@@ -116,6 +116,7 @@ async function deleteSession(id: string) {
         v-for="s in sessions"
         :key="s.id"
         :class="['session-item', { active: s.id === activeId }]"
+        data-testid="session-item"
         @click="activateSession(s.id)"
       >
         <div class="session-item-main">
@@ -125,12 +126,14 @@ async function deleteSession(id: string) {
         <div class="session-item-actions" @click.stop>
           <button
             class="icon-btn"
+            data-testid="session-rename-btn"
             title="Rename"
             aria-label="Rename"
             @click="renameSession(s.id, s.title || '')"
           >✎</button>
           <button
             class="icon-btn danger"
+            data-testid="session-delete-btn"
             title="Delete"
             aria-label="Delete"
             @click="deleteSession(s.id)"

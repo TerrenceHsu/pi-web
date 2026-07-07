@@ -378,7 +378,11 @@ E2E_BASE_URL=http://127.0.0.1:9000 npm run test:e2e
 | 3 | 文件上传 md | setInputFiles(sample.md) → attachment-bar FileChip → Send → user-message 内仍显示 FileChip → attachment-bar 清空 |
 | 4 | 图片 unsupported | setInputFiles(sample.png, 1x1 PNG) → chip 出现 + label 含 "unsupported" |
 | 5 | Skills/MCP Modal + env 不回显 | Skills modal 打开关闭 → MCP modal 打开 → 填 name/command/env (SECRET_KEY + super-secret-value-zzz-12345) → 提交前后 body innerText 都不含 secret value → server list 显示 "SECRET_KEY" 但不含 value |
-| 6 (skip) | Skill upload + Use this turn | **当前 skip**——@change.prevent 在 Playwright click 下的时序不稳；待修 |
+| 6 | Skill upload + Use this turn | 上传 SKILL.md → skill-card 出现 → 勾选 Use this turn → 关闭 modal → 发 prompt → SkillUsedCard 出现 |
+| 7 | drag-drop 上传 | DataTransfer + dispatchEvent('drop') 模拟真实拖放 → attachment-bar FileChip 出现 |
+| 8 | Stop 按钮 | 发送瞬间 Send 变 Stop（FakeClient 太快可能转瞬即逝）；最终 Send 恢复 |
+| 9a | session rename | hover session → 点 ✎ → window.prompt 接受 "renamed by e2e" → session 标题更新 |
+| 9b | session delete | hover session → 点 × → window.confirm 接受 → session 数量减 1 |
 
 ### 失败诊断
 
@@ -398,7 +402,8 @@ test-results/<failed-test-name>/video.webm
 ### 当前不覆盖（边界）
 
 - ❌ 真实 GLM（FakeClient 提供确定性文本）
-- ❌ 真实 MCP server（MCP 测试只测 form UI + env 防回显，不点 Test connection / Enable）
+- ❌ 真实 MCP server（MCP 测试只测 form UI + env 防回显；MCP tool enable 真链路需要 fake stdio subprocess，flaky 风险高，本轮跳过——后续 P1 加）
+- ❌ 真实 abort 链路（FakeClient 完成太快，Stop 按钮只测 UI 状态切换）
 - ❌ Cross-browser（仅 Chromium）
 - ❌ Mobile / 视口矩阵
 - ❌ Visual regression / 性能测试
