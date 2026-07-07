@@ -36,7 +36,10 @@ from pi_agent_core_py.skills import Skill
 from pi_agent_core_py.tools import AgentTool, ToolResult
 from pi_agent_core_py.web.app import create_app, dispose_app
 
-pytestmark = [pytest.mark.slow]
+# 不标 slow——25 个测试用 TestClient（含 SSE / WS / uvicorn subprocess），
+# 单跑约 19s（~780ms/test，主要是 uvicorn subprocess 启动开销）。
+# 覆盖 web/app.py 的 SSE / WS / 静态资源 / spec endpoint 大段代码。
+
 
 
 # ============================================================================

@@ -31,7 +31,10 @@ from pi_agent_core_py.harness import AgentHarness
 from pi_agent_core_py.model_client import DoneEvent, FakeClient, TextDeltaEvent
 from pi_agent_core_py.web.app import create_app, dispose_app
 
-pytestmark = [pytest.mark.slow]
+# 不标 slow——33 个测试用 FakeClient + tests/fixtures/fake_mcp_stdio_server.py
+# 子进程，单跑仅 2.5s（~75ms/test），完全可以默认运行。覆盖 web/app.py 的
+# MCP server CRUD / test / enable-disable / tools enable-disable 大段代码。
+
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "fake_mcp_stdio_server.py"
 
