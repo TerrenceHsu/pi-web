@@ -1100,3 +1100,67 @@ ChatPanel.onSubmit
 7. Regenerate / Export markdown
 8. PDF 文本提取
 
+---
+
+## ✅ Post-freeze 工程化（2026-07-07，tag 重打到 `8817c84`）
+
+P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 4 个 hotfix + e2e 增强 + coverage 大幅提升。所有改动**零源码功能变更**，仅修 bug + 补测试 + 调 mark。
+
+### Hotfixes（详见 `docs/RELEASE_NOTES_WEB_CLAUDE_P0.md` 的 Post-freeze hotfixes 段）
+
+| Bug | 影响 | 修复 |
+|---|---|---|
+| uvicorn 缺 websockets 协议库 | 真实进程无法建立 WS（404） | `pip install websockets` + 加进 `pyproject.toml [web]` deps |
+| `createEventSocket` 漏调 `connect()` | socket 创建后永不连接 | 末尾加 `connect()` 调用 |
+| chatStore 流式时序竞态（microtask/macrotask） | assistant 文本重复显示两次 | 移除 POST 兜底 push + 移除 finally cleanup + 加 streamItems 反查兜底 |
+| SkillList `@change.prevent` 反模式 | e2e Smoke 6 时序不稳 | 移除 `.prevent` 修饰符 |
+
+### E2E 增强（6 → 10 smoke）
+
+| # | 用例 | 状态 |
+|---|---|---|
+| 1-5 | layout / chat / file upload / image unsupported / modals + env non-echo | ✅ |
+| 6 | skill upload + use this turn（之前 skip） | ✅ 修通 |
+| 7 | drag-drop 上传 | ✅ 新增 |
+| 8 | Stop 按钮 UI 状态 | ✅ 新增 |
+| 9a | session rename（window.prompt dialog） | ✅ 新增 |
+| 9b | session delete（window.confirm dialog） | ✅ 新增 |
+| ~~10~~ | MCP tool enable 真链路 | ⏭️ 跳过（需 fake stdio subprocess，flaky 风险高） |
+
+### Coverage 大幅提升
+
+| 维度 | Before | After |
+|---|---|---|
+| 全套 coverage | 73.75%（FAIL gate） | **84.39%**（PASS） |
+| `mcp/transport.py` | 42% | **77%**（+22 unit tests） |
+| `tools/web_search.py` | 23% | **93%**（+11 unit tests） |
+| `web/app.py` | 26% | **80%**（slow→not-slow 测试调整） |
+| pytest | 678 | **843**（+165） |
+| 测试耗时 | ~14s | ~36s（含 SSE/WS/uvicorn subprocess） |
+
+### Git tag
+
+**`v0.0.23-web-claude-p0-mvp`** 重打到 `8817c84`（HEAD），含 6 个 commit：
+1. `a210aba` P0 MVP freeze
+2. `919174f` 4 个 web 测试改 not slow
+3. `798565c` e2e 增强 4 个 smoke + SessionSidebar data-testid
+4. `8883c48` WebSearchTool unit tests
+5. `2785f3f` MCP Transport unit tests
+6. `8817c84` mcp_api + integration 改 not slow
+
+### 当前测试基线（最终）
+
+| 命令 | 结果 |
+|---|---|
+| `pytest -m "not slow and not integration and not docker"` | **843 passed**（35.6s） |
+| `pytest -m "slow and not integration and not docker"` | ~96 passed（含 fake stdio / SSE / WS / 真实 GLM 子集） |
+| Playwright e2e | **10/10 passed**（7.5s） |
+| Coverage gate | **84.39%** ≥ 75% ✅ |
+| ruff | All checks passed |
+| 真实 GLM 端到端流式 | ✅ 通过 |
+| 浏览器手动 smoke（25 项） | 仍待执行（自动化已覆盖 10/25 项关键路径） |
+
+---
+
+**P0 MVP freeze candidate 已完整就绪。下一步进入 P1 或 freeze。**
+

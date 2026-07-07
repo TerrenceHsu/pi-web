@@ -9,16 +9,17 @@
 >
 > **范围**：仅 Web 端；不做 CLI；不操作本地文件；单 provider（GLM）；支持 Skills + MCP；不做跨 session 记忆；不做多用户系统。
 >
-> **当前基线**（Web Claude P0 MVP 完成）：
+> **当前基线**（Web Claude P0 MVP + 全部 post-freeze hotfix 完成）：
 > - Core runtime：Step 1–21 已完成
 > - Web backend：v0.0.22 stable baseline
-> - **Web Claude P0 MVP**：Step 1–8 全部完成（2026-07-07）
-> - Offline tests：**678 passed**（`pytest -m "not slow and not docker"`）
-> - Web Skills/MCP API tests：**59 passed**（slow mark）
-> - Web Files / Prompt-File-Injection tests：**37 passed**（slow mark）
-> - Web integration tests：**25 passed**（slow mark；v0.0.22 baseline 沿用）
-> - Frontend build：**npm run build 通过**（123 modules / 127.85 KB JS gzip 45.08 KB）
+> - **Web Claude P0 MVP**：Step 1–8 全部完成 + 4 个真实环境 hotfix + e2e 10/10 + coverage 84.39%
+> - **Git tag**：`v0.0.23-web-claude-p0-mvp` at `8817c84`（本副本独立 git 仓库）
+> - Offline tests：**843 passed**（`pytest -m "not slow and not integration and not docker"`，35.6s）
+> - Playwright e2e：**10/10 passed**（7.5s）
+> - Coverage gate：**84.39%** ≥ 75%（PASS）
+> - Frontend build：通过（含 chatStore 流式修复 + SkillList cleanup）
 > - Ruff：**All checks passed**
+> - 真实 GLM 端到端流式：✅ 通过
 > - 已有 Web API：`/api/sessions` CRUD、`/api/sessions/{sid}/files` 6 个、`/api/skills/upload + enable + disable`、`/api/mcp/servers` CRUD + test + enable + disable、`/api/mcp/tools/{name}/enable + disable`、`/api/messages?session_id=`、`/api/stream?limit=N`、`/ws/events`
 >
 > **定位**：Web Claude P0 MVP is complete for local development.
@@ -103,10 +104,41 @@
 - ❌ WebSocket event_id 去重 / 重连补播（v0.0.22 已知限制沿用）
 - ❌ 浏览器端 e2e 自动化测试（P0 仅手动 smoke）
 
+### Post-freeze 工程化段（2026-07-07，纳入 tag `8817c84`）
+
+P0 MVP freeze 后做的工程化改进，**零源码功能变更**——仅修 bug + 补测试 + 调 mark。
+
+#### Hotfixes（4 个真实环境激活才发现的 bug）
+
+详见 `docs/RELEASE_NOTES_WEB_CLAUDE_P0.md` 的 Post-freeze hotfixes 段：
+
+| Bug | 影响 | 修复 |
+|---|---|---|
+| uvicorn 缺 websockets 协议库 | 真实进程无法建立 WS（404） | `pip install websockets` + 加进 `pyproject.toml [web]` deps |
+| `createEventSocket` 漏调 `connect()` | socket 创建后永不连接 | 末尾加 `connect()` 调用 |
+| chatStore 流式时序竞态（microtask/macrotask） | assistant 文本重复显示两次 | 移除 POST 兜底 push + 移除 finally cleanup + 加 streamItems 反查兜底 |
+| SkillList `@change.prevent` 反模式 | e2e Smoke 6 时序不稳 | 移除 `.prevent` 修饰符 |
+
+#### E2E 增强（6 → 10 smoke）
+
+新增：drag-drop 上传 / Stop 按钮 UI / session rename（dialog）/ session delete（dialog）/ Smoke 6 修复（默认 enabled 路径 + ESC 关 modal）。
+
+#### Coverage 大幅提升
+
+| 维度 | Before | After |
+|---|---|---|
+| 全套 coverage | 73.75% FAIL | **84.39%** PASS |
+| `mcp/transport.py` | 42% | 77%（+22 unit tests） |
+| `tools/web_search.py` | 23% | 93%（+11 unit tests） |
+| `web/app.py` | 26% | 80%（slow→not-slow 调整） |
+| pytest | 678 | 843（+165） |
+
+---
+
 ### 后续 P1 建议（不在 P0 范围，按推荐优先级）
 
-1. **真实浏览器 smoke test**——按 [`docs/WEB_TESTING.md`](docs/WEB_TESTING.md) 25 项 checklist 手动验证（Step 8 未执行）
-2. **Playwright e2e 最小用例**——前端功能已多（session / chat / file / skills / MCP / modal / inline cards），后续每次回归靠手动点会累；优先投资 e2e 框架
+1. **真实浏览器 smoke test 剩余 15 项**——按 [`docs/WEB_TESTING.md`](docs/WEB_TESTING.md) 25 项 checklist 中未自动化的部分（手动）
+2. **Playwright MCP tool enable 真链路**——需要 start_test_web_app.py 加 fake stdio subprocess（Smoke 10 当前跳过）
 3. **真实 GLM 端到端冒烟**——含多轮 tool_use 的真实链路
 4. **MCP / Skill 配置持久化**——重启后恢复（目前重启即丢）
 5. **`/api/prompt/async` 异步任务模式**——解除 POST 同步阻塞限制
