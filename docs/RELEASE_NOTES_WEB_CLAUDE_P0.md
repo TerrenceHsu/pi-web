@@ -1,0 +1,278 @@
+# Release Notes — Web Claude P0 MVP
+
+> **完成日期**：2026-07-07
+> **基线**：v0.0.22 Web backend stable baseline + P0-1~P0-5 + Step 1–8
+>
+> **定位**：Web Claude P0 MVP is complete for local development.
+> Localhost-first, no authentication, not suitable for public exposure.
+>
+> 详见 [`WEB_CLAUDE_PLAN.md`](../WEB_CLAUDE_PLAN.md)、[`docs/WEB_API.md`](WEB_API.md)、[`docs/WEB_TESTING.md`](WEB_TESTING.md)。
+
+## 范围
+
+在 v0.0.22 Web backend baseline 之上把 Trace Viewer 改造为 **claude.ai 风格的本地对话助手**：
+
+- 左侧 SessionSidebar + 中间 ChatPanel 两栏
+- **不做右栏调试 Drawer**
+- 当前 turn 的运行信息以 inline 卡片插入中间对话流
+- 支持文件上传、Skills、MCP server
+- 后端 sqlite 多会话 + VirtualFileStore + view_file/list_files + Skills/MCP CRUD API
+
+## 新增功能
+
+### Backend（P0-1 ~ P0-5 + Step 1/2）
+
+| 模块 | 新增 |
+|---|---|
+| **P0-1 sqlite sessions** | `SQLiteSessionStore`（`src/pi_agent_core_py/session_sqlite.py` ~430 行）；WAL + 外键级联 + UNIQUE(session_id, idx) 防并发；`POST /api/sessions`、`PATCH /api/sessions/{sid}`、`DELETE /api/sessions/{sid}`；`GET /api/messages?session_id=`；`POST /api/prompt body.session_id` 历史加载 + replace 覆盖 + snapshot append |
+| **P0-2 VirtualFileStore** | `src/pi_agent_core_py/web/files.py`（~430 行）；session 级文件存储；`POST/GET /api/sessions/{sid}/files` + `GET/DELETE /api/sessions/{sid}/files/{fid}` + 兼容 `GET/DELETE /api/files/{fid}?session_id=`；sha256 / mime / 大小限制（单文件 25MB / session 100MB） |
+| **P0-3 file tools** | `tools/list_files.py` + `tools/view_file.py`（~800 行）；支持 md / html（HTMLParser）/ csv（Sniffer）/ parquet（pyarrow）/ 文本；`FileBlock` 注入 `UserMessage.content`；`POST /api/prompt file_ids` 校验 + 注入；**图片明确 image_unsupported**；**PDF 不解析正文** |
+| **P0-5 default system prompt** | `src/pi_agent_core_py/system_prompt.py`；`build_default_system_prompt(*, skills, mcp_tools, file_tools_enabled)`；empty system_prompt 时自动启用 |
+| **P0-4 Step 1 Skills API** | `POST /api/skills/upload`（multipart .md，重名 409 / 格式错 400 / 非 utf-8 400 / 太大 400 / 部分成功 207）；`POST /api/skills/{name}/enable/disable`；`GET /api/skills/{name}`；`POST /api/prompt` 顶层 `skill_names`（与 `skill_selection.names` 合并去重）；**unknown skill 由 web 层预校验返回 400（不再 500）**；`include_prompt=true` 默认 403 |
+| **P0-4 Step 2 MCP API** | `GET /api/mcp/servers`（不返回 env values）；`POST /api/mcp/servers`；`POST /api/mcp/servers/{name}/test`（**不污染 harness**）；`POST /api/mcp/servers/{name}/enable/disable`；`DELETE /api/mcp/servers/{name}`（清孤儿 disabled tools）；`POST /api/mcp/tools/{tool_name}/enable/disable`（**真实 unregister/register**）；disabled filter 在 server refresh 后仍生效 |
+
+### Frontend（P0-4 Step 3–7）
+
+| Step | 新增 |
+|---|---|
+| **Step 3 骨架** | Pinia + `types/`（强类型 barrel）+ `api/`（client / sessions / messages / files / skills / mcp / websocket）+ `stores/`（chat / session / file / skill / mcp） |
+| **Step 4 UI 骨架** | `AppShell.vue`（两栏 shell）+ `SessionSidebar.vue`（New chat / 会话列表 / Skills/MCP footer 按钮）+ `ChatPanel.vue`（header + MessageList + ChatInput）；`DeveloperDrawer.vue` 从主路径下线但文件保留 |
+| **Step 5 Inline Turn Cards** | `chatStore.handleEvent` 完整 WS event mapper；7 个 card 组件：`TurnInfoCard` / `ToolCallCard` / `ToolResultCard` / `FileReadCard` / `MCPToolCard` / `SkillUsedCard` / `ErrorCard`；streaming assistant draft + 光标动画 |
+| **Step 6 文件上传 UI** | `utils/files.ts` + `FileChip.vue` + `AttachmentBar.vue`；`ChatInput` 📎 按钮 + drag-drop；`sendPrompt` 携带 `file_ids` + `files`；失败保留 pending attachments |
+| **Step 7 Skills/MCP Modal** | `components/common/Modal.vue`（**居中弹窗，非右栏 Drawer**）+ `components/skills/{SkillManagerModal, SkillUploadForm, SkillList}` + `components/mcp/{MCPManagerModal, MCPServerForm, MCPServerList, MCPToolList}`；SessionSidebar footer 按钮挂载 modal |
+
+### 关键安全约束
+
+- **MCP env values 严格不回显**——response 类型只有 `env_keys`，没有任何 endpoint 返回 env value。前端表单提交后 `resetForm()` 清空所有字段；env input 用 `type=password + autocomplete=new-password` 防浏览器回填；列表只渲染 key 名 + `(values hidden)`
+- **Prompt preview 默认禁用**——`?include_prompt=true` 默认 403；需 `create_app(allow_prompt_preview=True)` + localhost
+- **`POST /api/prompt` 同步阻塞**——LLM 调用结束才返回；当前没有 `/api/prompt/async`；前端通过 `WS /ws/events` 展示实时事件，但 prompt 请求本身仍等待后端完成
+- **Localhost only / no auth**——无鉴权 / 无多用户隔离 / 无 rate limit；不建议公网暴露
+
+## Test Baseline
+
+| 测试层 | 命令 | 结果 |
+|---|---|---|
+| Offline baseline | `pytest tests/ -v -m "not slow and not docker"` | **678 passed** |
+| Web Skills/MCP API（P0-4 Step 1/2，slow） | `pytest tests/test_web_skills_api.py tests/test_web_mcp_api.py -m "slow and not docker"` | **59 passed** |
+| Web Files / Prompt-File-Injection（P0-2/P0-3，slow） | `pytest tests/test_web_files.py tests/test_prompt_file_injection.py -m "slow and not docker"` | **37 passed** |
+| Web Sessions / SQLite / File Tools / System Prompt（P0-1/P0-3/P0-5，slow） | `pytest tests/test_web_sessions_sqlite.py tests/test_session_sqlite.py tests/test_file_tools.py tests/test_virtual_file_store.py tests/test_system_prompt.py -m "slow and not docker"` | **87 passed** |
+| v0.0.22 Web integration（baseline，slow） | `pytest tests/test_integration_web_server.py -m "slow and not docker"` | **25 passed** |
+| Lint | `ruff check src tests` | **All checks passed** |
+| Frontend build | `cd src/pi_agent_core_py/web/frontend && npm run build` | **123 modules / 127.85 KB JS**（gzip 45.08 KB）；`vue-tsc --noEmit` 类型检查通过 |
+
+### 关于 coverage gate
+
+`pytest --cov` 配置在 `pyproject.toml` 中设了 `fail_under = 75`。当前 offline baseline 实际 coverage **73.75%**，会输出 `FAIL Required test coverage of 75.0% not reached`——但 pytest **exit code 仍是 0**（`--cov-fail-under` 未硬绑到 exit code）。
+
+> **Coverage is below the configured 75% threshold and is treated as a known baseline issue, not a Step 8 regression.** 该数字与 v0.0.22 / P0-1~P0-5 baseline 一致；Step 8 零源码改动，未引入新的未覆盖代码。
+
+### 关于浏览器手动 smoke
+
+> **Browser manual smoke checklist is documented but not yet executed in this Step 8 run.**
+
+Step 8 仅做文档收尾 + 自动化验证（`npm run build` / offline pytest / ruff）。25 项手动 smoke checklist 已写入 [`docs/WEB_TESTING.md`](WEB_TESTING.md)，建议使用者在本地按 checklist 验证后再 tag 正式 release。
+
+## Known Limitations（P0 MVP 不修）
+
+- **`POST /api/prompt` 同步阻塞**——慢 LLM 会让 HTTP 请求挂住；`/api/prompt/async` 未实现，spec 标记为 P1+
+- **无鉴权 / 无多用户 / 无 rate limit**——Web app 任何人都能访问 / 操作；**仅建议 localhost 使用**
+- **MCP / Skill 配置不持久化**——重启 server 即丢失
+- **不支持图片理解**（不做 OCR / 不做视觉理解）
+- **PDF 正文不解析**
+- **WebSocket 慢客户端采用"丢弃事件"策略**——v0.0.22 已知限制沿用；前端需自己补拉 `/api/messages`
+- **没有浏览器端 e2e 自动化测试**——P0 仅手动 smoke checklist
+- **`view_file` 大文本自动截断到 max_bytes**（默认 8KB）
+
+## Explicit Non-Goals（明确不做）
+
+- ❌ 右栏调试面板 / `DeveloperDrawer` 主入口（文件保留但不在主路径渲染）
+- ❌ CLI / RPC mode
+- ❌ RAG / Vector Memory / Long-term Memory / 跨 session 用户记忆
+- ❌ 多用户账号 / OAuth / RBAC / 企业 secret vault
+- ❌ 公网部署 / 横向扩展 / rate limit
+- ❌ MCP marketplace / Skill marketplace
+- ❌ Skill 在线编辑 / prompt preview 默认开启
+- ❌ MCP 配置持久化 / Skill 上传持久化
+- ❌ 图片理解（ImageBlock / GLM-4V 直读 / OCR / 视觉理解）
+- ❌ PDF 正文解析
+- ❌ 本地文件系统操作工具（bash / read / write / edit / grep / find / ls）
+- ❌ `/api/prompt/async` 异步任务模式 / job-id 轮询
+- ❌ Regenerate 最后一轮
+- ❌ 导出 markdown
+- ❌ WebSocket event_id 去重 / 重连补播
+
+## Backend Changes（修改的源码文件）
+
+| 文件 | 改动 |
+|---|---|
+| `pyproject.toml` | 加 `aiosqlite>=0.20`、`python-multipart>=0.0.9`、`pyarrow>=15` |
+| `src/pi_agent_core_py/system_prompt.py` | **新增**——`build_default_system_prompt(...)` |
+| `src/pi_agent_core_py/harness.py` | 加 `_prepare_skill_prompt`（empty system_prompt 触发默认） |
+| `src/pi_agent_core_py/session_sqlite.py` | **新增** ~430 行——SQLiteSessionStore + 3 异常 |
+| `src/pi_agent_core_py/messages.py` | 加 `FileBlock` + `FileFormat` + `UserContent` 扩展 |
+| `src/pi_agent_core_py/context.py` | `convert_to_llm` 把 FileBlock 转 provider-agnostic 文本说明 |
+| `src/pi_agent_core_py/tools/list_files.py` | **新增** `create_list_files_tool` factory |
+| `src/pi_agent_core_py/tools/view_file.py` | **新增** ~800 行——`create_view_file_tool` + `_classify_format` |
+| `src/pi_agent_core_py/tools/__init__.py` | 导出 list_files / view_file factory |
+| `src/pi_agent_core_py/web/files.py` | **新增** ~430 行——VirtualFileStore + 6 异常 |
+| `src/pi_agent_core_py/web/state.py` | `WebAppState` 加 `session_store` / `current_session_id` / `file_store` / `uploads_dir` / `mcp_server_configs` / `disabled_mcp_tools` |
+| `src/pi_agent_core_py/web/app.py` | `create_app(db_path / uploads_dir / max_file_size / max_session_upload_size)`；lifespan init sqlite + VirtualFileStore + auto register list_files/view_file；新增 sessions CRUD / files 6 endpoints / skills upload+enable+disable+detail / mcp servers CRUD+test+enable+disable+delete / mcp tools enable+disable；POST `/api/prompt` 支持 `session_id` / `file_ids` / `skill_names` + unknown skill 预校验 400 |
+
+## Frontend Changes（修改的源码文件）
+
+| 文件 | 改动 |
+|---|---|
+| `src/pi_agent_core_py/web/frontend/src/main.ts` | Pinia 初始化 |
+| `src/pi_agent_core_py/web/frontend/src/App.vue` | **重写**——Pinia stores + WS connect；不再渲染 DeveloperDrawer |
+| `src/pi_agent_core_py/web/frontend/src/api/` | **新增**——client.ts + sessions.ts / messages.ts / files.ts / skills.ts / mcp.ts / websocket.ts |
+| `src/pi_agent_core_py/web/frontend/src/types/` | **新增**——state.ts / sessions.ts / messages.ts / files.ts / skills.ts / mcp.ts / events.ts + barrel index.ts |
+| `src/pi_agent_core_py/web/frontend/src/stores/` | **新增**——chatStore / sessionStore / fileStore / skillStore / mcpStore |
+| `src/pi_agent_core_py/web/frontend/src/components/layout/` | **新增**——AppShell.vue + SessionSidebar.vue |
+| `src/pi_agent_core_py/web/frontend/src/components/chat/` | **新增 13 个**——ChatPanel / MessageList / ChatInput / AttachmentBar / FileChip / MessageBubble / TurnInfoCard / ToolCallCard / ToolResultCard / FileReadCard / MCPToolCard / SkillUsedCard / ErrorCard |
+| `src/pi_agent_core_py/web/frontend/src/components/skills/` | **新增**——SkillManagerModal / SkillUploadForm / SkillList |
+| `src/pi_agent_core_py/web/frontend/src/components/mcp/` | **新增**——MCPManagerModal / MCPServerForm / MCPServerList / MCPToolList |
+| `src/pi_agent_core_py/web/frontend/src/components/common/` | **新增**——Modal.vue（居中弹窗）+ ErrorBanner / LoadingSpinner / EmptyState |
+
+**旧组件保留但不在主路径渲染**：`DeveloperDrawer.vue` / `McpPanel.vue` / `SkillsPanel.vue` / `SessionPanel.vue` / `SnapshotPanel.vue` / `EventStream.vue` / `RawJsonPanel.vue` / `PolicyAuditPanel.vue` / 旧 `Sidebar.vue` / 旧 `ChatPanel.vue` / 旧 `MessageList.vue`。
+
+## 升级指南
+
+P0 MVP 全部**向后兼容** v0.0.22 baseline：
+
+```python
+# v0.0.22
+app = create_app(harness)
+
+# P0 MVP（默认行为不变——db_path=None 走 :memory: 内存库 fallback；
+# uploads_dir=None 关闭文件上传路径）
+app = create_app(harness)
+
+# P0 MVP（完整启用）
+app = create_app(
+    harness,
+    db_path="sqlite.db",          # 持久化 sessions
+    uploads_dir="uploads",         # 启用文件上传
+    allow_prompt_preview=True,     # 仅本地调试
+)
+```
+
+**破坏性变更**：无。所有 v0.0.22 endpoint 行为保留。
+
+## 下一步（不在 P0 范围）
+
+P0 MVP 已能本地端到端使用。按推荐优先级（高 → 低）：
+
+1. **真实浏览器 smoke test**——按 [`docs/WEB_TESTING.md`](WEB_TESTING.md) 25 项 checklist 在浏览器手动验证（本轮 Step 8 未执行）
+2. **Playwright e2e 最小用例**——前端功能已多（session / chat / file / skills / MCP / modal / inline cards），后续每次回归靠手动点会累；先投资 e2e 框架
+3. **真实 GLM 端到端冒烟**——含多轮 tool_use 的真实链路（用 `tests/fixtures/fake_mcp_stdio_server.py` + 真 GLM key）
+4. **MCP / Skill 配置持久化**——重启后恢复（目前重启即丢）
+5. **`/api/prompt/async`**——异步任务模式 / job-id 轮询；解除同步阻塞限制
+6. **WebSocket event_id 去重 + reconnect 补播**——v0.0.22 已知限制沿用
+7. **Regenerate / Export markdown**
+8. **PDF 文本提取**（pdf.js 或服务端 pdftotext）
+
+移动端隐藏 sidebar 为抽屉、Skill 在线编辑、Skill / MCP marketplace 等再后续考虑。
+
+---
+
+## Post-freeze hotfixes（2026-07-07 真实环境激活后）
+
+P0 MVP freeze 后用真实 GLM 激活测试时，发现 4 个**只在线上才暴露**的 bug——unit / e2e 测试都覆盖不到。逐一修复，记录如下作为后续防回归参考。
+
+### Bug 1：uvicorn 进程无法建立 WebSocket（404）
+
+**现象**：浏览器 DevTools Network 显示 `GET /ws/events 404 Not Found`；后端日志显示 `WARNING: No supported WebSocket library detected. Please use "pip install 'uvicorn[standard]'", or install 'websockets' or 'wsproto' manually.`
+
+**根因**：`uvicorn` 默认安装**不带** WebSocket 协议库；`tests/test_integration_web_server.py` 用 Starlette `TestClient` 走 ASGI mock 不需要，所以测试全绿但真实 uvicorn 进程连不上 WS。
+
+**修复**：`pip install websockets`（16.0）。
+
+**待办**：把 `websockets>=12` 加到 `pyproject.toml` 的 `[project.optional-dependencies] web = [...]`。**未做**——需要决定是否升级到 `uvicorn[standard]` 还是单独装 `websockets`。
+
+### Bug 2：`createEventSocket` 不调 `connect()` —— socket 创建后永不连接
+
+**现象**：`chatStore.wsConnected` 始终 false；浏览器 Network 完全没 WS 请求；但手动 `new WebSocket(...)` 立刻成功。
+
+**根因**：`src/pi_agent_core_py/web/frontend/src/api/websocket.ts` 的 `createEventSocket` 函数中，`connect()` 函数**只定义不调用**——返回的对象只有 `close / reconnect / isOpen`，没有自动触发首次连接的入口。chatStore 调 `socket = createEventSocket({...})` 后，socket 永远不发起 WS 握手。
+
+**修复**：在 `createEventSocket` 末尾加 `connect()` 调用——一行修复。
+
+**为什么没暴露**：项目从 Step 5 引入 chatStore 起 WS 链路就**从未工作过**。前端一直靠 POST 同步阻塞返回的 final messages 显示（用户看起来像"一次性出现"，误以为是模型快）。e2e FakeClient 不流式所以也没暴露。
+
+### Bug 3：assistant 文本重复显示两次（POST 兜底 + WS event 时序竞态）
+
+**现象**：发 prompt 后 UI 出现两个 `assistant_message` item，内容完全相同。
+
+**根因（深挖 5 轮调试后定位）**：
+
+JavaScript event loop 时序——
+
+| 步骤 | 内容 | 类型 |
+|---|---|---|
+| 1 | `POST /api/prompt` await 中 | async |
+| 2 | 后端 harness.run_prompt 完成，所有 AgentEvent 已 emit 到 WS hook queue | server |
+| 3 | HTTP 响应 + WS event frames 都通过 TCP 到达浏览器 | network |
+| 4 | **microtask**：POST continuation（`sendPrompt` 的兜底逻辑 + finally）先执行 | ← bug 点 |
+| 5 | **macrotask**：WS onmessage 处理 event 队列 | 后执行 |
+
+旧 `sendPrompt` 同时有两个问题：
+- (a) `finally { currentAssistantItemId = null }` 在 microtask 提前清空闭包变量
+- (b) POST 兜底逻辑 push 一份 final assistant text（以为 WS 没渲染）
+
+WS event 处理时 `currentAssistantItemId` 已被 (a) 清空 → `appendAssistantFull` 又创建新 draft → 加上 (b) 的兜底 push = **最多 3 份重复**。
+
+**5 轮调试过程**（保留作为以后类似 bug 的参考）：
+
+| 轮次 | 修复 | 结果 |
+|---|---|---|
+| 1 | 加 `assistantSeenFromWs` flag | 无效——POST 微任务执行时 flag 还是 false |
+| 2 | 加 `streamItems.some(hasAssistantItem)` 检查 | 无效——streamItems 此时也没 WS push 的 item |
+| 3 | 移除 POST 兜底 push | 减少一份重复，但 WS 内部 message_update 仍创建第二份 |
+| 4 | appendAssistantFull/Delta 反查 streamItems 找最后 assistant_message | **架构层规避**——不依赖闭包变量持久化 |
+| 5 | **移除 sendPrompt finally 的 `currentAssistantItemId = null`**（根因修复） | 真正解决——microtask 不再提前清状态 |
+
+**修复栈最终状态**：#4（防御）+ #5（根因）双层叠加。
+
+**关键经验**：当 microtask 和 macrotask 共享闭包变量时，**microtask 永远先执行**——任何"在 finally cleanup 状态"的代码都可能破坏 macrotask 后续看到的状态。修复策略：要么不在 finally 清，要么让 macrotask 自愈（反查响应式 store 状态）。
+
+### Bug 4：Playwright Smoke 6 时序不稳（已修）
+
+**现象**：e2e Test 6（上传 SKILL.md + Use this turn → SkillUsedCard）一直 timeout，标记为 `test.describe.skip`。
+
+**根因（深挖 5 轮）**：与最初假设完全不同——不是 `@change.prevent` 时序问题：
+
+| 轮次 | 假设 | 结果 |
+|---|---|---|
+| 1 | `.check()` 替代 `.click()` 触发 change | ❌ waitForResponse 仍超时 |
+| 2 | 点 label（包 input）触发 change | ❌ 同上 |
+| 3 | 加 console.log 看 handler 是否触发 | ✅ 触发了，但 `currently enabled? true` |
+| 4 | **真根因**：上传后 skill 默认 `status="enabled"`（SkillRegistry.register 默认值），点 toggle 走的是 **disable** 路径，`waitForResponse(/enable)` 永远超时 | ✅ 定位 |
+| 5 | modal 没关 + selector 匹配多个元素 → ESC 关闭 + `getByText` 精确匹配 | ✅ 通过 |
+
+**修改**：
+- `tests/e2e/web-claude-smoke.spec.ts`：移除 enable toggle 步骤（默认已 enabled）；用 ESC 键关闭 modal；用 `getByText("Skills: e2e_demo_skill")` 精确断言
+- `src/pi_agent_core_py/web/frontend/src/components/skills/SkillList.vue`：移除两个 checkbox 的 `@change.prevent` 的 `.prevent` 修饰符（对 checkbox 是反模式——`:checked` 单向绑定已控制状态，preventDefault 无意义）
+
+**测试**：6/6 通过（6.1s）。
+
+### 修改文件汇总
+
+| 文件 | 改动 |
+|---|---|
+| `src/pi_agent_core_py/web/frontend/src/api/websocket.ts` | `createEventSocket` 末尾加 `connect()` 调用 |
+| `src/pi_agent_core_py/web/frontend/src/stores/chatStore.ts` | 移除 POST 兜底 push；移除 `sendPrompt finally` 的 `currentAssistantItemId = null`；`appendAssistantFull / Delta` 加 streamItems 反查兜底 |
+| `src/pi_agent_core_py/web/frontend/src/components/skills/SkillList.vue` | 移除两个 checkbox 的 `@change.prevent` 的 `.prevent` 修饰符（对 checkbox 是反模式） |
+| `pyproject.toml` | `[web]` optional deps 加 `websockets>=12` |
+| `tests/e2e/web-claude-smoke.spec.ts` | Smoke 6 修复（默认 enabled 路径 + ESC 关 modal + getByText 精确匹配） |
+| 环境 | `pip install websockets`（pipy env） |
+
+### 测试基线（hotfix 全部完成后）
+
+| 命令 | 结果 |
+|---|---|
+| Playwright e2e | **6/6 passed**（6.1s）——Smoke 6 已修 |
+| Frontend build | ✅ 128.48 KB JS（gzip 45.21 KB） |
+| Offline pytest | **678 passed**，exit=0，零回归 |
+| Ruff | ✅ All checks passed |
+| 真实 GLM 端到端流式 | ✅ 通过（assistant 文本单份逐字流式） |
+| Coverage gate | 73.75% < 75%（历史 baseline，exit code 0，非本轮回归） |

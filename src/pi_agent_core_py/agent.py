@@ -1,0 +1,439 @@
+"""Agent 状态机 + Queue / Abort（Step 9）。
+
+在 Step 8 的单 turn 状态机之上加入：
+- **prompt queue**：running 时再 prompt 不报错，而是排队（FIFO）
+- **abort**：`abort(reason)` 通过 signal 协作中止当前 request
+- **新事件**：`RequestQueuedEvent` / `RequestStartEvent` / `RequestEndEvent` / `AgentAbortEvent`
+- **新状态**：`AgentStatus` 加 `"aborting"`
+
+设计要点：
+- `AgentRequest`：内部请求对象，含 `future: asyncio.Future[list[Message]]`
+- 单一 `_run_queue_worker` task 串行处理 queue
+- `prompt()` / `continue_()` 入队后 `await request.future`
+- abort 用 `asyncio.Event` 作为 signal 传入 `run_event_loop`，loop 检测后生成
+  `AssistantMessage(stop_reason="aborted")` 正常收敛
+- Agent 自身异常 → 清空 queue，所有排队 future `set_exception`
+- `wait_for_idle()` 等待 queue 全部排空
+- `reset()` 在 running / aborting / queue 非空时仍抛 RuntimeError
+
+Step 9 **不实现**：
+- AgentHarness（Step 10）/ Turn Snapshot（Step 11）/ Session（Step 12）
+- 工具内部感知 signal——只能在上层检查点中止
+- 强制 cancel running task——只用 signal 协作
+"""
+from __future__ import annotations
+
+import asyncio
+import inspect
+import time
+import typing
+from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
+
+from .context import TransformContextFn
+from .events import (
+    AgentAbortEvent,
+    AgentEndEvent,
+    AgentEvent,
+    AgentRequestType,
+    RequestEndEvent,
+    RequestEndStatus,
+    RequestQueuedEvent,
+    RequestStartEvent,
+    TurnEndEvent,
+)
+from .hooks import (
+    AfterToolCallFn,
+    BeforeToolCallFn,
+)
+from .loop import run_event_loop
+from .messages import Message
+from .model_client import ModelClient
+from .policy import (
+    InMemoryToolPermissionAuditLog,
+    ToolPermissionPolicy,
+)
+from .tools import AgentTool, ToolRegistry
+
+# ============================================================================
+# AgentStatus / AgentState
+# ============================================================================
+
+
+#: Agent 运行状态。
+#: - "idle"      queue 空，无 running request
+#: - "running"   正在执行一个 request
+#: - "aborting"  已 abort，等当前 request 收敛
+#: - "error"     Agent 自身异常（不是 LLM ErrorEvent / Tool is_error）
+AgentStatus = Literal["idle", "running", "aborting", "error"]
+
+
+class AgentState(BaseModel):
+    """Agent 持有的可变状态。"""
+    status: AgentStatus = "idle"
+    messages: list[Message] = Field(default_factory=list)
+    last_event: AgentEvent | None = None
+    last_error: str | None = None
+    turn_count: int = 0
+    # Step 9 新增
+    queue_size: int = 0
+    current_request_id: str | None = None
+    aborted_count: int = 0
+
+
+# ============================================================================
+# AgentRequest
+# ============================================================================
+
+
+@dataclass
+class AgentRequest:
+    """queue 里的一个待执行请求。
+
+    `prompt()` / `continue_()` 入队时构造；worker 取出后调用 `_run_request`；
+    调用方 `await request.future` 等到结果。
+    """
+    id: str
+    type: AgentRequestType
+    user_text: str | None
+    future: asyncio.Future[Any] = field(repr=False)
+    created_at: int = field(default_factory=lambda: int(time.time() * 1000))
+
+
+# ============================================================================
+# Subscriber
+# ============================================================================
+
+
+#: 事件订阅者。可以是 sync 或 async。
+#: 签名 (event, state) -> object | Awaitable[object]
+Subscriber = Callable[[AgentEvent, AgentState], object | Awaitable[object]]
+
+
+# ============================================================================
+# Agent 类
+# ============================================================================
+
+
+class Agent:
+    """有状态的 Agent + queue / abort（Step 9）。"""
+
+    def __init__(
+        self,
+        *,
+        system_prompt: str,
+        client: ModelClient,
+        tools: ToolRegistry | Iterable[AgentTool] | None = None,
+        transform_context_fn: TransformContextFn | None = None,
+        before_tool_call: BeforeToolCallFn | None = None,
+        after_tool_call: AfterToolCallFn | None = None,
+        permission_policy: ToolPermissionPolicy | None = None,
+        permission_audit_log: InMemoryToolPermissionAuditLog | None = None,
+        max_turns: int = 50,
+    ):
+        self.system_prompt = system_prompt
+        self.client = client
+        if isinstance(tools, ToolRegistry):
+            self.tools: ToolRegistry = tools
+        elif tools is None:
+            self.tools = ToolRegistry()
+        else:
+            self.tools = ToolRegistry(list(tools))
+        self.transform_context_fn = transform_context_fn
+        self.before_tool_call = before_tool_call
+        self.after_tool_call = after_tool_call
+        # Step 18：工具权限策略 / 审计日志——透传给 run_event_loop
+        # Agent 只做"持有 + 透传"，不做决策；Harness 可在运行期替换。
+        self.permission_policy: ToolPermissionPolicy | None = permission_policy
+        self.permission_audit_log: InMemoryToolPermissionAuditLog | None = permission_audit_log
+        # Bug-fix：max_turns 安全网——透传给 run_event_loop
+        self.max_turns: int = max_turns
+
+        self.state: AgentState = AgentState()
+        self._subscribers: list[Subscriber] = []
+
+        # Step 9 queue / worker 状态
+        self._queue: asyncio.Queue[AgentRequest] = asyncio.Queue()
+        self._worker_task: asyncio.Task[None] | None = None
+        self._current_task: asyncio.Task[None] | None = None
+        self._abort_signal: asyncio.Event | None = None
+        self._next_id: int = 0
+
+        # _idle_event：set 表示 worker 已退出（queue 全空）
+        self._idle_event: asyncio.Event = asyncio.Event()
+        self._idle_event.set()
+
+    # ----------------------------------------------------------------------
+    # 订阅
+    # ----------------------------------------------------------------------
+
+    def subscribe(self, callback: Subscriber) -> Callable[[], None]:
+        """注册事件订阅者；返回 unsubscribe 函数。"""
+        self._subscribers.append(callback)
+
+        def unsubscribe() -> None:
+            try:
+                self._subscribers.remove(callback)
+            except ValueError:
+                pass
+
+        return unsubscribe
+
+    # ----------------------------------------------------------------------
+    # 入口：prompt / continue_ / abort
+    # ----------------------------------------------------------------------
+
+    async def prompt(self, user_text: str) -> list[Message]:
+        """入队一个 prompt 请求；await 直到该请求完成。"""
+        req = self._make_request(type_="prompt", user_text=user_text)
+        await self._enqueue(req)
+        return await typing.cast("asyncio.Future[list[Message]]", req.future)
+
+    async def continue_(self) -> list[Message]:
+        """入队一个 continue 请求；await 直到完成。
+
+        无 messages 时抛 ValueError（队列前校验，避免入队后才报错）。
+        """
+        if not self.state.messages:
+            raise ValueError(
+                "Agent.continue_(): 当前无 messages，请先 prompt(...) 建立上下文"
+            )
+        req = self._make_request(type_="continue", user_text=None)
+        await self._enqueue(req)
+        return await typing.cast("asyncio.Future[list[Message]]", req.future)
+
+    async def abort(self, reason: str | None = None) -> None:
+        """中止当前 running request；idle / aborting / error 时无操作。
+
+        实现：set `_abort_signal` → run_event_loop 在检查点生成 aborted assistant 收敛。
+        当前 request 结束后 worker 自动处理 queue 中的下一个。
+
+        注意：aborting 态下再调 abort 是 no-op——避免对同一个 request 重复计数。
+        """
+        # 只在 running 时触发；aborting / idle / error 都 no-op
+        if self.state.status != "running":
+            return
+        self.state.status = "aborting"
+        self.state.aborted_count += 1
+        if self._abort_signal is not None:
+            self._abort_signal.set()
+        await self._handle_event(AgentAbortEvent(
+            request_id=self.state.current_request_id,
+            reason=reason,
+        ))
+
+    # ----------------------------------------------------------------------
+    # reset / wait_for_idle
+    # ----------------------------------------------------------------------
+
+    def reset(self) -> None:
+        """清空状态——running / aborting / queue 非空时仍抛 RuntimeError。
+
+        Step 9 不做 auto-abort；调方需要先 `await abort()` + `await wait_for_idle()`。
+        """
+        if self.state.status in ("running", "aborting"):
+            raise RuntimeError(
+                f"Cannot reset while agent is {self.state.status}"
+            )
+        if not self._queue.empty():
+            raise RuntimeError("Cannot reset while queue is not empty")
+        self.state.messages = []
+        self.state.last_event = None
+        self.state.last_error = None
+        self.state.turn_count = 0
+        self.state.queue_size = 0
+        self.state.current_request_id = None
+        self.state.aborted_count = 0
+        self.state.status = "idle"
+
+    async def wait_for_idle(self) -> None:
+        """等待 worker 把 queue 全部跑完。
+
+        - 已 idle：立即返回
+        - running / aborting：阻塞到 worker 退出
+        - error：阻塞到 worker 退出（worker 在 error 时也会 set _idle_event）
+        """
+        await self._idle_event.wait()
+
+    # ----------------------------------------------------------------------
+    # 内部：构造 / 入队 / worker
+    # ----------------------------------------------------------------------
+
+    def _make_request(self, *, type_: AgentRequestType, user_text: str | None) -> AgentRequest:
+        self._next_id += 1
+        req_id = f"req-{self._next_id}"
+        loop = asyncio.get_event_loop()
+        future = loop.create_future()
+        return AgentRequest(
+            id=req_id, type=type_, user_text=user_text, future=future,
+        )
+
+    async def _enqueue(self, req: AgentRequest) -> None:
+        # 先 clear _idle_event——必须在 put 之前，否则下面的 _handle_event await
+        # subscriber 时，外部 wait_for_idle 可能误判为已 idle（queue 非空但 event 仍 set）
+        self._idle_event.clear()
+        await self._queue.put(req)
+        # 入队后立即更新 state.queue_size（worker 还没取走）
+        self.state.queue_size = self._queue.qsize()
+        await self._handle_event(RequestQueuedEvent(
+            request_id=req.id,
+            request_type=req.type,
+            queue_size=self._queue.qsize(),
+        ))
+        self._ensure_worker()
+
+    def _ensure_worker(self) -> None:
+        """如果 worker 不存在或已退出，重建。"""
+        if self._worker_task is None or self._worker_task.done():
+            # 在创建 task 之前 clear _idle_event，避免 wait_for_idle 在 worker
+            # 真正开始前误判为 idle
+            self._idle_event.clear()
+            self._worker_task = asyncio.ensure_future(self._run_queue_worker())
+
+    async def _run_queue_worker(self) -> None:
+        """串行处理 queue 中所有 request，直到空。"""
+        try:
+            while not self._queue.empty():
+                req = await self._queue.get()
+                try:
+                    await self._process_request(req)
+                except Exception as e:
+                    # request 自身异常 → 进入 error 态 + 清空 queue
+                    self.state.status = "error"
+                    self.state.last_error = f"{type(e).__name__}: {e}"
+                    await self._drain_queue_on_error(e)
+                    return
+                finally:
+                    self._queue.task_done()
+            # 全部处理完
+            self.state.status = "idle"
+            self.state.queue_size = 0
+        finally:
+            self._idle_event.set()
+
+    async def _process_request(self, req: AgentRequest) -> None:
+        """处理单个 request：emit start → run → emit end；异常则 re-raise。"""
+        # 进入 running 态（即便上一轮是 aborting / error，新一轮覆盖）
+        self.state.current_request_id = req.id
+        self.state.queue_size = self._queue.qsize()
+        self.state.status = "running"
+
+        await self._handle_event(RequestStartEvent(
+            request_id=req.id, request_type=req.type,
+        ))
+
+        # 为本轮 request 建独立 signal
+        self._abort_signal = asyncio.Event()
+
+        self._current_task = asyncio.ensure_future(
+            self._run_request(req, self._abort_signal)
+        )
+
+        end_status: RequestEndStatus = "completed"
+        exc: Exception | None = None
+        try:
+            await self._current_task
+            if self._abort_signal.is_set():
+                end_status = "aborted"
+        except Exception as e:
+            end_status = "error"
+            exc = e
+
+        # 设置 future
+        if not req.future.done():
+            if exc is not None:
+                req.future.set_exception(exc)
+            else:
+                req.future.set_result(self.state.messages)
+
+        # 清理 request 级状态
+        self.state.current_request_id = None
+        self._current_task = None
+        self._abort_signal = None
+
+        await self._handle_event(RequestEndEvent(
+            request_id=req.id, request_type=req.type, status=end_status,
+        ))
+
+        if exc is not None:
+            raise exc
+
+    async def _run_request(self, req: AgentRequest, signal: asyncio.Event) -> None:
+        """跑一个 request：把 run_event_loop 的事件流转发给 _handle_event。"""
+        if req.type == "prompt":
+            user_text = req.user_text
+        else:
+            user_text = None
+
+        async for ev in run_event_loop(
+            system_prompt=self.system_prompt,
+            user_text=user_text,
+            initial_messages=list(self.state.messages),
+            client=self.client,
+            tools=self.tools,
+            transform_context_fn=self.transform_context_fn,
+            before_tool_call=self.before_tool_call,
+            after_tool_call=self.after_tool_call,
+            signal=signal,
+            permission_policy=self.permission_policy,
+            permission_audit_log=self.permission_audit_log,
+            max_turns=self.max_turns,
+        ):
+            await self._handle_event(ev)
+
+    async def _drain_queue_on_error(self, exc: Exception) -> None:
+        """Agent 自身异常后，把剩余 queue 全部 fail 掉。"""
+        while not self._queue.empty():
+            req = await self._queue.get()
+            if not req.future.done():
+                req.future.set_exception(exc)
+            await self._handle_event(RequestEndEvent(
+                request_id=req.id, request_type=req.type, status="error",
+            ))
+            self._queue.task_done()
+        self.state.queue_size = 0
+
+    # ----------------------------------------------------------------------
+    # 内部：事件处理 + 派发
+    # ----------------------------------------------------------------------
+
+    async def _handle_event(self, event: AgentEvent) -> None:
+        """更新 state，再派发给订阅者。"""
+        self.state.last_event = event
+
+        # 权威源：AgentEndEvent 拷回 messages
+        if isinstance(event, AgentEndEvent):
+            self.state.messages = list(event.messages)
+        elif isinstance(event, TurnEndEvent):
+            self.state.turn_count += 1
+        elif isinstance(event, RequestQueuedEvent):
+            self.state.queue_size = event.queue_size
+        elif isinstance(event, RequestStartEvent):
+            self.state.current_request_id = event.request_id
+        elif isinstance(event, RequestEndEvent):
+            self.state.current_request_id = None
+        elif isinstance(event, AgentAbortEvent):
+            # aborted_count 在 abort() 入口已 +1；这里避免重复计数
+            pass
+
+        await self._emit(event)
+
+    async def _emit(self, event: AgentEvent) -> None:
+        """派发事件给所有订阅者；单个抛异常不让主 loop 崩。"""
+        for sub in list(self._subscribers):
+            try:
+                result = sub(event, self.state)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as e:
+                self.state.last_error = (
+                    f"subscriber error: {type(e).__name__}: {e}"
+                )
+
+
+__all__ = [
+    "AgentStatus", "AgentState", "Agent", "AgentRequest", "Subscriber",
+]

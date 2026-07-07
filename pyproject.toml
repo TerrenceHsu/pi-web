@@ -1,0 +1,102 @@
+[project]
+name = "pi-agent-core-py"
+dynamic = ["version"]
+description = "Python port of @earendil-works/pi-agent-core"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Pi Python Port" }]
+dependencies = [
+    "pydantic>=2.7",
+    "openai>=1.40",
+    # anthropic + python-dotenv 是 GLM provider 的硬依赖：
+    # `import pi_agent_core_py` 会 eager 加载 providers.anthropic_compat（from anthropic import AsyncAnthropic）。
+    # Step 21 起 GLM 是核心 provider——不再单独拆 [glm] extra。
+    "anthropic>=0.39",
+    "python-dotenv>=1.0",
+    "anyio>=4.4",
+    "httpx>=0.27",
+    "pyyaml>=6.0",
+    "tiktoken>=0.7",
+    "jsonschema>=4",
+    # P0-1：sqlite session store 用 aiosqlite（异步 sqlite 适配器）
+    "aiosqlite>=0.20",
+    # P0-2：multipart upload（FastAPI 文件上传依赖）
+    "python-multipart>=0.0.9",
+    # P0-3：parquet 读取（view_file 工具用 pyarrow.parquet 读 schema + 前 N 行）
+    "pyarrow>=15",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5",
+    "ruff>=0.5",
+    "mypy>=1.11",
+    "types-jsonschema>=4",
+    "types-PyYAML>=6",
+]
+web = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    # WebSocket 协议库——uvicorn 默认安装不带，真实进程需要才能建立 /ws/events。
+    # Starlette TestClient 走 ASGI mock 不需要，所以测试全绿不代表线上能跑。
+    # 2026-07-07 真实环境激活才发现；详见 docs/RELEASE_NOTES_WEB_CLAUDE_P0.md。
+    "websockets>=12",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/pi_agent_core_py/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pi_agent_core_py"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "slow: tests that hit real LLM APIs (require API key)",
+    "integration: tests that hit real external services (require API key / network)",
+    "docker: tests that require Docker daemon (not used in this trimmed copy)",
+]
+addopts = [
+    "--cov=pi_agent_core_py",
+    "--cov-report=term-missing",
+    "--cov-report=xml:.coverage.xml",
+    "--no-cov-on-fail",
+    "-m", "not slow and not integration and not docker",
+]
+
+[tool.coverage.run]
+source = ["pi_agent_core_py"]
+branch = true
+omit = [
+    # demo / tutorial scripts——不在发布包范围内
+    "*/steps/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
+fail_under = 75
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy"]

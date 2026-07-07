@@ -1,0 +1,176 @@
+# Release Notes — v0.0.22 Web backend stable baseline
+
+> 在 v0.0.21（Step 21 Provider Adapter Refactor）之上，对 Web app 层做了一轮加固与 spec 对齐，
+> 形成 **Web backend stable baseline**。
+>
+> 范围只限 `src/pi_agent_core_py/web/` + `harness.py` 的 `remove_on_event_hook` 最小补丁；
+> **不动核心 runtime**（loop / agent / context / providers）。
+
+## 新增 endpoint（spec 对齐）
+
+| Endpoint | 用途 | 兼容旧 endpoint |
+|----------|------|-----------------|
+| `GET /api/sessions` | spec 复数路径，返回 `{count, sessions:[当前 session]}` | 与 `GET /api/session` 并存 |
+| `GET /api/mcp/tools` | spec endpoint，仅返回 MCP tools 列表 + count | 与 `GET /api/mcp` 并存 |
+| `WS /ws/events` | spec 推荐的 WebSocket 实时事件通道 | 与 `GET /api/stream` SSE 并存 |
+| `GET /api/stream?limit=N` | SSE 测试模式：发完 N 个 event 后正常关闭 | 默认行为不变（不传 limit 仍是无限流） |
+
+## 安全 / 健壮性修复
+
+### Hook 累积修复
+
+**问题**：`create_app(harness)` 多次调用同一个 harness 时，`_web_event_hook` 会重复
+加入 `harness.on_event_hooks`，导致单次 event 被广播 N 次。
+
+**修复**：
+
+- `harness.py` 加 `remove_on_event_hook(hook) -> bool` 最小补丁
+- `create_app` 用 `lifespan` context manager，shutdown 时精确移除自己的 hook
+- 提供 `dispose_app(app)` 给"不进 TestClient with"的场景兜底
+- 测试 `test_multiple_create_app_does_not_accumulate_hooks` 验证
+
+### `event_buffer` 上限
+
+**问题**：长跑 session 的 event buffer 无界增长，内存可能爆。
+
+**修复**：
+
+- `TraceEventBuffer` 默认 `maxlen=1000`（之前是 500）
+- `create_app(event_buffer_max_size=N)` 可自定义
+- 超过自动丢最旧（`deque(maxlen=N)` 内建行为）
+
+### `POST /api/prompt` 已运行时返回 409（不再 500）
+
+**问题**：外部直接 `await harness.run_prompt(...)` 占用 harness 时，`state.running` 不会
+被 Web 层更新；`_ensure_idle` 漏判 → harness 自己抛 `RuntimeError("Harness is already running")`
+→ HTTP 500。
+
+**修复**：
+
+- `_ensure_idle` 多查 `harness.context.phase`（外部调用也会更新 phase）
+- `POST /api/prompt` 的 `except RuntimeError` 路径检测 "already running" 关键字 → 返回 409
+- 测试 `test_post_prompt_returns_409_when_harness_already_running` 验证
+
+### Prompt preview 默认禁用
+
+**问题**：`/api/skills?include_prompt=true` 暴露 Skill 完整 prompt 模板，意外公网部署
+会泄露内部 prompt。
+
+**修复**：
+
+- `create_app(allow_prompt_preview=False)` 默认值
+- `include_prompt=true` 时：
+  - `allow_prompt_preview=False` → **403**
+  - `allow_prompt_preview=True` 但非 localhost → **403**
+  - 两者都满足才 200
+
+### SSE 自动化测试可做
+
+**问题**：`/api/stream` 是无限流，TestClient 在退出 `with` 时仍等服务器主动关闭，测试挂死。
+
+**修复**：
+
+- `?limit=N` 参数：发完 N 个真实 event 后正常关闭 stream
+- `limit=0`：hello event 后立即关闭
+- `limit=1` + 后台线程 POST prompt：经典"读到 1 个 event 后退出"模式
+- 默认行为不变（不传 limit 仍是无限流）
+
+### WebSocket 慢客户端不阻塞全局
+
+**设计**：
+
+- 每连接独立 `asyncio.Queue(maxsize=100)`
+- hook 广播用 `put_nowait`，queue 满时抛 `QueueFull` → 直接丢弃该 event
+- 不阻塞其它 client / 主 loop
+
+## 默认安全值清单
+
+| 配置 | 默认 | 修改方式 |
+|------|------|---------|
+| `event_buffer_max_size` | 1000 | `create_app(event_buffer_max_size=N)` |
+| `allow_prompt_preview` | False | `create_app(allow_prompt_preview=True)` |
+| WebSocket queue maxsize | 100 | 硬编码（v0.0.22 不暴露） |
+| SSE heartbeat | 15s | 硬编码（`_SSE_HEARTBEAT_SECONDS`） |
+| SSE 默认模式 | 无限流 | `?limit=N` 切换 |
+
+## 测试结果
+
+| 测试层 | 命令 | 结果 |
+|--------|------|------|
+| Web 集成 | `pytest tests/test_integration_web_server.py -v` | **25 passed** |
+| 离线核心 | `pytest tests/ -v -m "not slow and not docker"` | **563 passed, 36 deselected** |
+| Lint | `ruff check src tests` | **All checks passed** |
+
+Web 集成 25 个用例覆盖：
+
+- spec endpoints 兼容（4）
+- hook 生命周期（2）
+- event_buffer 上限（3）
+- 409 路径（2）
+- WebSocket（2）
+- SSE limit（2）
+- prompt preview 保护（4）
+- 基础 endpoint 健康检查（5）
+- uvicorn subprocess（1）
+
+## 修改的源码文件
+
+| 文件 | 改动 |
+|------|------|
+| `src/pi_agent_core_py/harness.py` | 加 `remove_on_event_hook(hook) -> bool` 最小方法 |
+| `src/pi_agent_core_py/web/app.py` | 新增 `/api/sessions` / `/api/mcp/tools` / `WS /ws/events` / `?limit=N`；`create_app` 加 `event_buffer_max_size` / `allow_prompt_preview`；`_ensure_idle` 多查 phase；`POST /api/prompt` RuntimeError 转 409；`lifespan` + `dispose_app` |
+| `src/pi_agent_core_py/web/state.py` | `TraceEventBuffer` 默认 maxlen 500 → 1000 |
+| `tests/test_integration_web_server.py` | 25 个新用例覆盖全部 12 项验收 |
+| `tests/test_step_20_web_app.py` | `client_with_skill` fixture 显式 `allow_prompt_preview=True`（保持原断言） |
+
+## 剩余风险
+
+### 已知限制（v0.0.22 不修）
+
+- **`POST /api/prompt` 仍是同步阻塞**——LLM 调用结束才返回响应。慢 LLM 会让 HTTP 请求挂住。
+  `/api/prompt/async`（异步 + job-id 轮询）**尚未实现**。spec 标记为 P3。
+- **没有鉴权系统**——Web app 任何人都能访问 / 操作。**仅建议 localhost 使用**。
+- **Web app 仅建议 localhost 使用**——没有 rate limit / 没有 multi-tenant 隔离 / 没有 audit log。
+  公网部署必须前置反向代理 + 鉴权层。
+- **WebSocket 慢客户端采用"丢弃事件"策略**——不阻塞全局，但客户端可能漏事件。
+  生产场景前端应有 `event_id` 去重 / 重连补播机制（v0.0.22 不实现）。
+
+### 未验证项
+
+- 真实第三方 MCP server（fs / git 等）在 `/api/mcp/tools` 下的兼容性——本轮只用 fake stdio server
+- WebSocket 在生产高并发（>100 连接）下的稳定性——本轮未压测
+- `?limit=N` SSE 在代理（nginx / cloudflare）下的行为——本轮只测 TestClient
+
+### 不在范围内
+
+按 spec 约束，本轮不做：
+
+- CLI
+- RAG / Vector Memory / Long-term Memory
+- 多用户账号 / OAuth / RBAC
+- 企业 secret vault
+- `/api/prompt/async` 异步任务模式
+- WebSocket event_id 去重 / 重连补播
+- 前端 Claude 化（v0.0.22 是 backend-only baseline；前端改造见 `WEB_CLAUDE_PLAN.md`）
+
+## 升级指南
+
+从 v0.0.21 升级到 v0.0.22 的代码改动**全部向后兼容**：
+
+```python
+# v0.0.21
+app = create_app(harness)
+
+# v0.0.22（默认行为不变）
+app = create_app(harness)
+
+# v0.0.22（自定义）
+app = create_app(
+    harness,
+    event_buffer_max_size=2000,
+    allow_prompt_preview=True,  # 仅本地调试用
+)
+```
+
+旧测试 `test_skills_include_prompt` 的 fixture 需要显式 `allow_prompt_preview=True`：
+spec 要求默认禁用，破坏性变更最小化——只改 fixture 不改测试逻辑。

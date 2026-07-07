@@ -1,0 +1,97 @@
+"""Playwright E2E 专用 Web app 启动脚本。
+
+目标：
+- 用 FakeClient + AgentHarness 启动真实 FastAPI app
+- 监听 127.0.0.1:8000（PORT 环境变量可覆盖）
+- 临时 sqlite + uploads_dir（process 退出即丢）
+- 静态托管 src/pi_agent_core_py/web/static/（必须先 npm run build）
+- 不依赖真实 GLM / 真实 MCP server
+
+用法（被 playwright.config.ts webServer 调用）：
+
+    python tests/e2e/start_test_web_app.py
+
+注意：必须在 conda 环境 `pipy` 下运行；脚本不强校验环境。
+"""
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+# 让脚本可以从仓库根目录直接运行——把 src/ 加进 sys.path
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SRC_DIR = REPO_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+
+def _build_test_harness():
+    """构造 FakeClient harness——多次 prompt 都返回确定性文本。
+
+    scripts 用 list[list[StreamEvent]]——FakeClient 每次 stream() 调用消费一个 script；
+    P0-4 e2e 中多次发 prompt 时按序消费；超过则 FakeClient 抛错（不希望发生）。
+    """
+    from pi_agent_core_py.agent import Agent
+    from pi_agent_core_py.harness import AgentHarness
+    from pi_agent_core_py.model_client import (
+        DoneEvent,
+        FakeClient,
+        TextDeltaEvent,
+    )
+
+    # 10 个相同的 script——足够 5 个 smoke test 各发 1~2 次 prompt
+    script = [
+        TextDeltaEvent(delta="hello from fake backend"),
+        DoneEvent(stop_reason="stop"),
+    ]
+    scripts = [list(script) for _ in range(20)]
+    fake = FakeClient(scripts)
+    agent = Agent(system_prompt="", client=fake)
+    harness = AgentHarness(agent)
+    # attach 一个空 SkillRegistry——让 /api/skills/upload 走 register 路径而非 422
+    harness.attach_skills([])
+    return harness
+
+
+def main() -> None:
+    import uvicorn
+
+    from pi_agent_core_py.web.app import create_app
+
+    port = int(os.environ.get("PORT", "8000"))
+    host = os.environ.get("HOST", "127.0.0.1")
+
+    # 临时 sqlite + uploads_dir——脚本退出时随临时目录清理
+    tmp_root = Path(tempfile.mkdtemp(prefix="pi-e2e-"))
+    db_path = tmp_root / "e2e.sqlite"
+    uploads_dir = tmp_root / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+
+    print(
+        f"[e2e] starting on http://{host}:{port} "
+        f"(db={db_path}, uploads={uploads_dir})",
+        flush=True,
+    )
+
+    harness = _build_test_harness()
+    app = create_app(
+        harness,
+        db_path=str(db_path),
+        uploads_dir=str(uploads_dir),
+        allow_prompt_preview=True,
+    )
+
+    # uvicorn 日志降到 warning——避免淹没 Playwright webServer 输出
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level="warning",
+        access_log=False,
+    )
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Test / type / lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Virtualenvs
+.venv/
+.conda/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Session / runtime data
+*.jsonl
+
+# Node / frontend build
+node_modules/
+src/pi_agent_core_py/web/static/assets/
+src/pi_agent_core_py/web/static/index.html
+
+# Real-env dev data (persistent sqlite + uploads from local dev runs)
+dev_data/
+
+# Playwright e2e artifacts (trace / screenshot / video on failure)
+tests/e2e/test-results/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Claude Code local state (CLAUDE.md at repo root IS committed)
+.claude/settings.local.json
