@@ -27,9 +27,6 @@ from pi_agent_core_py.harness import AgentHarness
 from pi_agent_core_py.model_client import DoneEvent, FakeClient, TextDeltaEvent
 from pi_agent_core_py.web.app import create_app, dispose_app
 
-pytestmark = [pytest.mark.slow]
-
-
 # ============================================================================
 # fixtures
 # ============================================================================
