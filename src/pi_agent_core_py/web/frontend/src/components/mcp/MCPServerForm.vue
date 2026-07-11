@@ -144,6 +144,7 @@ async function submit() {
           rows="3"
           spellcheck="false"
           placeholder='["--port", "8080"]'
+          data-testid="mcp-server-args-input"
         ></textarea>
       </label>
       <div class="field full">

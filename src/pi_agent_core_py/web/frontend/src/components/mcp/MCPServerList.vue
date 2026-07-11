@@ -57,16 +57,24 @@ async function onDelete(name: string) {
   <div class="mcp-server-list">
     <h3 class="block-title">Servers</h3>
     <p v-if="servers.length === 0" class="empty">No MCP servers added yet.</p>
-    <div v-for="s in servers" :key="s.name" class="server-card">
+    <div
+      v-for="s in servers"
+      :key="s.name"
+      class="server-card"
+      :data-testid="'mcp-server-card'"
+      :data-server-name="s.name"
+    >
       <div class="server-head">
         <span class="server-name">{{ s.name }}</span>
         <span
           class="badge"
           :class="s.enabled ? 'badge-on' : 'badge-off'"
+          data-testid="mcp-server-status-badge"
         >{{ s.enabled ? "enabled" : "disabled" }}</span>
         <span
           v-if="s.enabled && !s.last_error"
           class="badge badge-success"
+          data-testid="mcp-server-attached-badge"
         >attached · {{ s.tool_count }} tool{{ s.tool_count === 1 ? "" : "s" }}</span>
         <span
           v-else-if="s.enabled && s.last_error"
@@ -85,7 +93,7 @@ async function onDelete(name: string) {
         <span class="muted">(values hidden)</span>
       </div>
       <p v-if="s.last_error" class="server-error">{{ s.last_error }}</p>
-      <div v-if="lastTest(s.name)" class="server-test">
+      <div v-if="lastTest(s.name)" class="server-test" data-testid="mcp-server-test-result">
         <span
           v-if="lastTest(s.name)?.error == null && lastTest(s.name)?.toolCount != null"
           class="test-ok"
@@ -100,6 +108,7 @@ async function onDelete(name: string) {
         <button
           type="button"
           :disabled="testingName === s.name"
+          data-testid="mcp-server-test-btn"
           @click="onTest(s.name)"
         >
           <LoadingSpinner v-if="testingName === s.name" :size="12" />
@@ -109,16 +118,19 @@ async function onDelete(name: string) {
           v-if="!s.enabled"
           type="button"
           class="primary"
+          data-testid="mcp-server-enable-btn"
           @click="onEnable(s.name)"
         >Enable</button>
         <button
           v-else
           type="button"
+          data-testid="mcp-server-disable-btn"
           @click="onDisable(s.name)"
         >Disable</button>
         <button
           type="button"
           class="danger"
+          data-testid="mcp-server-delete-btn"
           @click="onDelete(s.name)"
         >Delete</button>
       </div>

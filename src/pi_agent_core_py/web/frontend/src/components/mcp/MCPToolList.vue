@@ -30,13 +30,20 @@ async function onDisable(name: string) {
     <p v-if="tools.length === 0" class="empty">
       No MCP tools available. Enable a server to see its tools.
     </p>
-    <div v-for="t in tools" :key="t.name" class="tool-row">
+    <div
+      v-for="t in tools"
+      :key="t.name"
+      class="tool-row"
+      :data-testid="'mcp-tool-row'"
+      :data-tool-name="t.name"
+    >
       <div class="tool-info">
         <div class="tool-name-row">
           <span class="tool-name">{{ t.name }}</span>
           <span
             class="badge"
             :class="t.enabled ? 'badge-on' : 'badge-off'"
+            data-testid="mcp-tool-status-badge"
           >{{ t.enabled ? "enabled" : "disabled" }}</span>
         </div>
         <div class="tool-meta">
@@ -52,11 +59,13 @@ async function onDisable(name: string) {
           v-if="!t.enabled"
           type="button"
           class="primary"
+          data-testid="mcp-tool-enable-btn"
           @click="onEnable(t.name)"
         >Enable</button>
         <button
           v-else
           type="button"
+          data-testid="mcp-tool-disable-btn"
           @click="onDisable(t.name)"
         >Disable</button>
       </div>

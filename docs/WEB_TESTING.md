@@ -175,6 +175,71 @@ cd src/pi_agent_core_py/web/frontend && npm install && npm run build
 
 ---
 
+## P1-A Real Environment Validation（2026-07-12）
+
+P0 MVP freeze 后的真实环境验证阶段。把上面 25 项 checklist 中尚未自动化的项补完，并新增 MCP tool enable/disable 真链路 E2E + 真实 GLM 多轮 tool_use smoke。
+
+详细报告：[`docs/P1_A_BROWSER_SMOKE_REPORT.md`](P1_A_BROWSER_SMOKE_REPORT.md) + [`docs/P1_A_VALIDATION_REPORT.md`](P1_A_VALIDATION_REPORT.md)。
+
+### 25 项 checklist 当前状态
+
+| ID | 状态 | 验证方式 |
+|---|---|---|
+| #1–3, #5–7, #11–15, #20, #24–25 | PASS | P0 e2e（10 smoke）|
+| #4 Shift+Enter 换行 | **PASS** | P1-A2 `mcp-tool-lifecycle.spec.ts` Smoke 11 |
+| #8 view_file → FileRead card | Agent 层 PASS | P1-A3 真实 GLM tool_use smoke（Web 层留 P1-B+） |
+| #9 上传图片 → 不支持回复 | Agent 层 PASS | 同上（图片走 unsupported 分支已单测覆盖）|
+| #10 上传 PDF → 未解析回复 | Agent 层 PASS | 同上（PDF 走 unsupported 分支已单测覆盖）|
+| #16 Add server → 字段清空 | **PASS** | P1-A2 `mcp-tool-lifecycle.spec.ts` Smoke 10 |
+| #17 Test → "✓ N tools detected" | **PASS** | 同上 |
+| #18 Enable server → badge `attached · N tools` | **PASS** | 同上 |
+| #19 Disable 单个 tool → badge disabled | **PASS** | 同上 |
+| #21 并发 prompt → 409 | **PASS** | P1-A1 API smoke（threading.Barrier 严格并发） |
+| #22 重名 SKILL.md → 409 | **PASS** | P1-A1 API smoke |
+| #23 MCP Test 不存在命令 → 502 | **PASS** | P1-A1 API smoke |
+
+### 新增自动化资产
+
+- `tests/e2e/mcp-tool-lifecycle.spec.ts` — MCP tool enable/disable 真链路（含 Shift+Enter）
+- `tests/integration/test_real_glm_tool_use.py` — 真实 GLM e2e_probe round-trip（slow+integration）
+- `scripts/smoke_real_glm_tool_use.py` — 独立 smoke 脚本（不依赖 pytest）
+
+### 运行命令
+
+```bash
+# 真实 GLM tool_use（需要 ANTHROPIC_AUTH_TOKEN / GLM_API_KEY / ANTHROPIC_API_KEY 至少一个）
+PYTHONPATH=src /d/miniconda/envs/pipy/python.exe -m pytest \
+  tests/integration/test_real_glm_tool_use.py -v -m "slow and integration" \
+  -p no:cacheprovider -W "ignore::pytest.PytestUnraisableExceptionWarning" \
+  --no-cov
+
+# 独立 smoke 脚本（输出事件摘要）
+PYTHONPATH=src /d/miniconda/envs/pipy/python.exe scripts/smoke_real_glm_tool_use.py
+
+# Playwright MCP tool lifecycle 真链路
+cd tests/e2e && npx playwright test mcp-tool-lifecycle.spec.ts
+
+# Playwright 全套（不回归）
+cd tests/e2e && npm run test:e2e
+```
+
+### 失败排查
+
+| 现象 | 查看 |
+|---|---|
+| Playwright 失败 | `tests/e2e/test-results/<spec>/trace.zip` + `screenshot` + `video` |
+| uvicorn log | `tests/e2e/test-results/<spec>/error-context.md` |
+| MCP subprocess stderr | webServer stdout/stderr（pipe 到 playwright 输出） |
+| 真实 GLM 失败 | `scripts/smoke_real_glm_tool_use.py` 输出的 events 摘要 |
+
+### 安全说明
+
+- 所有报告 / 截图 / 日志严格不打印 GLM API key
+- MCP env value 仅在 type=password 输入，提交后立即清空，不出现在 body innerText
+- e2e_probe 工具仅用于测试，不注册进产品默认工具集
+
+---
+
 ## fixture 设计
 
 ### `web_client`
