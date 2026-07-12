@@ -31,6 +31,13 @@ export interface EventSocket {
   reconnect: () => void
   /** 当前是否连接中 */
   isOpen: () => boolean
+  /**
+   * P1-B3-4: 仅 E2E 测试用——模拟"非主动网络断线"触发自动重连。
+   *
+   * 与 close() 区别：close() 设 closedByUser=true 不重连；
+   * closeForTest() 不设 closedByUser，让 scheduleReconnect() 自动触发。
+   */
+  closeForTest: () => void
 }
 
 /**
@@ -133,6 +140,18 @@ export function createEventSocket(opts: EventSocketOptions): EventSocket {
     },
     isOpen() {
       return ws !== null && ws.readyState === WebSocket.OPEN
+    },
+    closeForTest() {
+      // P1-B3-4: 模拟"非主动网络断线"——不设 closedByUser，让 onclose 自动 scheduleReconnect。
+      // 用于 E2E Test 4-7 触发 reconnect + replay 链路。
+      if (ws !== null) {
+        try {
+          ws.close()
+        } catch {
+          // 忽略
+        }
+        ws = null
+      }
     },
   }
 }

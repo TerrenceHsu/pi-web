@@ -113,3 +113,56 @@ export interface SkillSelection {
   tags?: string[]
   values?: Record<string, JsonValue>
 }
+
+// ============================================================================
+// P1-B3 异步 prompt / request lifecycle 类型
+// ============================================================================
+
+/** Request 当前状态——后端 Literal["queued","running","completed","error","aborted"] */
+export type RequestStatus = "queued" | "running" | "completed" | "error" | "aborted"
+
+/**
+ * POST /api/prompt/async response（P1-B1）。
+ *
+ * 立即返回 202 + request_id——HTTP 不等模型完成。
+ * 调用方用 events_url / request_url / abort_url 后续查询和控制。
+ */
+export interface PromptAsyncResponse {
+  ok: boolean
+  request_id: string
+  session_id: string
+  status: "queued" | "running"
+  events_url: string
+  request_url: string
+  abort_url: string
+}
+
+/**
+ * GET /api/requests/{request_id} response——active + history 都查。
+ *
+ * 安全约束：**不含** task / payload / system prompt / MCP env / traceback。
+ */
+export interface RequestSummary {
+  request_id: string
+  session_id: string | null
+  status: RequestStatus
+  created_at: string | null
+  started_at: string | null
+  ended_at: string | null
+  error: string | null
+  error_type: string | null
+  abort_reason: string | null
+  result_summary: {
+    message_count?: number
+    applied_skill_names?: string[]
+    session_id?: string | null
+  } | null
+  event_start_sequence: number | null
+  event_end_sequence: number | null
+}
+
+/** GET /api/requests?session_id=&status=active&limit=N response（P1-B3-3） */
+export interface RequestListResponse {
+  count: number
+  requests: RequestSummary[]
+}

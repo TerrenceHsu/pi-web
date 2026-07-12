@@ -32,7 +32,12 @@ def _build_test_harness():
 
     scripts 用 list[list[StreamEvent]]——FakeClient 每次 stream() 调用消费一个 script；
     P0-4 e2e 中多次发 prompt 时按序消费；超过则 FakeClient 抛错（不希望发生）。
+
+    P1-B3: 如果环境变量 PI_E2E_DELAYED=1，构造 delayed FakeClient——每个 delta
+    sleep 75-150ms，至少 4 个 delta，让 async prompt 测试能观察 draft 增长。
     """
+    import os
+
     from pi_agent_core_py.agent import Agent
     from pi_agent_core_py.harness import AgentHarness
     from pi_agent_core_py.model_client import (
@@ -41,13 +46,45 @@ def _build_test_harness():
         TextDeltaEvent,
     )
 
-    # 10 个相同的 script——足够 5 个 smoke test 各发 1~2 次 prompt
-    script = [
-        TextDeltaEvent(delta="hello from fake backend"),
-        DoneEvent(stop_reason="stop"),
-    ]
-    scripts = [list(script) for _ in range(20)]
-    fake = FakeClient(scripts)
+    # P1-B3-4: 默认 delayed（让 async prompt 测试能观察 draft 增长）；
+    # 设置 PI_E2E_FAST=1 切回 fast FakeClient
+    delayed = os.environ.get("PI_E2E_FAST") != "1"
+
+    if delayed:
+        # delayed script——5 个 delta + DoneEvent
+        deltas = ["Hello", " from", " delayed", " fake", " backend"]
+        script: list = [TextDeltaEvent(delta=d) for d in deltas]
+        script.append(DoneEvent(stop_reason="stop"))
+        # 用 dict 当作 FakeClient 的 script 元数据，但 FakeClient 不支持 delay——
+        # 用 subclass 包装（见 _DelayedFakeClient）
+        from pi_agent_core_py.model_client import FakeClient as _BaseFakeClient
+
+        class _DelayedFakeClient(_BaseFakeClient):
+            """FakeClient subclass——stream() 内每个 delta 前 sleep 75-150ms。"""
+
+            async def stream(self, **kwargs):
+                import asyncio
+                import random
+
+                # 调用父类 stream 拿到原 events，但插入 delay
+                # FakeClient.stream 是 async generator——委托
+                async for ev in super().stream(**kwargs):
+                    # 每个 event 前 delay（除 DoneEvent）
+                    if not isinstance(ev, DoneEvent):
+                        await asyncio.sleep(random.uniform(0.075, 0.150))
+                    yield ev
+
+        scripts = [list(script) for _ in range(20)]
+        fake = _DelayedFakeClient(scripts)
+    else:
+        # 默认 fast FakeClient
+        one = [
+            TextDeltaEvent(delta="hello from fake backend"),
+            DoneEvent(stop_reason="stop"),
+        ]
+        scripts = [list(one) for _ in range(20)]
+        fake = FakeClient(scripts)
+
     agent = Agent(system_prompt="", client=fake)
     harness = AgentHarness(agent)
     # attach 一个空 SkillRegistry——让 /api/skills/upload 走 register 路径而非 422
@@ -76,11 +113,15 @@ def main() -> None:
     )
 
     harness = _build_test_harness()
+    # P1-B3-4: E2E 可通过环境变量调整 buffer size——Test 6 buffer gap fallback 用
+    # E2E_EVENT_BUFFER_MAX_SIZE=2 让 buffer 快速满，触发 gap=true
+    buffer_max_size = int(os.environ.get("E2E_EVENT_BUFFER_MAX_SIZE", "1000"))
     app = create_app(
         harness,
         db_path=str(db_path),
         uploads_dir=str(uploads_dir),
         allow_prompt_preview=True,
+        event_buffer_max_size=buffer_max_size,
     )
 
     # uvicorn 日志降到 warning——避免淹没 Playwright webServer 输出

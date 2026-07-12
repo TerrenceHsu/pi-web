@@ -36,6 +36,14 @@ onMounted(async () => {
       chatStore.loadMessages(sid),
       fileStore.loadFiles(sid),
     ])
+
+    // P1-B3-3: 查 active request——页面刷新后恢复运行中 prompt
+    const activeReqId = await chatStore.findActiveRequest(sid)
+    if (activeReqId) {
+      // 有未完成 request——恢复 currentRequestId + sending/streaming
+      // WS 连接后 reconnect replay 会补播该 request 的事件
+      chatStore.resumeActiveRequest(activeReqId)
+    }
   }
 
   // 3. skills / mcp——失败不阻塞主聊天
@@ -43,7 +51,7 @@ onMounted(async () => {
   mcpStore.loadServers().catch((e) => console.error("loadServers failed", e))
   mcpStore.loadTools().catch((e) => console.error("loadTools failed", e))
 
-  // 4. WS 事件流
+  // 4. WS 事件流——connectEvents 内创建 socket + 自动重连
   chatStore.connectEvents()
 })
 

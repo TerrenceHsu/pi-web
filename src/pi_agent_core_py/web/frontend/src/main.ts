@@ -33,5 +33,9 @@ if (shouldExposeHooks && typeof window !== "undefined") {
     ;(window as any).__storeHooks = {
       chatStore: () => useChatStore(),
     }
+    // P1-B3-4: E2E socket 控制 hook——模拟"非主动网络断线"触发 reconnect + replay
+    ;(window as any).__e2eHooks = {
+      closeEventSocket: () => useChatStore().closeEventSocketForTest(),
+    }
   })
 }

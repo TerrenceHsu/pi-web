@@ -2494,6 +2494,65 @@ def create_app(
             },
         )
 
+    @app.get("/api/requests", response_model=None)
+    async def list_requests(
+        session_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """列出 request——支持 ?session_id / ?status=active / ?limit（P1-B3-3）。
+
+        status 过滤：
+            active → queued OR running
+            terminal → completed OR error OR aborted
+            其它（或不传）→ 不按 status 过滤
+
+        排序：created_at DESC（最新优先）。
+        默认 limit=50；上限 200。
+
+        **安全**：响应只含 _serialize_request 字段——不含 task / payload /
+        system prompt / MCP env / traceback。
+
+        典型用途：页面刷新后查 active session 是否有未完成 request。
+        """
+        if limit <= 0 or limit > 200:
+            limit = max(0, min(limit, 200))
+
+        # 收集 active + history
+        all_reqs: list[WebRunRequest] = list(state.active_requests.values())
+        all_reqs.extend(state.request_history)
+
+        # 过滤 session_id
+        if session_id is not None:
+            all_reqs = [r for r in all_reqs if r.session_id == session_id]
+
+        # 过滤 status
+        if status == "active":
+            all_reqs = [r for r in all_reqs if r.status in ("queued", "running")]
+        elif status == "terminal":
+            all_reqs = [
+                r
+                for r in all_reqs
+                if r.status in ("completed", "error", "aborted")
+            ]
+        elif status is not None:
+            # 精确匹配 status
+            all_reqs = [r for r in all_reqs if r.status == status]
+
+        # 排序：created_at DESC（None 视为最早）
+        all_reqs.sort(
+            key=lambda r: r.created_at or datetime.min.replace(tzinfo=UTC),
+            reverse=True,
+        )
+
+        # limit
+        all_reqs = all_reqs[:limit]
+
+        return {
+            "count": len(all_reqs),
+            "requests": [_serialize_request(r) for r in all_reqs],
+        }
+
     @app.get("/api/requests/{request_id}", response_model=None)
     async def get_request(
         request_id: str,
@@ -2675,10 +2734,24 @@ def create_app(
         client_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100)
         ws_clients.add(client_queue)
         try:
-            # 先发 hello
+            # 先发 hello（P1-B3-0c 控制帧）
+            #
+            # **关键不变量**（B3-0c §5.3）：
+            # - hello 是裸 dict，**不**走 _web_event_hook 包装
+            # - **不**进 TraceEventBuffer
+            # - **不**消耗 state.next_event_sequence
+            # - 前端**不**让它进 seenEventIds / lastGlobalSequence
+            # - 前端**不**让它进 ChatStreamItem mapper
+            #
+            # first_available_sequence / last_available_sequence 帮助客户端建立 baseline：
+            # - 首次连接 + 无 active request：lastGlobalSequence = last_available_sequence
+            # - 避免"第一个真实事件 sequence=500 被误判缺失 1-499"
             await websocket.send_json({
                 "type": "hello",
                 "agent_status": _agent_status(),
+                "first_available_sequence": state.event_buffer.first_sequence,
+                "last_available_sequence": state.event_buffer.last_sequence,
+                "server_time": _now_utc().isoformat(),
                 "_received_at_ms": int(time.time() * 1000),
             })
             while True:

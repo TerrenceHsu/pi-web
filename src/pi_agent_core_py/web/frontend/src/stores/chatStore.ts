@@ -15,6 +15,7 @@ import { defineStore } from "pinia"
 import { computed, ref } from "vue"
 
 import * as messagesApi from "../api/messages"
+import * as eventsApi from "../api/events"
 import { ApiError } from "../api/client"
 import { createEventSocket, type EventSocket } from "../api/websocket"
 import type {
@@ -168,8 +169,10 @@ export const useChatStore = defineStore("chat", () => {
    * 因此前端也用全局 cursor 判断"中间是否丢事件"，否则跨 session 事件会误报 gap。
    * 例如 session A 收 seq=10、session B 收 seq=11、session A 再收 seq=12：
    * per-session 判断会认为 A 缺 11，但 11 实际属于 B 没丢。
+   *
+   * P1-B3-4: 改为 ref + expose 到 store——便于 E2E 测试重置（resetForSession 不清）。
    */
-  let lastGlobalSequence = 0
+  const lastGlobalSequence = ref(0)
   /** 每个 session 最近一次看到的 envelope.sequence——保留作统计 + B3 reconnect
    * per-session replay cursor 使用，**不参与 gap 判断**。 */
   const lastSequenceBySession = ref<Record<string, number>>({})
@@ -181,6 +184,36 @@ export const useChatStore = defineStore("chat", () => {
   /** 当前 active session id（用于事件隔离）。由 setActiveSession 更新——
    * sessionStore 切换 / 新建 / 删除 session 时通过 chatStore.setActiveSession() 同步。 */
   const activeSessionId = ref<string | null>(null)
+
+  // P1-B3-1: async prompt 竞态 + request 隔离 state
+  /** await sendPromptAsync 期间为 true——handleEvent 看到 turn-control envelope
+   * 且 currentRequestId=null 时缓冲到 pendingEventsByRequest。 */
+  const pendingRequest = ref(false)
+  /** request_id → bufferred envelopes（await 202 期间 WS 提前到达的事件）。
+   * 模块级私有 Map——容量上限 100 events per queue + 5min 超时清理（简化版）。 */
+  const pendingEventsByRequest: Map<string, any[]> = new Map()
+  /** 收到当前 request 的 request_end——触发 status poll + loadMessages。 */
+  const terminalEventSeen = ref(false)
+  /** gap=true 或 replay 分页超限——terminal 后强制 loadMessages 校正。 */
+  const needsFinalResync = ref(false)
+  /** 用户点 Stop——只 set 此 flag；等 status=aborted 后才 finalize。 */
+  const aborting = ref(false)
+
+  /** turn-control 事件——会修改当前 turn 的 draft / sending / streaming 状态；
+   * 必须属于 currentRequestId 才能处理。 */
+  const TURN_CONTROL_TYPES = new Set([
+    "message_start", "message_update", "message_end",
+    "request_end", "agent_end", "error", "agent_abort",
+    "tool_execution_start", "tool_execution_end",
+    "turn_end", "turn_start", "agent_start",
+    "request_start", "request_queued",
+  ])
+
+  // P1-B3-2: reconnect replay state
+  /** replay 进行中——新 WS event 暂存到 liveEventsDuringReplay */
+  const replaying = ref(false)
+  /** replay 期间 WS 收到的 live envelope——合并到 replay events 后清空 */
+  let liveEventsDuringReplay: any[] = []
 
   let socket: EventSocket | null = null
 
@@ -256,6 +289,152 @@ export const useChatStore = defineStore("chat", () => {
     }
   }
 
+  /**
+   * P1-B3-3: 用服务端 messages 校正 streamItems——保留当前 request 的 turn cards，
+   * 替换 user_message / assistant_message 为服务端最终事实，删除 streaming draft。
+   *
+   * 调用时机：
+   * - request status 进入 terminal（completed/error/aborted）后
+   * - gap fallback 时（needsFinalResync=true）
+   * - 用户手动刷新
+   *
+   * 不重复 append——按服务端 message 顺序重建持久化 item，与 turn cards 不冲突。
+   */
+  async function reconcileMessagesFromServer(sessionId: string) {
+    try {
+      const resp = await messagesApi.getMessages(sessionId)
+      // 收集服务端的 user_message / assistant_message item（顺序敏感）
+      const persistedItems: ChatStreamItem[] = []
+      resp.messages.forEach((m, i) => {
+        if (m.role === "user" || m.role === "assistant") {
+          const item = messageToItem(m, `srv-${i}`)
+          if (item) persistedItems.push(item)
+        }
+      })
+
+      // 保留当前 streamItems 中的 turn cards（tool_call / tool_result / file_read /
+      // skill_used / mcp_tool_call / turn_info / error）——它们由 WS event 创建，
+      // 服务端 messages 不可重建。删除 user_message / assistant_message（避免重复）。
+      const turnCards = streamItems.value.filter(
+        (it: any) =>
+          it.kind !== "user_message" && it.kind !== "assistant_message",
+      )
+
+      // 合并：服务端 messages 在前（历史 + 本轮 user/assistant 最终文本）；
+      // turn cards 在后（按出现顺序保留）。这意味着本轮 turn cards 会出现在
+      // 历史 user_message 之后——这是 UI 期望的（用户先看到历史消息，再看本轮）。
+      streamItems.value = [...persistedItems, ...turnCards]
+
+      // reset turn-tracking 部分（保留 currentTurnInfoId/currentAssistantItemId）
+      Object.keys(toolItemIds).forEach((k) => delete toolItemIds[k])
+      lastSkillSignature = null
+    } catch (e: any) {
+      // reconcile 失败——不覆盖现有 streamItems；用户可手动刷新
+      error.value = e instanceof ApiError ? e.detail : String(e?.message ?? e)
+    }
+  }
+
+  /**
+   * P1-B3-3: request_end 后轮询 GET /api/requests/{id} 直到 terminal——避免
+   * request_end 早于 SQLite 持久化导致的 loadMessages 缺最终消息。
+   *
+   * 间隔 250ms → 500ms；总超时 10s。terminal 后调 reconcileMessagesFromServer。
+   */
+  async function pollRequestUntilTerminal(requestId: string) {
+    const MAX_TIMEOUT_MS = 10_000
+    const startedAt = Date.now()
+    let delay = 250
+
+    while (Date.now() - startedAt < MAX_TIMEOUT_MS) {
+      await new Promise((r) => setTimeout(r, delay))
+      delay = Math.min(delay * 2, 500)
+      try {
+        const r = await messagesApi.getRequestStatus(requestId)
+        if (
+          r.status === "completed" ||
+          r.status === "error" ||
+          r.status === "aborted"
+        ) {
+          // terminal——reconcile messages
+          if (r.session_id) {
+            await reconcileMessagesFromServer(r.session_id)
+          }
+          // 清 state
+          sending.value = false
+          streaming.value = false
+          aborting.value = false
+          currentRequestId.value = null
+          return
+        }
+      } catch {
+        // 404 / 网络——继续 poll，由 timeout 兜底
+      }
+    }
+    // timeout——保留 draft + 显示轻量错误
+    error.value = "Request finalization timeout — please refresh to sync"
+  }
+
+  /**
+   * P1-B3-3: Stop 按钮——优先调 request-scoped abort；fallback 到旧 /api/abort。
+   * 点击后只 set aborting=true；等 status=aborted（pollRequestUntilTerminal 处理）。
+   */
+  async function abortRun(reason = "user_requested") {
+    if (currentRequestId.value) {
+      aborting.value = true
+      try {
+        await messagesApi.abortRequest(currentRequestId.value, reason)
+      } catch (e) {
+        // abort 失败——不 block UI；用户可重试
+        aborting.value = false
+        throw e
+      }
+    } else {
+      // fallback——没有 currentRequestId（旧路径或 pendingRequest 期间）
+      // 直接 fetch /api/abort（避免与 chatStore.abortRun 命名冲突的循环 import）
+      try {
+        const res = await fetch("/api/abort", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason }),
+        })
+        if (!res.ok) {
+          // 忽略——abort 失败不 block UI
+        }
+      } catch {
+        // 忽略
+      }
+    }
+  }
+
+  /**
+   * P1-B3-3: 查询 session 的 active request——页面刷新 / session 切换恢复用。
+   * 返回 request_id 或 null。
+   */
+  async function findActiveRequest(sessionId: string): Promise<string | null> {
+    try {
+      const resp = await messagesApi.listActiveRequests(sessionId, 1)
+      if (resp.count > 0 && resp.requests[0]) {
+        return resp.requests[0].request_id
+      }
+    } catch {
+      // 忽略——降级为无 active request
+    }
+    return null
+  }
+
+  /**
+   * P1-B3-4: 页面刷新恢复——set currentRequestId + sending/streaming=true，
+   * 让 handleEvent 把后续 envelope 关联到该 request。
+   * WS reconnect 后 replay 会补播该 request 的事件。
+   */
+  function resumeActiveRequest(requestId: string) {
+    currentRequestId.value = requestId
+    pendingRequest.value = false
+    sending.value = true
+    streaming.value = true
+    terminalEventSeen.value = false
+  }
+
   // ----------------------------------------------------------------------
   // sendPrompt
   // ----------------------------------------------------------------------
@@ -282,6 +461,12 @@ export const useChatStore = defineStore("chat", () => {
     currentTurnEvents.value = []
     // 切新 turn 前清 gap 标记（前一轮的 gap 不影响本轮 UI）
     gapDetected.value = false
+    // P1-B3-1: async prompt 新 state——等 202 期间 pendingRequest=true
+    pendingRequest.value = true
+    currentRequestId.value = null
+    terminalEventSeen.value = false
+    needsFinalResync.value = false
+    aborting.value = false
 
     // 1. 乐观 push user_message——含本轮附件 FileRef[]
     streamItems.value.push({
@@ -318,29 +503,31 @@ export const useChatStore = defineStore("chat", () => {
     }
 
     try {
-      const resp = await messagesApi.sendPrompt({
+      // P1-B3-1: 切换到 async API——立即返回 202 + request_id。
+      // 等待期间 WS event 进 pendingEventsByRequest 缓冲；202 后 flush。
+      const resp = await messagesApi.sendPromptAsync({
         text: input.text,
         session_id: input.sessionId,
         file_ids: input.fileIds,
         skill_names: input.skillNames,
       })
 
-      // ============================================================
-      // 关键设计：POST /api/prompt 是同步阻塞，返回时所有 AgentEvent 已 emit
-      // 到 WS。但浏览器 event loop 的 microtask（POST 响应 continuation）
-      // 必然先于 macrotask（WS onmessage）执行——所以这里**绝不能 push
-      // assistant_message 兜底**，否则会与稍后到达的 WS event 重复。
-      //
-      // WS 正常工作时实时渲染 streaming draft；WS 断连时用户能从
-      // wsConnected=false / 状态条感知；不再做 POST 兜底。
-      // ============================================================
+      currentRequestId.value = resp.request_id
+      pendingRequest.value = false
 
-      // finalize turn_info
-      finalizeTurnInfo("done")
+      // flush 该 request 的 pending envelopes（按 sequence 排序，已通过 event_id 去重）
+      const pending = pendingEventsByRequest.get(resp.request_id) ?? []
+      pendingEventsByRequest.delete(resp.request_id)
+      if (pending.length > 0) {
+        pending.sort((a, b) => a.sequence - b.sequence)
+        for (const env of pending) {
+          // 已通过 event_id 去重 / session 隔离——直接走下游 mapper
+          applyEventToStreamItems({ ...env.payload, type: env.type })
+        }
+      }
 
-      // finalize turn_info
-      finalizeTurnInfo("done")
-
+      // 不清 sending/streaming——等 WS 推 request_end / status poll 决定
+      // 不在 finally 内清——async 立即返回后 request 还在后台运行
       return resp
     } catch (e: any) {
       let msg: string
@@ -350,6 +537,10 @@ export const useChatStore = defineStore("chat", () => {
         msg = String(e?.message ?? e)
       }
       error.value = msg
+      // async 失败 → 回滚乐观 push 的 turn_info + user_message 标记失败
+      pendingRequest.value = false
+      sending.value = false
+      streaming.value = false
       streamItems.value.push({
         kind: "error",
         id: genId("e"),
@@ -357,15 +548,105 @@ export const useChatStore = defineStore("chat", () => {
         details: e instanceof ApiError ? { status: e.status, payload: e.payload } : undefined,
       })
       finalizeTurnInfo("error")
+      // **不**自动 fallback 同步 POST /api/prompt（用户原指令 §3：避免双发）
       throw e
-    } finally {
-      // 关键：不清 currentAssistantItemId——POST 响应是 microtask，会先于
-      // 剩余 WS macrotask 执行；若在这里清变量，后续 WS event 会看到 null。
-      // WS 自己会在 turn_end / agent_end 时清，无需 finally 重复 cleanup。
-      // （错误路径：catch 已 finalize turn_info；currentItemId 留给下一轮
-      // message_start 自动判断 if-null-create / else-append 处理。）
-      sending.value = false
-      streaming.value = false
+    }
+  }
+
+  /** 缓冲 envelope 到 pendingEventsByRequest——单 queue 容量上限 100。 */
+  function bufferPendingEvent(requestId: string, envelope: WebEventEnvelope) {
+    let queue = pendingEventsByRequest.get(requestId)
+    if (!queue) {
+      queue = []
+      pendingEventsByRequest.set(requestId, queue)
+    }
+    queue.push(envelope)
+    // 容量上限——超限淘汰最旧
+    if (queue.length > 100) {
+      queue.splice(0, queue.length - 100)
+    }
+  }
+
+  /**
+   * P1-B3-2: WS reconnect 后从 lastGlobalSequence 拉取缺失事件 + 合并 live buffer。
+   *
+   * 流程（用户原指令 §7.4）：
+   * 1. socket 已进入 replaying（hello 后由 handleEvent 触发本函数）
+   * 2. WS 收到的新 event 在 handleEvent 入口进 liveEventsDuringReplay
+   * 3. 调 GET /api/events?after_sequence=N&limit=200（**不带 session_id**——全局补播）
+   * 4. 分页直到 has_more=false；保护上限 20 页 / 4000 事件，超限 needsFinalResync
+   * 5. 合并 replay + live → sort by sequence → dedupe by event_id
+   * 6. 依次 applyEventToStreamItems（跳过 session/request 隔离外的 envelope-decompose）
+   * 7. replaying=false，状态回 connected
+   */
+  async function replayFromCursor() {
+    if (replaying.value) return
+    replaying.value = true
+
+    try {
+      const MAX_PAGES = 20
+      const MAX_EVENTS = 4000
+      const PAGE_LIMIT = 200
+      let afterSeq = lastGlobalSequence.value
+      let totalEvents = 0
+      const collected: WebEventEnvelope[] = []
+
+      for (let page = 0; page < MAX_PAGES; page++) {
+        const resp = await eventsApi.getEvents({
+          afterSequence: afterSeq,
+          limit: PAGE_LIMIT,
+          // **不**传 sessionId——sequence 是全局的，必须拉全部 envelope
+        })
+        if (resp.gap) {
+          needsFinalResync.value = true
+        }
+        if (resp.events.length === 0) break
+        collected.push(...resp.events)
+        totalEvents += resp.events.length
+        if (totalEvents >= MAX_EVENTS) {
+          needsFinalResync.value = true
+          break
+        }
+        afterSeq = resp.events[resp.events.length - 1].sequence
+        if (!resp.has_more) break
+      }
+
+      // 合并 replay + live buffer
+      const merged = [...collected, ...liveEventsDuringReplay]
+      liveEventsDuringReplay = []
+
+      // sort by sequence
+      merged.sort((a, b) => a.sequence - b.sequence)
+
+      // dedupe by event_id——replay 和 live 可能有重复（同 event 走两条路到达）
+      const unique = new Map<string, WebEventEnvelope>()
+      for (const env of merged) {
+        if (!unique.has(env.event_id)) unique.set(env.event_id, env)
+      }
+
+      // 走下游 mapper——session / request 隔离照常；
+      // 不调 handleEvent（避免再次 rememberEventId + advance cursor + buffer）
+      replaying.value = false
+      for (const env of unique.values()) {
+        if (
+          env.session_id &&
+          activeSessionId.value &&
+          env.session_id !== activeSessionId.value
+        ) {
+          continue
+        }
+        const requestId = env.request_id
+        const isTurnControl =
+          requestId !== null && TURN_CONTROL_TYPES.has(env.type)
+        if (isTurnControl && requestId !== currentRequestId.value) {
+          continue
+        }
+        applyEventToStreamItems({ ...env.payload, type: env.type })
+      }
+    } catch (e) {
+      // replay 失败——降级为 needsFinalResync；用户可手动刷新
+      needsFinalResync.value = true
+      replaying.value = false
     }
   }
 
@@ -416,6 +697,35 @@ export const useChatStore = defineStore("chat", () => {
   function handleEvent(rawEvent: WebEvent) {
     if (!rawEvent || typeof rawEvent.type !== "string") return
 
+    // 1. 协议事件——hello / shutdown 是裸 dict（控制 frame，不走 envelope 路径）
+    if (rawEvent.type === "hello") {
+      wsConnected.value = true
+      wsReconnecting.value = false
+      // P1-B3-0c: hello 控制 frame 提供 first/last_available_sequence 用于建立 baseline。
+      // **关键不变量**：hello 不消耗 next_event_sequence / 不进 buffer / 不进 seenEventIds；
+      // 这里只更新 lastGlobalSequence baseline——避免首个真实事件 sequence=500
+      // 被误判缺失 1-499。
+      // 仅当本地尚无 cursor 时建立 baseline；reconnect 时保留旧 cursor 让 replay 走起。
+      const helloLast = (rawEvent as any).last_available_sequence
+      const wasReconnect = lastGlobalSequence.value > 0
+      if (
+        lastGlobalSequence.value === 0 &&
+        typeof helloLast === "number" &&
+        helloLast > 0
+      ) {
+        lastGlobalSequence.value = helloLast
+      }
+      // P1-B3-2: reconnect 时触发 replay——从 lastGlobalSequence 拉取缺失事件
+      if (wasReconnect) {
+        void replayFromCursor()
+      }
+      return
+    }
+    if (rawEvent.type === "shutdown") {
+      wsConnected.value = false
+      return
+    }
+
     // P1-B2: envelope-aware 处理——提取 payload 作为下游 event；envelope 元数据用于
     // 去重 + session/request 隔离 + sequence gap 检测。hello / shutdown / legacy
     // 裸事件走 isWebEventEnvelope=false 分支，保留原行为。
@@ -432,10 +742,10 @@ export const useChatStore = defineStore("chat", () => {
       // sequence gap 检测——用全局 cursor（后端 sequence 是全局单调）。
       // per-session cursor 不能用于 gap 判断：跨 session 事件会让 per-session
       // 看起来"缺号"但实际没丢（B2.1 hardening）。
-      if (lastGlobalSequence > 0 && envelope.sequence > lastGlobalSequence + 1) {
+      if (lastGlobalSequence.value > 0 && envelope.sequence > lastGlobalSequence.value + 1) {
         gapDetected.value = true
       }
-      lastGlobalSequence = Math.max(lastGlobalSequence, envelope.sequence)
+      lastGlobalSequence.value = Math.max(lastGlobalSequence.value, envelope.sequence)
 
       // per-session sequence cursor（统计 + B3 replay 用，不参与 gap 判断）
       if (envelope.session_id) {
@@ -447,8 +757,6 @@ export const useChatStore = defineStore("chat", () => {
       }
 
       // session 隔离：不属于当前 active session 的事件不写入当前消息流（B2 验收 #10）。
-      // 注意：同 session 的旧 request 事件当前**不会**被过滤——currentRequestId 隔离
-      // 留 B3 切 async 前端后启用（B2 报告 §10 已修正）。
       if (
         envelope.session_id &&
         activeSessionId.value &&
@@ -457,24 +765,55 @@ export const useChatStore = defineStore("chat", () => {
         return
       }
 
+      // P1-B3-2: replay 期间——live envelope 暂存（已通过 event_id 去重 + advance cursor）
+      // flush 时与 replay events 合并 → sort by sequence → applyEventToStreamItems
+      if (replaying.value) {
+        liveEventsDuringReplay.push(envelope)
+        return
+      }
+
+      // P1-B3-1: request 隔离 / pending buffer
+      const requestId = envelope.request_id
+      const isTurnControl =
+        requestId !== null && TURN_CONTROL_TYPES.has(envelope.type)
+
+      if (isTurnControl) {
+        // 是 turn-control 事件——必须属于 currentRequestId
+        if (pendingRequest.value && currentRequestId.value === null && requestId !== null) {
+          // 等 202 期间——缓冲；202 来了 flush
+          bufferPendingEvent(requestId, envelope)
+          return
+        }
+        if (requestId !== currentRequestId.value) {
+          // 旧 request 或未知 request——不污染当前 turn
+          // 已通过 event_id 去重 + 已推进 cursor，但不调下游 mapper
+          return
+        }
+        // requestId === currentRequestId——继续下游
+      }
+      // 非 turn-control（无 request_id 或管理 event）——继续下游
+
       // 合并 envelope.type + envelope.payload 作为下游 event
       event = { ...envelope.payload, type: envelope.type }
     }
 
+    applyEventToStreamItems(event)
+  }
+
+  /**
+   * 下游 event → ChatStreamItem 映射器——handleEvent / sendPrompt pending flush 共用。
+   *
+   * **不变量**：调用此函数前 event 已通过：
+   * - event_id 去重（envelope 路径）
+   * - session 隔离
+   * - request 隔离（turn-control 事件属于 currentRequestId）
+   *
+   * hello / shutdown 不应进入此函数（handleEvent 入口提前 return）。
+   */
+  function applyEventToStreamItems(event: any) {
     currentTurnEvents.value.push(event)
 
     const t = event.type
-
-    // 1. 协议事件
-    if (t === "hello") {
-      wsConnected.value = true
-      wsReconnecting.value = false
-      return
-    }
-    if (t === "shutdown") {
-      wsConnected.value = false
-      return
-    }
 
     // 2. error 事件
     if (t === "error") {
@@ -494,6 +833,8 @@ export const useChatStore = defineStore("chat", () => {
     }
     if (t === "request_end") {
       const status = (event as any).status
+      // P1-B3-3: terminal event——触发 status poll（等 SQLite 持久化完成）
+      terminalEventSeen.value = true
       if (status === "aborted" || status === "error") {
         finalizeTurnInfo("error")
         if (status === "aborted") {
@@ -501,6 +842,17 @@ export const useChatStore = defineStore("chat", () => {
         }
       } else {
         finalizeTurnInfo("done")
+      }
+      // P1-B3-3: poll 直到 terminal 后 reconcile messages
+      // （request_end 可能早于 SQLite 持久化，立即 loadMessages 会缺最终消息）
+      const reqId = currentRequestId.value
+      if (reqId) {
+        void pollRequestUntilTerminal(reqId)
+      } else {
+        // 无 currentRequestId（异常路径）——直接清 state
+        sending.value = false
+        streaming.value = false
+        aborting.value = false
       }
       return
     }
@@ -914,6 +1266,17 @@ export const useChatStore = defineStore("chat", () => {
     wsReconnecting.value = false
   }
 
+  /**
+   * P1-B3-4: 仅 E2E 测试用——模拟"非主动网络断线"触发自动 reconnect + replay。
+   * 与 disconnectEvents 区别：disconnectEvents 主动 close（不重连）；
+   * 本函数走 closeForTest 让 onclose 自动 scheduleReconnect。
+   */
+  function closeEventSocketForTest() {
+    if (socket !== null) {
+      socket.closeForTest()
+    }
+  }
+
   /** 切换 active session 时调用——清空当前 turn + items。 */
   function resetForSession() {
     streamItems.value = []
@@ -931,6 +1294,12 @@ export const useChatStore = defineStore("chat", () => {
     // 可累积——event_id 是全局唯一的）
     gapDetected.value = false
     currentRequestId.value = null
+    // P1-B3-1: 清 async prompt state
+    pendingRequest.value = false
+    terminalEventSeen.value = false
+    needsFinalResync.value = false
+    aborting.value = false
+    pendingEventsByRequest.clear()
   }
 
   /**
@@ -959,12 +1328,28 @@ export const useChatStore = defineStore("chat", () => {
     gapDetected,
     currentRequestId,
     activeSessionId,
+    // P1-B3-1: async prompt 竞态 + request 隔离 state
+    pendingRequest,
+    terminalEventSeen,
+    needsFinalResync,
+    aborting,
+    // P1-B3-2: replay state
+    replaying,
+    // P1-B3-4: 暴露给 E2E 测试重置——生产 UI 不读
+    lastGlobalSequence,
     loadMessages,
     sendPrompt,
     connectEvents,
     disconnectEvents,
+    closeEventSocketForTest,
     handleEvent,
     resetForSession,
     setActiveSession,
+    // P1-B3-3: 新 actions
+    abortRun,
+    reconcileMessagesFromServer,
+    pollRequestUntilTerminal,
+    findActiveRequest,
+    resumeActiveRequest,
   }
 })

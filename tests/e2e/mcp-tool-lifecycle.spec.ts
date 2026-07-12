@@ -173,11 +173,19 @@ test.describe("Shift+Enter newline (Smoke 11)", () => {
   test("#4 Shift+Enter inserts newline, Enter sends", async ({ page }) => {
     await page.goto("/")
 
+    // P1-B3-4: 新建独立 session——避免前 test 在 default session 留的 user_message 干扰
+    await page.locator('[data-testid="new-chat-button"]').click()
+    await page.waitForTimeout(150)
+
     const input = page.locator('[data-testid="chat-input-field"]')
     await expect(input).toBeVisible()
+    await input.focus()
 
     await input.fill("line1")
-    await input.press("Shift+Enter")
+    // 显式 down/up 模拟 Shift modifier——比 press("Shift+Enter") 更稳定
+    await page.keyboard.down("Shift")
+    await page.keyboard.press("Enter")
+    await page.keyboard.up("Shift")
     await input.type("line2")
 
     const value = await input.inputValue()
@@ -185,7 +193,7 @@ test.describe("Shift+Enter newline (Smoke 11)", () => {
     expect(value).toContain("line1")
     expect(value).toContain("line2")
 
-    // 消息未发送
+    // 消息未发送——新 session 应该没有任何 user-message
     await expect(page.locator('[data-testid="user-message"]')).toHaveCount(0)
   })
 })

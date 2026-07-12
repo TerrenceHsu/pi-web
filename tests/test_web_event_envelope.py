@@ -272,6 +272,55 @@ def test_9_ws_hello_envelope(web_client):
         assert first.get("type") == "hello"
 
 
+def test_9_ws_hello_has_sequence_metadata(web_client):
+    """P1-B3-0c: WS hello 控制 frame 含 first/last_available_sequence + server_time。
+
+    **关键不变量**：hello 是裸 dict（不走 envelope），但必须提供这 3 字段让前端
+    建立 baseline，避免首个真实事件被误判为缺 sequence 1..N-1。
+    """
+    client, _, _ = web_client
+    with client.websocket_connect("/ws/events") as ws:
+        hello = ws.receive_json()
+        assert hello.get("type") == "hello"
+        # 3 个 sequence metadata 字段
+        assert "first_available_sequence" in hello, (
+            f"hello missing first_available_sequence: {hello}"
+        )
+        assert "last_available_sequence" in hello, (
+            f"hello missing last_available_sequence: {hello}"
+        )
+        assert "server_time" in hello, (
+            f"hello missing server_time: {hello}"
+        )
+        # 空 buffer 时 first/last 都是 None；触发 prompt 后变 int
+        # 这里只验证字段存在 + 类型合法
+        first_seq = hello["first_available_sequence"]
+        last_seq = hello["last_available_sequence"]
+        assert first_seq is None or isinstance(first_seq, int)
+        assert last_seq is None or isinstance(last_seq, int)
+        # server_time 是 ISO8601 string
+        assert isinstance(hello["server_time"], str) and len(hello["server_time"]) > 0
+
+
+def test_9_ws_hello_not_in_event_buffer(web_client):
+    """P1-B3-0c: hello **不**进 TraceEventBuffer / **不**消耗 next_event_sequence。
+
+    验证：连接 WS（发 hello）→ GET /api/events 应该为空 / 不含 type=hello。
+    """
+    client, _, _ = web_client
+    with client.websocket_connect("/ws/events"):
+        # 收 hello
+        pass
+    body = client.get("/api/events").json()
+    # hello 不应该在 buffer 内
+    hello_in_buffer = [
+        ev for ev in body["events"] if ev.get("type") == "hello"
+    ]
+    assert hello_in_buffer == [], (
+        f"hello leaked into event buffer: {hello_in_buffer}"
+    )
+
+
 def test_9b_ws_and_get_events_share_envelope_schema(web_client):
     """WS broadcast 和 GET /api/events 用同一个 envelope schema——
     通过代码路径一致性验证（_web_event_hook 一次性生成 envelope 给三处）。

@@ -40,6 +40,10 @@ async function setupStore(
     const s = (window as any).__storeHooks.chatStore()
     if (sid !== null) s.setActiveSession(sid)
     s.resetForSession()
+    // P1-B3-4: 重置 lastGlobalSequence=0——避免被 hello baseline 推进影响 gap 测试
+    // hello 在 connectEvents 后会 set baseline = hello.last_available_sequence
+    // 如果 server-side buffer 已有事件（前序 test 触发的），baseline 会很高
+    s.lastGlobalSequence = 0
   }, sessionId)
 }
 

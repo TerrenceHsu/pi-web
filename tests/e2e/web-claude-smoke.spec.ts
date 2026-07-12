@@ -65,6 +65,10 @@ test.describe("Smoke 2: chat", () => {
   }) => {
     await page.goto("/")
 
+    // P1-B3-4: 新建独立 session——避免 retry 时 server-side 历史 user_message 干扰
+    await page.locator('[data-testid="new-chat-button"]').click()
+    await page.waitForTimeout(200)
+
     // 等聊天 UI 就绪
     await expect(page.locator('[data-testid="chat-input-field"]')).toBeVisible()
 
@@ -79,11 +83,10 @@ test.describe("Smoke 2: chat", () => {
       }),
     ).toBeVisible()
 
-    // assistant message（FakeClient deterministic 文本）应在合理时间内出现
-    // 同步阻塞 POST——等待 backend 返回
+    // assistant message——delayed FakeClient 约 400-750ms 完成
     await expect(
       page.locator('[data-testid="assistant-message"]').filter({
-        hasText: "hello from fake backend",
+        hasText: "delayed",
       }),
     ).toBeVisible({ timeout: 20_000 })
 
@@ -355,20 +358,24 @@ test.describe("Smoke 9: session rename + delete", () => {
   test("rename session via prompt dialog", async ({ page }) => {
     await page.goto("/")
 
+    // P1-B3-4: 先新建独立 session——避免前 test 在 default session 留的状态干扰
+    await page.locator('[data-testid="new-chat-button"]').click()
+    await page.waitForTimeout(150)
+
     // 监听 dialog（rename 用 window.prompt）
     page.on("dialog", async (dialog) => {
       expect(dialog.type()).toBe("prompt")
       await dialog.accept("renamed by e2e")
     })
 
-    // hover 触发 actions 显示，点 rename
+    // hover 触发 actions 显示，点 rename——目标 first session（刚新建的）
     const firstSession = page.locator('[data-testid="session-item"]').first()
     await firstSession.hover()
     await page.locator('[data-testid="session-rename-btn"]').first().click()
 
-    // 标题应该变成 "renamed by e2e"
+    // 标题应该变成 "renamed by e2e"——用 .first() 避免 strict mode（前 test 可能留下多个 session）
     await expect(
-      page.locator('[data-testid="session-item"]'),
+      page.locator('[data-testid="session-item"]').first(),
     ).toContainText("renamed by e2e", { timeout: 5_000 })
   })
 
