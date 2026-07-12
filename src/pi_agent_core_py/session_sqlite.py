@@ -305,6 +305,13 @@ class SQLiteSessionStore:
     def closed(self) -> bool:
         return self._closed
 
+    @property
+    def connection(self) -> aiosqlite.Connection | None:
+        """P1-C1: 暴露内部 connection 供 ExtensionSQLiteStore 共享——
+        :memory: 模式下两个独立 connect(':memory:') 是不同数据库，
+        必须共享同一 connection 才能让 session 表和 extension 表共存。"""
+        return self._db
+
     # ------------------------------------------------------------------
     # 内部辅助
     # ------------------------------------------------------------------

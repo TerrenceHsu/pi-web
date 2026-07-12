@@ -100,9 +100,20 @@ def main() -> None:
     port = int(os.environ.get("PORT", "8000"))
     host = os.environ.get("HOST", "127.0.0.1")
 
-    # 临时 sqlite + uploads_dir——脚本退出时随临时目录清理
-    tmp_root = Path(tempfile.mkdtemp(prefix="pi-e2e-"))
-    db_path = tmp_root / "e2e.sqlite"
+    # P1-C5: 支持 E2E_DB_PATH 固定数据库——用于 persistence E2E 预置测试数据
+    fixed_db = os.environ.get("E2E_DB_PATH")
+    if fixed_db:
+        db_path = Path(fixed_db)
+        # 固定 DB 模式：清理旧文件 + -wal + -shm
+        for suffix in ("", "-wal", "-shm"):
+            old = db_path.with_suffix(db_path.suffix + suffix) if suffix else db_path
+            if old.exists():
+                old.unlink()
+        tmp_root = db_path.parent
+    else:
+        # 临时 sqlite + uploads_dir——脚本退出时随临时目录清理
+        tmp_root = Path(tempfile.mkdtemp(prefix="pi-e2e-"))
+        db_path = tmp_root / "e2e.sqlite"
     uploads_dir = tmp_root / "uploads"
     uploads_dir.mkdir(parents=True, exist_ok=True)
 

@@ -108,26 +108,23 @@ class TraceEventBuffer:
 
 
 class WebMCPServerConfig(BaseModel):
-    """Web 层 MCP server 配置（P0-4 Step 2）。
+    """Web 层 MCP server 配置（P0-4 Step 2 + P1-C3 持久化）。
 
-    保存用户在 MCP Manager 中添加的 server 配置。**仅在服务端内存**，
-    不持久化；server 重启后丢失。
+    字段语义（P1-C3 修正）：
+        name            server 唯一名
+        command         stdio 启动命令
+        args            命令参数 list[str]
+        env             完整环境变量 dict[str, str]——**仅在服务端内存**，
+                        API response 永远只输出 env_keys；**绝不写入 SQLite**
+        enabled         desired_enabled（用户期望）——持久化字段；
+                        enabled=True 不代表 attached=True
+        attached        runtime 派生——当前进程是否成功连接；
+                        attach 成功 True / 失败 False；不持久化
+        last_error      最近一次 attach/test/refresh 错误描述；None 表示无错误
+        tool_count      最近一次成功 attach 后看到的工具数
 
-    字段语义：
-        name        server 唯一名；只允许 [A-Za-z0-9_-]（与 MCPServerConfig 一致）
-        command     stdio 启动命令（如 "python" / "node" / "npx"）
-        args        命令参数 list[str]
-        env         完整环境变量 dict[str, str]——**仅在服务端内存**，
-                    API response 永远只输出 env_keys
-        enabled     用户期望启用状态。enabled=True 不一定代表 runtime attach 成功
-                    （attach 失败时仍为 True，但 status / last_error 反映失败）
-        last_error  最近一次 attach/test/refresh 错误描述；None 表示无错误
-        tool_count  最近一次成功 attach 后看到的工具数（cache；非实时）
-
-    序列化规则（`_serialize_mcp_server` in app.py）：
-        - env 完整 dict **绝对不**进入 response
-        - 只导出 env_keys: list[str]（sorted）
-        - 不导出敏感字段
+    **兼容映射**（P1-C3）：API response 的 `enabled` = `desired_enabled`；
+    新增 `attached` 字段表示运行时连接状态。现有前端 / E2E 的 `enabled` 语义不变。
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -136,9 +133,17 @@ class WebMCPServerConfig(BaseModel):
     command: str
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
-    enabled: bool = False
+    enabled: bool = False  # desired_enabled（用户期望）
+    attached: bool = False  # runtime 派生（attach 成功 True）
     last_error: str | None = None
     tool_count: int = 0
+    # P1-C5: 结构化 restore 状态——避免前端解析 last_error 字符串
+    # not_requested: desired_enabled=false，未请求 attach
+    # attached: attach 成功
+    # needs_env: env value 缺失（missing_env_keys 非空）
+    # error: attach 失败 / timeout / 命令不存在等
+    restore_status: str = "not_requested"
+    missing_env_keys: list[str] = Field(default_factory=list)
 
 
 class WebAppState(BaseModel):
@@ -200,6 +205,13 @@ class WebAppState(BaseModel):
     next_event_sequence: int = 1
     current_request_id: str | None = None
     current_request_session_id: str | None = None
+    # P1-C2: Extension 配置持久化 store + Skill mutation lock
+    # extension_store 与 session_store 共享 connection（:memory: 模式必须）
+    # skill_mutation_lock 保证 upload/enable/disable/delete/restore 原子性
+    extension_store: Any = None
+    skill_mutation_lock: Any = None  # asyncio.Lock——在 create_app 内 init
+    # P1-C3: MCP mutation lock——覆盖 add/enable/disable/delete server + tool
+    mcp_mutation_lock: Any = None
 
 
 # ============================================================================

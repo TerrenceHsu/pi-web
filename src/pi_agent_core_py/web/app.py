@@ -275,6 +275,23 @@ def create_app(
             if not tools_registry.has("view_file"):
                 tools_registry.register(view_tool)
 
+        # P1-C2: 初始化 extension_store（与 session_store 共享 connection）
+        # + skill_mutation_lock + 启动恢复 uploaded Skills
+        from .extension_store import ExtensionSQLiteStore
+
+        extension_store = ExtensionSQLiteStore(
+            store_path, connection=session_store.connection
+        )
+        await extension_store.init()
+        state.extension_store = extension_store
+        state.skill_mutation_lock = asyncio.Lock()
+
+        # 启动恢复 uploaded Skills（逐行隔离 + sha256 校验 + model_validate）
+        await _restore_uploaded_skills(extension_store)
+
+        # P1-C4: 恢复 MCP server 配置 + auto attach + apply disabled tools
+        await _restore_mcp_servers(extension_store)
+
         yield
 
         # ====================================================================
@@ -327,10 +344,22 @@ def create_app(
                 q.put_nowait({"type": "shutdown"})
             except asyncio.QueueFull:
                 pass
+        # P1-C4: detach 所有 attached MCP servers——单个失败不阻塞其他
+        try:
+            await harness.detach_mcp_servers()
+        except Exception:
+            pass  # 单个 detach 失败不阻塞 shutdown
+
         # 关闭 SQLiteSessionStore
         if state.session_store is not None:
             try:
                 await state.session_store.close()
+            except Exception:
+                pass
+        # P1-C2: 关闭 extension_store（injected connection 不 close——由 session_store 负责）
+        if state.extension_store is not None:
+            try:
+                await state.extension_store.close()
             except Exception:
                 pass
         # VirtualFileStore 不需要 close（纯文件 IO），保留目录给后续进程用
@@ -351,6 +380,10 @@ def create_app(
     # P1-B1: request_history deque 的 maxlen 也用入参覆盖
     state.request_history = deque(maxlen=request_history_maxlen)
     state.request_history_maxlen = request_history_maxlen
+    # P1-C2: skill_mutation_lock 在 state 创建时立即 init（不依赖 lifespan）
+    state.skill_mutation_lock = asyncio.Lock()
+    # P1-C3: mcp_mutation_lock 同理
+    state.mcp_mutation_lock = asyncio.Lock()
     app.state.web = state
     app.state.allow_prompt_preview = allow_prompt_preview
     app.state.event_buffer_max_size = event_buffer_max_size
@@ -460,6 +493,279 @@ def create_app(
                 status_code=409,
                 detail=f"agent is {agent_status!r}",
             )
+
+    # ========================================================================
+    # P1-C2: Skill persistence helpers
+    # ========================================================================
+
+    async def _restore_uploaded_skills(ext_store: Any) -> None:
+        """启动时恢复 uploaded Skills——逐行隔离 + sha256 校验 + model_validate。
+
+        **规则**（用户原指令 C2 §6/§7）：
+        - filesystem/built-in Skill 优先——同名冲突不覆盖，记录 restore_error
+        - 单行损坏（JSON / hash / model_validate）记录 restore_error + 跳过
+        - 成功恢复清除 last_restore_error
+        - 不信任 Markdown 自声明的 source_kind——服务端强制覆盖
+        - 错误不含 prompt / raw markdown / 绝对路径
+        """
+        import hashlib
+        import json as _json
+
+        from ..skills import Skill, SkillRegistrationError
+        from .extension_store import ExtensionSQLiteStore
+
+        registry = harness.skill_registry
+        if registry is None:
+            return
+
+        rows = await ext_store.list_uploaded_skill_rows()
+        for row in rows:
+            result = ExtensionSQLiteStore.decode_uploaded_skill(row)
+            name = row["name"] if "name" in row.keys() else "<unknown>"
+
+            if result.error is not None or result.skill is None:
+                await ext_store.set_skill_restore_error(
+                    name, result.error or "decode failed"
+                )
+                continue
+
+            persisted = result.skill
+
+            # sha256 校验 raw_markdown
+            if persisted.content_sha256:
+                actual_sha = hashlib.sha256(
+                    persisted.raw_markdown.encode("utf-8")
+                ).hexdigest()
+                if actual_sha != persisted.content_sha256:
+                    await ext_store.set_skill_restore_error(
+                        name, "content hash mismatch"
+                    )
+                    continue
+
+            # decode skill_json + model_validate
+            try:
+                skill_data = _json.loads(persisted.skill_json)
+                skill = Skill.model_validate(skill_data)
+            except Exception as e:
+                await ext_store.set_skill_restore_error(
+                    name, f"decode failed: {type(e).__name__}"
+                )
+                continue
+
+            # 服务端强制覆盖 source metadata（不信任 Markdown 自声明）
+            skill.metadata = skill.metadata or {}
+            skill.metadata["source_kind"] = "upload"
+            skill.metadata["persisted"] = True
+
+            # 同名冲突——filesystem/built-in 优先
+            if registry.has(name):
+                await ext_store.set_skill_restore_error(
+                    name, "name conflict with existing skill"
+                )
+                continue
+
+            # register + apply enabled
+            try:
+                registry.register(skill)
+                if persisted.enabled:
+                    registry.enable(name)
+                else:
+                    registry.disable(name)
+            except SkillRegistrationError as e:
+                await ext_store.set_skill_restore_error(
+                    name, f"register failed: {type(e).__name__}"
+                )
+                continue
+
+            # 成功恢复——清除 last_restore_error
+            await ext_store.set_skill_restore_error(name, None)
+
+    async def _is_uploaded_skill(name: str) -> bool:
+        """检查 Skill 是否为上传来源——以 DB row 为准（不信任 metadata）。
+
+        **规则**（用户原指令 C2 §4）：非 uploaded Skill 的 enable/disable 不写 DB。
+        """
+        if state.extension_store is None:
+            return False
+        try:
+            return await state.extension_store.get_uploaded_skill(name) is not None
+        except Exception:
+            return False
+
+    # ========================================================================
+    # P1-C4: MCP startup restore + env resolution + failure isolation
+    # ========================================================================
+
+    def _resolve_mcp_env(
+        env_keys: list[str],
+    ) -> tuple[dict[str, str], list[str]]:
+        """从 os.environ 解析 env values。返回 (resolved_env, missing_keys)。
+
+        **安全**：只读 os.environ；missing 时返回 key name（不含 value）。
+        """
+        import os
+
+        resolved: dict[str, str] = {}
+        missing: list[str] = []
+        for key in env_keys:
+            val = os.environ.get(key)
+            if val is not None:
+                resolved[key] = val
+            else:
+                missing.append(key)
+        return resolved, missing
+
+    def _safe_extension_error(
+        exc: BaseException,
+        secret_values: list[str] | None = None,
+    ) -> str:
+        """安全错误摘要——替换 secret values / 不返回 traceback / 限长 500。
+
+        P1-C5 修正：过滤空字符串 + 按长度降序替换（避免短 secret 破坏长 secret 匹配）。
+        """
+        msg = f"{type(exc).__name__}: {exc}"
+        # 过滤空字符串 + 按长度降序（长 secret 先替换，避免子串问题）
+        non_empty = sorted(
+            [v for v in (secret_values or []) if v],
+            key=len,
+            reverse=True,
+        )
+        for val in non_empty:
+            msg = msg.replace(val, "***")
+        return msg[:500]
+
+    async def _restore_mcp_servers(ext_store: Any) -> None:
+        """P1-C4: 启动时恢复 MCP server 配置 + auto attach + apply disabled tools。
+
+        **顺序**（用户原指令 C4 §1）：
+        1. 读取所有 MCP server rows（逐行隔离）
+        2. decode + 校验 args_json / env_keys_json
+        3. 写入 WebAppState.mcp_server_configs（env 从 os.environ 解析）
+        4. desired_enabled=true → resolve env → auto attach (timeout 10s)
+        5. attach 成功 → apply disabled tools
+        6. missing env → 不 attach，记录 missing keys
+        7. attach 失败 → desired_enabled 仍 true，记录 error
+        8. 成功恢复清除 last_restore_error
+
+        **失败隔离**：单 server 损坏 / timeout / attach 失败不阻塞其他 server。
+        """
+        import json as _json
+
+        from ..mcp import MCPServerConfig
+        from .extension_store import ExtensionSQLiteStore
+
+        rows = await ext_store.list_mcp_server_rows()
+        for row in rows:
+            result = ExtensionSQLiteStore.decode_mcp_server(row)
+            name = row["name"] if "name" in row.keys() else "<unknown>"
+
+            if result.error is not None or result.server is None:
+                await ext_store.set_mcp_restore_error(
+                    name, result.error or "decode failed"
+                )
+                continue
+
+            persisted = result.server
+
+            # decode args / env_keys
+            try:
+                args = _json.loads(persisted.args_json)
+                env_keys = _json.loads(persisted.env_keys_json)
+            except _json.JSONDecodeError as e:
+                await ext_store.set_mcp_restore_error(
+                    name, f"json decode failed: {type(e).__name__}"
+                )
+                continue
+
+            # 写入 runtime config（env 暂空——从 os.environ 解析后填入）
+            cfg = WebMCPServerConfig(
+                name=name,
+                command=persisted.command,
+                args=args,
+                env={},
+                enabled=persisted.desired_enabled,
+                attached=False,
+                last_error=None,
+                tool_count=0,
+            )
+            state.mcp_server_configs[name] = cfg
+
+            if not persisted.desired_enabled:
+                # desired_enabled=false → 只恢复配置，不 attach
+                cfg.restore_status = "not_requested"
+                await ext_store.set_mcp_restore_error(name, None)
+                continue
+
+            # desired_enabled=true → resolve env
+            resolved_env, missing = _resolve_mcp_env(env_keys)
+            if missing:
+                # missing env → 不 attach；结构化记录 key name（不含 value）
+                cfg.restore_status = "needs_env"
+                cfg.missing_env_keys = missing
+                cfg.last_error = None  # 不把预期配置问题显示成系统异常
+                await ext_store.set_mcp_restore_error(name, None)
+                continue
+
+            cfg.env = resolved_env
+
+            # auto attach with timeout
+            try:
+                mcp_cfg = MCPServerConfig(
+                    name=name,
+                    transport=persisted.transport,
+                    command=persisted.command,
+                    args=args,
+                    env=resolved_env,
+                    timeout_s=10.0,
+                )
+                await asyncio.wait_for(
+                    harness.attach_mcp_servers([mcp_cfg]),
+                    timeout=10.0,
+                )
+                # 检查 attach 是否真的成功——harness.attach_mcp_servers 可能不抛
+                server_state = next(
+                    (s for s in harness.list_mcp_servers() if s.name == name),
+                    None,
+                )
+                if server_state is None or server_state.last_error:
+                    cfg.attached = False
+                    cfg.restore_status = "error"
+                    cfg.last_error = (
+                        server_state.last_error
+                        if server_state
+                        else "not in registry after attach"
+                    )
+                    await ext_store.set_mcp_restore_error(name, cfg.last_error)
+                    continue
+
+                cfg.attached = True
+                cfg.restore_status = "attached"
+                cfg.tool_count = server_state.tool_count
+                cfg.last_error = None
+
+                # apply disabled tools
+                disabled = await ext_store.list_disabled_mcp_tools(name)
+                for dt in disabled:
+                    full_name = f"{_MCP_TOOL_NAME_PREFIX}{name}__{dt.tool_name}"
+                    state.disabled_mcp_tools.add(full_name)
+                    if harness.agent.tools.has(full_name):
+                        try:
+                            harness.agent.tools.unregister(full_name)
+                        except Exception:
+                            pass
+
+                await ext_store.set_mcp_restore_error(name, None)
+            except TimeoutError:
+                cfg.attached = False
+                cfg.restore_status = "error"
+                cfg.last_error = "restore timeout (10s)"
+                await ext_store.set_mcp_restore_error(name, "restore timeout")
+            except Exception as e:
+                cfg.attached = False
+                cfg.last_error = _safe_extension_error(
+                    e, list(resolved_env.values())
+                )
+                await ext_store.set_mcp_restore_error(name, cfg.last_error)
 
     # ========================================================================
     # P1-B1: Prompt 公共执行逻辑（同步 /api/prompt + 异步 /api/prompt/async 共享）
@@ -1559,17 +1865,43 @@ def create_app(
         """WebMCPServerConfig → JSON-safe dict。
 
         **绝不**返回 env value——只返回 env_keys（sorted）。
-        command / args 可以返回（本地开发配置）。
+        P1-C3: 加 desired_enabled + attached 字段；enabled = desired_enabled（兼容）。
+        P1-C5: 加 restore_status + missing_env_keys 结构化字段。
         """
         return {
             "name": cfg.name,
             "command": cfg.command,
             "args": list(cfg.args or []),
-            "enabled": cfg.enabled,
+            "enabled": cfg.enabled,  # 兼容 = desired_enabled
+            "desired_enabled": cfg.enabled,  # P1-C3 显式字段
+            "attached": getattr(cfg, "attached", False),  # P1-C3 runtime 派生
+            "restore_status": getattr(cfg, "restore_status", "not_requested"),
+            "missing_env_keys": list(getattr(cfg, "missing_env_keys", [])),
             "last_error": cfg.last_error,
             "tool_count": cfg.tool_count,
             "env_keys": sorted((cfg.env or {}).keys()),
         }
+
+    def _parse_mcp_tool_name(
+        full_name: str,
+    ) -> tuple[str, str] | None:
+        """P1-C3/C4: 从 mcp__{server}__{tool} 解析 (server_name, raw_tool_name)。
+
+        **不依赖 split("__")**——遍历已知 server configs 匹配**最长**前缀，
+        避免 server name 前缀重叠（如 foo vs foo__bar）时歧义。
+        """
+        if not full_name.startswith(_MCP_TOOL_NAME_PREFIX):
+            return None
+        # 按 server_name 长度降序——优先匹配最长前缀
+        sorted_names = sorted(
+            state.mcp_server_configs.keys(), key=len, reverse=True
+        )
+        for server_name in sorted_names:
+            prefix = f"{_MCP_TOOL_NAME_PREFIX}{server_name}__"
+            if full_name.startswith(prefix):
+                raw_tool = full_name[len(prefix):]
+                return server_name, raw_tool
+        return None
 
     def _validate_mcp_server_payload(
         payload: dict[str, Any],
@@ -1722,35 +2054,70 @@ def create_app(
     ) -> dict[str, Any] | JSONResponse:
         """添加一个 MCP server 配置。
 
-        - name 重复 → 409
-        - name 不合法 / command 空 / args 不是 list[str] / env 不是 dict[str, str]
-          → 400
-        - enabled=true 时立即 refresh（attach 失败返回 400/502 但 config 已保存）
-        - P0 推荐 enabled=false 默认；前端可显式 enable
-
-        不返回 env values。
+        P1-C3: 持久化到 SQLite（只 env_keys，不 value）+ mutation lock + rollback。
+        - DB 失败 → 移除 runtime config
+        - enabled=true → attach（attach 失败 desired_enabled 仍 true，attached=false）
         """
+        from .extension_store import ExtensionStoreError
+
         cfg, err = _validate_mcp_server_payload(payload)
         if cfg is None:
             return JSONResponse(status_code=400, content={"detail": err})
-        if cfg.name in state.mcp_server_configs:
-            return JSONResponse(
-                status_code=409,
-                content={
-                    "detail": f"MCP server {cfg.name!r} already exists",
-                    "server_name": cfg.name,
-                },
-            )
-        state.mcp_server_configs[cfg.name] = cfg
 
-        # enabled=True 时立即 refresh——失败不撤销保存，仅写 last_error
-        attach_error: str | None = None
-        if cfg.enabled:
-            try:
-                await _refresh_enabled_mcp_servers()
-            except Exception as e:
-                attach_error = f"{type(e).__name__}: {e}"
-                cfg.last_error = attach_error
+        async with state.mcp_mutation_lock:
+            # 检查 runtime 重名
+            if cfg.name in state.mcp_server_configs:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "detail": f"MCP server {cfg.name!r} already exists",
+                        "server_name": cfg.name,
+                    },
+                )
+            # P1-C3: 检查 DB 重名
+            if state.extension_store is not None:
+                try:
+                    existing = await state.extension_store.get_mcp_server(cfg.name)
+                    if existing is not None:
+                        return JSONResponse(
+                            status_code=409,
+                            content={"detail": f"MCP server {cfg.name!r} already persisted"},
+                        )
+                except ExtensionStoreError:
+                    pass  # DB 不可用——降级为 runtime only
+
+            # 写 runtime config
+            state.mcp_server_configs[cfg.name] = cfg
+
+            # P1-C3: DB upsert（只 env_keys，不 value）
+            if state.extension_store is not None:
+                try:
+                    await state.extension_store.upsert_mcp_server(
+                        name=cfg.name,
+                        transport="stdio",
+                        command=cfg.command,
+                        args=cfg.args,
+                        desired_enabled=cfg.enabled,
+                        env_keys=list(cfg.env.keys()),
+                    )
+                except ExtensionStoreError:
+                    # DB 失败 → 移除 runtime config
+                    del state.mcp_server_configs[cfg.name]
+                    return JSONResponse(
+                        status_code=500,
+                        content={"ok": False, "error": "persist failed; runtime rolled back"},
+                    )
+
+            # enabled=True → attach（独立流程，不影响 add + DB 已完成）
+            attach_error: str | None = None
+            if cfg.enabled:
+                try:
+                    await _refresh_enabled_mcp_servers()
+                    cfg.attached = True
+                except Exception as e:
+                    attach_error = f"{type(e).__name__}: {e}"
+                    cfg.last_error = attach_error
+                    cfg.attached = False
 
         resp = _serialize_mcp_server(cfg)
         if attach_error is not None:
@@ -1826,25 +2193,52 @@ def create_app(
     ) -> dict[str, Any] | JSONResponse:
         """启用 MCP server。
 
-        - 不存在 → 404
-        - cfg.enabled = True；调 _refresh_enabled_mcp_servers（全量 attach）
-        - 失败不抛——写 last_error，response 含 502
+        P1-C3: persist desired_enabled=true → attach → 成功 attached=true / 失败 attached=false。
+        attach 失败不改 desired_enabled（保留用户意图）。
         """
+        from .extension_store import ExtensionStoreConflictError, ExtensionStoreError
+
         cfg = state.mcp_server_configs.get(name)
         if cfg is None:
             return JSONResponse(
                 status_code=404,
                 content={"detail": f"MCP server {name!r} not found"},
             )
-        cfg.enabled = True
-        try:
-            await _refresh_enabled_mcp_servers()
-        except Exception as e:
-            cfg.last_error = f"{type(e).__name__}: {e}"
-            return JSONResponse(
-                status_code=502,
-                content=_serialize_mcp_server(cfg),
-            )
+
+        async with state.mcp_mutation_lock:
+            # P1-C3: 先 persist desired_enabled=true
+            original_enabled = cfg.enabled
+            cfg.enabled = True
+            if state.extension_store is not None:
+                try:
+                    await state.extension_store.set_mcp_server_enabled(name, True)
+                except (ExtensionStoreConflictError, ExtensionStoreError):
+                    # DB 失败 → 不 attach，恢复原 desired_enabled
+                    cfg.enabled = original_enabled
+                    return JSONResponse(
+                        status_code=500,
+                        content={"ok": False, "error": "persist failed; runtime rolled back"},
+                    )
+
+            # attach
+            try:
+                await _refresh_enabled_mcp_servers()
+                # _refresh_enabled_mcp_servers 不抛异常——attach 失败时设 cfg.last_error
+                if cfg.last_error is not None:
+                    cfg.attached = False
+                    # desired_enabled 仍 true——保留用户意图
+                    return JSONResponse(
+                        status_code=502,
+                        content=_serialize_mcp_server(cfg),
+                    )
+                cfg.attached = True
+            except Exception as e:
+                cfg.last_error = f"{type(e).__name__}: {e}"
+                cfg.attached = False
+                return JSONResponse(
+                    status_code=502,
+                    content=_serialize_mcp_server(cfg),
+                )
         return _serialize_mcp_server(cfg)
 
     @app.post("/api/mcp/servers/{name}/disable", response_model=None)
@@ -1853,31 +2247,45 @@ def create_app(
     ) -> dict[str, Any] | JSONResponse:
         """禁用 MCP server。
 
-        - 不存在 → 404
-        - cfg.enabled = False；调 _refresh_enabled_mcp_servers（全量 attach，
-          其余 enabled server 仍保留）
-        - 同步清理 disabled_mcp_tools 中该 server 的工具（孤儿清理）
-          —— 实际我们仍保留 state.disabled_mcp_tools 中的项，避免重新 enable
-          时旧设置丢失；但 GET /api/mcp/tools 会因 server detach 而不展示。
+        P1-C3: persist desired_enabled=false → detach。
+        DB 失败不 detach。disabled tool rows 保留（server re-enable 后重新应用）。
         """
+        from .extension_store import ExtensionStoreConflictError, ExtensionStoreError
+
         cfg = state.mcp_server_configs.get(name)
         if cfg is None:
             return JSONResponse(
                 status_code=404,
                 content={"detail": f"MCP server {name!r} not found"},
             )
-        cfg.enabled = False
-        try:
-            await _refresh_enabled_mcp_servers()
-        except Exception as e:
-            cfg.last_error = f"{type(e).__name__}: {e}"
-            return JSONResponse(
-                status_code=502,
-                content=_serialize_mcp_server(cfg),
-            )
-        # 清掉 last_error——disable 成功后 server 不应有残留错误
-        cfg.last_error = None
-        cfg.tool_count = 0
+
+        async with state.mcp_mutation_lock:
+            # P1-C3: 先 persist desired_enabled=false
+            original_enabled = cfg.enabled
+            cfg.enabled = False
+            if state.extension_store is not None:
+                try:
+                    await state.extension_store.set_mcp_server_enabled(name, False)
+                except (ExtensionStoreConflictError, ExtensionStoreError):
+                    # DB 失败 → 不 detach，恢复原 desired_enabled
+                    cfg.enabled = original_enabled
+                    return JSONResponse(
+                        status_code=500,
+                        content={"ok": False, "error": "persist failed; runtime rolled back"},
+                    )
+
+            # detach
+            try:
+                await _refresh_enabled_mcp_servers()
+            except Exception as e:
+                cfg.last_error = f"{type(e).__name__}: {e}"
+                return JSONResponse(
+                    status_code=502,
+                    content=_serialize_mcp_server(cfg),
+                )
+            cfg.attached = False
+            cfg.last_error = None
+            cfg.tool_count = 0
         return _serialize_mcp_server(cfg)
 
     @app.delete("/api/mcp/servers/{name}", response_model=None)
@@ -1886,34 +2294,54 @@ def create_app(
     ) -> dict[str, Any] | JSONResponse:
         """删除 MCP server 配置。
 
+        P1-C3: DB delete + cascade disabled tools；DB 失败恢复 runtime config。
         - 不存在 → 404
-        - 如果 enabled：先 disable 并 refresh（释放 transport）
-        - 从 state.mcp_server_configs 删除
-        - **同时清理 disabled_mcp_tools 中 mcp__{name}__ 前缀的项**
-          ——避免孤儿 + 避免同名 server 重新添加时旧设置意外生效
+        - 如果 attached：先 detach
+        - 删除 runtime config + DB row（cascade disabled tool rows）
         """
+        from .extension_store import ExtensionStoreError
+
         cfg = state.mcp_server_configs.get(name)
         if cfg is None:
             return JSONResponse(
                 status_code=404,
                 content={"detail": f"MCP server {name!r} not found"},
             )
-        if cfg.enabled:
-            cfg.enabled = False
-            try:
-                await _refresh_enabled_mcp_servers()
-            except Exception as e:
-                state.last_error = (
-                    f"delete_mcp_server({name}) detach failed: "
-                    f"{type(e).__name__}: {e}"
-                )
-        # 删除配置
-        state.mcp_server_configs.pop(name, None)
-        # 清理孤儿 disabled tool names（前缀 mcp__{name}__）
-        prefix = f"{_MCP_TOOL_NAME_PREFIX}{name}__"
-        stale = {t for t in state.disabled_mcp_tools if t.startswith(prefix)}
-        if stale:
-            state.disabled_mcp_tools -= stale
+
+        async with state.mcp_mutation_lock:
+            # detach if attached
+            if cfg.enabled:
+                cfg.enabled = False
+                try:
+                    await _refresh_enabled_mcp_servers()
+                except Exception as e:
+                    state.last_error = (
+                        f"delete_mcp_server({name}) detach failed: "
+                        f"{type(e).__name__}: {e}"
+                    )
+            # 保存原 config 用于回滚
+            original_cfg = cfg.model_copy()
+            # 删 runtime config
+            state.mcp_server_configs.pop(name, None)
+            # 清理 runtime disabled tools
+            prefix = f"{_MCP_TOOL_NAME_PREFIX}{name}__"
+            stale = {t for t in state.disabled_mcp_tools if t.startswith(prefix)}
+            if stale:
+                state.disabled_mcp_tools -= stale
+
+            # P1-C3: DB delete（cascade disabled tool rows）
+            if state.extension_store is not None:
+                try:
+                    await state.extension_store.delete_mcp_server(name)
+                except ExtensionStoreError:
+                    # DB 失败 → 恢复 runtime config + disabled tools
+                    state.mcp_server_configs[name] = original_cfg
+                    state.disabled_mcp_tools |= stale
+                    return JSONResponse(
+                        status_code=500,
+                        content={"ok": False, "error": "persist failed; runtime restored"},
+                    )
+
         return {"deleted": True, "name": name, "cleaned_disabled_tools": sorted(stale)}
 
     @app.post("/api/mcp/tools/{tool_name}/enable", response_model=None)
@@ -1922,59 +2350,31 @@ def create_app(
     ) -> dict[str, Any] | JSONResponse:
         """启用单个 MCP tool。
 
-        - tool_name 必须是合法 MCP tool 全名（mcp__{server}__{tool}）
-        - 不在 disabled_mcp_tools 中 → 200，已是 enabled
-        - server 已 disabled → 409（先 enable server）
-        - tool 不在 mcp_registry 中 → 404
-
-        实现：
-        - 从 disabled_mcp_tools 移除
-        - 从 harness.mcp_registry.list_agent_tools() 找回 MCPAgentTool，重新 register
+        P1-C3: 结构化 key (server_name, raw_tool_name) + DB delete disabled row + rollback。
+        - 不依赖 split("__")——用 _parse_mcp_tool_name 遍历已知 server 匹配前缀
         """
-        if not tool_name.startswith(_MCP_TOOL_NAME_PREFIX):
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "detail": (
-                        f"tool_name must be MCP tool full name "
-                        f"(mcp__server__tool); got {tool_name!r}"
-                    ),
-                },
-            )
+        from .extension_store import ExtensionStoreError
 
-        # 解析 server name 用于校验 server 状态
-        rest = tool_name[len(_MCP_TOOL_NAME_PREFIX):]
-        if "__" not in rest:
+        parsed = _parse_mcp_tool_name(tool_name)
+        if parsed is None:
             return JSONResponse(
                 status_code=400,
-                content={
-                    "detail": (
-                        f"invalid MCP tool name {tool_name!r}; "
-                        "expected mcp__{server}__{tool}"
-                    ),
-                },
+                content={"detail": f"invalid MCP tool name {tool_name!r}"},
             )
-        server_name = rest.split("__", 1)[0]
+        server_name, raw_tool_name = parsed
+
         server_cfg = state.mcp_server_configs.get(server_name)
         if server_cfg is None:
             return JSONResponse(
                 status_code=404,
-                content={
-                    "detail": f"MCP server {server_name!r} not configured",
-                },
+                content={"detail": f"MCP server {server_name!r} not configured"},
             )
         if not server_cfg.enabled:
             return JSONResponse(
                 status_code=409,
-                content={
-                    "detail": (
-                        f"MCP server {server_name!r} is disabled; "
-                        "enable the server first"
-                    ),
-                },
+                content={"detail": f"MCP server {server_name!r} is disabled; enable server first"},
             )
 
-        # 找回 MCPAgentTool——harness.mcp_registry 此时不为 None（server enabled）
         registry = harness.mcp_registry
         if registry is None:
             return JSONResponse(
@@ -1988,25 +2388,37 @@ def create_app(
         if target is None:
             return JSONResponse(
                 status_code=404,
-                content={
-                    "detail": (
-                        f"MCP tool {tool_name!r} not found in registry "
-                        f"(server {server_name!r})"
-                    ),
-                },
+                content={"detail": f"MCP tool {tool_name!r} not found in registry"},
             )
 
-        state.disabled_mcp_tools.discard(tool_name)
-        if not harness.agent.tools.has(tool_name):
-            try:
-                harness.agent.tools.register(target)
-            except Exception as e:
-                return JSONResponse(
-                    status_code=500,
-                    content={
-                        "detail": f"register {tool_name!r} failed: {type(e).__name__}: {e}",
-                    },
-                )
+        async with state.mcp_mutation_lock:
+            # 保存原 MCPAgentTool 引用用于回滚
+            state.disabled_mcp_tools.discard(tool_name)
+            if not harness.agent.tools.has(tool_name):
+                try:
+                    harness.agent.tools.register(target)
+                except Exception as e:
+                    return JSONResponse(
+                        status_code=500,
+                        content={"detail": f"register failed: {type(e).__name__}: {e}"},
+                    )
+            # P1-C3: DB delete disabled row（结构化 key）
+            if state.extension_store is not None:
+                try:
+                    await state.extension_store.enable_mcp_tool(
+                        server_name, raw_tool_name
+                    )
+                except ExtensionStoreError:
+                    # DB 失败 → unregister 回滚
+                    try:
+                        harness.agent.tools.unregister(tool_name)
+                    except Exception:
+                        pass
+                    state.disabled_mcp_tools.add(tool_name)
+                    return JSONResponse(
+                        status_code=500,
+                        content={"ok": False, "error": "persist failed; runtime rolled back"},
+                    )
         return {"tool_name": tool_name, "enabled": True}
 
     @app.post("/api/mcp/tools/{tool_name}/disable", response_model=None)
@@ -2015,32 +2427,56 @@ def create_app(
     ) -> dict[str, Any] | JSONResponse:
         """禁用单个 MCP tool。
 
-        - tool_name 必须是 MCP tool 全名
-        - 加入 disabled_mcp_tools set
-        - 如果当前在 agent.tools 中，unregister（**真实生效**——LLM 不再看到）
-        - 幂等：tool 已 disabled → 仍返回 200
-
-        不强制要求 server enabled——server disabled 时工具本来就不在 agent.tools，
-        但仍把 tool_name 加入 set，server 重新 enable 时过滤会生效。
+        P1-C3: 结构化 key + DB insert disabled row + rollback。
+        保存原 MCPAgentTool 引用用于 DB 失败时 re-register。
         """
-        if not tool_name.startswith(_MCP_TOOL_NAME_PREFIX):
+        from .extension_store import ExtensionStoreError
+
+        parsed = _parse_mcp_tool_name(tool_name)
+        if parsed is None:
             return JSONResponse(
                 status_code=400,
-                content={
-                    "detail": (
-                        f"tool_name must be MCP tool full name "
-                        f"(mcp__server__tool); got {tool_name!r}"
-                    ),
-                },
+                content={"detail": f"invalid MCP tool name {tool_name!r}"},
             )
+        server_name, raw_tool_name = parsed
 
-        state.disabled_mcp_tools.add(tool_name)
-        if harness.agent.tools.has(tool_name):
-            try:
-                harness.agent.tools.unregister(tool_name)
-            except Exception:
-                # unregister 文档承诺不存在静默；防御性 try
-                pass
+        async with state.mcp_mutation_lock:
+            # 保存原 MCPAgentTool 引用用于回滚
+            original_target = None
+            if harness.agent.tools.has(tool_name):
+                # 从 registry 找到原 tool 对象
+                registry = harness.mcp_registry
+                if registry is not None:
+                    original_target = next(
+                        (t for t in registry.list_agent_tools() if t.name == tool_name),
+                        None,
+                    )
+
+            state.disabled_mcp_tools.add(tool_name)
+            if harness.agent.tools.has(tool_name):
+                try:
+                    harness.agent.tools.unregister(tool_name)
+                except Exception:
+                    pass
+
+            # P1-C3: DB insert disabled row（结构化 key）
+            if state.extension_store is not None:
+                try:
+                    await state.extension_store.disable_mcp_tool(
+                        server_name, raw_tool_name
+                    )
+                except ExtensionStoreError:
+                    # DB 失败 → re-register 回滚
+                    if original_target is not None:
+                        try:
+                            harness.agent.tools.register(original_target)
+                        except Exception:
+                            pass
+                    state.disabled_mcp_tools.discard(tool_name)
+                    return JSONResponse(
+                        status_code=500,
+                        content={"ok": False, "error": "persist failed; runtime rolled back"},
+                    )
         return {"tool_name": tool_name, "enabled": False}
 
     # ========================================================================
@@ -2152,19 +2588,19 @@ def create_app(
     ) -> dict[str, Any] | JSONResponse:
         """上传一个或多个 SKILL.md 文件并注册到 harness.skill_registry。
 
-        - multipart/form-data，字段名 `files` 可重复
-        - 单文件大小上限 256KB（`_SKILL_UPLOAD_MAX_BYTES`）
-        - 解析失败（frontmatter YAML 不合法 / 类型错误 / name 推断失败）
-          → 400，错误信息含 filename + error_type
-        - 重名（SkillRegistrationError）→ 409，含 detail.skill_name
-        - registry 未 attach → 422
-        - 成功返回 `{count, skills: [SkillSummary]}`，不包含 prompt 正文
+        P1-C2: 持久化到 SQLite + mutation lock + rollback。
+        - 每个文件逐个原子：register 成功 → DB 写入 → DB 失败 unregister 回滚
+        - 服务端强制覆盖 metadata["source_kind"]="upload" + ["persisted"]=True
+        - 并发 upload 由 skill_mutation_lock 串行化
         """
+        import hashlib
+
         from ..skill_loader import (
             SkillFileFormatError,
             parse_skill_markdown,
         )
         from ..skills import SkillRegistrationError
+        from .extension_store import ExtensionStoreError
 
         registry = _require_skill_registry()
 
@@ -2176,67 +2612,101 @@ def create_app(
 
         saved_skills: list[Any] = []
         errors: list[dict[str, Any]] = []
-        for upload in files:
-            filename = upload.filename or ""
-            try:
-                raw = await upload.read()
-            except Exception as e:
-                errors.append({
-                    "filename": filename or "<unknown>",
-                    "error_type": type(e).__name__,
-                    "error": f"failed to read upload: {e}",
-                })
-                continue
-            if len(raw) > _SKILL_UPLOAD_MAX_BYTES:
-                errors.append({
-                    "filename": filename or "<unknown>",
-                    "error_type": "SkillFileSecurityError",
-                    "error": (
-                        f"uploaded skill file size {len(raw)} exceeds "
-                        f"max_file_size_bytes={_SKILL_UPLOAD_MAX_BYTES}"
-                    ),
-                })
-                continue
-            try:
-                text = raw.decode("utf-8")
-            except UnicodeDecodeError as e:
-                errors.append({
-                    "filename": filename or "<unknown>",
-                    "error_type": "SkillFileFormatError",
-                    "error": f"file is not valid utf-8: {e}",
-                })
-                continue
 
-            fallback_name = _secure_skill_filename(filename)
-            try:
-                skill = parse_skill_markdown(
-                    text,
-                    fallback_name=fallback_name,
-                    source_path=f"upload:{filename or fallback_name}",
-                )
-            except SkillFileFormatError as e:
-                errors.append({
-                    "filename": filename or fallback_name,
-                    "error_type": "SkillFileFormatError",
-                    "error": str(e),
-                })
-                continue
+        # P1-C2: mutation lock 串行化 upload——避免并发同名交错
+        async with state.skill_mutation_lock:
+            for upload in files:
+                filename = upload.filename or ""
+                try:
+                    raw = await upload.read()
+                except Exception as e:
+                    errors.append({
+                        "filename": filename or "<unknown>",
+                        "error_type": type(e).__name__,
+                        "error": f"failed to read upload: {e}",
+                    })
+                    continue
+                if len(raw) > _SKILL_UPLOAD_MAX_BYTES:
+                    errors.append({
+                        "filename": filename or "<unknown>",
+                        "error_type": "SkillFileSecurityError",
+                        "error": (
+                            f"uploaded skill file size {len(raw)} exceeds "
+                            f"max_file_size_bytes={_SKILL_UPLOAD_MAX_BYTES}"
+                        ),
+                    })
+                    continue
+                try:
+                    text = raw.decode("utf-8")
+                except UnicodeDecodeError as e:
+                    errors.append({
+                        "filename": filename or "<unknown>",
+                        "error_type": "SkillFileFormatError",
+                        "error": f"file is not valid utf-8: {e}",
+                    })
+                    continue
 
-            try:
-                registry.register(skill)
-            except SkillRegistrationError as e:
-                # 重名 → 409，detail 含 skill_name 让前端区分
-                msg = str(e)
-                # 不直接抛 HTTPException，因为我们要返回 multiple-error 响应
-                errors.append({
-                    "filename": filename or fallback_name,
-                    "skill_name": skill.name,
-                    "error_type": "SkillRegistrationError",
-                    "error": msg,
-                    "status": 409,
-                })
-                continue
-            saved_skills.append(skill)
+                fallback_name = _secure_skill_filename(filename)
+                try:
+                    skill = parse_skill_markdown(
+                        text,
+                        fallback_name=fallback_name,
+                        source_path=f"upload:{filename or fallback_name}",
+                    )
+                except SkillFileFormatError as e:
+                    errors.append({
+                        "filename": filename or fallback_name,
+                        "error_type": "SkillFileFormatError",
+                        "error": str(e),
+                    })
+                    continue
+
+                # P1-C2: 服务端强制覆盖 source metadata（不信任 Markdown 自声明）
+                skill.metadata = skill.metadata or {}
+                skill.metadata["source_kind"] = "upload"
+                skill.metadata["persisted"] = True
+
+                # P1-C2: register 成功 → DB 写入 → DB 失败 unregister 回滚
+                try:
+                    registry.register(skill)
+                except SkillRegistrationError as e:
+                    msg = str(e)
+                    errors.append({
+                        "filename": filename or fallback_name,
+                        "skill_name": skill.name,
+                        "error_type": "SkillRegistrationError",
+                        "error": msg,
+                        "status": 409,
+                    })
+                    continue
+
+                # DB 持久化（如果 extension_store 可用）
+                if state.extension_store is not None:
+                    try:
+                        content_sha = hashlib.sha256(
+                            text.encode("utf-8")
+                        ).hexdigest()
+                        await state.extension_store.upsert_uploaded_skill(
+                            name=skill.name,
+                            skill_json=skill.model_dump_json(),
+                            raw_markdown=text,
+                            enabled=True,
+                            source_kind="upload",
+                            content_sha256=content_sha,
+                        )
+                    except ExtensionStoreError as e:
+                        # DB 失败 → 回滚 registry
+                        registry.unregister(skill.name)
+                        errors.append({
+                            "filename": filename or fallback_name,
+                            "skill_name": skill.name,
+                            "error_type": "ExtensionStoreError",
+                            "error": str(e),
+                            "status": 500,
+                        })
+                        continue
+
+                saved_skills.append(skill)
 
         # 至少一个成功 → 200；全部失败 → 用首个 error status 作整体 status
         out_skills = [
@@ -2311,33 +2781,149 @@ def create_app(
 
     @app.post("/api/skills/{name}/enable", response_model=None)
     async def enable_skill(name: str) -> dict[str, Any] | JSONResponse:
-        """启用 skill。不存在 → 404；registry 未 attach → 422。"""
+        """启用 skill。不存在 → 404；registry 未 attach → 422。
+
+        P1-C2: uploaded Skill 的 enabled 状态持久化到 SQLite。
+        非 uploaded Skill（filesystem/builtin/mcp_prompt）只改 runtime，不写 DB。
+        DB 失败时恢复原 runtime 状态。
+        """
         from ..skills import SkillNotFoundError
+        from .extension_store import ExtensionStoreConflictError, ExtensionStoreError
 
         registry = _require_skill_registry()
+
+        # 保存原状态用于回滚
         try:
-            registry.enable(name)
+            original_skill = registry.get(name)
+            original_status = original_skill.status
         except SkillNotFoundError:
             return JSONResponse(
                 status_code=404,
                 content={"detail": f"skill {name!r} not found"},
             )
+
+        async with state.skill_mutation_lock:
+            registry.enable(name)
+            # 只对 uploaded Skill 持久化
+            if state.extension_store is not None and await _is_uploaded_skill(name):
+                try:
+                    await state.extension_store.set_skill_enabled(name, True)
+                except (ExtensionStoreConflictError, ExtensionStoreError):
+                    # DB 失败 → 恢复原状态
+                    if original_status == "disabled":
+                        registry.disable(name)
+                    return JSONResponse(
+                        status_code=500,
+                        content={
+                            "ok": False,
+                            "error": "persist failed; runtime rolled back",
+                        },
+                    )
         return {"ok": True, "name": name, "status": "enabled"}
 
     @app.post("/api/skills/{name}/disable", response_model=None)
     async def disable_skill(name: str) -> dict[str, Any] | JSONResponse:
-        """禁用 skill。不存在 → 404；registry 未 attach → 422。"""
+        """禁用 skill。不存在 → 404；registry 未 attach → 422。
+
+        P1-C2: uploaded Skill 的 enabled 状态持久化到 SQLite。
+        """
         from ..skills import SkillNotFoundError
+        from .extension_store import ExtensionStoreConflictError, ExtensionStoreError
 
         registry = _require_skill_registry()
+
         try:
-            registry.disable(name)
+            original_skill = registry.get(name)
+            original_status = original_skill.status
         except SkillNotFoundError:
             return JSONResponse(
                 status_code=404,
                 content={"detail": f"skill {name!r} not found"},
             )
+
+        async with state.skill_mutation_lock:
+            registry.disable(name)
+            if state.extension_store is not None and await _is_uploaded_skill(name):
+                try:
+                    await state.extension_store.set_skill_enabled(name, False)
+                except (ExtensionStoreConflictError, ExtensionStoreError):
+                    if original_status == "enabled":
+                        registry.enable(name)
+                    return JSONResponse(
+                        status_code=500,
+                        content={
+                            "ok": False,
+                            "error": "persist failed; runtime rolled back",
+                        },
+                    )
         return {"ok": True, "name": name, "status": "disabled"}
+
+    @app.delete("/api/skills/{name}", response_model=None)
+    async def delete_skill(name: str) -> dict[str, Any] | JSONResponse:
+        """删除 uploaded Skill。非 uploaded Skill → 403。
+
+        P1-C2: DB row 为准——只有 web_uploaded_skills 中存在的 Skill 才能删除。
+        DB 删除失败时重新 register 原 Skill 对象。
+        """
+        from ..skills import SkillNotFoundError
+        from .extension_store import ExtensionStoreError
+
+        registry = _require_skill_registry()
+
+        if state.extension_store is None:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "extension store not initialized"},
+            )
+
+        # 检查 DB row——以数据库为准
+        persisted = await state.extension_store.get_uploaded_skill(name)
+        if persisted is None:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "detail": f"skill {name!r} is not an uploaded skill; "
+                    "only uploaded skills can be deleted"
+                },
+            )
+
+        # 保存原 Skill 对象用于回滚
+        try:
+            original_skill = registry.get(name)
+        except SkillNotFoundError:
+            original_skill = None
+
+        async with state.skill_mutation_lock:
+            # runtime unregister
+            if original_skill is not None:
+                registry.unregister(name)
+            # DB delete
+            try:
+                deleted = await state.extension_store.delete_uploaded_skill(name)
+            except ExtensionStoreError:
+                # DB 失败 → 重新 register 原 Skill
+                if original_skill is not None:
+                    try:
+                        registry.register(original_skill)
+                    except Exception:
+                        pass  # re-register 失败——inconsistency，但已尽力
+                return JSONResponse(
+                    status_code=500,
+                    content={"ok": False, "error": "persist failed; runtime restored"},
+                )
+            if not deleted:
+                # DB row 不存在（但前面检查过）——一致性异常
+                if original_skill is not None:
+                    try:
+                        registry.register(original_skill)
+                    except Exception:
+                        pass
+                return JSONResponse(
+                    status_code=404,
+                    content={"detail": f"skill {name!r} not in persistence"},
+                )
+
+        return {"ok": True, "name": name, "deleted": True}
 
     # ========================================================================
     # Policy audit
