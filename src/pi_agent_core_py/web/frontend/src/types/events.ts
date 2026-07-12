@@ -2,25 +2,65 @@
 //
 // /ws/events 是推荐实时通道；后端发过来的 event 形状宽松——前端按 type 字段分发。
 // AgentEvent 的 13 种 type 来自 src/pi_agent_core_py/events.py。
+//
+// P1-B2: 后端统一用 WebEventEnvelope 包装事件——event_id / sequence / request_id /
+// session_id / type / timestamp / payload 7 字段。chatStore.handleEvent 按这些字段
+// 去重 + 隔离不同 session/request。旧裸事件 schema 已退役。
 
 import type { AgentMessage } from "./messages"
 import type { FileRef } from "./files"
 
 /**
- * 后端推过来的任意事件——形状宽松。
+ * P1-B2: 统一事件信封——所有 WS / SSE / GET /api/events 用同一个 schema。
+ *
+ * 后端 _web_event_hook 在广播入口一次性生成 envelope，三处客户端看到的是同一份 dict。
+ */
+export interface WebEventEnvelope {
+  /** "evt_<uuid4 hex>"——前端按此字段去重 */
+  event_id: string
+  /** "req_..." / "req_sync_..." / null（非 prompt 管理事件为 null） */
+  request_id: string | null
+  /** "sess_..." / null */
+  session_id: string | null
+  /** 全局单调递增——前端按此检测 gap */
+  sequence: number
+  /** event 类型名（与 payload.type 冗余，方便客户端快速判断） */
+  type: string
+  /** ISO8601 UTC timestamp */
+  timestamp: string
+  /** 原 AgentEvent 序列化结果 + _received_at_ms */
+  payload: Record<string, any>
+}
+
+/**
+ * 后端推过来的事件——优先按 envelope 解释；兼容期内可能仍有裸事件（hello / shutdown）。
  *
  * 后端会发：
- *   - hello：连接建立时第一个事件
- *   - shutdown：服务端关闭通知
- *   - 13 种 AgentEvent：type 字段对应后端事件类型
+ *   - hello：连接建立时第一个事件（protocol-level）
+ *   - shutdown：服务端关闭通知（protocol-level）
+ *   - 13 种 AgentEvent：均被 envelope 包装，type 字段对应后端事件类型
  *     agent_start / agent_end / turn_start / turn_end
  *     message_start / message_update / message_end
  *     tool_execution_start / tool_execution_end
  *     request_queued / request_start / request_end / agent_abort
  */
-export interface WebEvent {
+export type WebEvent = WebEventEnvelope | LegacyWebEvent
+
+/** 兼容期：hello / shutdown 等协议事件仍可能用裸 schema（无 envelope 字段） */
+export interface LegacyWebEvent {
   type: string
   [key: string]: any
+}
+
+/** Type guard: 是否为 P1-B2 envelope（含 event_id + sequence + payload） */
+export function isWebEventEnvelope(ev: WebEvent): ev is WebEventEnvelope {
+  return (
+    typeof ev === "object" &&
+    ev !== null &&
+    typeof (ev as any).event_id === "string" &&
+    typeof (ev as any).sequence === "number" &&
+    typeof (ev as any).payload === "object"
+  )
 }
 
 // ============================================================================

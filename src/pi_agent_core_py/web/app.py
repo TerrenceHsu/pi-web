@@ -27,10 +27,14 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from fastapi import (
     FastAPI,
@@ -61,7 +65,7 @@ from .serializers import (
     serialize_snapshot_summary,
     to_json_safe,
 )
-from .state import WebAppState, WebMCPServerConfig
+from .state import WebAppState, WebMCPServerConfig, WebRunRequest
 
 # ============================================================================
 # 常量
@@ -102,6 +106,64 @@ _SSE_HEARTBEAT_SECONDS: float = 15.0
 
 
 # ============================================================================
+# P1-B1: 异步 prompt 公共数据类型（exceptions / validated / result）
+# ============================================================================
+
+
+class PromptValidationError(Exception):
+    """4xx 校验错误——HTTP 层转 JSONResponse；async 层不创建 request。
+
+    保留 status_code + detail + extra（如 missing_skill_names）以让 HTTP 层
+    重建与原 POST /api/prompt 完全一致的错误响应 schema。
+    """
+
+    def __init__(self, status_code: int, detail: str, **extra: Any) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+        self.extra: dict[str, Any] = extra
+
+
+class PromptRuntimeError(Exception):
+    """5xx / 409 harness 执行错误——同步路径走 JSONResponse，异步路径转 status=error。"""
+
+    def __init__(self, status_code: int, message: str, error_type: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.message = message
+        self.error_type = error_type
+
+
+@dataclass
+class _PromptValidated:
+    """_validate_prompt_payload 成功后的产物——传给 _run_prompt_core。
+
+    所有"已校验好"的字段集中在这里，避免 _run_prompt_core 重复解析 / 重复校验，
+    也避免 async runner 在 task 内重复 await 校验（task 抛 PromptValidationError
+    会变成 status=error 而非 4xx，违反用户原指令 §5.3）。
+    """
+
+    text: str
+    skill_selection: SkillSelection | None
+    session_id: str | None
+    store: Any
+    original_messages: list[Any] | None
+    attached_blocks: list[Any]
+    attached_summary: list[dict[str, Any]]
+
+
+@dataclass
+class PromptExecutionResult:
+    """_run_prompt_core 成功后的产物。"""
+
+    messages: list[Any]
+    serialized_messages: list[dict[str, Any]]
+    session_id: str | None
+    attachment_meta: dict[str, Any]
+    applied_skill_names: list[str]
+
+
+# ============================================================================
 # create_app
 # ============================================================================
 
@@ -115,6 +177,8 @@ def create_app(
     uploads_dir: str | Path | None = None,
     max_file_size: int = 25 * 1024 * 1024,
     max_session_upload_size: int = 100 * 1024 * 1024,
+    request_history_maxlen: int = 100,
+    shutdown_grace_s: float = 5.0,
 ) -> FastAPI:
     """构造一个 FastAPI 实例。
 
@@ -213,6 +277,42 @@ def create_app(
 
         yield
 
+        # ====================================================================
+        # P1-B1: shutdown 收敛——先收敛 active request，再走原清理流程
+        # ====================================================================
+        # 1. 拒绝新 async prompt（POST /api/prompt/async 看到 shutting_down=True 返回 503）
+        state.shutting_down = True
+
+        # 2. 收集所有 active request 的 task——abort queued（cancel）+ abort running（harness.abort）
+        #    用 list 快照——_abort_request_internal 会修改 state.active_requests
+        active_reqs = list(state.active_requests.values())
+        active_tasks: list[asyncio.Task] = []
+        for req in active_reqs:
+            try:
+                await _abort_request_internal(req, "server_shutdown")
+            except Exception:
+                pass
+            if req.task is not None and not req.task.done():
+                active_tasks.append(req.task)
+
+        # 3. 等 grace timeout——让 runner 通过正常路径 finalize（保留事件广播 + 状态写入）
+        if active_tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*active_tasks, return_exceptions=True),
+                    timeout=shutdown_grace_s,
+                )
+            except TimeoutError:
+                # grace 超时——强制 cancel 剩余 task
+                for t in active_tasks:
+                    if not t.done():
+                        t.cancel()
+                # 再等一次让 cancel 生效
+                await asyncio.gather(*active_tasks, return_exceptions=True)
+
+        # ====================================================================
+        # 原清理流程
+        # ====================================================================
         # shutdown：精确移除自己注册的 hook，避免累积
         hook = container.get("hook")
         if hook is not None:
@@ -248,6 +348,9 @@ def create_app(
     state = WebAppState(harness=harness)
     # 用入参覆盖默认 maxlen
     state.event_buffer = type(state.event_buffer)(max_size=event_buffer_max_size)
+    # P1-B1: request_history deque 的 maxlen 也用入参覆盖
+    state.request_history = deque(maxlen=request_history_maxlen)
+    state.request_history_maxlen = request_history_maxlen
     app.state.web = state
     app.state.allow_prompt_preview = allow_prompt_preview
     app.state.event_buffer_max_size = event_buffer_max_size
@@ -259,22 +362,51 @@ def create_app(
     ws_clients: set[asyncio.Queue[dict[str, Any]]] = container["ws_clients"]
 
     async def _web_event_hook(event: Any, _ctx: Any) -> None:
-        """on_event hook：序列化 event，写入 buffer + 广播 SSE / WS。
+        """on_event hook：序列化 event → 包装 WebEventEnvelope → 写入 buffer + 广播。
+
+        P1-B2：所有 WS / SSE / GET /api/events 客户端看到的是同一个 envelope
+        （event_id / sequence 在本入口一次性生成，不为不同客户端重复生成）。
+
+        envelope schema:
+            event_id    str        "evt_<uuid4 hex>"
+            request_id  str|None   state.current_request_id（_run_prompt_background set）
+            session_id  str|None   state.current_request_session_id
+            sequence    int        全局单调递增（state.next_event_sequence）
+            type        str        event 类型名（冗余字段，方便客户端快速判断）
+            timestamp   str        ISO8601 UTC
+            payload     dict       serialize_event(event) + _received_at_ms
 
         任何异常都被吞掉——Hook 失败不应影响 Agent 主流程（_handle_agent_event
         本身有 try/except 兜底，这里再加一层防御）。
         """
         try:
             payload = serialize_event(event)
-            # 加上 server-side 接收时间，便于 UI 排序
-            if isinstance(payload, dict):
-                payload.setdefault("_received_at_ms", int(time.time() * 1000))
-            state.event_buffer.append(payload if isinstance(payload, dict) else {})
+            if not isinstance(payload, dict):
+                # 防御坏 event——不可能发生但兜底
+                payload = {}
+            # 加上 server-side 接收时间，便于 UI 排序（保留旧字段向后兼容）
+            payload.setdefault("_received_at_ms", int(time.time() * 1000))
+
+            # 分配 sequence + 生成 envelope（在本入口一次性完成）
+            sequence = state.next_event_sequence
+            state.next_event_sequence = sequence + 1
+
+            envelope = {
+                "event_id": f"evt_{uuid4().hex[:16]}",
+                "request_id": state.current_request_id,
+                "session_id": state.current_request_session_id,
+                "sequence": sequence,
+                "type": payload.get("type") or type(event).__name__,
+                "timestamp": _now_utc().isoformat(),
+                "payload": payload,
+            }
+
+            state.event_buffer.append(envelope)
             # 广播到所有 SSE / WS client——慢客户端 put_nowait 抛 QueueFull 时
             # 丢弃该 event（不阻塞其它 client / 不阻塞主 loop）
             for q in list(sse_clients) + list(ws_clients):
                 try:
-                    q.put_nowait(payload)
+                    q.put_nowait(envelope)
                 except asyncio.QueueFull:
                     continue
         except Exception:
@@ -328,6 +460,449 @@ def create_app(
                 status_code=409,
                 detail=f"agent is {agent_status!r}",
             )
+
+    # ========================================================================
+    # P1-B1: Prompt 公共执行逻辑（同步 /api/prompt + 异步 /api/prompt/async 共享）
+    # ========================================================================
+
+    def _merge_skill_names(
+        skill_sel_raw: dict[str, Any] | None,
+        skill_names_raw: Any,
+    ) -> tuple[list[str] | None, list[str], list[str]]:
+        """合并顶层 skill_names + skill_selection.names（去重保序）+ 语法校验。
+
+        Returns (merged_names, sel_names, top_names)。
+        merged_names=None 表示没有 skill；其余两者为原始 list（空 list 也算）。
+        """
+        sel_names = list((skill_sel_raw or {}).get("names") or [])
+        top_names = list(skill_names_raw or [])
+        if sel_names or top_names:
+            seen: set[str] = set()
+            merged: list[str] = []
+            for n in [*sel_names, *top_names]:
+                if n and n not in seen:
+                    seen.add(n)
+                    merged.append(n)
+            return merged or None, sel_names, top_names
+        return None, sel_names, top_names
+
+    def _build_skill_selection(
+        skill_sel_raw: dict[str, Any] | None,
+        merged_names: list[str] | None,
+    ) -> SkillSelection | None:
+        if not (skill_sel_raw or merged_names):
+            return None
+        return SkillSelection(
+            names=merged_names,
+            tags=(skill_sel_raw or {}).get("tags"),
+            values=(skill_sel_raw or {}).get("values") or {},
+        )
+
+    async def _resolve_file_blocks(
+        session_id: str | None,
+        file_ids_raw: list[Any],
+    ) -> tuple[list[Any], list[dict[str, Any]]]:
+        """校验 file_ids + 构造 FileBlock。抛 PromptValidationError。"""
+        if not file_ids_raw:
+            return [], []
+        if state.file_store is None:
+            raise PromptValidationError(
+                503, "file store not initialized; cannot accept file_ids"
+            )
+        if session_id is None:
+            raise PromptValidationError(
+                400, "session_id required when file_ids present"
+            )
+
+        from ..messages import FileBlock
+        from ..tools.view_file import _classify_format
+        from .files import (
+            FileAccessDeniedError,
+            UnsafeFilenameError,
+            VirtualFileNotFoundError,
+        )
+
+        attached_blocks: list[Any] = []
+        attached_summary: list[dict[str, Any]] = []
+        for fid in file_ids_raw:
+            if not isinstance(fid, str) or not fid:
+                raise PromptValidationError(
+                    400,
+                    f"file_ids entries must be non-empty strings (got {fid!r})",
+                )
+            try:
+                ref = await state.file_store.get_for_session(session_id, fid)
+            except VirtualFileNotFoundError as e:
+                raise PromptValidationError(404, str(e)) from None
+            except FileAccessDeniedError as e:
+                raise PromptValidationError(403, str(e)) from None
+            except UnsafeFilenameError as e:
+                raise PromptValidationError(400, str(e)) from None
+
+            fmt = _classify_format(ref.name, ref.mime)
+            block = FileBlock(
+                file_id=ref.id,
+                name=ref.name,
+                mime=ref.mime,
+                size=ref.size,
+                sha256=ref.sha256,
+                format=fmt,
+            )
+            attached_blocks.append(block)
+            attached_summary.append(
+                {
+                    "id": ref.id,
+                    "name": ref.name,
+                    "mime": ref.mime,
+                    "size": ref.size,
+                    "sha256": ref.sha256,
+                    "format": fmt,
+                }
+            )
+        return attached_blocks, attached_summary
+
+    def _build_attachment_meta(
+        attached_summary: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        supported_count = sum(
+            1
+            for s in attached_summary
+            if s["format"]
+            not in ("image_unsupported", "binary", "unsupported", "pdf")
+        )
+        unsupported_count = len(attached_summary) - supported_count
+        return {
+            "attached_file_ids": [s["id"] for s in attached_summary],
+            "attached_file_names": [s["name"] for s in attached_summary],
+            "attached_file_count": len(attached_summary),
+            "attached_supported_file_count": supported_count,
+            "attached_unsupported_file_count": unsupported_count,
+        }
+
+    async def _validate_prompt_payload(
+        payload: dict[str, Any],
+    ) -> _PromptValidated:
+        """所有乐观校验——成功返回 _PromptValidated，失败抛 PromptValidationError。
+
+        异常 → HTTP 层 catch 转 JSONResponse（4xx）；async 层 catch 后不创建 request。
+        """
+        _ensure_idle()  # HTTPException(409)——HTTP 层 FastAPI 自动处理；async 层 catch
+
+        text = (payload or {}).get("text") or ""
+        if not text.strip():
+            raise PromptValidationError(400, "text is required")
+
+        skill_sel_raw = (payload or {}).get("skill_selection") or {}
+        skill_names_raw = (payload or {}).get("skill_names")
+        if skill_names_raw is not None:
+            if not isinstance(skill_names_raw, list):
+                raise PromptValidationError(
+                    400, "skill_names must be a list of strings"
+                )
+            bad = [
+                n
+                for n in skill_names_raw
+                if not isinstance(n, str) or not n
+            ]
+            if bad:
+                raise PromptValidationError(
+                    400,
+                    f"skill_names entries must be non-empty strings (got {bad[0]!r})",
+                )
+
+        merged_names, _sel_names, _top_names = _merge_skill_names(
+            skill_sel_raw, skill_names_raw
+        )
+        skill_selection = _build_skill_selection(skill_sel_raw, merged_names)
+
+        if merged_names and harness.skill_registry is not None:
+            missing = [
+                n for n in merged_names if not harness.skill_registry.has(n)
+            ]
+            if missing:
+                raise PromptValidationError(
+                    400,
+                    f"Unknown skill: {missing[0]!r}",
+                    missing_skill_names=missing,
+                )
+
+        session_id = (payload or {}).get("session_id") or state.current_session_id
+        store = state.session_store
+
+        original_messages: list[Any] | None = None
+        if store is not None and session_id is not None:
+            from ..session_sqlite import SessionNotFoundError
+
+            try:
+                history = await store.list_messages(session_id)
+            except SessionNotFoundError:
+                raise PromptValidationError(
+                    404, f"session {session_id!r} not found"
+                ) from None
+            original_messages = list(harness.agent.state.messages)
+            harness.agent.state.messages = list(history)
+
+        file_ids_raw = (payload or {}).get("file_ids") or []
+        if not isinstance(file_ids_raw, list):
+            raise PromptValidationError(
+                400, "file_ids must be a list of strings"
+            )
+        attached_blocks, attached_summary = await _resolve_file_blocks(
+            session_id, list(file_ids_raw)
+        )
+
+        return _PromptValidated(
+            text=text,
+            skill_selection=skill_selection,
+            session_id=session_id,
+            store=store,
+            original_messages=original_messages,
+            attached_blocks=attached_blocks,
+            attached_summary=attached_summary,
+        )
+
+    async def _run_prompt_core(
+        validated: _PromptValidated,
+    ) -> PromptExecutionResult:
+        """执行 prompt——假定已校验完毕。抛 PromptRuntimeError 表示 harness 失败。"""
+        state.running = True
+        state.last_error = None
+        try:
+            if validated.attached_blocks:
+                from ..messages import TextContent, UserMessage
+
+                user_msg = UserMessage(
+                    content=[TextContent(text=validated.text), *validated.attached_blocks]
+                )
+                harness.agent.state.messages.append(user_msg)
+                messages = await harness.run_continue(
+                    skill_selection=validated.skill_selection
+                )
+            else:
+                messages = await harness.run_prompt(
+                    validated.text, skill_selection=validated.skill_selection
+                )
+        except RuntimeError as e:
+            msg = str(e)
+            state.last_error = f"{type(e).__name__}: {msg}"
+            status = 409 if "already running" in msg.lower() else 500
+            raise PromptRuntimeError(
+                status, state.last_error, type(e).__name__
+            ) from None
+        except Exception as e:
+            state.last_error = f"{type(e).__name__}: {e}"
+            raise PromptRuntimeError(500, state.last_error, type(e).__name__) from None
+        finally:
+            state.running = False
+
+        if validated.store is not None and validated.session_id is not None:
+            try:
+                await validated.store.replace_messages(
+                    validated.session_id, list(messages)
+                )
+                if harness.last_snapshot is not None:
+                    await validated.store.append_snapshot(
+                        validated.session_id, harness.last_snapshot
+                    )
+            except Exception as e:
+                state.last_error = f"persist: {type(e).__name__}: {e}"
+            finally:
+                if validated.original_messages is not None:
+                    harness.agent.state.messages = validated.original_messages
+
+        attachment_meta = _build_attachment_meta(validated.attached_summary)
+        applied_skill_names: list[str] = list(
+            validated.skill_selection.names
+        ) if (
+            validated.skill_selection is not None
+            and validated.skill_selection.names
+        ) else []
+
+        return PromptExecutionResult(
+            messages=messages,
+            serialized_messages=[serialize_message(m) for m in messages],
+            session_id=validated.session_id,
+            attachment_meta=attachment_meta,
+            applied_skill_names=applied_skill_names,
+        )
+
+    def _serialize_prompt_validation_error(
+        e: PromptValidationError,
+    ) -> JSONResponse:
+        body: dict[str, Any] = {"detail": e.detail}
+        body.update(e.extra)
+        return JSONResponse(status_code=e.status_code, content=body)
+
+    def _serialize_prompt_runtime_error(
+        e: PromptRuntimeError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=e.status_code,
+            content={
+                "ok": False,
+                "error": e.message,
+                "error_type": e.error_type,
+            },
+        )
+
+    # ========================================================================
+    # P1-B1: 异步 prompt runner + request 序列化 + abort helper
+    # ========================================================================
+
+    def _safe_error(e: BaseException) -> str:
+        """安全错误摘要——截断到 type + message，不输出 traceback / repr。"""
+        return f"{type(e).__name__}: {e}"[:500]
+
+    def _now_utc() -> datetime:
+        return datetime.now(UTC)
+
+    def _serialize_request(req: WebRunRequest) -> dict[str, Any]:
+        """JSON-safe WebRunRequest 视图。task / payload 不进 JSON。"""
+        return {
+            "request_id": req.id,
+            "session_id": req.session_id,
+            "status": req.status,
+            "created_at": req.created_at.isoformat() if req.created_at else None,
+            "started_at": req.started_at.isoformat() if req.started_at else None,
+            "ended_at": req.ended_at.isoformat() if req.ended_at else None,
+            "error": req.error,
+            "error_type": req.error_type,
+            "abort_reason": req.abort_reason,
+            "result_summary": req.result_summary,
+            "event_start_sequence": req.event_start_sequence,
+            "event_end_sequence": req.event_end_sequence,
+        }
+
+    def _find_request(request_id: str) -> WebRunRequest | None:
+        """从 active + history 找 request record。"""
+        req = state.active_requests.get(request_id)
+        if req is not None:
+            return req
+        for r in state.request_history:
+            if r.id == request_id:
+                return r
+        return None
+
+    def _remove_from_active(req: WebRunRequest) -> None:
+        """从 active_requests / active_request_by_session 移除；保留 history append 给调用方做。"""
+        state.active_requests.pop(req.id, None)
+        if (
+            req.session_id
+            and state.active_request_by_session.get(req.session_id) == req.id
+        ):
+            state.active_request_by_session.pop(req.session_id, None)
+
+    async def _run_prompt_background(
+        web_request: WebRunRequest,
+        validated: _PromptValidated,
+    ) -> None:
+        """后台 task 入口——_run_prompt_core 包一层 + 状态流转 + 异常收敛。
+
+        关键不变量：
+        - 任何异常都不让 task 成为 "Task exception was never retrieved"
+          （PromptRuntimeError / Exception 都在 except 里消化）
+        - asyncio.CancelledError 必须重抛（asyncio 要求）
+        - finally 移除 active 并 append history——保证 shutdown 后 history 可查
+        - abort 路径：web_request.abort_reason 由 abort endpoint 设置；
+          runner 在 success 路径检查此 flag → status=aborted
+
+        P1-B2：set/clear state.current_request_id / current_request_session_id
+        让 _web_event_hook 能给 envelope 注入 request_id / session_id；
+        记录 event_start_sequence / event_end_sequence 到 web_request。
+        """
+        web_request.status = "running"
+        web_request.started_at = _now_utc()
+        # set request context（hook 跨 task 不可靠，用 web-level state 而非 contextvar）
+        state.current_request_id = web_request.id
+        state.current_request_session_id = web_request.session_id
+        # 占位 sequence 起点——下一个分配的 sequence 将是此值
+        web_request.event_start_sequence = state.next_event_sequence
+
+        try:
+            result = await _run_prompt_core(validated)
+        except asyncio.CancelledError:
+            web_request.status = "aborted"
+            web_request.ended_at = _now_utc()
+            web_request.error = "cancelled"
+            if web_request.abort_reason is None:
+                web_request.abort_reason = "task_cancelled"
+            raise
+        except PromptRuntimeError as e:
+            web_request.status = "error"
+            web_request.ended_at = _now_utc()
+            web_request.error = e.message
+            web_request.error_type = e.error_type
+        except HTTPException as e:
+            # _run_prompt_core 内部不应抛 HTTPException，但兜底
+            web_request.status = "error"
+            web_request.ended_at = _now_utc()
+            web_request.error = _safe_error(e)
+            web_request.error_type = "HTTPException"
+        except Exception as e:
+            web_request.status = "error"
+            web_request.ended_at = _now_utc()
+            web_request.error = _safe_error(e)
+            web_request.error_type = type(e).__name__
+        else:
+            # 成功——但检查是否被 abort 过（abort 不 cancel task，走 run_prompt 收敛路径）
+            if web_request.abort_reason is not None:
+                web_request.status = "aborted"
+            else:
+                web_request.status = "completed"
+            web_request.ended_at = _now_utc()
+            web_request.result_summary = {
+                "message_count": len(result.messages),
+                "applied_skill_names": list(result.applied_skill_names),
+                "session_id": result.session_id,
+                # 不放 message 全文（安全 + 内存）
+            }
+        finally:
+            # 记录最后一个 event 的 sequence（next - 1；如果没事件则 = start - 1）
+            web_request.event_end_sequence = state.next_event_sequence - 1
+            # clear request context——避免非 prompt 事件误关联
+            state.current_request_id = None
+            state.current_request_session_id = None
+            _remove_from_active(web_request)
+            state.request_history.append(web_request)
+
+    async def _abort_request_internal(
+        req: WebRunRequest,
+        reason: str | None,
+    ) -> dict[str, Any]:
+        """abort 共享逻辑——POST /api/abort 别名 + POST /api/requests/{id}/abort 都走这里。"""
+        reason_str = reason or "user_requested"
+
+        if req.status == "queued":
+            # task 尚未进 running 状态（理论上 create_task 立即调度；保险起见支持）
+            req.abort_reason = reason_str
+            if req.task is not None and not req.task.done():
+                req.task.cancel()
+            # 主动 finalize（runner 可能还没机会跑 finally）
+            if req.status not in ("aborted", "error", "completed"):
+                req.status = "aborted"
+                req.ended_at = _now_utc()
+                _remove_from_active(req)
+                state.request_history.append(req)
+        elif req.status == "running":
+            # 设置 flag——runner 在 success 路径会读到
+            req.abort_reason = reason_str
+            # 调 harness.abort() 让模型 finalize（不 cancel task，避免孤儿）
+            try:
+                await harness.abort(req.abort_reason)
+            except Exception as e:
+                return {
+                    "ok": False,
+                    "error": _safe_error(e),
+                    "request_id": req.id,
+                    "status": req.status,
+                }
+        # completed/error/aborted → 幂等返回当前状态
+        return {
+            "ok": True,
+            "request_id": req.id,
+            "status": req.status,
+            "abort_reason": req.abort_reason,
+        }
 
     # ========================================================================
     # Static + index
@@ -421,9 +996,70 @@ def create_app(
     # ========================================================================
 
     @app.get("/api/events")
-    async def get_events() -> dict[str, Any]:
+    async def get_events(
+        session_id: str | None = None,
+        request_id: str | None = None,
+        after_sequence: int | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """列出 buffer 内事件（envelope-aware，P1-B2）。
+
+        过滤参数：
+            session_id     仅返回 envelope.session_id 匹配的事件
+            request_id     仅返回 envelope.request_id 匹配的事件
+            after_sequence 仅返回 envelope.sequence > after_sequence 的事件
+            limit          最多返回 N 个事件（按 sequence 升序）；超限 has_more=True
+
+        gap 检测（用户原指令 §6.3）：
+            after_sequence + 1 < first_available_sequence → gap=True
+            表示客户端期望的起点已被 buffer 截断丢弃。
+
+        响应 schema：
+            {
+              "count": N,                       # 兼容旧字段 = len(events)
+              "events": [...],                  # 过滤后的事件 list
+              "first_available_sequence": int,  # 当前 buffer 内最小 sequence
+              "last_available_sequence": int,   # 当前 buffer 内最大 sequence
+              "has_more": bool,                 # limit 截断标志
+              "gap": bool                       # after_sequence 已过期标志
+            }
+        """
         events = state.event_buffer.list()
-        return {"count": len(events), "events": events}
+
+        # 过滤
+        filtered: list[dict[str, Any]] = []
+        for ev in events:
+            if session_id is not None and ev.get("session_id") != session_id:
+                continue
+            if request_id is not None and ev.get("request_id") != request_id:
+                continue
+            if after_sequence is not None:
+                ev_seq = ev.get("sequence")
+                if not isinstance(ev_seq, int) or ev_seq <= after_sequence:
+                    continue
+            filtered.append(ev)
+
+        # limit 截断
+        has_more = False
+        if limit is not None and limit >= 0 and len(filtered) > limit:
+            filtered = filtered[:limit]
+            has_more = True
+
+        # gap 检测：客户端期望起点 after_sequence+1，但 buffer 最早是 first_available_sequence
+        gap = False
+        if after_sequence is not None:
+            first_avail = state.event_buffer.first_sequence
+            if first_avail is not None and after_sequence + 1 < first_avail:
+                gap = True
+
+        return {
+            "count": len(filtered),  # 兼容旧字段
+            "events": filtered,
+            "first_available_sequence": state.event_buffer.first_sequence,
+            "last_available_sequence": state.event_buffer.last_sequence,
+            "has_more": has_more,
+            "gap": gap,
+        }
 
     @app.post("/api/events/clear")
     async def clear_events() -> dict[str, Any]:
@@ -1731,273 +2367,197 @@ def create_app(
 
     @app.post("/api/prompt", response_model=None)
     async def post_prompt(payload: dict[str, Any]) -> dict[str, Any] | JSONResponse:
-        """触发一次 prompt。
+        """触发一次 prompt（同步阻塞；P1-B1 起逻辑与 /api/prompt/async 共享）。
 
-        P0-1：支持 body 中传 `session_id`。
-        - 传 session_id → 从 sqlite 加载该 session 历史 messages 注入
-          agent.state.messages；run_prompt 后用 final_messages 覆盖回 sqlite；
-          append snapshot
-        - 不传 session_id → 用 state.current_session_id（lifespan 时创建的 default）
+        行为与 v0.0.23.1 完全一致——_run_prompt_core 是从原 endpoint 抽出的公共逻辑。
+        旧的 4xx / 409 / 500 错误 schema 与字段（detail / missing_skill_names /
+        ok=false / error / error_type）严格保持不变。
 
-        P0-3：支持 body 中传 `file_ids: list[str]`。
-        - 校验每个 file_id 属于该 session（不存在 404 / 跨 session 403）
-        - 把每个附件作为 FileBlock 注入 UserMessage.content
-        - 图片也以 format="image_unsupported" 注入（不做图片理解）
-        - 不新增 ImageBlock；不向 provider 传 image block
-        - snapshot metadata 记录 attached_file_ids / names / counts
+        P0-1：body.session_id
+        P0-3：body.file_ids（FileBlock 注入到 UserMessage.content）
+        P0-4：body.skill_names + body.skill_selection.names 合并去重
+
+        P1-B2：set/clear state.current_request_id（sync 路径用 req_sync_ 前缀）
+        让 _web_event_hook 给 envelope 注入 request_id / session_id，
+        与 /api/prompt/async 路径行为一致。sync 路径不创建 WebRunRequest record。
         """
-        _ensure_idle()
-        text = (payload or {}).get("text") or ""
-        if not text.strip():
-            raise HTTPException(status_code=400, detail="text is required")
-        skill_sel_raw = (payload or {}).get("skill_selection") or {}
-        # P0-4：顶层 skill_names（list[str]）—— 与 skill_selection.names 等价合并
-        # 前端 ChatInput 直接传 ["a", "b"] 比包一层 skill_selection 更顺手。
-        # 校验：必须是 list[str]；空 list 当 None 处理。
-        skill_names_raw = (payload or {}).get("skill_names")
-        if skill_names_raw is not None:
-            if not isinstance(skill_names_raw, list):
-                return JSONResponse(
-                    status_code=400,
-                    content={"detail": "skill_names must be a list of strings"},
-                )
-            bad = [n for n in skill_names_raw if not isinstance(n, str) or not n]
-            if bad:
-                return JSONResponse(
-                    status_code=400,
-                    content={
-                        "detail": (
-                            "skill_names entries must be non-empty strings "
-                            f"(got {bad[0]!r})"
-                        ),
-                    },
-                )
-        # 合并：顶层 skill_names + skill_selection.names（去重保序）
-        merged_names: list[str] | None = None
-        sel_names = list(skill_sel_raw.get("names") or [])
-        top_names = list(skill_names_raw or [])
-        if sel_names or top_names:
-            seen: set[str] = set()
-            merged_names = []
-            for n in [*sel_names, *top_names]:
-                if n and n not in seen:
-                    seen.add(n)
-                    merged_names.append(n)
-
-        skill_selection: SkillSelection | None = None
-        if skill_sel_raw or merged_names:
-            skill_selection = SkillSelection(
-                names=merged_names,
-                tags=skill_sel_raw.get("tags"),
-                values=skill_sel_raw.get("values") or {},
-            )
-
-        # P0-4 Step 2：校验 skill_names 都在 registry 中——避免 SkillRegistry.select
-        # 内部抛 SkillNotFoundError 走到 500。这是 web 层最小修复，不动 harness。
-        if merged_names and harness.skill_registry is not None:
-            missing = [
-                n for n in merged_names if not harness.skill_registry.has(n)
-            ]
-            if missing:
-                return JSONResponse(
-                    status_code=400,
-                    content={
-                        "detail": f"Unknown skill: {missing[0]!r}",
-                        "missing_skill_names": missing,
-                    },
-                )
-
-        # 解析 session_id：显式 > current_session_id
-        session_id = (payload or {}).get("session_id") or state.current_session_id
-        store = state.session_store
-
-        # 若有 store + session_id：加载历史到 agent.state.messages
-        if store is not None and session_id is not None:
-            from ..session_sqlite import SessionNotFoundError
-            try:
-                history = await store.list_messages(session_id)
-            except SessionNotFoundError:
-                return JSONResponse(
-                    status_code=404,
-                    content={"detail": f"session {session_id!r} not found"},
-                )
-            # 暂存原 messages，run_prompt 完成后还原（避免 sqlite 路径污染 agent 长期状态）
-            original_messages = list(harness.agent.state.messages)
-            harness.agent.state.messages = list(history)
-        else:
-            original_messages = None
-
-        # P0-3：file_ids 解析 + 校验 + 注入
-        file_ids_raw = (payload or {}).get("file_ids") or []
-        if not isinstance(file_ids_raw, list):
-            return JSONResponse(
-                status_code=400,
-                content={"detail": "file_ids must be a list of strings"},
-            )
-        attached_blocks: list[Any] = []  # FileBlock 实例
-        attached_summary: list[dict[str, Any]] = []
-        if file_ids_raw:
-            if state.file_store is None:
-                return JSONResponse(
-                    status_code=503,
-                    content={"detail": "file store not initialized; cannot accept file_ids"},
-                )
-            if session_id is None:
-                return JSONResponse(
-                    status_code=400,
-                    content={"detail": "session_id required when file_ids present"},
-                )
-            from ..messages import FileBlock
-            from ..tools.view_file import _classify_format
-            from .files import (
-                FileAccessDeniedError,
-                UnsafeFilenameError,
-                VirtualFileNotFoundError,
-            )
-
-            for fid in file_ids_raw:
-                if not isinstance(fid, str) or not fid:
-                    return JSONResponse(
-                        status_code=400,
-                        content={
-                            "detail": (
-                                f"file_ids entries must be non-empty strings "
-                                f"(got {fid!r})"
-                            ),
-                        },
-                    )
-                try:
-                    ref = await state.file_store.get_for_session(session_id, fid)
-                except VirtualFileNotFoundError as e:
-                    return JSONResponse(
-                        status_code=404, content={"detail": str(e)},
-                    )
-                except FileAccessDeniedError as e:
-                    return JSONResponse(
-                        status_code=403, content={"detail": str(e)},
-                    )
-                except UnsafeFilenameError as e:
-                    return JSONResponse(
-                        status_code=400, content={"detail": str(e)},
-                    )
-                fmt = _classify_format(ref.name, ref.mime)
-                block = FileBlock(
-                    file_id=ref.id,
-                    name=ref.name,
-                    mime=ref.mime,
-                    size=ref.size,
-                    sha256=ref.sha256,
-                    format=fmt,
-                )
-                attached_blocks.append(block)
-                attached_summary.append({
-                    "id": ref.id, "name": ref.name, "mime": ref.mime,
-                    "size": ref.size, "sha256": ref.sha256, "format": fmt,
-                })
-
-        state.running = True
-        state.last_error = None
         try:
-            if attached_blocks:
-                # P0-3：把 text + FileBlocks 合并到一条 UserMessage，再走 run_continue。
-                # 这样 convert_to_llm 处理后是单条 user message（含 [text, file, file]），
-                # LLM 看到文件元信息 + 用户提问在同一个 user turn。
-                from ..messages import TextContent, UserMessage
-
-                user_msg = UserMessage(content=[
-                    TextContent(text=text), *attached_blocks,
-                ])
-                # 把构造好的 UserMessage 追加到 agent.state.messages 末尾
-                # （此时已被 sqlite history 替换为正确历史）
-                harness.agent.state.messages.append(user_msg)
-                messages = await harness.run_continue(skill_selection=skill_selection)
-            else:
-                messages = await harness.run_prompt(text, skill_selection=skill_selection)
-        except HTTPException:
-            raise
-        except RuntimeError as e:
-            # Harness "already running" 等 RuntimeError 转 409 而非 500——
-            # 客户端可据此重试 / 显示占用提示
-            msg = str(e)
-            state.last_error = f"{type(e).__name__}: {msg}"
-            status = 409 if "already running" in msg.lower() else 500
-            return JSONResponse(
-                status_code=status,
-                content={
-                    "ok": False,
-                    "error": state.last_error,
-                    "error_type": type(e).__name__,
-                },
-            )
-        except Exception as e:
-            state.last_error = f"{type(e).__name__}: {e}"
-            return JSONResponse(
-                status_code=500,
-                content={
-                    "ok": False,
-                    "error": state.last_error,
-                    "error_type": type(e).__name__,
-                },
-            )
-        finally:
-            state.running = False
-
-        # 若走了 sqlite 路径：用 final_messages 覆盖回 sqlite；append snapshot
-        if store is not None and session_id is not None:
+            validated = await _validate_prompt_payload(payload)
+            # set request context（sync 路径用临时 request_id，不进 active_requests）
+            sync_request_id = f"req_sync_{uuid4().hex[:12]}"
+            state.current_request_id = sync_request_id
+            state.current_request_session_id = validated.session_id
             try:
-                await store.replace_messages(session_id, list(messages))
-                if harness.last_snapshot is not None:
-                    await store.append_snapshot(session_id, harness.last_snapshot)
-            except Exception as e:
-                # 持久化失败不应覆盖 prompt 成功返回；写入 metadata 供诊断
-                state.last_error = f"persist: {type(e).__name__}: {e}"
+                result = await _run_prompt_core(validated)
             finally:
-                # 还原 agent.state.messages（避免 sqlite 路径污染后续非 sqlite 请求）
-                if original_messages is not None:
-                    harness.agent.state.messages = original_messages
-
-        # P0-3：snapshot metadata 追加附件信息（snapshot 已 finish，但 context.metadata
-        # 仍然可读；记录到 response 里方便前端显示）
-        supported_count = sum(
-            1 for s in attached_summary
-            if s["format"] not in ("image_unsupported", "binary", "unsupported", "pdf")
-        )
-        unsupported_count = len(attached_summary) - supported_count
-        attachment_meta = {
-            "attached_file_ids": [s["id"] for s in attached_summary],
-            "attached_file_names": [s["name"] for s in attached_summary],
-            "attached_file_count": len(attached_summary),
-            "attached_supported_file_count": supported_count,
-            "attached_unsupported_file_count": unsupported_count,
-        }
-
-        # P0-4：把本轮实际启用的 skill_names 写入 response，便于前端展示 SkillUsedCard
-        # （registry 中不存在的 name 已由 SkillRegistry.select 抛 SkillNotFoundError；
-        # 但我们走 run_continue/run_prompt 路径会自己 select，失败时变 500——前端
-        # 应只发已上传的 skill name）
-        applied_skill_names: list[str] = []
-        if skill_selection is not None and skill_selection.names:
-            applied_skill_names = list(skill_selection.names)
-
+                state.current_request_id = None
+                state.current_request_session_id = None
+        except PromptValidationError as e:
+            return _serialize_prompt_validation_error(e)
+        except PromptRuntimeError as e:
+            return _serialize_prompt_runtime_error(e)
         return {
             "ok": True,
-            "session_id": session_id,
-            "messages": [serialize_message(m) for m in messages],
-            "attachments": attachment_meta,
-            "applied_skill_names": applied_skill_names,
+            "session_id": result.session_id,
+            "messages": result.serialized_messages,
+            "attachments": result.attachment_meta,
+            "applied_skill_names": result.applied_skill_names,
         }
+
+    # ========================================================================
+    # P1-B1: 异步 prompt endpoint + request lifecycle API
+    # ========================================================================
+
+    @app.post("/api/prompt/async", response_model=None)
+    async def post_prompt_async(
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | JSONResponse:
+        """异步触发 prompt——立即返回 request_id + HTTP 202。
+
+        行为（用户原指令 §5.3）：
+        1. 跑完整乐观校验（与同步路径一致）—— 失败立即 4xx，不创建 request
+        2. session 级别并发检查（同 session 已有 queued/running → 409）
+        3. 创建 request record + asyncio.create_task(_run_prompt_background)
+        4. 立即返回 202 + request_id + status=queued + 各资源 URL
+
+        并发限制（用户原指令 §3.16 / §5.3）：
+        - 单 agent 实例全局单 active request（_ensure_idle 保证）
+        - session_id 字段保留为未来扩展点；当前不虚假宣称多 session 并行
+        """
+        if state.shutting_down:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "detail": "server shutting down; cannot accept new prompts"
+                },
+            )
+
+        # 1. 完整乐观校验——_ensure_idle / text / skill_names / unknown skill /
+        #    session 存在 / file ownership 都在 _validate_prompt_payload 里
+        try:
+            validated = await _validate_prompt_payload(payload)
+        except PromptValidationError as e:
+            return _serialize_prompt_validation_error(e)
+        except HTTPException as e:
+            # _ensure_idle 抛 HTTPException(409)——转与同步路径一致的 schema
+            return JSONResponse(
+                status_code=e.status_code, content={"detail": e.detail}
+            )
+
+        # 2. session 级并发检查
+        session_id = validated.session_id
+        if session_id and session_id in state.active_request_by_session:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": (
+                        f"session {session_id!r} already has an active request"
+                    ),
+                },
+            )
+
+        # 3. 创建 request record
+        request_id = f"req_{uuid4().hex[:16]}"
+        web_request = WebRunRequest(
+            id=request_id,
+            session_id=session_id,
+            status="queued",
+            created_at=_now_utc(),
+            # payload 仅内存——debug 用；不进任何 JSON response
+            payload=dict(payload) if isinstance(payload, dict) else None,
+        )
+        state.active_requests[request_id] = web_request
+        if session_id:
+            state.active_request_by_session[session_id] = request_id
+
+        # 4. 启动受管理 background task
+        task = asyncio.create_task(
+            _run_prompt_background(web_request, validated),
+            name=f"prompt_async_{request_id}",
+        )
+        web_request.task = task
+
+        # 5. 立即返回 202——不 await task
+        events_url = "/api/events" + (
+            f"?session_id={session_id}" if session_id else ""
+        )
+        return JSONResponse(
+            status_code=202,
+            content={
+                "ok": True,
+                "request_id": request_id,
+                "session_id": session_id,
+                "status": "queued",
+                "events_url": events_url,
+                "request_url": f"/api/requests/{request_id}",
+                "abort_url": f"/api/requests/{request_id}/abort",
+            },
+        )
+
+    @app.get("/api/requests/{request_id}", response_model=None)
+    async def get_request(
+        request_id: str,
+    ) -> dict[str, Any] | JSONResponse:
+        """查询单个 request 状态——active + history 都查；不存在 404。"""
+        req = _find_request(request_id)
+        if req is None:
+            return JSONResponse(
+                status_code=404,
+                content={"detail": f"request {request_id!r} not found"},
+            )
+        return _serialize_request(req)
+
+    @app.post("/api/requests/{request_id}/abort", response_model=None)
+    async def abort_request_endpoint(
+        request_id: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | JSONResponse:
+        """abort 单个 request——queued/running/completed/error/aborted 全部幂等。"""
+        req = _find_request(request_id)
+        if req is None:
+            return JSONResponse(
+                status_code=404,
+                content={"detail": f"request {request_id!r} not found"},
+            )
+        reason = None
+        if isinstance(payload, dict):
+            r_val = payload.get("reason")
+            if isinstance(r_val, str):
+                reason = r_val
+        result = await _abort_request_internal(req, reason)
+        if not result.get("ok", True):
+            return JSONResponse(status_code=500, content=result)
+        return result
 
     @app.post("/api/abort", response_model=None)
     async def post_abort(payload: dict[str, Any]) -> dict[str, Any] | JSONResponse:
-        reason = (payload or {}).get("reason")
+        """兼容别名——转发到当前 active request（如有）；否则直调 harness.abort()。
+
+        保留旧 endpoint 是为了不破坏前端 Stop 按钮（B1 阶段不切前端）和旧测试。
+        """
+        reason = (payload or {}).get("reason") if isinstance(payload, dict) else None
+        reason_str = reason if isinstance(reason, str) else None
+
+        # 有 active request → 转发到 _abort_request_internal
+        if state.active_requests:
+            # 单 active（_ensure_idle 保证）—— 取第一个
+            req_id = next(iter(state.active_requests))
+            req = state.active_requests[req_id]
+            result = await _abort_request_internal(req, reason_str)
+            if not result.get("ok", True):
+                return JSONResponse(status_code=500, content=result)
+            return {"ok": True, **{k: v for k, v in result.items() if k != "ok"}}
+
+        # 无 active request → 旧行为：直调 harness.abort()（兼容尚未走 async 路径的场景）
         try:
-            await harness.abort(reason if isinstance(reason, str) else None)
+            await harness.abort(reason_str)
         except Exception as e:
             return JSONResponse(
                 status_code=500,
                 content={"ok": False, "error": f"{type(e).__name__}: {e}"},
             )
         return {"ok": True}
+
 
     @app.post("/api/reset", response_model=None)
     async def post_reset(payload: dict[str, Any]) -> dict[str, Any] | JSONResponse:

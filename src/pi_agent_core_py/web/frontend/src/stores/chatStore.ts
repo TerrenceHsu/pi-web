@@ -27,7 +27,9 @@ import type {
   FileReadItem,
   TurnInfoItem,
   WebEvent,
+  WebEventEnvelope,
 } from "../types"
+import { isWebEventEnvelope } from "../types/events"
 
 // ============================================================================
 // 工具函数
@@ -131,6 +133,55 @@ export const useChatStore = defineStore("chat", () => {
   const wsReconnecting = ref(false)
   const error = ref<string | null>(null)
 
+  // P1-B2: 事件去重 / 隔离 state
+  /**
+   * 已处理过的 envelope.event_id——避免重复处理同一事件（WS 重发 / 错误重连场景）。
+   * 模块级私有 Set——Pinia 不暴露非序列化 Set；与现有 toolItemIds 一致。
+   *
+   * P1-B2.1: 加容量上限——避免长时间运行无限增长。与后端 event_buffer_max_size
+   * 对齐（默认 1000）。
+   *
+   * P1-B3 前置 hardening: 改为真正的 FIFO 淘汰——只淘汰最旧 ID，不清空全部历史。
+   * 清空策略会让边界后旧 event 被 replay 时重复处理；FIFO 保证窗口内去重稳定。
+   */
+  const SEEN_EVENT_IDS_MAX = 1000
+  const seenEventIds: Set<string> = new Set()
+  const seenEventQueue: string[] = []
+
+  /** 把 event_id 记入 seen set + FIFO queue；超限时淘汰最旧。返回 true 表示新见。 */
+  function rememberEventId(eventId: string): boolean {
+    if (seenEventIds.has(eventId)) return false
+    seenEventIds.add(eventId)
+    seenEventQueue.push(eventId)
+    while (seenEventQueue.length > SEEN_EVENT_IDS_MAX) {
+      const expired = seenEventQueue.shift()
+      if (expired !== undefined) {
+        seenEventIds.delete(expired)
+      }
+    }
+    return true
+  }
+  /**
+   * 全局 sequence cursor——所有 session 共享；用于 gap 检测。
+   *
+   * 后端 sequence 是全局单调（state.next_event_sequence），不分 session；
+   * 因此前端也用全局 cursor 判断"中间是否丢事件"，否则跨 session 事件会误报 gap。
+   * 例如 session A 收 seq=10、session B 收 seq=11、session A 再收 seq=12：
+   * per-session 判断会认为 A 缺 11，但 11 实际属于 B 没丢。
+   */
+  let lastGlobalSequence = 0
+  /** 每个 session 最近一次看到的 envelope.sequence——保留作统计 + B3 reconnect
+   * per-session replay cursor 使用，**不参与 gap 判断**。 */
+  const lastSequenceBySession = ref<Record<string, number>>({})
+  /** 检测到 sequence 缺口——B2 仅标记，B3 触发 replay。 */
+  const gapDetected = ref(false)
+  /** 当前 active request id——B2 阶段 sync 路径用 req_sync_ prefix（不强制过滤）；
+   * B3 切 async 后用于隔离旧 request 事件。 */
+  const currentRequestId = ref<string | null>(null)
+  /** 当前 active session id（用于事件隔离）。由 setActiveSession 更新——
+   * sessionStore 切换 / 新建 / 删除 session 时通过 chatStore.setActiveSession() 同步。 */
+  const activeSessionId = ref<string | null>(null)
+
   let socket: EventSocket | null = null
 
   /** 当前 turn 收到的 raw events——用于 details 展开。 */
@@ -220,10 +271,17 @@ export const useChatStore = defineStore("chat", () => {
     if (sending.value) return
     if (!input.text.trim()) return
 
+    // P1-B2: 记录当前 active session id——handleEvent 用它做 session 过滤
+    if (input.sessionId) {
+      activeSessionId.value = input.sessionId
+    }
+
     sending.value = true
     streaming.value = true
     error.value = null
     currentTurnEvents.value = []
+    // 切新 turn 前清 gap 标记（前一轮的 gap 不影响本轮 UI）
+    gapDetected.value = false
 
     // 1. 乐观 push user_message——含本轮附件 FileRef[]
     streamItems.value.push({
@@ -355,8 +413,54 @@ export const useChatStore = defineStore("chat", () => {
   // handleEvent —— WS event → ChatStreamItem 完整映射
   // ----------------------------------------------------------------------
 
-  function handleEvent(event: WebEvent) {
-    if (!event || typeof event.type !== "string") return
+  function handleEvent(rawEvent: WebEvent) {
+    if (!rawEvent || typeof rawEvent.type !== "string") return
+
+    // P1-B2: envelope-aware 处理——提取 payload 作为下游 event；envelope 元数据用于
+    // 去重 + session/request 隔离 + sequence gap 检测。hello / shutdown / legacy
+    // 裸事件走 isWebEventEnvelope=false 分支，保留原行为。
+    let event: any = rawEvent
+    let envelope: WebEventEnvelope | null = null
+    if (isWebEventEnvelope(rawEvent)) {
+      envelope = rawEvent as WebEventEnvelope
+
+      // 去重：event_id 已见过 → 跳过（B2 验收 #8）
+      // P1-B3 hardening: rememberEventId 实现 FIFO 淘汰——只淘汰最旧 ID，
+      // 不清空全部历史，避免边界后旧 event 被 replay 时重复处理。
+      if (!rememberEventId(envelope.event_id)) return
+
+      // sequence gap 检测——用全局 cursor（后端 sequence 是全局单调）。
+      // per-session cursor 不能用于 gap 判断：跨 session 事件会让 per-session
+      // 看起来"缺号"但实际没丢（B2.1 hardening）。
+      if (lastGlobalSequence > 0 && envelope.sequence > lastGlobalSequence + 1) {
+        gapDetected.value = true
+      }
+      lastGlobalSequence = Math.max(lastGlobalSequence, envelope.sequence)
+
+      // per-session sequence cursor（统计 + B3 replay 用，不参与 gap 判断）
+      if (envelope.session_id) {
+        const last = lastSequenceBySession.value[envelope.session_id] ?? 0
+        lastSequenceBySession.value = {
+          ...lastSequenceBySession.value,
+          [envelope.session_id]: Math.max(last, envelope.sequence),
+        }
+      }
+
+      // session 隔离：不属于当前 active session 的事件不写入当前消息流（B2 验收 #10）。
+      // 注意：同 session 的旧 request 事件当前**不会**被过滤——currentRequestId 隔离
+      // 留 B3 切 async 前端后启用（B2 报告 §10 已修正）。
+      if (
+        envelope.session_id &&
+        activeSessionId.value &&
+        envelope.session_id !== activeSessionId.value
+      ) {
+        return
+      }
+
+      // 合并 envelope.type + envelope.payload 作为下游 event
+      event = { ...envelope.payload, type: envelope.type }
+    }
+
     currentTurnEvents.value.push(event)
 
     const t = event.type
@@ -822,6 +926,24 @@ export const useChatStore = defineStore("chat", () => {
     assistantSeenFromWs = false
     Object.keys(toolItemIds).forEach((k) => delete toolItemIds[k])
     lastSkillSignature = null
+    // P1-B2: 重置去重 state（session 切换时不清理 lastSequenceBySession——
+    // 保留 per-session sequence 用于后续切回时 gap 检测；但 seenEventIds
+    // 可累积——event_id 是全局唯一的）
+    gapDetected.value = false
+    currentRequestId.value = null
+  }
+
+  /**
+   * 同步当前 active session id——供 sessionStore 切换/新建/删除 session 时调用。
+   * 必须在所有切换路径调用，否则 handleEvent 的 session 隔离会用过期的 session_id。
+   *
+   * P1-B2.1 hardening：之前只在 sendPrompt 内推断 activeSessionId，导致用户切换
+   * session 但未发消息时，WS 事件仍按旧 session 过滤。
+   *
+   * 不调 resetForSession——由调用方决定是否清空消息流（首次加载 / 切换 / 删除等场景不同）。
+   */
+  function setActiveSession(sid: string | null) {
+    activeSessionId.value = sid
   }
 
   return {
@@ -832,11 +954,17 @@ export const useChatStore = defineStore("chat", () => {
     wsReconnecting,
     error,
     itemCount,
+    // P1-B2: envelope-aware state（暴露给调试 / 后续 UI）
+    lastSequenceBySession,
+    gapDetected,
+    currentRequestId,
+    activeSessionId,
     loadMessages,
     sendPrompt,
     connectEvents,
     disconnectEvents,
     handleEvent,
     resetForSession,
+    setActiveSession,
   }
 })

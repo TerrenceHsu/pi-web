@@ -300,15 +300,117 @@ Agent 当前 messages。**P0-1 起支持 `?session_id=`**：
 **Response 503**: file store 未初始化但传了 `file_ids`。
 **Response 500**: harness / agent 异常（`state.last_error` 留详情）。
 
-> ⚠️ **当前实现是同步阻塞**——LLM 调用结束才返回响应。慢 LLM 会让 HTTP 请求挂住。`/api/prompt/async`（异步 + job-id 轮询）**尚未实现**，spec 标记为 P1+。前端通过 `WS /ws/events` 实时展示 streaming events，但 POST 请求本身仍等待后端 run_prompt 返回。
+> ℹ️ **同步路径**——LLM 调用结束才返回响应。前端通过 `WS /ws/events` 实时展示 streaming events，POST 请求本身等后端 run_prompt 返回。**异步路径**见下方 `POST /api/prompt/async`（P1-B1）。
 
-### `POST /api/abort`
+---
 
-中止当前 in-flight prompt。
+### `POST /api/prompt/async`（P1-B1）
 
-**Body**（可选）：`{"reason": "user clicked stop"}`
+异步触发 prompt——立即返回 `request_id` + HTTP 202；后台 task 执行 Agent。
 
-**Response 200**: `{"ok": true}`
+请求 Body 与同步 `POST /api/prompt` **完全一致**（text / session_id / file_ids / skill_names / skill_selection）。
+
+**完整乐观校验**：所有 4xx 错误（400 参数 / 404 session 不存在 / 403 跨 session / 400 unknown skill）在校验阶段抛出，**不创建 request record**——调用方立即收到 4xx。
+
+**Response 202**（立即返回）:
+
+```json
+{
+  "ok": true,
+  "request_id": "req_...",
+  "session_id": "sess-...",
+  "status": "queued",
+  "events_url": "/api/events?session_id=sess-...",
+  "request_url": "/api/requests/req-...",
+  "abort_url": "/api/requests/req-.../abort"
+}
+```
+
+**Response 503**: server 正在 shutdown（`shutting_down=True`）。
+
+**并发限制**（single harness）：
+- 全局单 active request（`_ensure_idle` 检查 state.running + harness.context.phase + agent.state.status）→ 第二个请求 409
+- `session_id` 字段保留为未来扩展点；当前 single harness 下 session 级并发检查不会触发（harness busy 检查先 reject）
+
+---
+
+### `GET /api/requests/{request_id}`（P1-B1）
+
+查询单个 request 状态。active + history 都会查。
+
+**Response 200**:
+
+```json
+{
+  "request_id": "req_...",
+  "session_id": "sess-...",
+  "status": "running",
+  "created_at": "2026-07-12T12:34:56.789Z",
+  "started_at": "2026-07-12T12:34:56.790Z",
+  "ended_at": null,
+  "error": null,
+  "error_type": null,
+  "abort_reason": null,
+  "result_summary": null,
+  "event_start_sequence": null,
+  "event_end_sequence": null
+}
+```
+
+`status` ∈ `queued | running | completed | error | aborted`。
+
+`result_summary`（仅 completed）: `{message_count, applied_skill_names, session_id}`——**不含** message 全文 / GLM key / MCP env / system prompt。
+
+`event_start_sequence` / `event_end_sequence` 字段 P1-B1 占位 `null`，P1-B2 起 envelope 改造后填充。
+
+**Response 404**: request 不存在（既不在 active 也不在 history）。
+
+---
+
+### `POST /api/requests/{request_id}/abort`（P1-B1）
+
+abort 单个 request——幂等。
+
+**Body**（可选）: `{"reason": "user_requested"}`
+
+**行为**:
+- `queued`: cancel task + 设 status=aborted
+- `running`: 调 `harness.abort(reason)`（不 cancel task，让模型 finalize）+ 设 `abort_reason` flag → runner 在 success 路径检查 flag 设 status=aborted
+- `completed` / `error` / `aborted`: 幂等返回当前状态
+
+**Response 200**:
+
+```json
+{
+  "ok": true,
+  "request_id": "req_...",
+  "status": "aborted",
+  "abort_reason": "user_requested"
+}
+```
+
+**Response 404**: request 不存在。
+
+---
+
+### `POST /api/abort`（P1-B1 兼容别名）
+
+兼容旧前端 Stop 按钮——若存在 active request 则转发到 `_abort_request_internal`；否则直调 `harness.abort()`。
+
+**Body**（可选）: `{"reason": "..."}`
+
+**Response 200**: `{"ok": true, "request_id"?: "req_...", "status"?: "aborted", ...}`（有 active request 时返回详情，否则只返 `{"ok": true}`）
+
+---
+
+## Request History（P1-B1）
+
+- `WebAppState.active_requests: dict[request_id → WebRunRequest]` — 运行中或刚结束
+- `WebAppState.active_request_by_session: dict[session_id → request_id]` — session 级 active 映射（单 active per session）
+- `WebAppState.request_history: deque[WebRunRequest]`（maxlen=100，可经 `create_app(request_history_maxlen=...)` 覆盖）
+- 完成的 request 从 active 移到 history；`_find_request` 同时查两者
+- `task` / `payload` 字段仅内存——**不进 JSON response**
+- `error` / `error_type` 字段是 `safe_error()` 截断版（≤500 字符），不输出 traceback 全文
 
 ### `POST /api/reset`
 

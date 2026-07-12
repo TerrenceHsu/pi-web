@@ -78,17 +78,39 @@ tests/
 │   ├── GET /api/skills/{name} 默认无 prompt / ?include_prompt=true 默认 403 / allow + localhost 200
 │   └── POST /api/prompt skill_names / skill_selection 合并去重 / unknown skill → 400（不再 500）
 │
-└── test_web_mcp_api.py                   P0-4 Step 2 MCP API（33 用例）
-    ├── GET /api/mcp/servers 初始为空
-    ├── POST /api/mcp/servers 成功 / 重名 409 / 非法 name 400 / 空 command 400 / bad args 400 / bad env 400
-    ├── **env value 绝不出现在任何 response（强校验）**
-    ├── POST /api/mcp/servers/{name}/test 成功（fake stdio）/ 不污染 harness / 失败 502 / 不存在 404 / 不写 state
-    ├── POST /enable / disable + GET /api/mcp/tools 看到 tools / disabled 看不到
-    ├── DELETE /api/mcp/servers/{name}（先 disable 释放 transport；清孤儿 disabled tools）
-    ├── POST /api/mcp/tools/{tool_name}/disable 真实 unregister / enable 重新 register
-    ├── invalid tool_name → 400 / unknown tool → 404 / server disabled → 409 / 幂等
-    └── disable filter survives server refresh（关键回归点）
+├── test_web_mcp_api.py                   P0-4 Step 2 MCP API（33 用例）
+│   ├── GET /api/mcp/servers 初始为空
+│   ├── POST /api/mcp/servers 成功 / 重名 409 / 非法 name 400 / 空 command 400 / bad args 400 / bad env 400
+│   ├── **env value 绝不出现在任何 response（强校验）**
+│   ├── POST /api/mcp/servers/{name}/test 成功（fake stdio）/ 不污染 harness / 失败 502 / 不存在 404 / 不写 state
+│   ├── POST /enable / disable + GET /api/mcp/tools 看到 tools / disabled 看不到
+│   ├── DELETE /api/mcp/servers/{name}（先 disable 释放 transport；清孤儿 disabled tools）
+│   ├── POST /api/mcp/tools/{tool_name}/disable 真实 unregister / enable 重新 register
+│   ├── invalid tool_name → 400 / unknown tool → 404 / server disabled → 409 / 幂等
+│   └── disable filter survives server refresh（关键回归点）
+│
+└── test_web_prompt_async.py              P1-B1 异步 prompt + request registry（20 用例，默认运行）
+    ├── POST /api/prompt/async 202 + request_id 立即返回（delayed FakeClient 验证）
+    ├── GET /api/requests/{id} status 流转 queued → running → completed
+    ├── messages 持久化到 session / file_ids / skill_names 注入
+    ├── 4xx 校验失败不创建 request（unknown skill / missing file / empty text）
+    ├── 并发 409（同 session + 全局 harness busy）
+    ├── harness 异常 → status=error + safe_error
+    ├── abort running / completed 幂等 / unknown 404
+    ├── shutdown 收敛 active task
+    └── 旧 POST /api/prompt + POST /api/abort 兼容别名验证
+
+test_web_event_envelope.py               P1-B2 WebEventEnvelope + 去重（11 用例，默认运行）
+    ├── envelope 7 字段 schema（event_id/request_id/session_id/sequence/type/timestamp/payload）
+    ├── event_id 唯一 / sequence 全局单调递增
+    ├── prompt 事件关联正确 request_id/session_id
+    ├── async request 记录 event_start/end_sequence
+    ├── GET /api/events 过滤：after_sequence / session_id / request_id / limit
+    ├── buffer 截断后 gap=true（first_sequence 自动跟随 head）
+    └── envelope.payload 保留原 AgentEvent 字段 + _received_at_ms（向后兼容）
 ```
+
+总计：**Web Claude P0 MVP 共 ~259 个 web 相关用例**（v0.0.22 baseline 25 + P0-1 sqlite 30+13 + P0-2 files 33+22 + P0-3 file tools 27+15 + P0-5 system prompt 17 + P0-4 Step 1 skills 26 + P0-4 Step 2 mcp 33 + step-20 serializers/state/app 51 + P1-B1 async prompt 20 + P1-B2 envelope 11 ≈ 259）。
 
 总计：**Web Claude P0 MVP 共 ~228 个 web 相关用例**（v0.0.22 baseline 25 + P0-1 sqlite 30+13 + P0-2 files 33+22 + P0-3 file tools 27+15 + P0-5 system prompt 17 + P0-4 Step 1 skills 26 + P0-4 Step 2 mcp 33 + step-20 serializers/state/app 51 ≈ 228）。
 
@@ -172,6 +194,92 @@ cd src/pi_agent_core_py/web/frontend && npm install && npm run build
 ### Session 管理
 24. ✅ 重命名 session（hover → ✎）
 25. ✅ 删除 session（hover → × + confirm）→ 自动切到剩余 / 新建
+
+---
+
+## P1-B1 Async Prompt + Request Registry（2026-07-12）
+
+详细报告：[`docs/P1_B_VALIDATION_REPORT.md`](P1_B_VALIDATION_REPORT.md)。
+
+### 新增测试
+
+- `tests/test_web_prompt_async.py`（20 用例，**默认运行**——Fast FakeClient + TestClient，无外部依赖）
+
+### 新增 endpoint
+
+| Method | Path | 说明 |
+|---|---|---|
+| POST | `/api/prompt/async` | 异步触发 prompt，立即返回 202 + request_id |
+| GET | `/api/requests/{request_id}` | 查询 request status（active + history） |
+| POST | `/api/requests/{request_id}/abort` | 幂等 abort |
+| POST | `/api/abort` | **保留为兼容别名**——转发到 active request |
+
+### 运行命令
+
+```bash
+# B1 测试单独跑
+PYTHONPATH=src /d/miniconda/envs/pipy/python.exe -m pytest \
+  tests/test_web_prompt_async.py -v \
+  -p no:cacheprovider -W "ignore::pytest.PytestUnraisableExceptionWarning"
+
+# 验证旧 POST /api/prompt 不回归
+PYTHONPATH=src /d/miniconda/envs/pipy/python.exe -m pytest \
+  tests/test_integration_web_server.py tests/test_web_sessions_sqlite.py \
+  tests/test_prompt_file_injection.py tests/test_web_skills_api.py -v \
+  -p no:cacheprovider -W "ignore::pytest.PytestUnraisableExceptionWarning"
+```
+
+### 关键测试 fixture
+
+`web_client` / `web_client_slow` 用 `with TestClient(app) as client` 让 lifespan + portal 持续——background task 跨 request 正常跑（必要条件，否则 task 在 response 后被 cancel）。
+
+---
+
+## P1-B2 WebEventEnvelope + Event Dedup（2026-07-12）
+
+详细报告：[`docs/P1_B2_VALIDATION_REPORT.md`](P1_B2_VALIDATION_REPORT.md)。
+
+### 新增测试
+
+- `tests/test_web_event_envelope.py`（11 用例，**默认运行**）
+
+### 新增/变更行为
+
+| 区域 | 变更 |
+|---|---|
+| 事件 schema | 所有 WS / SSE / GET /api/events 事件用统一 `WebEventEnvelope`（7 字段：event_id / request_id / session_id / sequence / type / timestamp / payload） |
+| 序列号 | 全局单调递增 `state.next_event_sequence`；广播入口一次性分配 |
+| buffer | `TraceEventBuffer.first_sequence` / `last_sequence` 跟随 buffer head 自动更新；maxlen 截断时自动调整 |
+| GET /api/events | 加 `?session_id` / `?request_id` / `?after_sequence` / `?limit`；响应含 `first_available_sequence` / `last_available_sequence` / `has_more` / `gap` |
+| 前端 chatStore | 加 `seenEventIds` / `lastSequenceBySession` / `gapDetected` / `currentRequestId` / `activeSessionId` state；handleEvent envelope-aware 去重 + session 隔离 + gap 检测 |
+| 未改 | `sendPrompt`（仍用同步 /api/prompt）/ Stop 按钮（仍用旧 /api/abort）/ WS reconnect（B3 任务）|
+
+### 运行命令
+
+```bash
+# B2 测试单独跑
+PYTHONPATH=src /d/miniconda/envs/pipy/python.exe -m pytest \
+  tests/test_web_event_envelope.py -v \
+  -p no:cacheprovider -W "ignore::pytest.PytestUnraisableExceptionWarning"
+
+# 验证旧 12 e2e 不回归
+cd tests/e2e && npm run test:e2e
+```
+
+### Envelope schema（前后端契约）
+
+```typescript
+// frontend/src/types/events.ts
+interface WebEventEnvelope {
+  event_id: string         // "evt_<uuid4 hex>"
+  request_id: string | null
+  session_id: string | null
+  sequence: number         // 全局单调递增
+  type: string             // 与 payload.type 冗余
+  timestamp: string        // ISO8601 UTC
+  payload: Record<string, any>  // 原 AgentEvent serialize_event 结果
+}
+```
 
 ---
 

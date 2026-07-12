@@ -32,6 +32,8 @@ function formatTime(ts?: number): string {
 async function activateSession(id: string) {
   if (id === activeId.value) return
   sessionStore.setActiveSession(id)
+  // P1-B2.1: 同步 chatStore.activeSessionId + reset turn cards
+  chatStore.setActiveSession(id)
   chatStore.resetForSession()
   await Promise.all([
     chatStore.loadMessages(id),
@@ -44,6 +46,8 @@ async function newChat() {
   try {
     const s = await sessionStore.createNewSession()
     if (s) {
+      // P1-B2.1: 新建 session 后同步 chatStore.activeSessionId
+      chatStore.setActiveSession(s.id)
       chatStore.resetForSession()
       fileStore.resetForSession()
       await Promise.all([
@@ -74,6 +78,8 @@ async function deleteSession(id: string) {
     if (!sessionStore.activeSessionId) {
       await newChat()
     } else if (sessionStore.activeSessionId) {
+      // P1-B2.1: 同步 chatStore.activeSessionId 到新的 active session
+      chatStore.setActiveSession(sessionStore.activeSessionId)
       chatStore.resetForSession()
       fileStore.resetForSession()
       await Promise.all([

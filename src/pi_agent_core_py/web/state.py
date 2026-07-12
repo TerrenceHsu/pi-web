@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from typing import Any
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -41,6 +43,8 @@ class TraceEventBuffer:
     - 超过 max_size 自动丢最旧（deque maxlen 行为）
     - list() 返回浅拷贝（防止外部 mutate）
     - clear() 清空所有事件
+    - first_sequence / last_sequence 跟踪当前 buffer 内 sequence 范围
+      （P1-B2：用于 GET /api/events after_sequence gap 检测）
 
     单 event loop 内 append/list/clear 不加锁——FastAPI / asyncio
     单 loop 安全；多 loop / 多线程场景需要自己加锁（Step 20 不做）。
@@ -53,16 +57,32 @@ class TraceEventBuffer:
             )
         self.max_size = max_size
         self._events: deque[dict[str, Any]] = deque(maxlen=max_size)
+        # P1-B2: sequence 跟踪——None 表示 buffer 空
+        self.first_sequence: int | None = None
+        self.last_sequence: int | None = None
 
     def append(self, event: dict[str, Any]) -> None:
         """追加事件。
 
         假设 event 已经是 JSON-safe dict；本方法不做二次校验（性能考虑）。
         若 event 不是 dict，静默跳过（防御坏调用方，不抛错）。
+
+        P1-B2：first_sequence / last_sequence 跟随 buffer 实际头尾 sequence。
+        deque maxlen 截断最旧时 first_sequence 自动更新到新的 head。
         """
         if not isinstance(event, dict):
             return
         self._events.append(event)
+        # last_sequence = 刚 append 的 sequence
+        seq = event.get("sequence")
+        if isinstance(seq, int):
+            self.last_sequence = seq
+        # first_sequence = buffer 实际 head 的 sequence（截断后会变）
+        if self._events:
+            head = self._events[0]
+            head_seq = head.get("sequence") if isinstance(head, dict) else None
+            if isinstance(head_seq, int):
+                self.first_sequence = head_seq
 
     def list(self) -> list[dict[str, Any]]:
         """返回 list 浅拷贝（list 顺序保持，但内部 dict 仍是原引用）。
@@ -75,6 +95,8 @@ class TraceEventBuffer:
 
     def clear(self) -> None:
         self._events.clear()
+        self.first_sequence = None
+        self.last_sequence = None
 
     def __len__(self) -> int:
         return len(self._events)
@@ -138,6 +160,13 @@ class WebAppState(BaseModel):
                              （mcp__{server}__{tool} 形式）；再次 enable 时会
                              重新应用过滤
 
+    P1-B1 异步架构字段：
+        active_requests          request_id → WebRunRequest（运行中或刚结束）
+        active_request_by_session  session_id → request_id（单 active per session）
+        request_history          deque[WebRunRequest]（completed/aborted/error 后转入；
+                                 maxlen=request_history_maxlen，默认 100）
+        shutting_down            lifespan shutdown 阶段设 True，拒绝新 async prompt
+
     arbitrary_types_allowed=True：harness / event_buffer / event_queue /
     session_store 都不是 Pydantic 原生类型。
     """
@@ -159,6 +188,73 @@ class WebAppState(BaseModel):
     mcp_server_configs: dict[str, WebMCPServerConfig] = Field(default_factory=dict)
     # P0-4 Step 2: disabled MCP tool 全名集合
     disabled_mcp_tools: set[str] = Field(default_factory=set)
+    # P1-B1: 异步 prompt request registry
+    active_requests: dict[str, Any] = Field(default_factory=dict)
+    active_request_by_session: dict[str, str] = Field(default_factory=dict)
+    request_history: Any = Field(default_factory=lambda: deque(maxlen=100))
+    request_history_maxlen: int = 100
+    shutting_down: bool = False
+    # P1-B2: 全局单调递增 event sequence + 当前 active request context
+    # current_request_id / current_request_session_id 在 _run_prompt_background
+    # set/clear（不用 contextvar——hook 在 Agent 内部 task 触发，跨 task 不可靠）
+    next_event_sequence: int = 1
+    current_request_id: str | None = None
+    current_request_session_id: str | None = None
 
 
-__all__ = ["TraceEventBuffer", "WebAppState", "WebMCPServerConfig"]
+# ============================================================================
+# P1-B1: WebRunRequest —— 异步 prompt 请求 record
+# ============================================================================
+
+RequestStatus = Literal["queued", "running", "completed", "error", "aborted"]
+
+
+@dataclass
+class WebRunRequest:
+    """异步 prompt 请求 record。
+
+    生命周期：queued → running → (completed | error | aborted)。
+    完成后从 active_requests 移除，放入 request_history。
+
+    字段分两类：
+        **JSON-safe**（serialize_request 输出）：
+            id / session_id / status / created_at / started_at / ended_at /
+            error / error_type / abort_reason / result_summary /
+            event_start_sequence / event_end_sequence
+        **仅内存**（不进 JSON）：
+            task（asyncio.Task 引用——用于 abort / shutdown 收敛）
+            payload（原始请求 dict——用于 debug，**绝不**进 JSON response；
+                    不保存 secret 字段的副本，原 payload 中的 file_ids 引用
+                    不构成 secret 泄露）
+
+    安全约束（用户原指令 §10）：
+        - error / error_type 仅 safe summary（safe_error 截断）
+        - result_summary 不含 message 全文，只含计数 / stop_reason / applied_skills
+        - 不保存 GLM API key / MCP env values / 完整 system prompt
+    """
+
+    id: str
+    session_id: str | None
+    status: RequestStatus = "queued"
+    created_at: datetime | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    error: str | None = None
+    error_type: str | None = None
+    abort_reason: str | None = None
+    result_summary: dict[str, Any] | None = None
+    # P1-B2 会填充这两个字段（事件 sequence 范围）；P1-B1 占位
+    event_start_sequence: int | None = None
+    event_end_sequence: int | None = None
+    # 仅内存——不进 JSON
+    task: asyncio.Task | None = field(default=None, repr=False)
+    payload: dict[str, Any] | None = field(default=None, repr=False)
+
+
+__all__ = [
+    "TraceEventBuffer",
+    "WebAppState",
+    "WebMCPServerConfig",
+    "WebRunRequest",
+    "RequestStatus",
+]

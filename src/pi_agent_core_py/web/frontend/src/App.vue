@@ -30,6 +30,8 @@ onMounted(async () => {
   // 2. 当前 session 的 messages / files
   const sid = sessionStore.activeSessionId
   if (sid) {
+    // P1-B2.1: 同步 chatStore.activeSessionId——handleEvent 用它做 session 过滤
+    chatStore.setActiveSession(sid)
     await Promise.all([
       chatStore.loadMessages(sid),
       fileStore.loadFiles(sid),
