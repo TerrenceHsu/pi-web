@@ -1164,3 +1164,132 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
 
 **P0 MVP freeze candidate 已完整就绪。下一步进入 P1 或 freeze。**
 
+---
+
+## ✅ P1-A 真实环境验证（2026-07-12，tag `v0.0.23.1-web-claude-validation` @ `80a2f6f`）
+
+- A1 API smoke 3 项（并发 409 / 重名 SKILL 409 / 不存在命令 502）
+- A2 Playwright MCP tool lifecycle 真链路（add→test→enable→disable tool→enable→disable server→delete）
+- A3 真实 GLM e2e_probe 多轮 tool_use（PROBE_OK_ALPHA_7F3A 防幻觉 token）
+
+详见 `docs/P1_A_VALIDATION_REPORT.md` / `docs/P1_A_BROWSER_SMOKE_REPORT.md`。
+
+---
+
+## ✅ P1-B 异步架构 + WebEventEnvelope（2026-07-12，tag `v0.0.24-async-architecture` @ `79cea14`）
+
+**B1 异步 Prompt + Request Registry**：POST /api/prompt/async → 202 + request_id → 后台 asyncio.Task；GET/POST /api/requests/{id}[/abort]；lifespan shutdown 收敛 active task。
+
+**B2 WebEventEnvelope + Event Dedup**：_web_event_hook 一次性生成 envelope（7 字段）；全局 sequence 单调；GET /api/events 加 session_id/request_id/after_sequence/limit + gap 检测；前端 chatStore seenEventIds FIFO / lastGlobalSequence / gapDetected。
+
+**B2.1 Hardening**：gap 检测改全局 lastGlobalSequence；chatStore.setActiveSession() + 4 切换路径同步；seenEventIds FIFO 淘汰（1000 上限）。
+
+**B3 Async UI + Reconnect Replay**：前端切 async prompt；pendingEventsByRequest 缓冲；belongsToCurrentRequest 隔离 turn-control 事件；replayFromCursor + pollRequestUntilTerminal + abortRun + findActiveRequest；WS hello 加 first/last_available_sequence；__e2eHooks 仅 E2E build 暴露。
+
+详见 `docs/P1_B_VALIDATION_REPORT.md` / `B2_VALIDATION_REPORT.md` / `B3_VALIDATION_REPORT.md`。
+
+---
+
+## ✅ P1-C Extension Persistence（2026-07-13，tag `v0.0.25-extension-persistence` @ `b4640aa`）
+
+- **C1 ExtensionSQLiteStore**：3 表 + schema_meta v1 单例；共享 session_store connection；逐行隔离 decode；4 个不变量
+- **C2 Skill Persistence**：upload/enable/disable 加 DB 写入；DELETE /api/skills/{name}；startup restore（sha256 + 强制 source_kind=upload）
+- **C3 MCP Persistence**：add/enable/disable server+tool 加 DB 写入；desired_enabled vs attached；env 只持久化 env_keys；结构化 tool key；delete server cascade
+- **C4 Startup Restore + Failure Isolation**：_resolve_mcp_env；_safe_extension_error；_restore_mcp_servers（10s timeout + 失败隔离）；missing env → needs_env + missing_env_keys
+- **C5 Browser Validation**：5 persistence E2E + 安全扫描（P1C_SECRET_MARKER_7F3A91）
+
+详见 `docs/P1_C_VALIDATION_REPORT.md` / `docs/P1_C_PERSISTENCE_ARCHITECTURE.md`。
+
+---
+
+## ✅ P1-D1 Export Markdown（2026-07-14，tag `v0.0.26-export-markdown` @ `ebbc896`）
+
+**核心链路**：SQLite messages → 按 idx ASC → 只映射 user/assistant → canonical Markdown renderer → 大小检查 → 安全 Content-Disposition → 浏览器 Blob 下载。
+
+新增 / 修改：
+- `src/pi_agent_core_py/web/markdown_export.py`：纯函数 renderer（ExportMessage + render_session_markdown）；filename sanitize（path traversal / 控制字符 / 80 字符 / RFC 5987 UTF-8）；MAX_EXPORT_CHARS=2M / MAX_EXPORT_BYTES=5MB
+- `src/pi_agent_core_py/web/app.py` +92 行：GET /api/sessions/{sid}/export/markdown
+- `frontend/src/api/client.ts` +80 行：requestBlob + downloadBlob（**try/finally + setTimeout(0)** 释放 Blob URL）
+- `frontend/src/api/sessions.ts` +13 行：exportMarkdown
+- `frontend/src/components/layout/SessionSidebar.vue` +19 行：Export 按钮
+- `tests/test_web_markdown_export.py`：22 用例（含审核 4 补测：空 session / 404 双路径 / CRLF 阻断 / active draft 不导出）
+
+审核三道边界：
+1. Blob URL 释放——downloadBlob 改 try/finally（审核推荐）+ setTimeout(0) 防 Safari 中断
+2. Content-Disposition CRLF——sanitize_filename \\x00-\\x1f 正则阻断；test_21 显式证明
+3. MCP env value 不导出（准确表述）——按 role 过滤、不读 mcp_servers 表；用户正文原样导出（不扫描 secret 字符串）
+
+测试基线：
+- offline pytest: **990 passed**（986 baseline + 4 新增）
+- coverage: **90.38%** ≥ 75% PASS
+- ruff: All checks passed
+- frontend build (e2e): 137.53 KB JS / 39.80 KB CSS
+- Playwright e2e: **26/28**——两个失败（mcp-tool-lifecycle / Smoke 6）是 **P1-C 持久化引入的跨测试状态污染**；stash + 重测证明 HEAD `b4640aa` 单独跑同样 26/28——非 D1 引入回归
+
+---
+
+## 🔄 P1-D2 Regenerate（详细设计阶段，2026-07-14）
+
+**状态**：详细设计已提交（commit `5252ff5`），等用户审核；**暂不编码**。
+
+### 已落地
+
+- **D2-1 Message ID 稳定性 characterization test**（commit `a124697`）：
+  - 2 个 xfail strict=True 锁定当前 `replace_messages()` DELETE+INSERT 重新生成所有历史 message ID 的行为
+  - D2 修复 `replace_messages` 为 diff-based sync 后，移除 xfail 标记自然变 GREEN
+  - 测试路径：`tests/test_d2_message_id_stability.py`
+
+- **D2 详细设计文档**（commit `5252ff5`，~740 行）：
+  - 路径：`docs/P1_D2_REGENERATE_DESIGN.md`
+  - 回答审核员八个问题（replace_messages 稳定性 / 候选保存位置 / messages 表更新时机 / finalize transaction SQL / 普通 prompt 不受影响 / error/abort 恢复 / restart 处理 / Harness context 同步）
+  - revision schema（v1 → v2 migration）
+  - _execute_prompt / _persist_normal / _persist_regeneration 拆分
+  - 8 commit 实现路径已规划
+  - 4 个决策点待用户确认
+
+### 核心架构（设计阶段）
+
+1. **Revision schema**：`web_message_revisions(assistant_message_id, revision_number, status, content_json, is_active)` + UNIQUE(assistant_message_id, revision_number)
+2. **Message ID 稳定性**：diff-based replace_messages——UPDATE 优先于 DELETE-INSERT，按 (session_id, idx) 定位
+3. **非破坏性 finalize**：单 BEGIN IMMEDIATE transaction 内 5 SQL 原子切换 active content；失败时 messages 表不动
+4. **状态枚举**：running / completed / superseded / error / aborted / interrupted（restart sweep）
+
+### 待用户确认（4 个决策点）
+
+1. revision 0 延迟创建（推荐）vs 每次 prompt 都创建
+2. 流式期间不写 revision.content_json（推荐）vs 周期 flush
+3. revision count 不限制（推荐）vs 硬限制 20
+4. active revision 切换放 D2.1（推荐）vs D2 直接做
+
+### 阻塞依赖
+
+- D2 编码开始前必须先 commit 1：修 `replace_messages` 为 diff sync，让 characterization test 的 xfail 转 GREEN
+
+---
+
+## ⏳ P1-D3 PDF Text Extraction（边界冲突待解决）
+
+**未开始**。已知冲突：
+- `tools/view_file.py` 修改边界（允许 PDF adapter vs 不改 tools/）
+- asyncio.to_thread + wait_for 是软超时（不是硬取消）
+- PDF metadata 存储位置（FileRef 需加 metadata 字段）
+- 失败文件清理策略（方案 A 整体拒绝 vs 方案 B 保存但标记）
+
+---
+
+## ⏳ P1-D4 E2E + Docs + Release（等 D2/D3）
+
+- tag `v0.0.27-product-actions`（待定）
+
+---
+
+## 当前测试基线（HEAD `5252ff5`）
+
+| 命令 | 结果 |
+|---|---|
+| `pytest -m "not slow and not integration and not docker"` | **990 passed**（~60s） |
+| Coverage gate | **90.38%** ≥ 75% ✅ |
+| Playwright e2e（build:e2e） | **26/28**（已知 P1-C 跨测试污染） |
+| ruff | All checks passed |
+| Frontend production build | 137.53 KB JS / 39.80 KB CSS |
+
