@@ -49,6 +49,7 @@ from fastapi.responses import (
     FileResponse,
     HTMLResponse,
     JSONResponse,
+    Response,
     StreamingResponse,
 )
 
@@ -1544,6 +1545,97 @@ def create_app(
             except Exception:
                 pass
         return {"ok": True, "deleted_files": deleted_files}
+
+    # ========================================================================
+    # P1-D1: Export Markdown
+    # ========================================================================
+
+    @app.get("/api/sessions/{sid}/export/markdown")
+    async def export_session_markdown(
+        sid: str,
+    ) -> Any:
+        """导出 session 为 Markdown 文件——基于 SQLite 持久化消息。
+
+        **安全**（用户原指令 D1 §4.3/§4.8）：
+        - 只导出 user / assistant 正文
+        - 不导出 system prompt / request_id / sequence / MCP env / raw tool args / trace
+        - HTML 保留用户原文（不执行/不删除）
+        - filename 做 path traversal + 控制字符清理
+        - 导出超限返回 413（不静默截断）
+
+        **D2 复用**：renderer 是纯函数；D2 revision 过滤在 API 层完成后传入。
+        """
+        from datetime import UTC, datetime
+
+        from ..session_sqlite import SessionNotFoundError
+        from .markdown_export import (
+            MarkdownExportOptions,
+            build_content_disposition,
+            build_export_filename,
+            check_export_size,
+            messages_to_export_items,
+            render_session_markdown,
+        )
+
+        store = state.session_store
+        if store is None:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "session store not initialized"},
+            )
+
+        # 读 session
+        try:
+            session = await store.get_session(sid)
+        except SessionNotFoundError:
+            session = None
+        if session is None:
+            return JSONResponse(
+                status_code=404,
+                content={"detail": f"session {sid!r} not found"},
+            )
+
+        # 读 messages（按 idx ASC——SQLite store 保证）
+        try:
+            messages = await store.list_messages(sid)
+        except SessionNotFoundError:
+            return JSONResponse(
+                status_code=404,
+                content={"detail": f"session {sid!r} not found"},
+            )
+
+        # 构造 ExportMessage list
+        export_items = messages_to_export_items(messages)
+
+        # render
+        exported_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+        markdown = render_session_markdown(
+            session_title=session.title or "Session",
+            messages=export_items,
+            options=MarkdownExportOptions(),
+            exported_at=exported_at,
+        )
+
+        # 大小检查
+        size_error = check_export_size(markdown)
+        if size_error is not None:
+            return JSONResponse(
+                status_code=413,
+                content={"detail": size_error},
+            )
+
+        # filename
+        date_str = datetime.now(UTC).strftime("%Y%m%d")
+        filename = build_export_filename(session.title or "", date_str)
+
+        # 响应
+        return Response(
+            content=markdown,
+            media_type="text/markdown; charset=utf-8",
+            headers={
+                "Content-Disposition": build_content_disposition(filename),
+            },
+        )
 
     # ========================================================================
     # Files（P0-2）

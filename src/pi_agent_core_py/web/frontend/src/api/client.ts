@@ -151,3 +151,83 @@ function buildUrl(path: string, query?: Record<string, any>): string {
   const qs = params.toString()
   return API_BASE + path + (qs ? `?${qs}` : "")
 }
+
+/**
+ * P1-D1: 下载 blob——用于 Export Markdown 等文件下载场景。
+ *
+ * - GET 请求，Accept: application/octet-stream
+ * - 返回 { blob, filename }——filename 从 Content-Disposition 提取
+ * - 非 2xx → 抛 ApiError
+ */
+export async function requestBlob(
+  path: string,
+): Promise<{ blob: Blob; filename: string | null }> {
+  const url = API_BASE + path
+  let resp: Response
+  try {
+    resp = await fetch(url, {
+      method: "GET",
+      headers: { Accept: "*/*" },
+    })
+  } catch (e: any) {
+    if (e?.name === "AbortError") throw e
+    throw new ApiError(0, `network error: ${e?.message ?? e}`, null)
+  }
+
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "")
+    let payload: any = text
+    try {
+      payload = JSON.parse(text)
+    } catch {
+      // 非 JSON——保留原文
+    }
+    const detail =
+      (payload && typeof payload === "object" && (payload.detail || payload.error)) ||
+      resp.statusText ||
+      "download failed"
+    throw new ApiError(resp.status, String(detail), payload)
+  }
+
+  const blob = await resp.blob()
+  // 从 Content-Disposition 提取 filename
+  const cd = resp.headers.get("content-disposition") || ""
+  let filename: string | null = null
+  // RFC 5987 filename*=UTF-8''...
+  const filenameStarMatch = cd.match(/filename\*=UTF-8''(.+?)(?:;|$)/i)
+  if (filenameStarMatch) {
+    try {
+      filename = decodeURIComponent(filenameStarMatch[1])
+    } catch {
+      filename = filenameStarMatch[1]
+    }
+  } else {
+    const filenameMatch = cd.match(/filename="?(.+?)"?(?:;|$)/i)
+    if (filenameMatch) {
+      filename = filenameMatch[1]
+    }
+  }
+  return { blob, filename }
+}
+
+/**
+ * P1-D1: 触发浏览器下载——从 blob + filename 创建临时 <a> 并 click。
+ *
+ * Blob URL 必须释放——多次导出不能积累。
+ * 用 try/finally 保证 click 抛异常时 URL 仍被回收；
+ * setTimeout(0) 推迟到下一个 macrotask，避免同步 revoke 中断 Safari 下载。
+ */
+export function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+  try {
+    const a = document.createElement("a")
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+  } finally {
+    // setTimeout(0)——让浏览器先把 download 任务派发出去
+    setTimeout(() => URL.revokeObjectURL(url), 0)
+  }
+}

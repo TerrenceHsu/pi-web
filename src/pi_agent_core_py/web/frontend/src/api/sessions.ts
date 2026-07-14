@@ -42,3 +42,16 @@ export function deleteSession(sessionId: string) {
     { method: "DELETE" },
   )
 }
+
+/**
+ * P1-D1: GET /api/sessions/{sid}/export/markdown——导出 session 为 Markdown。
+ *
+ * 返回 blob + filename（从 Content-Disposition 提取）。
+ * 调用方用 downloadBlob 触发浏览器下载。
+ */
+export function exportMarkdown(sessionId: string) {
+  // 动态 import 避免循环依赖
+  return import("./client").then(({ requestBlob }) =>
+    requestBlob(`/api/sessions/${encodeURIComponent(sessionId)}/export/markdown`),
+  )
+}

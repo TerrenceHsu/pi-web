@@ -91,6 +91,18 @@ async function deleteSession(id: string) {
     console.error("deleteSession failed", e)
   }
 }
+
+async function exportSession(id: string) {
+  try {
+    const { exportMarkdown } = await import("../../api/sessions")
+    const { downloadBlob } = await import("../../api/client")
+    const { blob, filename } = await exportMarkdown(id)
+    downloadBlob(blob, filename || "chat-export.md")
+  } catch (e: any) {
+    console.error("exportSession failed", e)
+    chatStore.error = e?.message ? `Export failed: ${e.message}` : "Export failed"
+  }
+}
 </script>
 
 <template>
@@ -130,6 +142,13 @@ async function deleteSession(id: string) {
           <div class="session-item-meta">{{ formatTime(s.updated_at) }}</div>
         </div>
         <div class="session-item-actions" @click.stop>
+          <button
+            class="icon-btn"
+            data-testid="session-export-btn"
+            title="Export Markdown"
+            aria-label="Export Markdown"
+            @click="exportSession(s.id)"
+          >⤓</button>
           <button
             class="icon-btn"
             data-testid="session-rename-btn"
