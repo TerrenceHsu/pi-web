@@ -38,6 +38,11 @@ src/pi_agent_core_py/web/static/index.html
 # Real-env dev data (persistent sqlite + uploads from local dev runs)
 dev_data/
 
+# Dev-mode sqlite from local web runs (created by uvicorn in CWD)
+dev_sessions.db
+dev_sessions.db-shm
+dev_sessions.db-wal
+
 # Playwright e2e artifacts (trace / screenshot / video on failure)
 tests/e2e/test-results/
 

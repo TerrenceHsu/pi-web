@@ -3,6 +3,7 @@
 > **目标**：在 Step 1–21 baseline 与 v0.0.22 Web backend stable baseline 之上，把项目从「agent runtime 调试器」改造为「claude.ai 风格的 Web 端对话助手」。
 >
 > **本版核心调整**：
+>
 > 1. **不再使用右栏调试面板**。页面主结构改为「左侧会话栏 + 中间对话窗口」。
 > 2. **当前 turn 的运行信息直接展示在中间对话流中**，像 assistant 回答一样出现，但使用低对比度、可折叠、淡化样式。
 > 3. **支持用户自己添加 Skills 和 MCP server**，并在中间窗口内以可视化卡片展示启用状态、工具列表、连接结果和调用过程。
@@ -10,6 +11,7 @@
 > **范围**：仅 Web 端；不做 CLI；不操作本地文件；单 provider（GLM）；支持 Skills + MCP；不做跨 session 记忆；不做多用户系统。
 >
 > **当前基线**（Web Claude P0 MVP + 全部 post-freeze hotfix 完成）：
+>
 > - Core runtime：Step 1–21 已完成
 > - Web backend：v0.0.22 stable baseline
 > - **Web Claude P0 MVP**：Step 1–8 全部完成 + 4 个真实环境 hotfix + e2e 10/10 + coverage 84.39%
@@ -29,19 +31,20 @@
 
 ## 一、总体设计决策
 
-| 维度 | 选择 | 说明 |
-|---|---|---|
-| 页面结构 | 左侧会话栏 + 中间对话窗口 | 不做右栏调试面板，避免产品形态偏调试器 |
-| Turn 信息展示 | 中间窗口 inline cards | 像 assistant 消息一样展示，但淡化、折叠、低干扰 |
-| Skills | 用户可添加 / 启用 / 禁用 / 查看 | 支持上传 `SKILL.md`，也支持 MCP prompts 转 Skill |
-| MCP | 用户可添加 server / 测试连接 / 启用工具 | 支持 stdio MCP；HTTP MCP 可保留占位 |
-| 调试信息 | 默认隐藏为淡化块 | 事件、工具调用、snapshot、policy decision 都进入当前 turn 的淡化信息块 |
-| 文件 | 仅会话内上传与查看 | 不操作本地文件系统；不做 bash/read/write/edit |
-| Provider | 单 GLM | 不做多 provider 路由 |
-| Session | 线性 session | 不做 fork / branch / branch summary |
-| Memory | 当前 session 内上下文 | 不做跨 session 长期记忆 / 向量记忆 |
-| 权限 | 工具 allowlist + MCP server/tool allowlist | 不做多用户 RBAC，不做路径沙箱 |
-| 部署 | localhost first | 无鉴权，不建议公网暴露 |
+
+| 维度          | 选择                                       | 说明                                                                   |
+| --------------- | -------------------------------------------- | ------------------------------------------------------------------------ |
+| 页面结构      | 左侧会话栏 + 中间对话窗口                  | 不做右栏调试面板，避免产品形态偏调试器                                 |
+| Turn 信息展示 | 中间窗口 inline cards                      | 像 assistant 消息一样展示，但淡化、折叠、低干扰                        |
+| Skills        | 用户可添加 / 启用 / 禁用 / 查看            | 支持上传`SKILL.md`，也支持 MCP prompts 转 Skill                        |
+| MCP           | 用户可添加 server / 测试连接 / 启用工具    | 支持 stdio MCP；HTTP MCP 可保留占位                                    |
+| 调试信息      | 默认隐藏为淡化块                           | 事件、工具调用、snapshot、policy decision 都进入当前 turn 的淡化信息块 |
+| 文件          | 仅会话内上传与查看                         | 不操作本地文件系统；不做 bash/read/write/edit                          |
+| Provider      | 单 GLM                                     | 不做多 provider 路由                                                   |
+| Session       | 线性 session                               | 不做 fork / branch / branch summary                                    |
+| Memory        | 当前 session 内上下文                      | 不做跨 session 长期记忆 / 向量记忆                                     |
+| 权限          | 工具 allowlist + MCP server/tool allowlist | 不做多用户 RBAC，不做路径沙箱                                          |
+| 部署          | localhost first                            | 无鉴权，不建议公网暴露                                                 |
 
 ---
 
@@ -49,20 +52,22 @@
 
 ### Step 进度表
 
-| Step | 内容 | 状态 |
-|---|---|---|
+
+| Step   | 内容                                                                                                                                                     | 状态    |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | --------- |
 | Step 1 | Skills API（`POST /api/skills/upload`、enable/disable、`GET /api/skills/{name}`、`POST /api/prompt` 顶层 `skill_names`；unknown skill web 层预校验 400） | ✅ Done |
-| Step 2 | MCP API（servers CRUD、test connection 不污染 harness、enable/disable、tools enable/disable 真实生效；env values 严格不回显） | ✅ Done |
-| Step 3 | 前端骨架（Pinia + `types/` + `api/` + `stores/` 五个 store；barrel `index.ts` 保证旧 .vue import 不破坏） | ✅ Done |
-| Step 4 | Claude-like 两栏 UI（`AppShell` + `SessionSidebar` + `ChatPanel`；`DeveloperDrawer` 主路径下线） | ✅ Done |
-| Step 5 | Inline Turn Cards + WS mapper（7 个 card 组件 + streaming assistant draft） | ✅ Done |
-| Step 6 | 文件上传 UI（`FileChip` + `AttachmentBar` + `ChatInput` drag-drop + `sendPrompt` 带 `file_ids`) | ✅ Done |
-| Step 7 | Skills/MCP Manager Modal（`Modal.vue` + skills 三件套 + mcp 四件套；env value 防回显四道防线） | ✅ Done |
-| Step 8 | Docs 收尾 + 最终验证（本轮） | ✅ Done |
+| Step 2 | MCP API（servers CRUD、test connection 不污染 harness、enable/disable、tools enable/disable 真实生效；env values 严格不回显）                            | ✅ Done |
+| Step 3 | 前端骨架（Pinia +`types/` + `api/` + `stores/` 五个 store；barrel `index.ts` 保证旧 .vue import 不破坏）                                                 | ✅ Done |
+| Step 4 | Claude-like 两栏 UI（`AppShell` + `SessionSidebar` + `ChatPanel`；`DeveloperDrawer` 主路径下线）                                                         | ✅ Done |
+| Step 5 | Inline Turn Cards + WS mapper（7 个 card 组件 + streaming assistant draft）                                                                              | ✅ Done |
+| Step 6 | 文件上传 UI（`FileChip` + `AttachmentBar` + `ChatInput` drag-drop + `sendPrompt` 带 `file_ids`)                                                          | ✅ Done |
+| Step 7 | Skills/MCP Manager Modal（`Modal.vue` + skills 三件套 + mcp 四件套；env value 防回显四道防线）                                                           | ✅ Done |
+| Step 8 | Docs 收尾 + 最终验证（本轮）                                                                                                                             | ✅ Done |
 
 ### 已完成能力列表（M1+M2+M3+M4+M5 全部就绪）
 
 **后端 API（P0-1 ~ P0-5 + Step 1/2）**：
+
 - Sessions：sqlite 多会话 CRUD（POST / PATCH / DELETE `/api/sessions`，GET `/api/messages?session_id=`）
 - Files：会话级 VirtualFileStore（6 个 endpoints；单文件 25MB / session 总量 100MB）
 - Prompt：`POST /api/prompt` 支持 `session_id` / `file_ids` / `skill_names` / `skill_selection`；unknown skill web 层 400；附件统一注入 `FileBlock`
@@ -71,6 +76,7 @@
 - 文件工具：`list_files` / `view_file`（md / html / csv / parquet / 文本；图片明确 unsupported；PDF 不解析正文）
 
 **前端 UI（P0-4 Step 3–7）**：
+
 - 左侧 `SessionSidebar`（New chat / 会话列表 / 重命名 / 删除；底部 Skills / MCP 按钮挂载 modal）
 - 中间 `ChatPanel`（header 状态 + 消息流 + ChatInput）
 - Inline Turn Cards：`UserMessage` / `AssistantMessage`（streaming draft）/ `TurnInfo` / `ToolCall` / `ToolResult` / `FileRead` / `MCPToolCall` / `SkillUsed` / `Error`
@@ -81,6 +87,7 @@
 - 通用 `Modal.vue`：居中弹窗、ESC/遮罩关闭、Teleport 到 body、80vh 内滚动——**不是右栏 Drawer**
 
 **关键安全约束**：
+
 - **MCP env values 严格不回显**：response 类型只有 `env_keys`；前端表单用 `type=password + autocomplete=new-password`；提交后 `resetForm()` 清空所有字段；列表只渲染 key 名 + `(values hidden)`
 - **Prompt preview 默认禁用**：`?include_prompt=true` 默认 403；需 `create_app(allow_prompt_preview=True)` + localhost
 - **`POST /api/prompt` 同步阻塞**：LLM 调用结束才返回；当前没有 `/api/prompt/async`；前端通过 WS `/ws/events` 展示实时事件，但 prompt 请求本身仍等待后端完成
@@ -112,12 +119,13 @@ P0 MVP freeze 后做的工程化改进，**零源码功能变更**——仅修 b
 
 详见 `docs/RELEASE_NOTES_WEB_CLAUDE_P0.md` 的 Post-freeze hotfixes 段：
 
-| Bug | 影响 | 修复 |
-|---|---|---|
-| uvicorn 缺 websockets 协议库 | 真实进程无法建立 WS（404） | `pip install websockets` + 加进 `pyproject.toml [web]` deps |
-| `createEventSocket` 漏调 `connect()` | socket 创建后永不连接 | 末尾加 `connect()` 调用 |
+
+| Bug                                           | 影响                       | 修复                                                                 |
+| ----------------------------------------------- | ---------------------------- | ---------------------------------------------------------------------- |
+| uvicorn 缺 websockets 协议库                  | 真实进程无法建立 WS（404） | `pip install websockets` + 加进 `pyproject.toml [web]` deps          |
+| `createEventSocket` 漏调 `connect()`          | socket 创建后永不连接      | 末尾加`connect()` 调用                                               |
 | chatStore 流式时序竞态（microtask/macrotask） | assistant 文本重复显示两次 | 移除 POST 兜底 push + 移除 finally cleanup + 加 streamItems 反查兜底 |
-| SkillList `@change.prevent` 反模式 | e2e Smoke 6 时序不稳 | 移除 `.prevent` 修饰符 |
+| SkillList`@change.prevent` 反模式             | e2e Smoke 6 时序不稳       | 移除`.prevent` 修饰符                                                |
 
 #### E2E 增强（6 → 10 smoke）
 
@@ -125,13 +133,14 @@ P0 MVP freeze 后做的工程化改进，**零源码功能变更**——仅修 b
 
 #### Coverage 大幅提升
 
-| 维度 | Before | After |
-|---|---|---|
-| 全套 coverage | 73.75% FAIL | **84.39%** PASS |
-| `mcp/transport.py` | 42% | 77%（+22 unit tests） |
-| `tools/web_search.py` | 23% | 93%（+11 unit tests） |
-| `web/app.py` | 26% | 80%（slow→not-slow 调整） |
-| pytest | 678 | 843（+165） |
+
+| 维度                  | Before      | After                      |
+| ----------------------- | ------------- | ---------------------------- |
+| 全套 coverage         | 73.75% FAIL | **84.39%** PASS            |
+| `mcp/transport.py`    | 42%         | 77%（+22 unit tests）      |
+| `tools/web_search.py` | 23%         | 93%（+11 unit tests）      |
+| `web/app.py`          | 26%         | 80%（slow→not-slow 调整） |
+| pytest                | 678         | 843（+165）                |
 
 ---
 
@@ -213,11 +222,12 @@ type ChatStreamItem =
 
 ### 3.2 普通消息
 
-| 类型 | 视觉 |
-|---|---|
-| UserMessageItem | 正常用户消息气泡 |
+
+| 类型                 | 视觉                |
+| ---------------------- | --------------------- |
+| UserMessageItem      | 正常用户消息气泡    |
 | AssistantMessageItem | 正常 assistant 回答 |
-| ErrorItem | 红色轻提示，不白屏 |
+| ErrorItem            | 红色轻提示，不白屏  |
 
 ### 3.3 当前 turn 淡化信息块
 
@@ -236,15 +246,16 @@ type ChatStreamItem =
 
 视觉要求：
 
-| 属性 | 要求 |
-|---|---|
-| 背景 | 浅灰 / 低饱和 |
-| 字体 | 比正文小一号 |
-| 透明度 | 比 assistant 消息弱 |
-| 默认状态 | 简要显示 |
-| 展开后 | 展示事件 timeline、tool args/result、snapshot metadata |
-| 位置 | 插入本轮 user 消息之后、assistant 最终回答之前或回答内部合适位置 |
-| 目的 | 让用户知道 agent 做了什么，但不打断阅读 |
+
+| 属性     | 要求                                                             |
+| ---------- | ------------------------------------------------------------------ |
+| 背景     | 浅灰 / 低饱和                                                    |
+| 字体     | 比正文小一号                                                     |
+| 透明度   | 比 assistant 消息弱                                              |
+| 默认状态 | 简要显示                                                         |
+| 展开后   | 展示事件 timeline、tool args/result、snapshot metadata           |
+| 位置     | 插入本轮 user 消息之后、assistant 最终回答之前或回答内部合适位置 |
+| 目的     | 让用户知道 agent 做了什么，但不打断阅读                          |
 
 ### 3.4 ToolCall 淡化块
 
@@ -306,9 +317,10 @@ MCP tool 调用时使用 ToolCall 淡化块展示，不进入右栏。
 
 不做右栏。Skills 入口有两个：
 
-| 入口 | 位置 | 用途 |
-|---|---|---|
-| Sidebar: Extensions | 左侧栏 | 管理所有 Skills / MCP |
+
+| 入口                  | 位置             | 用途                  |
+| ----------------------- | ------------------ | ----------------------- |
+| Sidebar: Extensions   | 左侧栏           | 管理所有 Skills / MCP |
 | Composer: Skills chip | 输入框上方或左侧 | 选择本轮启用的 Skills |
 
 点击后打开 modal：
@@ -331,13 +343,14 @@ MCP tool 调用时使用 ToolCall 淡化块展示，不进入右栏。
 
 当前已有 `GET /api/skills`。需要补充：
 
-| API | 作用 |
-|---|---|
-| `GET /api/skills` | 列出 Skills，默认不返回 prompt body |
-| `POST /api/skills/upload` | 上传 `SKILL.md` 并注册 |
-| `PATCH /api/skills/{name}` | 启用 / 禁用 / 调整 priority |
-| `DELETE /api/skills/{name}` | 删除用户上传的 Skill |
-| `POST /api/skills/reload` | 手动重新加载 skills 目录 |
+
+| API                         | 作用                                |
+| ----------------------------- | ------------------------------------- |
+| `GET /api/skills`           | 列出 Skills，默认不返回 prompt body |
+| `POST /api/skills/upload`   | 上传`SKILL.md` 并注册               |
+| `PATCH /api/skills/{name}`  | 启用 / 禁用 / 调整 priority         |
+| `DELETE /api/skills/{name}` | 删除用户上传的 Skill                |
+| `POST /api/skills/reload`   | 手动重新加载 skills 目录            |
 
 请求示例：
 
@@ -387,11 +400,12 @@ MCP tool 调用时使用 ToolCall 淡化块展示，不进入右栏。
 
 同样不做右栏。MCP 入口：
 
-| 入口 | 位置 | 用途 |
-|---|---|---|
-| Sidebar: Extensions | 管理 MCP server |
-| Composer: Tools chip | 查看当前会话可用工具 |
-| 中间消息流 | 展示连接、调用、失败、权限拒绝 |
+
+| 入口                 | 位置                           | 用途 |
+| ---------------------- | -------------------------------- | ------ |
+| Sidebar: Extensions  | 管理 MCP server                |      |
+| Composer: Tools chip | 查看当前会话可用工具           |      |
+| 中间消息流           | 展示连接、调用、失败、权限拒绝 |      |
 
 MCP modal：
 
@@ -423,23 +437,25 @@ Env:
 
 当前已有：
 
-| API | 状态 |
-|---|---|
-| `GET /api/mcp` | 已有 |
+
+| API                  | 状态 |
+| ---------------------- | ------ |
+| `GET /api/mcp`       | 已有 |
 | `GET /api/mcp/tools` | 已有 |
 
 需要新增：
 
-| API | 作用 |
-|---|---|
-| `GET /api/mcp/servers` | 列出 server 配置与状态 |
-| `POST /api/mcp/servers` | 新增 server 配置 |
-| `POST /api/mcp/servers/{name}/test` | 测试连接，不持久启用 |
-| `POST /api/mcp/servers/{name}/connect` | 连接并注册 tools |
-| `POST /api/mcp/servers/{name}/disconnect` | 断开并移除 tools |
-| `PATCH /api/mcp/servers/{name}` | 修改 enabled / args / env |
-| `DELETE /api/mcp/servers/{name}` | 删除配置 |
-| `PATCH /api/mcp/tools/{tool_name}` | 启用 / 禁用单个 tool |
+
+| API                                       | 作用                      |
+| ------------------------------------------- | --------------------------- |
+| `GET /api/mcp/servers`                    | 列出 server 配置与状态    |
+| `POST /api/mcp/servers`                   | 新增 server 配置          |
+| `POST /api/mcp/servers/{name}/test`       | 测试连接，不持久启用      |
+| `POST /api/mcp/servers/{name}/connect`    | 连接并注册 tools          |
+| `POST /api/mcp/servers/{name}/disconnect` | 断开并移除 tools          |
+| `PATCH /api/mcp/servers/{name}`           | 修改 enabled / args / env |
+| `DELETE /api/mcp/servers/{name}`          | 删除配置                  |
+| `PATCH /api/mcp/tools/{tool_name}`        | 启用 / 禁用单个 tool      |
 
 ### 5.4 安全规则
 
@@ -508,17 +524,18 @@ MCP server failed：github
 
 ### 6.2 AgentEvent → ChatStreamItem 映射
 
-| AgentEvent / StreamEvent | UI item | 默认展示 |
-|---|---|---|
-| RequestQueued | TurnInfoItem | 淡化，显示“请求已排队” |
-| RequestStart | TurnInfoItem | 淡化，显示“开始处理” |
-| TurnStart | TurnInfoItem | 淡化，创建当前 turn 容器 |
-| MessageUpdate / TextDelta | AssistantMessageItem | 正常流式正文 |
-| ToolExecutionStart | ToolCallItem | 淡化，显示工具名和 running |
-| ToolExecutionEnd | ToolCallItem | 淡化，显示 success/error/duration |
-| PolicyDecision | TurnInfoItem / ToolCallItem | 拒绝时显示警告样式 |
-| SnapshotFinished | TurnInfoItem | 淡化，显示 snapshot id / duration |
-| Error | ErrorItem | 明显但不白屏 |
+
+| AgentEvent / StreamEvent  | UI item                     | 默认展示                          |
+| --------------------------- | ----------------------------- | ----------------------------------- |
+| RequestQueued             | TurnInfoItem                | 淡化，显示“请求已排队”          |
+| RequestStart              | TurnInfoItem                | 淡化，显示“开始处理”            |
+| TurnStart                 | TurnInfoItem                | 淡化，创建当前 turn 容器          |
+| MessageUpdate / TextDelta | AssistantMessageItem        | 正常流式正文                      |
+| ToolExecutionStart        | ToolCallItem                | 淡化，显示工具名和 running        |
+| ToolExecutionEnd          | ToolCallItem                | 淡化，显示 success/error/duration |
+| PolicyDecision            | TurnInfoItem / ToolCallItem | 拒绝时显示警告样式                |
+| SnapshotFinished          | TurnInfoItem                | 淡化，显示 snapshot id / duration |
+| Error                     | ErrorItem                   | 明显但不白屏                      |
 
 ### 6.3 展开后的内容
 
@@ -606,14 +623,15 @@ web/src/
 
 ### 7.2 删除 / 降级组件
 
-| 旧组件 | 处理 |
-|---|---|
-| `InspectorPanel.vue` | 删除或改为 `TurnInfoCard.vue` 内部展开内容 |
-| `SnapshotPage.vue` | 不作为主入口，可保留隐藏 dev route |
-| `TracePage.vue` | 不作为主入口，信息进入 TurnInfoCard |
-| `MCPPage.vue` | 改为 `MCPServerManager.vue` modal |
-| `SkillPage.vue` | 改为 `SkillsManager.vue` modal |
-| `PolicyPage.vue` | 不作为页面；policy 决策进入 ToolCallCard / TurnInfoCard |
+
+| 旧组件               | 处理                                                    |
+| ---------------------- | --------------------------------------------------------- |
+| `InspectorPanel.vue` | 删除或改为`TurnInfoCard.vue` 内部展开内容               |
+| `SnapshotPage.vue`   | 不作为主入口，可保留隐藏 dev route                      |
+| `TracePage.vue`      | 不作为主入口，信息进入 TurnInfoCard                     |
+| `MCPPage.vue`        | 改为`MCPServerManager.vue` modal                        |
+| `SkillPage.vue`      | 改为`SkillsManager.vue` modal                           |
+| `PolicyPage.vue`     | 不作为页面；policy 决策进入 ToolCallCard / TurnInfoCard |
 
 ### 7.3 App.vue
 
@@ -649,30 +667,32 @@ App.vue 只负责 shell：
 
 v0.0.22 已有：
 
-| 能力 | API |
-|---|---|
-| 会话列表 | `GET /api/sessions` |
-| 消息列表 | `GET /api/messages` |
-| 事件列表 | `GET /api/events` |
-| prompt | `POST /api/prompt` |
-| SSE | `GET /api/stream?limit=N` |
-| WebSocket | `WS /ws/events` |
-| MCP tools | `GET /api/mcp/tools` |
-| Skills list | `GET /api/skills` |
+
+| 能力        | API                       |
+| ------------- | --------------------------- |
+| 会话列表    | `GET /api/sessions`       |
+| 消息列表    | `GET /api/messages`       |
+| 事件列表    | `GET /api/events`         |
+| prompt      | `POST /api/prompt`        |
+| SSE         | `GET /api/stream?limit=N` |
+| WebSocket   | `WS /ws/events`           |
+| MCP tools   | `GET /api/mcp/tools`      |
+| Skills list | `GET /api/skills`         |
 
 ### 8.2 需要新增的 backend 能力
 
-| 优先级 | 能力 | API |
-|---|---|---|
-| P0 | 线性 session CRUD | `POST /api/sessions`、`PATCH /api/sessions/{sid}`、`DELETE /api/sessions/{sid}` |
-| P0 | 文件上传 | `POST /api/sessions/{sid}/files`、`GET /api/sessions/{sid}/files`、`GET /api/files/{fid}` |
-| P0 | 默认 system prompt | `system_prompt.py` + harness 默认注入 |
-| P1 | Skill 上传 / 启用 | `POST /api/skills/upload`、`PATCH /api/skills/{name}`、`DELETE /api/skills/{name}` |
-| P1 | MCP server 管理 | `POST /api/mcp/servers`、`POST /api/mcp/servers/{name}/test`、`POST /api/mcp/servers/{name}/connect` |
-| P1 | MCP tool 启用 | `PATCH /api/mcp/tools/{tool_name}` |
-| P1 | prompt async | `POST /api/prompt/async` |
-| P2 | regenerate | `POST /api/messages/{id}/regenerate` |
-| P2 | export markdown | `GET /api/sessions/{sid}/export.md` |
+
+| 优先级 | 能力               | API                                                                                                  |
+| -------- | -------------------- | ------------------------------------------------------------------------------------------------------ |
+| P0     | 线性 session CRUD  | `POST /api/sessions`、`PATCH /api/sessions/{sid}`、`DELETE /api/sessions/{sid}`                      |
+| P0     | 文件上传           | `POST /api/sessions/{sid}/files`、`GET /api/sessions/{sid}/files`、`GET /api/files/{fid}`            |
+| P0     | 默认 system prompt | `system_prompt.py` + harness 默认注入                                                                |
+| P1     | Skill 上传 / 启用  | `POST /api/skills/upload`、`PATCH /api/skills/{name}`、`DELETE /api/skills/{name}`                   |
+| P1     | MCP server 管理    | `POST /api/mcp/servers`、`POST /api/mcp/servers/{name}/test`、`POST /api/mcp/servers/{name}/connect` |
+| P1     | MCP tool 启用      | `PATCH /api/mcp/tools/{tool_name}`                                                                   |
+| P1     | prompt async       | `POST /api/prompt/async`                                                                             |
+| P2     | regenerate         | `POST /api/messages/{id}/regenerate`                                                                 |
+| P2     | export markdown    | `GET /api/sessions/{sid}/export.md`                                                                  |
 
 ---
 
@@ -887,12 +907,13 @@ ruff check src tests
 
 新增测试：
 
-| 阶段 | 测试 |
-|---|---|
+
+| 阶段    | 测试                           |
+| --------- | -------------------------------- |
 | Phase 3 | `tests/test_web_skills_api.py` |
-| Phase 4 | `tests/test_web_mcp_api.py` |
-| Phase 5 | `tests/test_web_files_api.py` |
-| Phase 6 | `tests/test_system_prompt.py` |
+| Phase 4 | `tests/test_web_mcp_api.py`    |
+| Phase 5 | `tests/test_web_files_api.py`  |
+| Phase 6 | `tests/test_system_prompt.py`  |
 
 ### 10.2 前端测试
 
@@ -912,29 +933,31 @@ npm run typecheck
 
 建议补充：
 
-| 阶段 | 验证 |
-|---|---|
-| Phase 1 | ChatPage 可加载，发送 prompt API 正确 |
-| Phase 2 | event mapper 单测 |
-| Phase 3 | Skills modal 可打开，上传表单校验 |
-| Phase 4 | MCP form JSON args/env 校验 |
-| Phase 5 | FileChip / 上传进度 / 错误展示 |
+
+| 阶段    | 验证                                        |
+| --------- | --------------------------------------------- |
+| Phase 1 | ChatPage 可加载，发送 prompt API 正确       |
+| Phase 2 | event mapper 单测                           |
+| Phase 3 | Skills modal 可打开，上传表单校验           |
+| Phase 4 | MCP form JSON args/env 校验                 |
+| Phase 5 | FileChip / 上传进度 / 错误展示              |
 | Phase 6 | system prompt hash 出现在 snapshot metadata |
 
 ---
 
 ## 十一、验收里程碑
 
-| 里程碑 | 含义 | 对应阶段 |
-|---|---|---|
-| M1 | 无右栏的 Claude-like 聊天页面 | Phase 1 |
-| M2 | 当前 turn 信息 inline 淡化展示 | Phase 2 |
-| M3 | Skills 可添加 / 启用 / 可视化 | Phase 3 |
-| M4 | MCP 可添加 / 连接 / 工具可视化 | Phase 4 |
-| M5 | 文件上传 + view_file/list_files 闭环 | Phase 5 |
-| M6 | 默认对话 system prompt 生效 | Phase 6 |
 
-**最小可用 Web Claude** = M1 + M2 + M3 + M4。  
+| 里程碑 | 含义                                 | 对应阶段 |
+| -------- | -------------------------------------- | ---------- |
+| M1     | 无右栏的 Claude-like 聊天页面        | Phase 1  |
+| M2     | 当前 turn 信息 inline 淡化展示       | Phase 2  |
+| M3     | Skills 可添加 / 启用 / 可视化        | Phase 3  |
+| M4     | MCP 可添加 / 连接 / 工具可视化       | Phase 4  |
+| M5     | 文件上传 + view_file/list_files 闭环 | Phase 5  |
+| M6     | 默认对话 system prompt 生效          | Phase 6  |
+
+**最小可用 Web Claude** = M1 + M2 + M3 + M4。
 **完整 Web Claude MVP** = M1 + M2 + M3 + M4 + M5 + M6。
 
 ---
@@ -958,17 +981,18 @@ npm run typecheck
 
 ## 十三、风险与控制
 
-| 风险 | 控制 |
-|---|---|
-| Turn 信息打断阅读 | 默认淡化、折叠、低对比度；只显示摘要 |
-| Skills 太多导致 prompt 过长 | 只注入本轮启用 Skills |
-| MCP 工具有危险能力 | 默认 disabled；connect 后仍按 policy allowlist |
-| WebSocket 事件重复 | 前端按 event_id 去重 |
-| 后端事件 schema 不稳定 | 前端 mapper 做兼容层 |
-| 文件太大撑爆上下文 | view_file 截断；大文件只显示摘要 |
-| prompt preview 泄露 | 默认禁用；只本地调试显式开启 |
-| SQLite 并发写 | WAL + 单写锁 |
-| 前端一次改动过大 | 按 Phase 1–7 小步推进 |
+
+| 风险                        | 控制                                           |
+| ----------------------------- | ------------------------------------------------ |
+| Turn 信息打断阅读           | 默认淡化、折叠、低对比度；只显示摘要           |
+| Skills 太多导致 prompt 过长 | 只注入本轮启用 Skills                          |
+| MCP 工具有危险能力          | 默认 disabled；connect 后仍按 policy allowlist |
+| WebSocket 事件重复          | 前端按 event_id 去重                           |
+| 后端事件 schema 不稳定      | 前端 mapper 做兼容层                           |
+| 文件太大撑爆上下文          | view_file 截断；大文件只显示摘要               |
+| prompt preview 泄露         | 默认禁用；只本地调试显式开启                   |
+| SQLite 并发写               | WAL + 单写锁                                   |
+| 前端一次改动过大            | 按 Phase 1–7 小步推进                         |
 
 ---
 
@@ -997,10 +1021,10 @@ Phase 7  Stop / Regenerate / 导出 / 移动端
 
 ## 十五、变更日志
 
-| 日期 | 改动 |
-|---|---|
-| 2026-07-05 | 初稿。基于 v0.0.21 baseline，定义 P0/P1/P2 三档路线 |
-| 2026-07-06 | 修改为「无右栏调试面板」方案；当前 turn 信息改为中间窗口淡化展示；新增 Skills/MCP 用户添加与可视化计划 |
-| 2026-07-06 | P0-3 完成：`list_files` / `view_file` 工具 + `FileBlock` 注入 UserMessage。**附件统一注入 FileBlock（不发全文 / 不发 path）；图片明确不支持（不做 ImageBlock / 不做 GLM-4V 直读 / 不做 OCR）；view_file 支持 md / html / csv / parquet / 文本**。`POST /api/prompt` 加 `file_ids`。pyarrow>=15 入依赖。764 测试通过，ruff 通过。 |
-| 2026-07-07 | **P0-4 Step 1–7 完成**（前端 Claude-like 改造，本轮共 8 个 step，剩 Step 8 docs 收尾）。Step 1 Skills API：`POST /api/skills/upload`、enable/disable、`GET /api/skills/{name}`、`POST /api/prompt` 顶层 `skill_names`；unknown skill 由 web 层预校验返回 400（不再走 500）；26 用例。Step 2 MCP API：servers CRUD、test connection（不污染 harness）、enable/disable、tools enable/disable 真实生效（`agent.tools.unregister/register`）；env values 严格不回显（response 类型只有 `env_keys`）；35 用例。Step 3 前端骨架：Pinia + `types/` + `api/` + `stores/` 五个 store；barrel `index.ts` 保证旧 .vue import 不破坏。Step 4 UI 骨架：`AppShell` + `SessionSidebar` + `ChatPanel` 两栏；`DeveloperDrawer` 从主路径下线但文件保留；9 个新 .vue。Step 5 Inline Turn Cards：`chatStore.handleEvent` 完整 WS event mapper；7 个 card 组件（TurnInfoCard / ToolCallCard / ToolResultCard / FileReadCard / MCPToolCard / SkillUsedCard / ErrorCard）；streaming assistant draft。Step 6 文件上传 UI：`utils/files.ts` + `FileChip` + `AttachmentBar`；`ChatInput` 附件按钮 + drag-drop；`sendPrompt` 带 `file_ids` + `files`；失败保留 pending attachments。Step 7 Skills/MCP Manager Modal：`components/common/Modal.vue`（**居中弹窗，非右栏 Drawer**）+ `components/skills/{SkillManagerModal, SkillUploadForm, SkillList}` + `components/mcp/{MCPManagerModal, MCPServerForm, MCPServerList, MCPToolList}`；SessionSidebar footer 按钮挂载 modal；`mcpStore` 加 `lastTestResultByServer` map（多 server 连续 test 不覆盖）；`createServer/enableServer/disableServer/testServer/deleteServer` 失败时 `reloadServersSilent()` 同步后端真实 `last_error`；delete 时清掉对应 test result 防孤儿。**env value 防回显四道防线**：(1) 后端 summary 类型本身无 `env`；(2) MCPServerForm 永远空白初始化 + 提交后 `resetForm()` 清空所有字段；(3) env input 用 `type=password` + `autocomplete=new-password` 防浏览器回填；(4) MCPServerList 只渲染 `env_keys.join(', ')` + `(values hidden)` 提示。**Step 7 零后端改动**（`web/app.py` 一行未改）。基线：678 offline passed + 59 web skill/mcp passed + ruff clean + npm 123 modules / 127.85 KB JS（gzip 45.08 KB）。 |
 
+| 日期       | 改动                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-07-05 | 初稿。基于 v0.0.21 baseline，定义 P0/P1/P2 三档路线                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| 2026-07-06 | 修改为「无右栏调试面板」方案；当前 turn 信息改为中间窗口淡化展示；新增 Skills/MCP 用户添加与可视化计划                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| 2026-07-06 | P0-3 完成：`list_files` / `view_file` 工具 + `FileBlock` 注入 UserMessage。**附件统一注入 FileBlock（不发全文 / 不发 path）；图片明确不支持（不做 ImageBlock / 不做 GLM-4V 直读 / 不做 OCR）；view_file 支持 md / html / csv / parquet / 文本**。`POST /api/prompt` 加 `file_ids`。pyarrow>=15 入依赖。764 测试通过，ruff 通过。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| 2026-07-07 | **P0-4 Step 1–7 完成**（前端 Claude-like 改造，本轮共 8 个 step，剩 Step 8 docs 收尾）。Step 1 Skills API：`POST /api/skills/upload`、enable/disable、`GET /api/skills/{name}`、`POST /api/prompt` 顶层 `skill_names`；unknown skill 由 web 层预校验返回 400（不再走 500）；26 用例。Step 2 MCP API：servers CRUD、test connection（不污染 harness）、enable/disable、tools enable/disable 真实生效（`agent.tools.unregister/register`）；env values 严格不回显（response 类型只有 `env_keys`）；35 用例。Step 3 前端骨架：Pinia + `types/` + `api/` + `stores/` 五个 store；barrel `index.ts` 保证旧 .vue import 不破坏。Step 4 UI 骨架：`AppShell` + `SessionSidebar` + `ChatPanel` 两栏；`DeveloperDrawer` 从主路径下线但文件保留；9 个新 .vue。Step 5 Inline Turn Cards：`chatStore.handleEvent` 完整 WS event mapper；7 个 card 组件（TurnInfoCard / ToolCallCard / ToolResultCard / FileReadCard / MCPToolCard / SkillUsedCard / ErrorCard）；streaming assistant draft。Step 6 文件上传 UI：`utils/files.ts` + `FileChip` + `AttachmentBar`；`ChatInput` 附件按钮 + drag-drop；`sendPrompt` 带 `file_ids` + `files`；失败保留 pending attachments。Step 7 Skills/MCP Manager Modal：`components/common/Modal.vue`（**居中弹窗，非右栏 Drawer**）+ `components/skills/{SkillManagerModal, SkillUploadForm, SkillList}` + `components/mcp/{MCPManagerModal, MCPServerForm, MCPServerList, MCPToolList}`；SessionSidebar footer 按钮挂载 modal；`mcpStore` 加 `lastTestResultByServer` map（多 server 连续 test 不覆盖）；`createServer/enableServer/disableServer/testServer/deleteServer` 失败时 `reloadServersSilent()` 同步后端真实 `last_error`；delete 时清掉对应 test result 防孤儿。**env value 防回显四道防线**：(1) 后端 summary 类型本身无 `env`；(2) MCPServerForm 永远空白初始化 + 提交后 `resetForm()` 清空所有字段；(3) env input 用 `type=password` + `autocomplete=new-password` 防浏览器回填；(4) MCPServerList 只渲染 `env_keys.join(', ')` + `(values hidden)` 提示。**Step 7 零后端改动**（`web/app.py` 一行未改）。基线：678 offline passed + 59 web skill/mcp passed + ruff clean + npm 123 modules / 127.85 KB JS（gzip 45.08 KB）。 |

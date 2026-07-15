@@ -1,6 +1,6 @@
 # P1-D2 Regenerate — Detailed Design
 
-> **状态**：D2 详细设计阶段（用户审核 2026-07-14 批准进入设计，**暂不批准编码**）
+> **状态**：✅ 设计已批准（用户 2026-07-15 审核 4 个决策点定稿）——按 §6 commit 顺序进入实现
 > **前置**：P1-D1 ✅ FROZEN（tag `v0.0.26-export-markdown` @ `ebbc896`）
 > **依赖阻塞**：Message ID 稳定性 characterization test ✅ 已落地（commit `a124697`，2 个 xfail）
 > **目标 tag**：`v0.0.27-regenerate`（实现完成 + 验证后）
@@ -12,8 +12,16 @@
 1. **非破坏性**：旧 active 回答在 regenerate 流式生成期间必须仍然可见、可访问
 2. **可恢复**：error / abort / server restart 都不能让 session 进入"既无旧回答也无新回答"的中间态
 3. **不动 core runtime**：所有逻辑在 Web 编排层（`web/app.py` + `web/extension_store.py` + `session_sqlite.py`）
-4. **单一真源**：`messages` 表 row 永远是当前 active assistant content；`web_message_revisions` 只存历史/候选
+4. **单一真源（canonical truth = `messages` 表）**：`messages.content_json` 永远是当前 active assistant content——
+   - 下一轮 Prompt 使用的回答
+   - Export 导出的回答
+   - `GET /api/messages` 返回的回答
+   - `web_message_revisions` 只存历史和生成尝试（**不**承担 active 角色）
 5. **Message ID 稳定**：assistant_message_id 在 regenerate 期间不变——revision 通过外键引用
+6. **`completed` ⟺ `active`**：去掉 `is_active` 字段，用 `status='completed'` 表达"这条 revision 是当前 active"——
+   由 `UNIQUE(assistant_message_id) WHERE status='completed'` 部分索引强制单例
+7. **自动切换 active，不做手动切换**：regenerate 成功 finalize 时自动把新回答设为 active；
+   **不**提供用户手动切回历史 revision 的 UI/API（D2 显式不做）
 
 ---
 
@@ -116,16 +124,21 @@ async def replace_messages(self, session_id, messages):
 
 ### Q3：running candidate 内容保存在哪里？
 
-**答**：`web_message_revisions.content_json`——D2 新增表的字段。
+**答**：流式期间 **不写 DB**——delta 只存在前端 chatStore（用户视觉看到 draft）和 WS 事件流。
 
-**关键设计**：**不创建第二条 canonical assistant row**。
-- `messages` 表 row（assistant）保持 active 回答，**直到 finalize 成功才 UPDATE**
-- 流式生成期间，candidate 累积在：
-  - **前端**：chatStore.streamItems（用户视觉上看到 draft）
-  - **后端**（可选）：`web_message_revisions.content_json`（partial，用于 server restart 后断点续传）
-  - 选填策略：每 N 个 delta 或每 T 秒 UPDATE 一次 revision.content_json（flush）
+**revision row 的生命周期（决策点 1+2 定稿）**：
 
-**简化方案（推荐 D2 实现）**：流式期间**不**写 DB——只在前端 chatStore 维护 draft。Revision row 在 regenerate 启动时创建（status='running', content_json=空），finalize 时一次性写入完整 content_json。
+| 时刻 | 操作 | revision 状态 |
+|------|------|---------------|
+| regenerate 启动（POST /regenerate） | INSERT revision row, `status='running'`, `content_json=NULL` | running |
+| 模型流式生成 | **不** UPDATE revision；前端 chatStore 累积 delta | running |
+| 模型执行成功 → finalize | 单 transaction 内 INSERT revision 0（首次）/ UPDATE 上一个 completed → superseded + UPDATE 本 revision → completed + UPDATE messages | completed |
+| 失败 / 中止 | UPDATE 本 revision → error / aborted | error / aborted |
+
+**关键设计**：
+- **revision 0 延迟创建**（决策点 1）：**只在第一次 regenerate 成功 finalize 时**，把当时的旧 active 内容保存为 revision 0（`status='superseded'`）。失败 / 中止 **不**产生 revision 0——避免无意义的历史污染。
+- **流式期间不写 candidate**（决策点 2）：模型执行成功后**一次性**把完整 candidate 写入 revision.content_json，并原子更新 messages.content_json。
+- 后续 regenerate：上一个 `completed` revision 被 UPDATE 为 `superseded`，新 revision 成为 `completed`——无需再为旧 active 单独 INSERT（它已经是 revision 表里的一行）。
 
 ### Q4：是否更新 messages 表？在什么时间更新？
 
@@ -133,12 +146,13 @@ async def replace_messages(self, session_id, messages):
 
 | 阶段 | messages.content_json | revision.content_json | revision.status |
 |---|---|---|---|
-| regenerate start | 旧回答 | 空 | running |
-| streaming | 旧回答（不变） | 空（不写） | running |
-| finalize success | **新回答**（UPDATE） | **新回答**（UPDATE） | completed |
-| finalize error | 旧回答（不变） | error_summary | error |
-| abort | 旧回答（不变） | 空 | aborted |
-| server restart | 旧回答（不变） | 空 | interrupted（startup 改） |
+| regenerate start | 旧回答 | NULL | running |
+| streaming | 旧回答（不变） | NULL（不写） | running |
+| finalize success（非首次） | **新回答**（UPDATE） | **新回答**（UPDATE） | completed |
+| finalize success（首次） | **新回答**（UPDATE） | revision 0 ← 旧回答（INSERT, superseded）；revision 1 ← 新回答（UPDATE, completed） | completed |
+| finalize error | 旧回答（不变） | NULL | error |
+| abort | 旧回答（不变） | NULL | aborted |
+| server restart | 旧回答（不变） | NULL | interrupted（startup sweep 改） |
 
 **为什么不流式写 messages 表？**
 1. 流式写会让 active content 在 finalize 前不断变化 → 任何并发 GET /api/messages 看到中间态
@@ -147,49 +161,73 @@ async def replace_messages(self, session_id, messages):
 
 ### Q5：revision finalize 的 SQLite transaction 包含哪些 SQL？
 
-**答**：5 个 SQL 在**单 BEGIN IMMEDIATE transaction** 内：
+**答**：核心 4 步 SQL 在**单 `BEGIN IMMEDIATE` transaction** 内（去掉 `is_active`，用 `status='completed'` 表达 active）：
 
 ```sql
 BEGIN IMMEDIATE;
 
--- 1. 校验：revision 仍是 running（未 abort / 未被 supersede）
+-- 1. 校验：revision 仍是 running（未 abort / 未被 supersede / 未被 sweep 改 interrupted）
 SELECT status FROM web_message_revisions WHERE id = ?;
--- expect 'running'——否则放弃 finalize
+-- expect 'running'——否则放弃 finalize（ROLLBACK）
 
--- 2. 校验：目标 assistant 仍是 active（未被其他 regenerate 改）
+-- 2a. 校验：没有 rival completed revision（并发 finalize 防御）
 SELECT id FROM web_message_revisions
   WHERE assistant_message_id = ?
-    AND is_active = 1
+    AND status = 'completed'
     AND id != ?;
--- expect no rows——否则放弃（另一个 regenerate 已经赢了）
+-- 注：uq_web_message_revision_active 部分唯一索引保证最多 1 个 completed
+-- 若存在且 id 不同 → 放弃（理论不应发生，因为 running 也唯一）
 
--- 3. 把旧 active revision 标记 superseded
+-- 2b. （首次 regenerate）INSERT revision 0 把旧 active 归档为 superseded
+--     判断条件：本 assistant_message_id 下没有任何 status IN ('superseded','completed') 的历史 revision
+INSERT INTO web_message_revisions (
+    id, session_id, assistant_message_id, revision_number,
+    request_id, status, base_content_sha256, content_json,
+    created_at, completed_at
+) VALUES (
+    ?, ?, ?, 0,
+    NULL, 'superseded', ?, ?,
+    ?, ?
+);
+-- 注：revision 0 的 request_id 设为 NULL（不属于任何 web_run_request）
+--     base_content_sha256 = sha256(旧 active content_json)（与本次 running revision 相同）
+--     content_json = 旧 active content_json
+
+-- 3. （非首次）把上一个 completed revision 改为 superseded
 UPDATE web_message_revisions
-  SET status = 'superseded', is_active = 0, completed_at = ?
+  SET status = 'superseded', completed_at = ?
   WHERE assistant_message_id = ?
-    AND is_active = 1
+    AND status = 'completed'
     AND id != ?;
+-- 受影响行数：0（首次，由 2b 处理）或 1（非首次）
 
--- 4. 新 revision 标记 completed + active + 写入完整 content
+-- 4. 新 revision 标记 completed + 写入完整 candidate content
 UPDATE web_message_revisions
-  SET status = 'completed', is_active = 1,
-      content_json = ?, completed_at = ?
+  SET status = 'completed',
+      content_json = ?,
+      completed_at = ?
   WHERE id = ?;
 
--- 5. messages 表替换 active content（保留 id！）
+-- 5. messages 表替换 active content（保留 id 与 role！）
 UPDATE messages
   SET content_json = ?
   WHERE id = ?;
--- 注：role 不变（assistant→assistant）
 
 UPDATE sessions SET updated_at = ? WHERE id = ?;
 
 COMMIT;
 ```
 
+**关键变化（vs 旧设计）**：
+- 去掉 `is_active` 字段——`status='completed'` ⟺ `active`，由部分唯一索引保证
+- 加 `base_content_sha256`（NOT NULL）：revision 创建瞬间的旧 active content_json 的 SHA-256
+  - **用途 1**：审计——知道这次 regenerate 是基于哪个版本的 active 生成的
+  - **用途 2**（可选）：finalize 时校验 `sha256(messages.content_json) == base_content_sha256`，防止外部修改
+- 首次 regenerate 的 revision 0 INSERT 与非首次的 UPDATE 互斥（通过 step 3 受影响行数判断）
+
 **失败回滚**：任何一步失败 → `ROLLBACK`，messages 表保持旧 active，revision 仍 running（可重试 finalize 或人工 abort）。
 
-**隔离级别**：BEGIN IMMEDIATE 取得 write lock，防止并发 finalize 竞争。
+**隔离级别**：BEGIN IMMEDIATE 取得 write lock，防止并发 finalize 竞争；部分唯一索引 `uq_web_message_revision_running` / `uq_web_message_revision_active` 在 SQLite 层兜底，应用层校验作为友好错误路径。
 
 ### Q6：下一次普通 prompt 如何只使用 active answer？
 
@@ -207,8 +245,7 @@ COMMIT;
 **关键**：`web_message_revisions` 表**不参与**普通 prompt 的 list/replace——它只是历史记录。
 
 **新增 API**（D2 实现）：
-- `GET /api/sessions/{sid}/messages/{mid}/revisions`——列出某条 assistant 的所有 revision
-- `POST /api/sessions/{sid}/messages/{mid}/revisions/{rid}/activate`——切换 active revision（可选 P1-D2.1）
+- `GET /api/sessions/{sid}/messages/{mid}/revisions`——列出某条 assistant 的所有 revision（分页 + 单次返回上限，见决策点 3）
 
 ### Q7：regenerate error/abort 后如何恢复 Harness 的 canonical context？
 
@@ -330,9 +367,9 @@ async def sweep_interrupted_revisions(self):
 
 ---
 
-## 2. Revision Schema（D2 新增）
+## 2. Revision Schema（D2 新增——定稿版）
 
-### 2.1 DDL
+### 2.1 DDL（用户 2026-07-15 定稿）
 
 ```sql
 -- extension_store.py SCHEMA_VERSION 1 → 2
@@ -340,56 +377,127 @@ async def sweep_interrupted_revisions(self):
 CREATE TABLE IF NOT EXISTS web_message_revisions (
     id                    TEXT PRIMARY KEY,
     session_id            TEXT NOT NULL,
-    assistant_message_id  TEXT NOT NULL,    -- references messages.id（跨表外键）
-    revision_number       INTEGER NOT NULL, -- 0=原回答，1+=regenerate
-    request_id            TEXT,             -- 关联 web_run_requests
-    status                TEXT NOT NULL
-                          CHECK (status IN (
-                              'running', 'completed', 'superseded',
-                              'error', 'aborted', 'interrupted'
-                          )),
-    content_json          TEXT,             -- 完整 AssistantMessage JSON
-    is_active             INTEGER NOT NULL DEFAULT 0
-                          CHECK (is_active IN (0, 1)),
+    assistant_message_id  TEXT NOT NULL,
+    revision_number       INTEGER NOT NULL,
+    request_id            TEXT,
+    status                TEXT NOT NULL CHECK (
+        status IN (
+            'running',
+            'completed',
+            'superseded',
+            'error',
+            'aborted',
+            'interrupted'
+        )
+    ),
+    base_content_sha256   TEXT NOT NULL,
+    content_json          TEXT,
     created_at            TEXT NOT NULL,
     completed_at          TEXT,
     error_summary         TEXT,
 
-    UNIQUE (assistant_message_id, revision_number)
+    UNIQUE (assistant_message_id, revision_number),
+    FOREIGN KEY (session_id)
+        REFERENCES sessions(id)
+        ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_revisions_session
-    ON web_message_revisions(session_id);
-CREATE INDEX IF NOT EXISTS idx_revisions_active
-    ON web_message_revisions(assistant_message_id, is_active)
-    WHERE is_active = 1;
+-- 每个 web_run_request 至多关联 1 个 revision
+CREATE UNIQUE INDEX IF NOT EXISTS uq_web_message_revision_request
+    ON web_message_revisions(request_id)
+    WHERE request_id IS NOT NULL;
+
+-- 每个 assistant_message_id 至多 1 个 running（防并发 regenerate）
+CREATE UNIQUE INDEX IF NOT EXISTS uq_web_message_revision_running
+    ON web_message_revisions(assistant_message_id)
+    WHERE status = 'running';
+
+-- 每个 assistant_message_id 至多 1 个 completed（= active）——替代旧设计的 is_active
+CREATE UNIQUE INDEX IF NOT EXISTS uq_web_message_revision_active
+    ON web_message_revisions(assistant_message_id)
+    WHERE status = 'completed';
+
+-- 历史查询主索引（分页）
+CREATE INDEX IF NOT EXISTS idx_web_message_revisions_history
+    ON web_message_revisions(
+        session_id,
+        assistant_message_id,
+        revision_number DESC
+    );
 ```
 
-### 2.2 外键策略
+### 2.2 字段语义
 
-`assistant_message_id` **跨表引用 `session_sqlite.py` 的 messages.id**——但 SQLite 外键不能跨 ATTACH/不同连接。
+| 字段 | 类型 | 语义 |
+|------|------|------|
+| `id` | TEXT PK | revision row id（`_gen_id("rev")`） |
+| `session_id` | TEXT NOT NULL | 所属 session，FK to `sessions(id)` ON DELETE CASCADE |
+| `assistant_message_id` | TEXT NOT NULL | 对应 `messages.id`——**不**加跨表 FK（顺序敏感，应用层校验） |
+| `revision_number` | INTEGER NOT NULL | 0 = 首次归档的旧 active（决策点 1：延迟创建）；1+ = 后续 regenerate candidate |
+| `request_id` | TEXT nullable | 关联 `web_run_requests`——regenerate 启动时写入；revision 0 归档行写 NULL |
+| `status` | TEXT NOT NULL | 状态机见 §2.3 |
+| `base_content_sha256` | TEXT NOT NULL | **revision 创建瞬间的 `messages.content_json`（旧 active）的 SHA-256**——审计 + 可选 finalize 一致性校验 |
+| `content_json` | TEXT nullable | 完整 AssistantMessage JSON；running/aborted/interrupted 期间为 NULL |
+| `created_at` | TEXT NOT NULL | ISO 时间戳 |
+| `completed_at` | TEXT nullable | 离开 running 态的时间戳 |
+| `error_summary` | TEXT nullable | error / interrupted 时的人类可读摘要 |
 
-**当前 P1-C 架构**：`ExtensionSQLiteStore` 复用 `session_store` 的 connection（共享 `:memory:` 必须；磁盘 DB 也是同一文件）。所以**同库不同表**——可以加 FK。
+> **注**：`base_content_sha256` 是用户定稿 schema 中引入的 NOT NULL 字段，文档中标注的"SHA-256 of messages.content_json at revision creation"是基于 finalize 流程的推断语义——若实际意图不同（如 SHA of 截断 context 而非 active row），实现前请用户再确认一次。
 
-**D2 选择**：**不加 FK 约束**，用应用层校验：
-- 原因：session_store 的 messages 表创建在前，extension_store 的 revisions 表创建在后；如果加 FK 依赖顺序敏感
-- 应用层校验：`finalize_revision` 时先 `SELECT FROM messages WHERE id=?` 确认存在
-- 加 INDEX (`assistant_message_id`, `is_active`) 加速查询
+### 2.3 状态机
 
-### 2.3 revision_number 语义
+```
+                ┌─────────────────────────────┐
+                │  regenerated (user action)  │
+                └──────────────┬──────────────┘
+                               │
+                               ▼
+                           ┌───────┐
+              ┌─ success ─ │running│ ─ abort ──────┐
+              │            └───┬───┘               │
+              │                │                   ▼
+              │                │              ┌─────────┐
+              │   ┌─ error ────┘              │ aborted │
+              │   ▼                            └─────────┘
+              │ ┌───────┐
+              │ │ error │                     ┌───────────────┐
+              │ └───────┘      server restart │ interrupted   │
+              │                  ───────────▶ │ (startup sweep│
+              │                                │  改)          │
+              │   previous completed          └───────────────┘
+              │        ▼
+              │   ┌───────────┐  next regenerate success  ┌───────────┐
+              └──▶│ completed │ ────────────────────────▶ │ superseded│
+                  └───────────┘                            └───────────┘
+                  (= active)
+```
 
-| revision_number | 含义 | 创建时机 |
-|---|---|---|
-| 0 | 原回答（普通 prompt 产生的第一个 assistant） | 首次 regenerate 时 INSERT（如果不存在） |
-| 1+ | regenerate candidate | 每次 regenerate 启动 |
+| status | 含义 | 终态？ |
+|--------|------|--------|
+| `running` | 正在生成的候选 | 否（可 → completed / error / aborted / interrupted） |
+| `completed` | **当前 active 内容对应的历史 revision** | 否（被下一个 completed 推为 superseded） |
+| `superseded` | 曾经 active、现已被新回答替代 | 是 |
+| `error` | 生成或 finalize 失败 | 是 |
+| `aborted` | 用户中止 | 是 |
+| `interrupted` | server restart 导致未完成（startup sweep 改） | 是 |
 
-**revision 0 的延迟创建**：
-- 普通 prompt **不**创建 revision row——避免无 regenerate 时浪费
-- 首次 regenerate 时：
-  1. 检查 `WHERE assistant_message_id=? AND revision_number=0` 是否存在
-  2. 不存在 → INSERT revision 0 with `content_json=旧回答, status='superseded', is_active=0`
-  3. INSERT revision N+1 with `status='running', is_active=0`
-- 这样 revision 0 永远代表"原始回答"，被 supersede 后仍可查询/恢复
+**关键不变量**：
+- `completed` ⟺ `active`——messages 表的当前 content_json 对应唯一的 completed revision（由 `uq_web_message_revision_active` 强制）
+- 同一 `assistant_message_id` 下至多 1 个 `running`（由 `uq_web_message_revision_running` 强制）
+- 同一 `request_id` 至多关联 1 个 revision（由 `uq_web_message_revision_request` 强制）
+
+### 2.4 外键策略
+
+**`session_id` 加 FK to `sessions(id)` ON DELETE CASCADE**（用户定稿）：
+- sessions 表 PK 是 `id TEXT`，类型匹配
+- `extension_store.py` 已 `PRAGMA foreign_keys=ON`（行 175）
+- 本库已有 FK CASCADE 先例：`web_disabled_tools.server_name REFERENCES web_mcp_servers(name) ON DELETE CASCADE`
+- 行为：DELETE session 自动级联删除该 session 下所有 revision row
+
+**`assistant_message_id` 不加跨表 FK**（沿用旧设计）：
+- session_store 的 messages 表创建在前，extension_store 的 revisions 表创建在后——FK 依赖顺序敏感
+- 应用层校验：`finalize_revision` / `create_revision` 时 `SELECT FROM messages WHERE id=?` 确认存在
+- 由 `idx_web_message_revisions_history` 索引加速查询
 
 ---
 
@@ -424,15 +532,20 @@ User                Web App              SQLite              Harness
  │  /messages/{mid}  │                    │                    │
  │  /regenerate ────▶│                    │                    │
  │                    │                    │                    │
- │                    │  ┌── begin txn ────────────────────┐  │
- │                    ├─ │ ensure revision 0 (旧回答)      │  │
- │                    │  │ INSERT revision N+1 (running)    │  │
- │                    │  └── commit ───────────────────────┘  │
+ │                    │  ┌── begin txn ─────────────────────┐  │
+ │                    │  │ sha = sha256(messages.content_   │  │
+ │                    │  │  json WHERE id = mid)            │  │
+ │                    ├─ │ INSERT revision N+1              │  │
+ │                    │  │   (status='running',             │  │
+ │                    │  │    content_json=NULL,            │  │
+ │                    │  │    base_content_sha256=sha,      │  │
+ │                    │  │    request_id=req_id)            │  │
+ │                    │  └── commit ────────────────────────┘  │
  │                    │                    │                    │
  │                    ├─ _execute_prompt ──────────────────────▶│
  │                    │   (truncate to preceding user) │   │
  │                    │                    │                    │
- │   WS stream ◀──────┤  draft 增长（前端 chatStore）         │
+ │   WS stream ◀──────┤  draft 增长（前端 chatStore，不写 DB） │
  │   (revision_id)    │                    │                    │
  │                    │                    │                    │
  │                    │◀─ candidate assistant ─────────────────│
@@ -440,11 +553,15 @@ User                Web App              SQLite              Harness
  │                    │  ┌── BEGIN IMMEDIATE ─────────────┐   │
  │                    │  │ 1. SELECT revision.status       │   │
  │                    │  │    (verify still 'running')     │   │
- │                    │  │ 2. SELECT rival active revision │   │
+ │                    │  │ 2. SELECT rival completed       │   │
  │                    │  │    (verify no winner)           │   │
- │                    │  │ 3. UPDATE 旧 active →superseded │   │
+ │                    │  │ 3. 首次？INSERT revision 0      │   │
+ │                    │  │    (旧 active, status=          │   │
+ │                    │  │    'superseded')                │   │
+ │                    │  │    非首次？UPDATE prev          │   │
+ │                    │  │    completed → superseded       │   │
  │                    │  │ 4. UPDATE 新 revision →         │   │
- │                    │  │    completed+is_active=1+content│   │
+ │                    │  │    completed+content_json       │   │
  │                    │  │ 5. UPDATE messages.content_json │   │
  │                    │  │    (保留 messages.id)           │   │
  │                    │  │ 6. UPDATE sessions.updated_at   │   │
@@ -486,9 +603,12 @@ lifespan startup:
 | Method | Path | 用途 |
 |---|---|---|
 | `POST` | `/api/sessions/{sid}/messages/{mid}/regenerate` | 启动 regenerate，返回 revision_id |
-| `GET` | `/api/sessions/{sid}/messages/{mid}/revisions` | 列出该 assistant 的所有 revision |
+| `GET` | `/api/sessions/{sid}/messages/{mid}/revisions` | 列出该 assistant 的所有 revision（分页 + 单次返回上限，决策点 3） |
 | `GET` | `/api/sessions/{sid}/messages/{mid}/revisions/{rid}` | 查看某 revision 详情 |
-| `POST` | `/api/sessions/{sid}/messages/{mid}/revisions/{rid}/activate` | 切换 active revision（可选，P1-D2.1） |
+
+**显式不做**（决策点 4）：
+- ~~`POST /api/sessions/{sid}/messages/{mid}/revisions/{rid}/activate`~~——用户手动切换 active revision 不在 D2 范围内
+- regenerate 成功 finalize 时**自动**切换 active（messages.content_json UPDATE 即是切换），无需显式 endpoint
 
 ### 4.2 regenerate request/response
 
@@ -520,18 +640,24 @@ Content-Type: application/json
 ### 4.3 revisions list response
 
 ```http
-GET /api/sessions/sess_abc/messages/msg_a1/revisions
+GET /api/sessions/sess_abc/messages/msg_a1/revisions?limit=20&offset=0
 ```
+
+**Query params**（决策点 3：分页）：
+- `limit`：单次返回上限，默认 20，最大 100
+- `offset`：偏移量，默认 0
 
 ```json
 {
   "count": 3,
+  "limit": 20,
+  "offset": 0,
   "revisions": [
     {
       "id": "rev_001",
       "revision_number": 0,
       "status": "superseded",
-      "is_active": false,
+      "base_content_sha256": "9f2c...",
       "created_at": "2026-07-14T10:00:00Z",
       "completed_at": "2026-07-14T10:00:05Z"
     },
@@ -539,7 +665,7 @@ GET /api/sessions/sess_abc/messages/msg_a1/revisions
       "id": "rev_002",
       "revision_number": 1,
       "status": "superseded",
-      "is_active": false,
+      "base_content_sha256": "9f2c...",
       "created_at": "2026-07-14T10:05:00Z",
       "completed_at": "2026-07-14T10:05:04Z",
       "error_summary": null
@@ -548,13 +674,15 @@ GET /api/sessions/sess_abc/messages/msg_a1/revisions
       "id": "rev_003",
       "revision_number": 2,
       "status": "completed",
-      "is_active": true,
+      "base_content_sha256": "9f2c...",
       "created_at": "2026-07-14T10:10:00Z",
       "completed_at": "2026-07-14T10:10:06Z"
     }
   ]
 }
 ```
+
+**注**：返回不含 `content_json`（大字段）；详情 endpoint `GET /revisions/{rid}` 才返回完整 content。`is_active` 字段也移除——客户端用 `status == 'completed'` 判断。
 
 ---
 
@@ -590,9 +718,9 @@ async def _migrate_schema(self):
         await self._db.commit()
 
 async def _migrate_v1_to_v2(self):
-    """加 web_message_revisions 表 + indexes。
+    """加 web_message_revisions 表 + 4 索引（用户定稿版 schema）。
 
-    幂等——用 CREATE TABLE IF NOT EXISTS。
+    幂等——用 CREATE TABLE IF NOT EXISTS / CREATE UNIQUE INDEX IF NOT EXISTS。
     不动 uploaded_skills / mcp_servers / disabled_tools。
     """
     db = self._require_db()
@@ -603,24 +731,45 @@ async def _migrate_v1_to_v2(self):
             assistant_message_id  TEXT NOT NULL,
             revision_number       INTEGER NOT NULL,
             request_id            TEXT,
-            status                TEXT NOT NULL
-                                  CHECK (status IN (
-                                      'running', 'completed', 'superseded',
-                                      'error', 'aborted', 'interrupted'
-                                  )),
+            status                TEXT NOT NULL CHECK (
+                status IN (
+                    'running',
+                    'completed',
+                    'superseded',
+                    'error',
+                    'aborted',
+                    'interrupted'
+                )
+            ),
+            base_content_sha256   TEXT NOT NULL,
             content_json          TEXT,
-            is_active             INTEGER NOT NULL DEFAULT 0
-                                  CHECK (is_active IN (0, 1)),
             created_at            TEXT NOT NULL,
             completed_at          TEXT,
             error_summary         TEXT,
-            UNIQUE (assistant_message_id, revision_number)
+            UNIQUE (assistant_message_id, revision_number),
+            FOREIGN KEY (session_id)
+                REFERENCES sessions(id)
+                ON DELETE CASCADE
         );
-        CREATE INDEX IF NOT EXISTS idx_revisions_session
-            ON web_message_revisions(session_id);
-        CREATE INDEX IF NOT EXISTS idx_revisions_active
-            ON web_message_revisions(assistant_message_id, is_active)
-            WHERE is_active = 1;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_web_message_revision_request
+            ON web_message_revisions(request_id)
+            WHERE request_id IS NOT NULL;
+
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_web_message_revision_running
+            ON web_message_revisions(assistant_message_id)
+            WHERE status = 'running';
+
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_web_message_revision_active
+            ON web_message_revisions(assistant_message_id)
+            WHERE status = 'completed';
+
+        CREATE INDEX IF NOT EXISTS idx_web_message_revisions_history
+            ON web_message_revisions(
+                session_id,
+                assistant_message_id,
+                revision_number DESC
+            );
     """)
 ```
 
@@ -649,12 +798,12 @@ async def _migrate_v1_to_v2(self):
 | # | Commit | 范围 | 测试 |
 |---|---|---|---|
 | **1** | feat(session-sqlite): diff-based replace_messages | 修 Q2 + 移除 characterization test 的 xfail | 跑 `test_d2_message_id_stability.py`（应全 GREEN） |
-| **2** | feat(extension-store): web_message_revisions schema + migration v1→v2 | DDL + migrate + sweep_interrupted | schema 单元测试 + migration 测试 |
-| **3** | feat(extension-store): revision CRUD（create/finalize/list/sweep） | 数据访问层 | CRUD 单元测试 |
+| **2** | feat(extension-store): web_message_revisions schema + migration v1→v2 | DDL（用户定稿版）+ migrate + sweep_interrupted | schema 单元测试 + migration 测试（含 FK CASCADE 删 session） |
+| **3** | feat(extension-store): revision CRUD（create/finalize/list/sweep） | 数据访问层；finalize 实现单 transaction 内的"首次 INSERT revision 0 / 非首次 UPDATE 旧 completed→superseded"+ "本 revision → completed"+ "messages UPDATE" | CRUD 单元测试（含首次/非首次/并发 rival 三类） |
 | **4** | refactor(web/app): split _execute_prompt + _persist_normal/regeneration | Q7 拆分（不引入新功能） | 现有 prompt 测试不回归 |
-| **5** | feat(web): POST /regenerate + GET /revisions endpoints | API 层 | endpoint 集成测试 |
-| **6** | feat(web): revision_finalized WS event + 前端 revision badge | 前端 | E2E |
-| **7** | test(e2e): regenerate flow + abort + restart recovery | E2E | 7-10 个 E2E 用例 |
+| **5** | feat(web): POST /regenerate + GET /revisions endpoints（含分页） | API 层；**不**含 `/activate`（决策点 4：不做手动切换） | endpoint 集成测试（含分页 limit/offset） |
+| **6** | feat(web): revision_finalized WS event + 前端 active 切换 UI | 前端：finalize 后自动刷新消息；revision badge 显示历史 | E2E |
+| **7** | test(e2e): regenerate flow + abort + restart recovery | E2E | 7-10 个 E2E 用例（首次/非首次/abort/restart 后 interrupted 提示） |
 | **8** | docs: P1-D2 release notes + tag v0.0.27-regenerate | 文档 | — |
 
 **每个 commit 都要跑**：
@@ -672,11 +821,13 @@ async def _migrate_v1_to_v2(self):
 | **branch / fork session** | 需要 snapshot fork + 多 session 分叉管理 | P2 / P3 |
 | **跨 session regenerate** | 用户语义模糊（regenerate 到哪个 session？） | 不做 |
 | **revision diff viewer** | UI 复杂，P1 不值得 | P2 |
-| **revision count 限制** | 假设单 assistant revision < 20；过多时手动 prune | P2 |
+| **revision count 硬限制 / 自动 prune** | 决策点 3：暂不限制，保留完整历史；查询接口分页 + 单次返回上限 | 后续可选（P2 加 prune API） |
 | **revision metadata（temperature / model）** | 当前每个 prompt 不带这些参数 | P2 provider routing |
 | **collaborative editing** | 多用户场景 | 不做（localhost only） |
 | **revision export** | 已有 session-level export（D1） | 后续可选 |
 | **multimodal regenerate**（图片 regenerate） | P0 明确不支持图片理解 | 不做 |
+| **手动 active revision 切换** | 决策点 4：自动切换已满足核心需求；手动切换需 revision list UI + 二次确认 + active 还原逻辑 | 不做（连 P2 也暂不计划） |
+| **流式期间写 candidate 到 SQLite** | 决策点 2：delta 只走前端 chatStore + WS 事件流；模型执行成功后一次性写完整 content | 不做（断点续传场景不存在） |
 
 ---
 
@@ -707,32 +858,26 @@ async def _migrate_v1_to_v2(self):
 
 ---
 
-## 9. 等待用户批准
+## 9. 用户决策点（2026-07-15 已定稿 ✅）
 
-### 用户需要确认的决策点
+| # | 决策 | 结论 | 说明 |
+|---|------|------|------|
+| 1 | Revision 0 创建时机 | **延迟创建** | **只在第一次 regenerate 成功 finalize 时**，把当时的旧 active 内容保存为 revision 0（status='superseded'）；失败/中止不产生无意义的 revision 0 |
+| 2 | 流式期间写入 candidate | **不周期写 SQLite** | delta 只存在前端 draft 和事件流；模型执行成功后一次性把完整 candidate 写入 revision，并原子更新 active message |
+| 3 | Revision 数量限制 | **暂不硬限制** | 保留完整历史；查询接口必须分页和限制单次返回数量，不做自动删除 |
+| 4 | Active revision 切换 | **自动切换必须做，手动切换不做** | regenerate 成功后自动将新回答设为 active（finalize transaction 内完成）；**不**提供用户手动切回旧 revision 的 UI/API |
 
-1. **revision 0 延迟创建** vs **每次 prompt 都创建 revision 0**
-   - 推荐：延迟创建（节省空间，普通 prompt 不写 revision 表）
-   - 替代：每次都写（revision 表更完整，但写放大）
+**第 4 点的明确区分**：
 
-2. **流式期间是否写 revision.content_json**
-   - 推荐：不写（简化，server restart 时 revision 仍 running → interrupted）
-   - 替代：周期 flush（断点续传，但增加 DB 写）
+✅ **必须实现**：completed 后自动切换 active revision（finalize transaction 的 `UPDATE messages SET content_json=?` + revision `status='completed'` 即是切换）
 
-3. **revision count 限制**
-   - 推荐：D2 不限制（先观察）
-   - 替代：硬限制 20（超过删除最老的 superseded）
+❌ **本阶段不实现**：用户手动选择、恢复或切换历史 revision 的 endpoint 或 UI（`POST /revisions/{rid}/activate` 不在 D2 范围内）
 
-4. **是否实现 active revision 切换**（P1-D2.1）
-   - 推荐：D2 只做 regenerate（不可切换历史 revision），D2.1 再加切换
-   - 替代：D2 直接做切换（增加 ~30% 工作量）
+### 进入编码的 gating（已通过）
 
-### 进入编码的 gating
+- [x] 八个问题回答是否完整、准确
+- [x] revision schema 是否符合预期（用户定稿 schema 已落入 §2.1）
+- [x] commit 顺序是否合理
+- [x] 决策点 1-4 的推荐选项是否接受（全部按推荐 + 用户细化）
 
-提交本设计文档后，用户审核：
-- [ ] 八个问题回答是否完整、准确
-- [ ] revision schema 是否符合预期
-- [ ] commit 顺序是否合理
-- [ ] 决策点 1-4 的推荐选项是否接受
-
-**审核通过后**，按 §6 commit 顺序进入实现阶段。
+**下一步**：按 §6 commit 顺序进入实现阶段。Commit 1（diff-based `replace_messages`）解除 xfail 是入口。
