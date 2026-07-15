@@ -154,6 +154,35 @@ class _PromptValidated:
 
 
 @dataclass(frozen=True)
+class ValidatedRegenerationRequest:
+    """D2-5：_validate_regeneration_payload 成功产物——传给 _run_regeneration_core。
+
+    所有校验通过后才构造——失败抛 HTTPException，不构造此对象。
+    `history` 不含待替换的旧 assistant（含 preceding user）。
+    `original_harness_messages` 用于 fallback（reset 失败时恢复）。
+    """
+
+    session_id: str
+    assistant_message_id: str
+    preceding_user_message_id: str
+    history: tuple[Any, ...]
+    original_harness_messages: tuple[Any, ...]
+
+
+class RegenerationValidationError(Exception):
+    """D2-5：regenerate 校验失败——含稳定 code + HTTP status。
+
+    不含 candidate 正文 / SQL / 绝对路径——安全错误响应。
+    """
+
+    def __init__(self, status_code: int, code: str, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.message = message
+
+
+@dataclass(frozen=True)
 class PromptExecutionResult:
     """D2-4：纯执行产物——_execute_prompt 的返回值。
 
@@ -1060,18 +1089,20 @@ def create_app(
         *,
         assistant_message_id: str,
         request_id: str,
+        revision_id: str | None = None,
     ) -> PromptRunOutcome:
-        """D2-4：Regenerate 编排核心——不暴露 HTTP（D2-5 才加 /regenerate route）。
+        """D2-4 + D2-5：Regenerate 编排核心。
 
-        完整生命周期：
-            1. create_running_revision（短事务）
+        生命周期：
+            1. 若 revision_id 为 None：create_running_revision（短事务）
+               否则：使用 caller 传入的 revision_id（D2-5 POST route 已创建）
             2. 读 canonical messages → 截断到 preceding user → 临时替换 harness state
             3. _execute_prompt（长 LLM 执行，无 DB transaction 跨越）
             4. _persist_regeneration_result（finalize_revision + best-effort snapshot）
             5. _reset_harness_to_session（成功 / 失败都要 reset）
 
-        异常 → revision 状态映射（D2-4 审核 §6）：
-            - 用户主动 abort → revision.aborted
+        异常 → revision 状态映射：
+            - 用户主动 abort → revision.aborted（asyncio.CancelledError 由 caller 处理）
             - Provider/Agent 执行失败（PromptRuntimeError） → revision.error
             - Candidate 缺失 → revision.error
             - Base hash stale (RevisionBaseContentChangedError) → revision.error
@@ -1079,7 +1110,7 @@ def create_app(
 
         Snapshot 失败（finalize 已成功）→ revision 仍 completed，request 仍 completed。
 
-        **事务边界**：create_running_revision 短事务 → 释放 → 长执行 → finalize 短事务。
+        **事务边界**：短事务 create → 释放 → 长执行 → finalize 短事务。
         没有任何 SQLite BEGIN IMMEDIATE 跨越 LLM 调用。
         """
         from .extension_store import (
@@ -1097,20 +1128,22 @@ def create_app(
         if store is None or session_id is None:
             raise ExtensionStoreError("regenerate requires session + store")
 
-        # 1. 创建 running revision（短事务）
-        revision = await ext_store.create_running_revision(
-            session_id=session_id,
-            assistant_message_id=assistant_message_id,
-            request_id=request_id,
-        )
+        # 1. revision 创建（D2-5：caller 可传入已有 revision_id 避免双创建）
+        if revision_id is None:
+            revision = await ext_store.create_running_revision(
+                session_id=session_id,
+                assistant_message_id=assistant_message_id,
+                request_id=request_id,
+            )
+            revision_id = revision.id
 
         # 保存原 harness state 用于 fallback；读 canonical 构建 regeneration history
         original_harness_messages = list(harness.agent.state.messages)
         canonical_before = await store.list_messages(session_id)
 
-        # 截断：create_running_revision 已经校验过目标是 session 最新 assistant，
-        # 所以 canonical_before 中最后一个 AssistantMessage 就是它。regeneration_history
-        # = canonical_before[:last_assistant_idx]（含 preceding user，不含旧 assistant）
+        # 截断：caller 已校验过目标是 session 最新 assistant，所以 canonical_before
+        # 中最后一个 AssistantMessage 就是它。regeneration_history =
+        # canonical_before[:last_assistant_idx]（含 preceding user，不含旧 assistant）
         from ..messages import AssistantMessage
 
         try:
@@ -1121,7 +1154,7 @@ def create_app(
         except ValueError:
             # canonical 找不到 assistant——mark error
             await ext_store.mark_revision_error(
-                revision_id=revision.id,
+                revision_id=revision_id,
                 request_id=request_id,
                 error_summary="target assistant message not in canonical history",
             )
@@ -1141,7 +1174,7 @@ def create_app(
         except PromptRuntimeError as e:
             # 模型/Agent 执行失败 → revision.error
             await ext_store.mark_revision_error(
-                revision_id=revision.id,
+                revision_id=revision_id,
                 request_id=request_id,
                 error_summary=_safe_error(e),
             )
@@ -1150,7 +1183,7 @@ def create_app(
         except Exception as e:
             # 兜底——未预期异常也 mark error
             await ext_store.mark_revision_error(
-                revision_id=revision.id,
+                revision_id=revision_id,
                 request_id=request_id,
                 error_summary=_safe_error(e),
             )
@@ -1162,13 +1195,13 @@ def create_app(
             outcome = await _persist_regeneration_result(
                 validated,
                 execution,
-                revision_id=revision.id,
+                revision_id=revision_id,
                 request_id=request_id,
             )
         except (ValueError, RevisionBaseContentChangedError, RevisionError) as e:
             # Candidate 缺失 / hash stale / SQL 失败 → revision.error
             await ext_store.mark_revision_error(
-                revision_id=revision.id,
+                revision_id=revision_id,
                 request_id=request_id,
                 error_summary=_safe_error(e),
             )
@@ -1488,6 +1521,10 @@ def create_app(
             "result_summary": req.result_summary,
             "event_start_sequence": req.event_start_sequence,
             "event_end_sequence": req.event_end_sequence,
+            # D2-5：operation + regenerate 关联（向后兼容）
+            "operation": req.operation,
+            "regeneration_id": req.regeneration_id,
+            "target_message_id": req.target_message_id,
         }
 
     def _find_request(request_id: str) -> WebRunRequest | None:
@@ -1603,7 +1640,7 @@ def create_app(
         elif req.status == "running":
             # 设置 flag——runner 在 success 路径会读到
             req.abort_reason = reason_str
-            # 调 harness.abort() 让模型 finalize（不 cancel task，避免孤儿）
+            # D2-5：regenerate request 的 abort 也调 harness.abort() 让模型 finalize
             try:
                 await harness.abort(req.abort_reason)
             except Exception as e:
@@ -1620,6 +1657,265 @@ def create_app(
             "status": req.status,
             "abort_reason": req.abort_reason,
         }
+
+    # ========================================================================
+    # P1-D2-5: Regenerate validation + background runner
+    # ========================================================================
+
+    def _regen_error_response(e: RegenerationValidationError) -> JSONResponse:
+        """D2-5：regenerate 校验错误 → 稳定 code JSONResponse。"""
+        return JSONResponse(
+            status_code=e.status_code,
+            content={"detail": {"code": e.code, "message": e.message}},
+        )
+
+    def _regen_safe_error_response(
+        e: Exception, code: str = "regenerate_start_failed"
+    ) -> JSONResponse:
+        """D2-5：未预期错误 → 安全 500 摘要 + 稳定 code。"""
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": {
+                    "code": code,
+                    "message": _safe_error(e),
+                }
+            },
+        )
+
+    async def _validate_regeneration_payload(
+        session_id: str,
+        assistant_message_id: str,
+    ) -> ValidatedRegenerationRequest:
+        """D2-5：regenerate 校验——10 个错误 code 映射。
+
+        顺序：
+        1. store / extension_store / harness init 检查
+        2. session 存在
+        3. message 存在 + 属于 session
+        4. role=assistant
+        5. 最新 assistant
+        6. preceding user 存在
+        7. 无 active request
+        8. 无 running revision
+
+        失败抛 RegenerationValidationError（含 status_code + code + message）。
+        """
+        store = state.session_store
+        ext_store = state.extension_store
+        if store is None or ext_store is None:
+            raise RegenerationValidationError(
+                503, "extension_store_unavailable",
+                "Extension store not initialized.",
+            )
+
+        # session 存在
+        try:
+            session = await store.get_session(session_id)
+        except Exception:
+            session = None
+        if session is None:
+            raise RegenerationValidationError(
+                404, "session_not_found",
+                f"Session {session_id!r} not found.",
+            )
+
+        # message 存在 + 属于 session + role + 最新 assistant + preceding user
+        db = store.connection
+        cur = await db.execute(
+            "SELECT id, session_id, role, idx FROM messages WHERE id = ?",
+            (assistant_message_id,),
+        )
+        msg_row = await cur.fetchone()
+        await cur.close()
+        if msg_row is None or msg_row["session_id"] != session_id:
+            raise RegenerationValidationError(
+                404, "message_not_found",
+                f"Assistant message {assistant_message_id!r} not found in this session.",
+            )
+        if msg_row["role"] != "assistant":
+            raise RegenerationValidationError(
+                400, "regenerate_target_not_assistant",
+                "Only assistant messages can be regenerated.",
+            )
+
+        # 最新 assistant
+        cur = await db.execute(
+            "SELECT id FROM messages "
+            "WHERE session_id = ? AND role = 'assistant' "
+            "ORDER BY idx DESC LIMIT 1",
+            (session_id,),
+        )
+        latest = await cur.fetchone()
+        await cur.close()
+        if latest is None or latest["id"] != assistant_message_id:
+            raise RegenerationValidationError(
+                409, "regenerate_target_not_latest",
+                "Only the latest assistant response can be regenerated.",
+            )
+
+        # preceding user——从 target idx 向前找最近 role=user
+        cur = await db.execute(
+            "SELECT id, idx FROM messages "
+            "WHERE session_id = ? AND role = 'user' AND idx < ? "
+            "ORDER BY idx DESC LIMIT 1",
+            (session_id, msg_row["idx"]),
+        )
+        preceding = await cur.fetchone()
+        await cur.close()
+        if preceding is None:
+            raise RegenerationValidationError(
+                409, "regenerate_missing_user_message",
+                "No preceding user message found to regenerate from.",
+            )
+
+        # active request 检查
+        if session_id in state.active_request_by_session:
+            raise RegenerationValidationError(
+                409, "request_already_active",
+                "An active request is already running for this session.",
+            )
+
+        # running revision 检查（依赖 partial unique index）
+        cur = await db.execute(
+            "SELECT id FROM web_message_revisions "
+            "WHERE assistant_message_id = ? AND status = 'running' LIMIT 1",
+            (assistant_message_id,),
+        )
+        existing_running = await cur.fetchone()
+        await cur.close()
+        if existing_running is not None:
+            raise RegenerationValidationError(
+                409, "revision_already_running",
+                "A regeneration is already running for this assistant message.",
+            )
+
+        # 构造 history——canonical active messages[:target_idx]（不含旧 assistant）
+        canonical = await store.list_messages(session_id)
+        history = tuple(canonical[: msg_row["idx"]])
+
+        return ValidatedRegenerationRequest(
+            session_id=session_id,
+            assistant_message_id=assistant_message_id,
+            preceding_user_message_id=preceding["id"],
+            history=history,
+            original_harness_messages=tuple(harness.agent.state.messages),
+        )
+
+    async def _run_regeneration_background(
+        web_request: WebRunRequest,
+        validated: ValidatedRegenerationRequest,
+    ) -> None:
+        """D2-5：regenerate 后台 task 入口——基于 _run_prompt_background 模式。
+
+        生命周期：queued → running → _execute_prompt → finalize → reset → completed
+        异常映射：
+            - asyncio.CancelledError → revision.aborted + request.aborted（重抛）
+            - PromptRuntimeError → revision.error + request.error
+            - RevisionBaseContentChangedError / RevisionError → revision.error + request.error
+            - 其它 Exception → revision.error + request.error（safe summary）
+
+        Snapshot 失败（finalize 已成功）→ request 仍 completed（_persist 处理）。
+        """
+        from .extension_store import (
+            RevisionBaseContentChangedError,
+            RevisionError,
+        )
+
+        ext_store = state.extension_store
+        revision_id = web_request.regeneration_id
+        assert revision_id is not None, "regenerate request missing regeneration_id"
+        request_id = web_request.id
+
+        web_request.status = "running"
+        web_request.started_at = _now_utc()
+        state.current_request_id = request_id
+        state.current_request_session_id = web_request.session_id
+        web_request.event_start_sequence = state.next_event_sequence
+
+        # 构造 _PromptValidated 视图（_run_regeneration_core 需要 skill_selection 等）
+        prompt_validated = _PromptValidated(
+            text="",  # regenerate 不用 text
+            skill_selection=None,
+            session_id=validated.session_id,
+            store=state.session_store,
+            original_messages=list(validated.original_harness_messages),
+            attached_blocks=[],
+            attached_summary=[],
+        )
+
+        try:
+            await _run_regeneration_core(
+                prompt_validated,
+                revision_id=revision_id,
+                assistant_message_id=validated.assistant_message_id,
+                request_id=request_id,
+            )
+        except asyncio.CancelledError:
+            # 显式 mark_revision_aborted（不让通用 except 捕获）
+            try:
+                await ext_store.mark_revision_aborted(
+                    revision_id=revision_id, request_id=request_id,
+                )
+            except Exception:
+                pass  # best-effort——revision 可能已被 mark
+            web_request.status = "aborted"
+            web_request.ended_at = _now_utc()
+            web_request.error = "cancelled"
+            if web_request.abort_reason is None:
+                web_request.abort_reason = "task_cancelled"
+            raise
+        except (
+            PromptRuntimeError,
+            RevisionBaseContentChangedError,
+            RevisionError,
+            ValueError,
+        ) as e:
+            # 已知执行错误 → revision.error
+            try:
+                await ext_store.mark_revision_error(
+                    revision_id=revision_id,
+                    request_id=request_id,
+                    error_summary=_safe_error(e),
+                )
+            except Exception:
+                pass
+            web_request.status = "error"
+            web_request.ended_at = _now_utc()
+            web_request.error = _safe_error(e)
+            web_request.error_type = type(e).__name__
+        except Exception as e:
+            # 未预期异常 → revision.error + safe summary
+            try:
+                await ext_store.mark_revision_error(
+                    revision_id=revision_id,
+                    request_id=request_id,
+                    error_summary=_safe_error(e),
+                )
+            except Exception:
+                pass
+            web_request.status = "error"
+            web_request.ended_at = _now_utc()
+            web_request.error = _safe_error(e)
+            web_request.error_type = type(e).__name__
+        else:
+            # 成功——但检查 abort flag（abort 不 cancel task 走收敛路径）
+            if web_request.abort_reason is not None:
+                web_request.status = "aborted"
+            else:
+                web_request.status = "completed"
+            web_request.ended_at = _now_utc()
+            web_request.result_summary = {
+                "regeneration_id": revision_id,
+                "assistant_message_id": validated.assistant_message_id,
+                "session_id": validated.session_id,
+            }
+        finally:
+            web_request.event_end_sequence = state.next_event_sequence - 1
+            state.current_request_id = None
+            state.current_request_session_id = None
+            _remove_from_active(web_request)
+            state.request_history.append(web_request)
 
     # ========================================================================
     # Static + index
@@ -1955,6 +2251,231 @@ def create_app(
             except Exception:
                 pass
         return {"ok": True, "deleted_files": deleted_files}
+
+    # ========================================================================
+    # P1-D2-5: Regenerate + Revision history
+    # ========================================================================
+
+    @app.post(
+        "/api/sessions/{sid}/messages/{assistant_message_id}/regenerate",
+        response_model=None,
+    )
+    async def post_regenerate(
+        sid: str,
+        assistant_message_id: str,
+    ) -> dict[str, Any] | JSONResponse:
+        """D2-5：触发 regenerate——返回 202 + regeneration_id + request_id。
+
+        14 步顺序（用户 2026-07-15 D2-5 审核 §2）：
+            validate → create_running_revision → register request → create task → 202
+
+        补偿逻辑：
+            - revision 创建失败：不注册 request，不启动 task，返回 4xx/5xx
+            - registry 注册失败：mark_revision_error + 移除可能存在的 entry
+            - task 创建失败：mark_revision_error + 移除 registry entry
+
+        `regeneration_id == revision.id`（不另生成第三个 ID）。
+        """
+        from .extension_store import RevisionError
+
+        if state.shutting_down:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "detail": {
+                        "code": "extension_store_unavailable",
+                        "message": "server shutting down",
+                    }
+                },
+            )
+
+        # 1. 完整校验
+        try:
+            validated = await _validate_regeneration_payload(sid, assistant_message_id)
+        except RegenerationValidationError as e:
+            return _regen_error_response(e)
+
+        # 2. 生成 request_id（regeneration_id 在 step 4 从 revision.id 拿）
+        request_id = f"req_{uuid4().hex[:16]}"
+
+        # 3. create_running_revision（短事务）——失败补偿：不注册 request
+        try:
+            revision = await state.extension_store.create_running_revision(
+                session_id=validated.session_id,
+                assistant_message_id=validated.assistant_message_id,
+                request_id=request_id,
+            )
+        except RegenerationValidationError:
+            raise  # 安全网——validator 应已抛
+        except RevisionError as e:
+            # 已知的 revision 错误（如 request_id 冲突 / already running 在 race 中触发）
+            code_map = {
+                "RevisionAlreadyRunningError": "revision_already_running",
+                "RevisionRequestConflictError": "request_conflict",
+            }
+            code = code_map.get(type(e).__name__, "regenerate_start_failed")
+            return JSONResponse(
+                status_code=409,
+                content={"detail": {"code": code, "message": _safe_error(e)}},
+            )
+        except Exception as e:
+            return _regen_safe_error_response(e)
+
+        regeneration_id = revision.id
+
+        # 4. 构造 queued WebRunRequest（不启动 task）
+        web_request = WebRunRequest(
+            id=request_id,
+            session_id=validated.session_id,
+            status="queued",
+            created_at=_now_utc(),
+            operation="regenerate",
+            regeneration_id=regeneration_id,
+            target_message_id=validated.assistant_message_id,
+            payload=None,  # regenerate 无 body
+        )
+
+        # 5. 注册进 registry——失败补偿：mark_revision_error
+        state.active_requests[request_id] = web_request
+        state.active_request_by_session[validated.session_id] = request_id
+        # 注册后状态——若 mark_revision_error 需要 task 未启动也能调（D2-3 已支持）
+
+        # 6. 创建 managed task——失败补偿：mark_revision_error + 移除 registry
+        bg_coro = _run_regeneration_background(web_request, validated)
+        try:
+            task = asyncio.create_task(bg_coro, name=f"regenerate_{request_id}")
+        except Exception as e:
+            # task 创建失败——close un-awaited coro + 补偿
+            bg_coro.close()
+            try:
+                await state.extension_store.mark_revision_error(
+                    revision_id=regeneration_id,
+                    request_id=request_id,
+                    error_summary=_safe_error(e),
+                )
+            except Exception:
+                pass
+            state.active_requests.pop(request_id, None)
+            state.active_request_by_session.pop(validated.session_id, None)
+            return _regen_safe_error_response(e, code="regenerate_start_failed")
+
+        web_request.task = task
+
+        # 7. 返回 202
+        return JSONResponse(
+            status_code=202,
+            content={
+                "ok": True,
+                "operation": "regenerate",
+                "regeneration_id": regeneration_id,
+                "request_id": request_id,
+                "session_id": validated.session_id,
+                "assistant_message_id": validated.assistant_message_id,
+                "status": "queued",
+            },
+        )
+
+    @app.get(
+        "/api/sessions/{sid}/messages/{assistant_message_id}/revisions",
+        response_model=None,
+    )
+    async def get_revisions(
+        sid: str,
+        assistant_message_id: str,
+        limit: int = 20,
+        before_revision_number: int | None = None,
+    ) -> dict[str, Any] | JSONResponse:
+        """D2-5：列出 assistant 的 revision 历史——安全 serializer。
+
+        **不**返回 content_json / base_content_sha256 / request_id（审核 §1.2）。
+        `is_current` 仅当 status == "completed"（partial unique 保证至多一个）。
+        """
+        ext_store = state.extension_store
+        store = state.session_store
+        if ext_store is None or store is None:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "detail": {
+                        "code": "extension_store_unavailable",
+                        "message": "Extension store not initialized.",
+                    }
+                },
+            )
+
+        # session/message 一致性校验
+        try:
+            session = await store.get_session(sid)
+        except Exception:
+            session = None
+        if session is None:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "detail": {"code": "session_not_found", "message": "Session not found."}
+                },
+            )
+        db = store.connection
+        cur = await db.execute(
+            "SELECT id, session_id, role FROM messages WHERE id = ?",
+            (assistant_message_id,),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        if row is None or row["session_id"] != sid:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "detail": {
+                        "code": "message_not_found",
+                        "message": "Assistant message not found in this session.",
+                    }
+                },
+            )
+        if row["role"] != "assistant":
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": {
+                        "code": "regenerate_target_not_assistant",
+                        "message": "Revisions only exist for assistant messages.",
+                    }
+                },
+            )
+
+        # limit clamp——repository 也 clamp，API 层保持一致
+        clamped_limit = max(1, min(100, limit))
+
+        revisions = await ext_store.list_revisions(
+            session_id=sid,
+            assistant_message_id=assistant_message_id,
+            limit=clamped_limit,
+            before_revision_number=before_revision_number,
+        )
+
+        items = [
+            {
+                "revision_id": r.id,
+                "revision_number": r.revision_number,
+                "status": r.status,
+                "created_at": r.created_at,
+                "completed_at": r.completed_at,
+                "is_current": r.status == "completed",
+            }
+            for r in revisions
+        ]
+
+        next_before = items[-1]["revision_number"] if items else None
+        # 如果返回数量 < limit，next_before 应为 null（无更多页）
+        if len(items) < clamped_limit:
+            next_before = None
+
+        return {
+            "session_id": sid,
+            "assistant_message_id": assistant_message_id,
+            "items": items,
+            "next_before_revision_number": next_before,
+        }
 
     # ========================================================================
     # P1-D1: Export Markdown

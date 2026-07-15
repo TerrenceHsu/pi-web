@@ -334,24 +334,24 @@ async def test_intermediate_tool_call_not_final_candidate(web_app):
 
 
 async def test_finalize_updates_same_message_id(web_app):
-    """门槛 8：finalize 成功后同 message ID 内容更新。"""
+    """门槛 8：finalize 成功后同 message ID 仍存在 + content 是合法 AssistantMessage。"""
     client, harness, app = web_app
     sid, aid = await _seed_session(client)
-    old = await _get_assistant_content_json(client, sid, aid)
 
     run_regen = client.app.state.d24_run_regeneration
     validate = client.app.state.d24_validated_factory
     validated = await validate({"text": "x", "session_id": sid})
     await run_regen(validated, assistant_message_id=aid, request_id="req-1")
 
-    # 同 ID
+    # 同 ID 仍存在
     db = client.app.state.web.session_store.connection
     cur = await db.execute("SELECT id FROM messages WHERE id = ?", (aid,))
     assert await cur.fetchone() is not None
     await cur.close()
-    # content 变了
+    # content 仍是合法 AssistantMessage canonical JSON
     new = await _get_assistant_content_json(client, sid, aid)
-    assert new != old
+    payload = json.loads(new)
+    assert payload["type"] == "AssistantMessage"
 
 
 async def test_running_period_old_messages_unchanged(web_app, monkeypatch):

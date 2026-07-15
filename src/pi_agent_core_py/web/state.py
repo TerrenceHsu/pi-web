@@ -220,6 +220,9 @@ class WebAppState(BaseModel):
 
 RequestStatus = Literal["queued", "running", "completed", "error", "aborted"]
 
+# D2-5：request operation 类型——区分普通 prompt 与 regenerate
+RequestOperation = Literal["prompt", "regenerate"]
+
 
 @dataclass
 class WebRunRequest:
@@ -232,7 +235,8 @@ class WebRunRequest:
         **JSON-safe**（serialize_request 输出）：
             id / session_id / status / created_at / started_at / ended_at /
             error / error_type / abort_reason / result_summary /
-            event_start_sequence / event_end_sequence
+            event_start_sequence / event_end_sequence / operation /
+            regeneration_id / target_message_id
         **仅内存**（不进 JSON）：
             task（asyncio.Task 引用——用于 abort / shutdown 收敛）
             payload（原始请求 dict——用于 debug，**绝不**进 JSON response；
@@ -258,6 +262,10 @@ class WebRunRequest:
     # P1-B2 会填充这两个字段（事件 sequence 范围）；P1-B1 占位
     event_start_sequence: int | None = None
     event_end_sequence: int | None = None
+    # D2-5：operation 类型 + regenerate 关联（向后兼容——普通 prompt 默认值）
+    operation: RequestOperation = "prompt"
+    regeneration_id: str | None = None  # revision.id（regenerate 路径）
+    target_message_id: str | None = None  # assistant_message_id（regenerate 路径）
     # 仅内存——不进 JSON
     task: asyncio.Task | None = field(default=None, repr=False)
     payload: dict[str, Any] | None = field(default=None, repr=False)
@@ -269,4 +277,5 @@ __all__ = [
     "WebMCPServerConfig",
     "WebRunRequest",
     "RequestStatus",
+    "RequestOperation",
 ]
