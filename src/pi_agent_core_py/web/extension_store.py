@@ -113,7 +113,142 @@ class MCPServerRowResult:
 # ============================================================================
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+
+# ============================================================================
+# DDL 常量——拆成单独语句 list 而非多语句字符串，便于在显式 transaction 内
+# 用 execute() 逐条执行（executescript 会隐式 commit，破坏 BEGIN IMMEDIATE）
+# ============================================================================
+
+_SCHEMA_META_DDL = """
+CREATE TABLE IF NOT EXISTS web_extension_schema_meta (
+    id      INTEGER PRIMARY KEY CHECK (id = 1),
+    version INTEGER NOT NULL
+)
+"""
+
+# P1-C1 三张表——fresh v2 与既有 v1 共用（CREATE IF NOT EXISTS 幂等）
+_C1_TABLE_DDL_STATEMENTS: list[str] = [
+    """
+    CREATE TABLE IF NOT EXISTS web_uploaded_skills (
+        name                TEXT PRIMARY KEY,
+        skill_json          TEXT NOT NULL,
+        raw_markdown        TEXT NOT NULL,
+        enabled             INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+        source_kind         TEXT NOT NULL DEFAULT 'upload'
+                            CHECK (source_kind IN ('upload')),
+        content_sha256      TEXT NOT NULL DEFAULT '',
+        last_restore_error  TEXT,
+        created_at          TEXT NOT NULL,
+        updated_at          TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS web_mcp_servers (
+        name                TEXT PRIMARY KEY,
+        transport           TEXT NOT NULL DEFAULT 'stdio'
+                            CHECK (transport IN ('stdio')),
+        command             TEXT NOT NULL,
+        args_json           TEXT NOT NULL DEFAULT '[]',
+        desired_enabled     INTEGER NOT NULL DEFAULT 0
+                            CHECK (desired_enabled IN (0, 1)),
+        env_keys_json       TEXT NOT NULL DEFAULT '[]',
+        last_restore_error  TEXT,
+        created_at          TEXT NOT NULL,
+        updated_at          TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS web_mcp_disabled_tools (
+        server_name         TEXT NOT NULL,
+        tool_name           TEXT NOT NULL,
+        disabled_at         TEXT NOT NULL,
+        PRIMARY KEY (server_name, tool_name),
+        FOREIGN KEY (server_name)
+            REFERENCES web_mcp_servers(name)
+            ON DELETE CASCADE
+    )
+    """,
+]
+
+# P1-D2 revisions 表——fresh v2 与 v1→v2 migration 共用
+# DDL 补充（审核要求）：
+#   - revision_number CHECK >= 0
+#   - status IN ('completed','superseded') → content_json NOT NULL
+#   - 不加 running→NULL CHECK（留未来 checkpoint 灵活性）
+_REVISIONS_DDL_STATEMENTS: list[str] = [
+    """
+    CREATE TABLE IF NOT EXISTS web_message_revisions (
+        id                    TEXT PRIMARY KEY,
+        session_id            TEXT NOT NULL,
+        assistant_message_id  TEXT NOT NULL,
+        revision_number       INTEGER NOT NULL CHECK (revision_number >= 0),
+        request_id            TEXT,
+        status                TEXT NOT NULL CHECK (
+            status IN (
+                'running',
+                'completed',
+                'superseded',
+                'error',
+                'aborted',
+                'interrupted'
+            )
+        ),
+        base_content_sha256   TEXT NOT NULL,
+        content_json          TEXT,
+        created_at            TEXT NOT NULL,
+        completed_at          TEXT,
+        error_summary         TEXT,
+        UNIQUE (assistant_message_id, revision_number),
+        FOREIGN KEY (session_id)
+            REFERENCES sessions(id)
+            ON DELETE CASCADE,
+        CHECK (
+            status NOT IN ('completed', 'superseded')
+            OR content_json IS NOT NULL
+        )
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_web_message_revision_request
+        ON web_message_revisions(request_id)
+        WHERE request_id IS NOT NULL
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_web_message_revision_running
+        ON web_message_revisions(assistant_message_id)
+        WHERE status = 'running'
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_web_message_revision_active
+        ON web_message_revisions(assistant_message_id)
+        WHERE status = 'completed'
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_web_message_revisions_history
+        ON web_message_revisions(
+            session_id,
+            assistant_message_id,
+            revision_number DESC
+        )
+    """,
+]
+
+
+# fresh-v2 schema validation 必须存在的表 + 索引
+_REQUIRED_TABLES = (
+    "web_uploaded_skills",
+    "web_mcp_servers",
+    "web_mcp_disabled_tools",
+    "web_message_revisions",
+)
+_REQUIRED_INDEXES = (
+    "uq_web_message_revision_request",
+    "uq_web_message_revision_running",
+    "uq_web_message_revision_active",
+    "idx_web_message_revisions_history",
+)
 
 
 class ExtensionSQLiteStore:
@@ -157,7 +292,20 @@ class ExtensionSQLiteStore:
         return self._db
 
     async def init(self) -> None:
-        """打开 / 接受 connection + 建 schema。幂等。"""
+        """打开 / 接受 connection + 按 schema version 初始化。幂等。
+
+        初始化顺序（审核要求——避免在检查 version 前意外修改未来版本 DB）：
+
+            1. open / accept connection（含 PRAGMA）
+            2. 只确保 schema_meta 表存在（CREATE IF NOT EXISTS）
+            3. 读 schema version
+            4. 按 version 分支：
+               - None      → 全新 DB，单 transaction 建 v2 全部 schema
+               - 1         → migrate v1→v2（单 transaction）
+               - 2         → 只 validate，不重建
+               - > 2       → 在任何 DDL 前 raise（防止 downgrade 损坏）
+               - 其它      → raise
+        """
         if self._db is not None:
             return
         if self._injected_connection is not None:
@@ -174,59 +322,126 @@ class ExtensionSQLiteStore:
             self._db.row_factory = aiosqlite.Row
             await self._db.execute("PRAGMA foreign_keys=ON")
             await self._db.execute("PRAGMA busy_timeout=5000")
-        await self._exec_schema()
+
+        # 先确保 schema_meta 表存在（独立 executescript——此时还没读 version）
+        await self._db.executescript(_SCHEMA_META_DDL)
         await self._db.commit()
 
-    async def _exec_schema(self) -> None:
-        self._require_db()
-        await self._db.executescript(
-            f"""
-            CREATE TABLE IF NOT EXISTS web_extension_schema_meta (
-                id      INTEGER PRIMARY KEY CHECK (id = 1),
-                version INTEGER NOT NULL
-            );
+        version = await self.get_schema_version()
 
-            CREATE TABLE IF NOT EXISTS web_uploaded_skills (
-                name                TEXT PRIMARY KEY,
-                skill_json          TEXT NOT NULL,
-                raw_markdown        TEXT NOT NULL,
-                enabled             INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
-                source_kind         TEXT NOT NULL DEFAULT 'upload'
-                                    CHECK (source_kind IN ('upload')),
-                content_sha256      TEXT NOT NULL DEFAULT '',
-                last_restore_error  TEXT,
-                created_at          TEXT NOT NULL,
-                updated_at          TEXT NOT NULL
-            );
+        if version is None:
+            await self._initialize_fresh_v2_schema()
+        elif version == 1:
+            await self._migrate_v1_to_v2()
+        elif version == SCHEMA_VERSION:
+            await self._validate_v2_schema()
+        elif version > SCHEMA_VERSION:
+            # 关键：在任何 DDL 前失败——防止把未来版本的 DB 当成旧版重建
+            raise ExtensionStoreError(
+                "Extension database schema is newer than this application."
+            )
+        else:
+            raise ExtensionStoreError(
+                f"Unsupported extension database schema version: {version}"
+            )
 
-            CREATE TABLE IF NOT EXISTS web_mcp_servers (
-                name                TEXT PRIMARY KEY,
-                transport           TEXT NOT NULL DEFAULT 'stdio'
-                                    CHECK (transport IN ('stdio')),
-                command             TEXT NOT NULL,
-                args_json           TEXT NOT NULL DEFAULT '[]',
-                desired_enabled     INTEGER NOT NULL DEFAULT 0
-                                    CHECK (desired_enabled IN (0, 1)),
-                env_keys_json       TEXT NOT NULL DEFAULT '[]',
-                last_restore_error  TEXT,
-                created_at          TEXT NOT NULL,
-                updated_at          TEXT NOT NULL
-            );
+    # ------------------------------------------------------------------
+    # schema 初始化 / migration 内部方法
+    # ------------------------------------------------------------------
 
-            CREATE TABLE IF NOT EXISTS web_mcp_disabled_tools (
-                server_name         TEXT NOT NULL,
-                tool_name           TEXT NOT NULL,
-                disabled_at         TEXT NOT NULL,
-                PRIMARY KEY (server_name, tool_name),
-                FOREIGN KEY (server_name)
-                    REFERENCES web_mcp_servers(name)
-                    ON DELETE CASCADE
-            );
+    async def _initialize_fresh_v2_schema(self) -> None:
+        """全新 DB——单 BEGIN IMMEDIATE transaction 建 C1 三表 + revisions 表 + 索引
+        + 插入 schema_meta(id=1, version=2)。
 
-            INSERT OR IGNORE INTO web_extension_schema_meta (id, version)
-            VALUES (1, {SCHEMA_VERSION});
-            """
-        )
+        任一步失败 → ROLLBACK（schema_meta 表仍在但 version 字段未填——下次 init
+        会重新进入此分支重试；幂等）。
+        """
+        db = self._require_db()
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            for stmt in _C1_TABLE_DDL_STATEMENTS:
+                await db.execute(stmt)
+            for stmt in _REVISIONS_DDL_STATEMENTS:
+                await db.execute(stmt)
+            await db.execute(
+                "INSERT INTO web_extension_schema_meta (id, version) VALUES (1, ?)",
+                (SCHEMA_VERSION,),
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+
+    async def _migrate_v1_to_v2(self) -> None:
+        """v1→v2 migration——单 BEGIN IMMEDIATE transaction 加 revisions 表 + 4 索引
+        + UPDATE schema_meta version 1→2。
+
+        事务内重新校验 version=1（防并发 init）；UPDATE rowcount 必须=1。
+        幂等：CREATE TABLE/INDEX IF NOT EXISTS。
+
+        任一步失败 → ROLLBACK；version 仍为 1；revisions 表/索引不留残留。
+        """
+        db = self._require_db()
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            # 事务内再校验 version（防并发 init race）
+            cursor = await db.execute(
+                "SELECT version FROM web_extension_schema_meta WHERE id = 1"
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None or row["version"] != 1:
+                raise ExtensionStoreError(
+                    "schema version changed unexpectedly during migration"
+                )
+            for stmt in _REVISIONS_DDL_STATEMENTS:
+                await db.execute(stmt)
+            cursor = await db.execute(
+                "UPDATE web_extension_schema_meta SET version = ? "
+                "WHERE id = 1 AND version = 1",
+                (SCHEMA_VERSION,),
+            )
+            if cursor.rowcount != 1:
+                raise ExtensionStoreError(
+                    "migration rowcount mismatch——version unchanged"
+                )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+
+    async def _validate_v2_schema(self) -> None:
+        """version=2 已就绪——只读校验关键表/索引存在，不重建。
+
+        若 version=2 但 schema 不完整，报告 corruption（不静默重建——审核要求）。
+        """
+        db = self._require_db()
+        for table in _REQUIRED_TABLES:
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name = ?",
+                (table,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None:
+                raise ExtensionStoreError(
+                    "schema corruption: table missing despite version=2 "
+                    f"(table={table!r})"
+                )
+        for index in _REQUIRED_INDEXES:
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'index' AND name = ?",
+                (index,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None:
+                raise ExtensionStoreError(
+                    "schema corruption: index missing despite version=2 "
+                    f"(index={index!r})"
+                )
 
     async def close(self) -> None:
         """关闭连接。幂等。
