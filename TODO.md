@@ -1228,9 +1228,9 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
 
 ---
 
-## 🔄 P1-D2 Regenerate（D2-1 + D2-2 + D2-3 + D2-4 + D2-5 ✅ 完成，等审核进入 D2-6 lifespan sweep + D2-7 E2E，2026-07-16）
+## 🔄 P1-D2 Regenerate（D2-1 + D2-2 + D2-3 + D2-4 + D2-5 + D2-6 ✅ 完成，等审核进入 D2-7 前端 + D2-8 E2E/Freeze，2026-07-16）
 
-**状态**：D2 准备工作 + D2-1 + D2-2 + D2-3 + D2-4 + D2-5 已落地；D2-6 `mark_running_revisions_interrupted` lifespan 接入 + D2-7 E2E + D2-8 release 等下一次审核。
+**状态**：D2 准备工作 + D2-1 + D2-2 + D2-3 + D2-4 + D2-5 + D2-6 已落地；D2-7 前端 Regenerate Flow + D2-8 Playwright/Docs/Freeze 等下一次审核。
 
 ### 已落地
 
@@ -1247,6 +1247,17 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
     - try/except ROLLBACK 整个 transaction
   - `tests/test_session_message_id_stability.py`（rename from test_d2_message_id_stability.py）14 测试全 PASS
   - 范围边界：未实现 revision schema / regenerate endpoint / _execute_prompt 拆分 / 前端 Regenerate / request metadata / revision 清理（留待 D2-2+）
+
+- **D2-6 startup sweep + Web DTO**（commit `9b6db3d`）：
+  - **Startup sweep**：`mark_running_revisions_interrupted` 接入 lifespan startup——固定顺序：session store init → extension store init/migrate → **sweep** → restore Skills → restore MCP → yield
+  - **Sweep 失败 = 启动失败**（raise RuntimeError，不吞掉）——避免半损坏状态导致后续 regenerate 永久 409
+  - 错误摘要安全：仅 type name，无 content / SQL / 路径 / traceback
+  - **Web PersistedMessage DTO**：`SQLiteSessionStore.list_persisted_messages(sid) -> list[SQLiteStoredMessage]`；`serialize_persisted_message` 暴露 `{message_id, session_id, idx, role, content, created_at, message}`；GET /api/messages?session_id= 改用新 serializer
+  - **不**修改 core AgentMessage——DTO 是 Web 层包装
+  - Request metadata 全链路验证：`_serialize_request` 已含 operation/regeneration_id/target_message_id；GET /api/requests/{id} 与 GET /api/requests 都用此 serializer；reconnect 通过 GET /api/requests?status=active 获取
+  - **D2-3 finalize timestamp bug 修复**：`finalize_revision` 误用 `_now_iso()` 写 `sessions.updated_at`（INTEGER 列）→ 改用 `_now_ms()`；revision 表 TEXT 列仍用 ISO
+  - `tests/test_d2_6_startup_and_dto.py` 16 用例全 PASS（Sweep 9 + DTO 4 + Metadata 3）
+  - 范围边界：未实现前端 Regenerate 按钮 / Playwright / docs / tag（留 D2-7/D2-8）
 
 - **D2-5 regenerate HTTP API**（commit `72fa2f4`）：
   - `POST /api/sessions/{sid}/messages/{aid}/regenerate` → 202 + `{ok, operation: "regenerate", regeneration_id, request_id, session_id, assistant_message_id, status: "queued"}`
@@ -1337,11 +1348,21 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
 3. ✅ **不**硬限制 revision 数量——查询接口必须分页
 4. ✅ 自动 active 切换必做，手动切换**不做**
 
-### 下一步 D2-6 + D2-7 + D2-8
+### 下一步 D2-7 + D2-8
 
-- **D2-6**：`mark_running_revisions_interrupted` 接入 lifespan startup（在 `_restore_mcp_servers` 之后调用）；补 startup sweep 测试
-- **D2-7**：Playwright E2E——regenerate flow + abort + restart recovery（7-10 用例）
-- **D2-8**：release notes + tag `v0.0.27-regenerate`
+- **D2-7 Frontend Regenerate Flow**：
+  - `frontend/src/api/messages.ts` + `types/` 加 PersistedMessage / ChatMessage 类型（含 message_id）
+  - `chatStore.ts` 加 regeneration 状态：`regenerationId` / `regeneratingMessageId` / `regenerationDraft` / `regenerationStatus`
+  - `MessageBubble.vue` 加 Regenerate 按钮（仅最新 persisted assistant + 无 active request + 非 sending/streaming/aborting）
+  - 流式期间保留原 active bubble + 独立 regeneration draft bubble
+  - 成功：reconcileMessagesFromServer → 同 message_id content 更新 → 删 draft → Regenerated badge
+  - Error/Abort：删 draft + 保留原回答 + 清 currentRequestId
+  - Reload/reconnect：通过 `operation: "regenerate"` 恢复 regeneration 状态
+  - Stop 继续用 `POST /api/requests/{request_id}/abort`（**不**新增 regenerate 专用 abort）
+- **D2-8 Playwright + Docs + D2 Freeze**：
+  - Playwright 7-10 用例（最新 assistant 显示按钮 / 历史 assistant 不显示 / 流式期间旧回答可见 / completed 同 bubble 更新 / abort 保留旧回答 / reload delta 不重不漏 / 双击单 request / server restart running→interrupted / Export Markdown 只含新 active / 普通 Send 用新 active）
+  - 完整发布检查：offline pytest / coverage ≥75% / ruff / frontend build / 28 E2E 不回归 / 新增 E2E 通过 / production hooks 0 / core runtime 未修改 / working tree clean
+  - **Tag 策略修正**：D2/D3 阶段不打正式 tag；P1-D4 全部完成才打 `v0.0.26-product-actions`；`v0.0.27` 留给 P1-D 之后
 
 ### D2-5 测试覆盖（31 用例）
 
@@ -1399,12 +1420,12 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
 
 ---
 
-## 当前测试基线（HEAD `72fa2f4`——D2-5 完成）
+## 当前测试基线（HEAD `9b6db3d`——D2-6 完成）
 
 | 命令 | 结果 |
 |---|---|
-| `pytest -m "not slow and not integration and not docker"` | **1114 passed**（1083 + 31 D2-5），14 deselected（~67s） |
-| D2 专项 8 文件 | **178 passed**（regenerate_api 31 + execution_split 20 + revisions 40 + migration 20 + message_id_stability 13 + prompt_async 20 + request_recovery 12 + markdown_export 22） |
+| `pytest -m "not slow and not integration and not docker"` | **1130 passed**（1114 + 16 D2-6），14 deselected（~63s） |
+| D2 专项 9 文件 | **194 passed**（d2_6_startup_and_dto 16 + regenerate_api 31 + execution_split 20 + revisions 40 + migration 20 + message_id_stability 13 + prompt_async 20 + request_recovery 12 + markdown_export 22） |
 | Coverage gate | 83.82% ≥ 75% ✅ |
 | Playwright e2e（build:e2e） | **26/28**（已知 P1-C 跨测试污染，非 D1/D2 引入） |
 | ruff | All checks passed（src tests scripts） |
