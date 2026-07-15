@@ -1228,9 +1228,9 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
 
 ---
 
-## 🔄 P1-D2 Regenerate（D2-1 ✅ 完成，等审核进入 D2-2，2026-07-15）
+## 🔄 P1-D2 Regenerate（D2-1 + D2-2 ✅ 完成，等审核进入 D2-3 CRUD，2026-07-15）
 
-**状态**：D2 准备工作 + D2-1 已落地；D2-2 schema migration 等下一次审核。
+**状态**：D2 准备工作 + D2-1 + D2-2 已落地；D2-3 revision CRUD 等下一次审核。
 
 ### 已落地
 
@@ -1248,9 +1248,41 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
   - `tests/test_session_message_id_stability.py`（rename from test_d2_message_id_stability.py）14 测试全 PASS
   - 范围边界：未实现 revision schema / regenerate endpoint / _execute_prompt 拆分 / 前端 Regenerate / request metadata / revision 清理（留待 D2-2+）
 
+- **D2-2 web_message_revisions schema + migration v1→v2**（commit `e25b319`）：
+  - `SCHEMA_VERSION = 1` → `2`
+  - `init()` 重写为审核要求顺序：connect → PRAGMA → `_ensure_schema_meta_table` → `get_schema_version` → 按 version 分支（None→`_initialize_fresh_v2_schema` / 1→`_migrate_v1_to_v2` / 2→`_validate_v2_schema` / >2→fail-before-DDL）
+  - 所有 DDL 在 `BEGIN IMMEDIATE` 单 transaction 内；任一步失败 ROLLBACK
+  - `_migrate_v1_to_v2` 事务内重新校验 version=1 + UPDATE rowcount=1
+  - DDL 补审核要求约束：`revision_number INTEGER CHECK >= 0` + `CHECK (status NOT IN ('completed','superseded') OR content_json IS NOT NULL)`
+  - 不加 `running → content_json NULL` CHECK（留未来 checkpoint 灵活性）
+  - `web_message_revisions` 表：6 status 枚举 / `UNIQUE(assistant_message_id, revision_number)` / FK `session_id` CASCADE
+  - 4 个索引：`uq_web_message_revision_request` / `_running` / `_active`（partial unique）/ `idx_web_message_revisions_history`
+  - `_validate_v2_schema` 只读校验表/索引存在，不静默重建
+  - `assistant_message_id` 不加跨表 FK（顺序敏感，应用层校验）
+  - `tests/test_extension_store_d2_migration.py` 20 测试全 PASS
+
+### base_content_sha256 语义（D2-2 审核定稿 2026-07-15）
+
+✅ **= 创建 revision 时 messages 表目标 assistant row 的原始 `content_json` 字符串按 UTF-8 编码的 SHA-256**
+
+- **不是**截断上下文 hash / 整个 session history hash / 新 candidate hash / assistant 纯文本 hash
+- **是** optimistic concurrency token——finalize 时重读 `messages.content_json` 算 SHA-256 对比，不一致→reject finalize→rollback→revision 标 error（code: `revision_base_content_changed`）
+- **不重新序列化**（json.loads/dumps 会改 whitespace/key order/unicode/separators）
+- revision 0 的 `base_content_sha256` = revision 1 的 = sha256(旧 active)；revision 2 = sha256(B)
+- 错误响应**不含** hash 差异细节
+
+### `completed ⇯ active` 修正（D2-2 审核要求）
+
+旧表述"completed ⟺ active"过于绝对——第一次 regenerate 前 messages 是 active 但 revision 表为空。
+正确表述：**partial unique index 保证每个 assistant_message_id 至多 1 个 completed，不保证必然存在**
+
 ### D2-1 测试覆盖（14 场景）
 
 初次写入 ID 唯一 / 尾部追加 / user+assistant 历史 ID 保持 / 同 role 内容更新 ID 不变（regenerate 关键）/ created_at 保持 / 新消息新 ID / 缩短尾部 / role mismatch 只重建不匹配位置及后方 / idx 连续 / SQL 失败 rollback / session.updated_at 推进 / list_messages 顺序 / 第二轮 prompt 后第一轮 ID 保持 / 原 xfail 转 PASS
+
+### D2-2 测试覆盖（20 门槛）
+
+1. fresh DB 直接 v2 / 2. v1→v2 / 3. C1 三表保持 / 4. session+messages 保持 / 5. Skill / 6. MCP / 7. disabled tool / 8. 幂等 / 9. v2 重开不重复 DDL / 10. version>2 fail-before-DDL / 11. mid-migration 异常留 v1 / 12. mid-migration 异常无残留 / 13. status CHECK / 14. revision_number CHECK / 15. request_id partial unique / 16. running partial unique / 17. completed partial unique / 18. 多 superseded / 19. session delete CASCADE / 20. 空 revisions 表不影响 messages API
 
 ### 4 个决策点已定稿（2026-07-15）
 
@@ -1259,13 +1291,9 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
 3. ✅ **不**硬限制 revision 数量——查询接口必须分页
 4. ✅ 自动 active 切换必做，手动切换**不做**
 
-### ⚠️ 仍待确认（D2-2 编码前）
+### 下一步 D2-3
 
-`base_content_sha256`（用户定稿 schema 中 NOT NULL 但无说明）——已推断为"revision 创建瞬间的 `messages.content_json` 的 SHA-256"（审计 + finalize 一致性校验）
-
-### 下一步 D2-2
-
-revision schema（assistant_message_id FK + ON DELETE CASCADE + 4 索引 + base_content_sha256）+ `_migrate_schema` 框架
+revision CRUD（create_running / finalize / list / sweep_interrupted）——核心是 finalize 的单 transaction 内 5 步 SQL（INSERT revision 0 或 UPDATE prev completed→superseded + UPDATE running→completed + UPDATE messages.content_json）+ base_content_sha256 optimistic concurrency check + error code `revision_base_content_changed`
 
 ---
 
@@ -1285,12 +1313,12 @@ revision schema（assistant_message_id FK + ON DELETE CASCADE + 4 索引 + base_
 
 ---
 
-## 当前测试基线（HEAD `564c3f5`——D2-1 完成）
+## 当前测试基线（HEAD `e25b319`——D2-2 完成）
 
 | 命令 | 结果 |
 |---|---|
-| `pytest -m "not slow and not integration and not docker"` | **1003 passed**, 0 xfailed（~60s） |
-| Coverage gate | **83.82%** ≥ 75% ✅ |
+| `pytest -m "not slow and not integration and not docker"` | **1023 passed**（1003 baseline + 20 D2-2），14 deselected（~50s） |
+| Coverage gate | 83.82% ≥ 75% ✅（D2-2 不影响 coverage） |
 | Playwright e2e（build:e2e） | **26/28**（已知 P1-C 跨测试污染，非 D1/D2 引入） |
 | ruff | All checks passed |
 | Frontend build (e2e mode) | 137.53 KB JS / 39.80 KB CSS |
