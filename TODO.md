@@ -1228,9 +1228,9 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
 
 ---
 
-## 🔄 P1-D2 Regenerate（D2-1 + D2-2 + D2-3 ✅ 完成，等审核进入 D2-4 执行链路拆分，2026-07-15）
+## 🔄 P1-D2 Regenerate（D2-1 + D2-2 + D2-3 + D2-4 ✅ 完成，等审核进入 D2-5 Regenerate API，2026-07-15）
 
-**状态**：D2 准备工作 + D2-1 + D2-2 + D2-3 已落地；D2-4 `_execute_prompt` 拆分等下一次审核。
+**状态**：D2 准备工作 + D2-1 + D2-2 + D2-3 + D2-4 已落地；D2-5 `/regenerate` HTTP route 等下一次审核。
 
 ### 已落地
 
@@ -1247,6 +1247,20 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
     - try/except ROLLBACK 整个 transaction
   - `tests/test_session_message_id_stability.py`（rename from test_d2_message_id_stability.py）14 测试全 PASS
   - 范围边界：未实现 revision schema / regenerate endpoint / _execute_prompt 拆分 / 前端 Regenerate / request metadata / revision 清理（留待 D2-2+）
+
+- **D2-4 execution/persistence split**（commit `260bbff`）：
+  - `_run_prompt_core` 改为 thin wrapper：调 `_execute_prompt` + `_persist_normal_prompt_result`
+  - 新数据类 `PromptExecutionResult`（frozen，8 字段：messages / assistant_message / messages_before/after / stop_reason / usage / snapshot_payload / result_summary）；旧 `PromptExecutionResult` 重命名为 `PromptRunOutcome`（兼容 caller）
+  - `_execute_prompt`：纯执行——run_prompt/run_continue + candidate 提取；**不**碰 DB
+  - `_persist_normal_prompt_result`：replace_messages + append_snapshot（旧语义）
+  - `_persist_regeneration_result`：finalize_revision + best-effort snapshot；**不**调 replace_messages
+  - `_extract_terminal_assistant`：从 suffix 末尾向前扫，跳过非 AssistantMessage / error_message / ToolCall-only 中间 turn
+  - `_reset_harness_to_session`：优先 SQLite canonical；失败 fallback；所有 regenerate 路径退出都调
+  - `_run_regeneration_core`（不暴露 HTTP）：queued→running→execute→finalize→reset→completed；异常→revision 状态映射；snapshot 失败 best-effort
+  - 事务边界：短事务 create_running_revision → 释放 → 长 LLM 执行 → 短事务 finalize_revision；**没有** SQLite BEGIN IMMEDIATE 跨越 LLM 调用
+  - 内部函数挂 `app.state.d24_*` 便于测试访问（**非** public API）
+  - `tests/test_web_prompt_execution_split.py` 20 用例全 PASS
+  - 范围边界：未实现 `/regenerate` route / 前端 / WS event / request metadata UI / PDF（留 D2-5+）
 
 - **D2-3 revision repository**（commit `813831d`）：
   - 8 个 async 方法（按审核固定接口）：`create_running_revision` / `get_revision` / `get_revision_by_request_id` / `list_revisions` / `finalize_revision` / `mark_revision_error` / `mark_revision_aborted` / `mark_running_revisions_interrupted`
@@ -1308,9 +1322,25 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
 3. ✅ **不**硬限制 revision 数量——查询接口必须分页
 4. ✅ 自动 active 切换必做，手动切换**不做**
 
-### 下一步 D2-4
+### 下一步 D2-5
 
-`web/app.py::_run_prompt_core` 拆分为 `_execute_prompt`（只执行模型，不持久化）+ `_persist_normal_prompt_result` + `_persist_regeneration_result`（调用 `finalize_revision`）。regenerate 用专用路径，**不**调 `replace_messages`——避免覆盖 active。同时加 `_reset_harness_to_session` helper（每个 prompt 开始前重置 harness agent messages 到 SQLite 当前 active state）。
+`POST /api/sessions/{sid}/messages/{mid}/regenerate` HTTP route——包装 `_run_regeneration_core`；返回 202 + revision_id；接入异步 request registry；request lifecycle 顺序保证 `completed` 发生在 `finalize_revision` COMMIT 之后。`GET /api/sessions/{sid}/messages/{mid}/revisions` 分页列表 endpoint。`revision_finalized` WS event + 前端 active 切换 UI。
+
+### D2-4 测试覆盖（20 用例）
+
+**执行不写 DB（2）**：execute 不写 messages / revision
+
+**普通 persistence（2）**：normal 走 replace_messages / 历史 ID 保持
+
+**Regenerate persistence（3）**：不调 replace_messages / candidate 来自 suffix / 中间 tool-call 不算
+
+**Finalize 后状态（5）**：同 ID 内容更新 / running 时旧内容不变 / model error 不变 / hash stale 不变 / candidate None 转 revision.error
+
+**Harness 恢复（4）**：成功恢复 canonical / error 恢复旧 content / 无截断 context 残留 / 无 partial tool turn 残留
+
+**Snapshot 失败（1）**：best-effort，revision/request 仍 completed
+
+**不回归（3）**：normal async prompt / request-scoped abort / WebEventEnvelope schema
 
 ### D2-3 测试覆盖（40 用例）
 
@@ -1340,13 +1370,13 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
 
 ---
 
-## 当前测试基线（HEAD `813831d`——D2-3 完成）
+## 当前测试基线（HEAD `260bbff`——D2-4 完成）
 
 | 命令 | 结果 |
 |---|---|
-| `pytest -m "not slow and not integration and not docker"` | **1063 passed**（1023 + 40 D2-3），14 deselected（~50s） |
-| D2 专项 4 文件 | **95 passed**（migration 20 + revisions 40 + message_id_stability 13 + markdown_export 22） |
-| Coverage gate | 83.82% ≥ 75% ✅（D2-3 不影响 coverage） |
+| `pytest -m "not slow and not integration and not docker"` | **1083 passed**（1063 + 20 D2-4），14 deselected（~50s） |
+| D2 专项 5 文件 | **105 passed**（execution_split 20 + revisions 40 + message_id_stability 13 + prompt_async 20 + request_recovery 12） |
+| Coverage gate | 83.82% ≥ 75% ✅ |
 | Playwright e2e（build:e2e） | **26/28**（已知 P1-C 跨测试污染，非 D1/D2 引入） |
 | ruff | All checks passed（src tests scripts） |
 | Frontend build (e2e mode) | 137.53 KB JS / 39.80 KB CSS |
