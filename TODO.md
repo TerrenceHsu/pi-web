@@ -1228,42 +1228,44 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
 
 ---
 
-## 🔄 P1-D2 Regenerate（详细设计阶段，2026-07-14）
+## 🔄 P1-D2 Regenerate（D2-1 ✅ 完成，等审核进入 D2-2，2026-07-15）
 
-**状态**：详细设计已提交（commit `5252ff5`），等用户审核；**暂不编码**。
+**状态**：D2 准备工作 + D2-1 已落地；D2-2 schema migration 等下一次审核。
 
 ### 已落地
 
-- **D2-1 Message ID 稳定性 characterization test**（commit `a124697`）：
-  - 2 个 xfail strict=True 锁定当前 `replace_messages()` DELETE+INSERT 重新生成所有历史 message ID 的行为
-  - D2 修复 `replace_messages` 为 diff-based sync 后，移除 xfail 标记自然变 GREEN
-  - 测试路径：`tests/test_d2_message_id_stability.py`
+- **D2 准备工作**（commit `9264267`）：
+  - D2 设计文档定稿 `docs/P1_D2_REGENERATE_DESIGN.md`（883 行）
+  - .gitignore 排除 dev_sessions.db*
+  - WEB_CLAUDE_PLAN.md 修复开头误输入 `d` 字符
+  - 注：chatStore reconcile "按 index 1:1 就地替换" 改动 revert——查明 baseline e2e 失败的真因是 build 命令错（应 `npm run build:e2e`），与 chatStore 无关；改动留待 D2-3+ 合并
 
-- **D2 详细设计文档**（commit `5252ff5`，~740 行）：
-  - 路径：`docs/P1_D2_REGENERATE_DESIGN.md`
-  - 回答审核员八个问题（replace_messages 稳定性 / 候选保存位置 / messages 表更新时机 / finalize transaction SQL / 普通 prompt 不受影响 / error/abort 恢复 / restart 处理 / Harness context 同步）
-  - revision schema（v1 → v2 migration）
-  - _execute_prompt / _persist_normal / _persist_regeneration 拆分
-  - 8 commit 实现路径已规划
-  - 4 个决策点待用户确认
+- **D2-1 diff-based replace_messages**（commit `564c3f5`）：
+  - `src/pi_agent_core_py/session_sqlite.py:505-596` 改写：
+    - 共同前缀 [0, min(old, new))：role+content 同→不动；role 同 content 异→UPDATE content_json（id+created_at 保）；role 异→first_mismatch=i
+    - [first_mismatch, old_count) DELETE；[first_mismatch, new_count) INSERT
+    - try/except ROLLBACK 整个 transaction
+  - `tests/test_session_message_id_stability.py`（rename from test_d2_message_id_stability.py）14 测试全 PASS
+  - 范围边界：未实现 revision schema / regenerate endpoint / _execute_prompt 拆分 / 前端 Regenerate / request metadata / revision 清理（留待 D2-2+）
 
-### 核心架构（设计阶段）
+### D2-1 测试覆盖（14 场景）
 
-1. **Revision schema**：`web_message_revisions(assistant_message_id, revision_number, status, content_json, is_active)` + UNIQUE(assistant_message_id, revision_number)
-2. **Message ID 稳定性**：diff-based replace_messages——UPDATE 优先于 DELETE-INSERT，按 (session_id, idx) 定位
-3. **非破坏性 finalize**：单 BEGIN IMMEDIATE transaction 内 5 SQL 原子切换 active content；失败时 messages 表不动
-4. **状态枚举**：running / completed / superseded / error / aborted / interrupted（restart sweep）
+初次写入 ID 唯一 / 尾部追加 / user+assistant 历史 ID 保持 / 同 role 内容更新 ID 不变（regenerate 关键）/ created_at 保持 / 新消息新 ID / 缩短尾部 / role mismatch 只重建不匹配位置及后方 / idx 连续 / SQL 失败 rollback / session.updated_at 推进 / list_messages 顺序 / 第二轮 prompt 后第一轮 ID 保持 / 原 xfail 转 PASS
 
-### 待用户确认（4 个决策点）
+### 4 个决策点已定稿（2026-07-15）
 
-1. revision 0 延迟创建（推荐）vs 每次 prompt 都创建
-2. 流式期间不写 revision.content_json（推荐）vs 周期 flush
-3. revision count 不限制（推荐）vs 硬限制 20
-4. active revision 切换放 D2.1（推荐）vs D2 直接做
+1. ✅ revision 0 延迟创建——只在第一次 regenerate **成功 finalize** 时插入
+2. ✅ 流式期间**不**写 candidate 到 SQLite
+3. ✅ **不**硬限制 revision 数量——查询接口必须分页
+4. ✅ 自动 active 切换必做，手动切换**不做**
 
-### 阻塞依赖
+### ⚠️ 仍待确认（D2-2 编码前）
 
-- D2 编码开始前必须先 commit 1：修 `replace_messages` 为 diff sync，让 characterization test 的 xfail 转 GREEN
+`base_content_sha256`（用户定稿 schema 中 NOT NULL 但无说明）——已推断为"revision 创建瞬间的 `messages.content_json` 的 SHA-256"（审计 + finalize 一致性校验）
+
+### 下一步 D2-2
+
+revision schema（assistant_message_id FK + ON DELETE CASCADE + 4 索引 + base_content_sha256）+ `_migrate_schema` 框架
 
 ---
 
@@ -1283,13 +1285,13 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
 
 ---
 
-## 当前测试基线（HEAD `5252ff5`）
+## 当前测试基线（HEAD `564c3f5`——D2-1 完成）
 
 | 命令 | 结果 |
 |---|---|
-| `pytest -m "not slow and not integration and not docker"` | **990 passed**（~60s） |
-| Coverage gate | **90.38%** ≥ 75% ✅ |
-| Playwright e2e（build:e2e） | **26/28**（已知 P1-C 跨测试污染） |
+| `pytest -m "not slow and not integration and not docker"` | **1003 passed**, 0 xfailed（~60s） |
+| Coverage gate | **83.82%** ≥ 75% ✅ |
+| Playwright e2e（build:e2e） | **26/28**（已知 P1-C 跨测试污染，非 D1/D2 引入） |
 | ruff | All checks passed |
-| Frontend production build | 137.53 KB JS / 39.80 KB CSS |
+| Frontend build (e2e mode) | 137.53 KB JS / 39.80 KB CSS |
 
