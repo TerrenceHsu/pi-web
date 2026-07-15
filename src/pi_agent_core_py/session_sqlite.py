@@ -563,6 +563,39 @@ class SQLiteSessionStore:
             # 删除 [first_mismatch, old_count) 的旧 row
             if first_mismatch < old_count:
                 truncate_from_idx = old_rows[first_mismatch]["idx"]
+
+                # P1-D2-3 orphan cleanup：删除 messages 前，先清理可能存在的
+                # web_message_revisions（assistant_message_id 无跨表 FK，必须显式
+                # 处理；session delete 走 session_id CASCADE，但单条 message 删除
+                # 不会触发）。同一 transaction 内保证原子性。
+                #
+                # 兼容旧 schema：检查表是否存在（从 v2 起表必然存在）。
+                cur_check = await db.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'web_message_revisions'"
+                )
+                rev_table_exists = await cur_check.fetchone() is not None
+                await cur_check.close()
+
+                if rev_table_exists:
+                    cur_del = await db.execute(
+                        "SELECT id FROM messages "
+                        "WHERE session_id = ? AND idx >= ? AND role = 'assistant'",
+                        (session_id, truncate_from_idx),
+                    )
+                    assistant_ids = [
+                        r["id"] for r in await cur_del.fetchall()
+                    ]
+                    await cur_del.close()
+
+                    if assistant_ids:
+                        placeholders = ",".join("?" * len(assistant_ids))
+                        await db.execute(
+                            f"DELETE FROM web_message_revisions "
+                            f"WHERE assistant_message_id IN ({placeholders})",
+                            assistant_ids,
+                        )
+
                 await db.execute(
                     "DELETE FROM messages "
                     "WHERE session_id = ? AND idx >= ?",

@@ -23,11 +23,19 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import aiosqlite
+
+
+def _now_ms() -> int:
+    """毫秒时间戳——用于 revision id 生成。"""
+    return int(datetime.now(UTC).timestamp() * 1000)
+
 
 # ============================================================================
 # 专用错误
@@ -44,6 +52,51 @@ class ExtensionStoreValidationError(ExtensionStoreError):
 
 class ExtensionStoreConflictError(ExtensionStoreError):
     """冲突——如重名 skill / server。"""
+
+
+# ============================================================================
+# P1-D2-3 revision 错误体系——安全错误码，不含 content / prompt / SQL / 绝对路径
+# ============================================================================
+
+
+class RevisionError(ExtensionStoreError):
+    """Revision 相关错误基类。"""
+
+
+class RevisionNotFoundError(RevisionError):
+    """revision_id 不存在（finalize / mark_error / mark_aborted 路径）。"""
+
+
+class RevisionTargetNotFoundError(RevisionError):
+    """assistant_message_id 不在 messages 表，或与 session_id 不匹配。"""
+
+
+class RevisionTargetNotAssistantError(RevisionError):
+    """目标 message 存在但 role 不是 assistant。"""
+
+
+class RevisionTargetNotLatestError(RevisionError):
+    """目标 message 不是当前 session 的最新 assistant。"""
+
+
+class RevisionAlreadyRunningError(RevisionError):
+    """该 assistant_message_id 已有一个 status='running' 的 revision。"""
+
+
+class RevisionRequestConflictError(RevisionError):
+    """request_id 已被其它 revision 占用，或与 revision row 不匹配。"""
+
+
+class RevisionBaseContentChangedError(RevisionError):
+    """finalize 时 base_content_sha256 与当前 messages.content_json 不匹配。
+
+    上层应在独立 transaction 中决定是否把 revision 标 error——本异常已经触发
+    finalize transaction 的 rollback，messages 保持现状。
+    """
+
+
+class RevisionStateTransitionError(RevisionError):
+    """非法状态转换——如 completed → error、superseded → completed。"""
 
 
 # ============================================================================
@@ -106,6 +159,28 @@ class MCPServerRowResult:
     name: str
     server: PersistedMCPServer | None = None
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class PersistedMessageRevision:
+    """P1-D2-3：message revision 的持久化视图（不可变）。
+
+    对应 `web_message_revisions` 表的一行。`content_json` 在 running/aborted/
+    interrupted 状态下为 None；completed/superseded 状态下为完整 AssistantMessage
+    canonical JSON。
+    """
+
+    id: str
+    session_id: str
+    assistant_message_id: str
+    revision_number: int
+    request_id: str | None
+    status: str
+    base_content_sha256: str
+    content_json: str | None
+    created_at: str
+    completed_at: str | None
+    error_summary: str | None
 
 
 # ============================================================================
@@ -893,16 +968,574 @@ class ExtensionSQLiteStore:
         except Exception as e:
             raise ExtensionStoreError(self._safe_db_error(e)) from None
 
+    # ==================================================================
+    # P1-D2-3 Message Revisions
+    # ==================================================================
+
+    @staticmethod
+    def _gen_revision_id() -> str:
+        """生成 revision row id——前缀 rev + ms 时间戳 + uuid 短码。"""
+        return f"rev-{_now_ms()}-{uuid.uuid4().hex[:8]}"
+
+    @staticmethod
+    def _row_to_revision(row: aiosqlite.Row) -> PersistedMessageRevision:
+        """raw row → frozen dataclass。"""
+        return PersistedMessageRevision(
+            id=row["id"],
+            session_id=row["session_id"],
+            assistant_message_id=row["assistant_message_id"],
+            revision_number=row["revision_number"],
+            request_id=row["request_id"],
+            status=row["status"],
+            base_content_sha256=row["base_content_sha256"],
+            content_json=row["content_json"],
+            created_at=row["created_at"],
+            completed_at=row["completed_at"],
+            error_summary=row["error_summary"],
+        )
+
+    @staticmethod
+    def _sha256_of_content_json(content_json: str) -> str:
+        """直接对原始字符串算 sha256——**禁止** json.loads/dumps 重序列化。
+
+        审核要求：hashlib.sha256(content_json.encode("utf-8")).hexdigest()
+        """
+        return hashlib.sha256(content_json.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _truncate_error_summary(s: str | None) -> str | None:
+        """安全截断 error_summary——最多 500 字符；None 透传。"""
+        if s is None:
+            return None
+        return s[:500]
+
+    async def _verify_target_assistant_latest(
+        self,
+        db: aiosqlite.Connection,
+        *,
+        session_id: str,
+        assistant_message_id: str,
+    ) -> aiosqlite.Row:
+        """共享前置校验：message 存在 + session 匹配 + role=assistant + 最新 assistant。
+
+        返回 message row（含 content_json）。任一校验失败抛对应 RevisionError。
+        """
+        cursor = await db.execute(
+            "SELECT id, session_id, role, content_json "
+            "FROM messages WHERE id = ?",
+            (assistant_message_id,),
+        )
+        msg = await cursor.fetchone()
+        await cursor.close()
+        if msg is None or msg["session_id"] != session_id:
+            raise RevisionTargetNotFoundError(
+                "target assistant message not found in this session"
+            )
+        if msg["role"] != "assistant":
+            raise RevisionTargetNotAssistantError(
+                "target message role is not assistant"
+            )
+
+        cursor = await db.execute(
+            "SELECT id FROM messages "
+            "WHERE session_id = ? AND role = 'assistant' "
+            "ORDER BY idx DESC LIMIT 1",
+            (session_id,),
+        )
+        latest = await cursor.fetchone()
+        await cursor.close()
+        if latest is None or latest["id"] != assistant_message_id:
+            raise RevisionTargetNotLatestError(
+                "target is not the latest assistant message in this session"
+            )
+        return msg
+
+    async def create_running_revision(
+        self,
+        *,
+        session_id: str,
+        assistant_message_id: str,
+        request_id: str,
+    ) -> PersistedMessageRevision:
+        """为指定 assistant message 创建 status='running' 的 revision row。
+
+        单 BEGIN IMMEDIATE transaction 内完成所有校验 + INSERT，避免两个并发
+        request 算出相同 revision_number。
+
+        revision_number 从 1 开始（MAX+1）；revision_number=0 只能由 finalize
+        在第一次成功时创建。base_content_sha256 直接对 DB 中原始 content_json
+        字符串算 SHA-256。
+        """
+        db = self._require_db()
+        now = self._now_iso()
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+
+            msg = await self._verify_target_assistant_latest(
+                db,
+                session_id=session_id,
+                assistant_message_id=assistant_message_id,
+            )
+
+            # 校验：该 assistant 没有其它 running revision
+            cursor = await db.execute(
+                "SELECT id FROM web_message_revisions "
+                "WHERE assistant_message_id = ? AND status = 'running'",
+                (assistant_message_id,),
+            )
+            if await cursor.fetchone() is not None:
+                await cursor.close()
+                raise RevisionAlreadyRunningError(
+                    "another running revision already exists for this assistant"
+                )
+            await cursor.close()
+
+            # 校验：request_id 未被其它 revision 占用
+            cursor = await db.execute(
+                "SELECT id FROM web_message_revisions WHERE request_id = ?",
+                (request_id,),
+            )
+            if await cursor.fetchone() is not None:
+                await cursor.close()
+                raise RevisionRequestConflictError(
+                    "request_id already associated with another revision"
+                )
+            await cursor.close()
+
+            # 算 base_content_sha256（直接对原始字符串）
+            base_sha = self._sha256_of_content_json(msg["content_json"])
+
+            # 算下一 revision_number（MAX+1，无历史时 = 1）
+            cursor = await db.execute(
+                "SELECT MAX(revision_number) AS max_rev "
+                "FROM web_message_revisions "
+                "WHERE assistant_message_id = ?",
+                (assistant_message_id,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            max_rev = row["max_rev"] if row is not None else None
+            next_rev = (max_rev + 1) if max_rev is not None else 1
+
+            revision_id = self._gen_revision_id()
+            await db.execute(
+                """
+                INSERT INTO web_message_revisions
+                    (id, session_id, assistant_message_id, revision_number,
+                     request_id, status, base_content_sha256, content_json,
+                     created_at, completed_at, error_summary)
+                VALUES (?, ?, ?, ?, ?, 'running', ?, NULL, ?, NULL, NULL)
+                """,
+                (
+                    revision_id, session_id, assistant_message_id, next_rev,
+                    request_id, base_sha, now,
+                ),
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+
+        result = await self.get_revision(revision_id)
+        assert result is not None, "just-inserted revision missing"
+        return result
+
+    async def get_revision(
+        self, revision_id: str,
+    ) -> PersistedMessageRevision | None:
+        """单条查询——不存在返回 None。"""
+        db = self._require_db()
+        try:
+            cursor = await db.execute(
+                "SELECT * FROM web_message_revisions WHERE id = ?",
+                (revision_id,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            return self._row_to_revision(row) if row is not None else None
+        except Exception as e:
+            raise ExtensionStoreError(self._safe_db_error(e)) from None
+
+    async def get_revision_by_request_id(
+        self, request_id: str,
+    ) -> PersistedMessageRevision | None:
+        """按 request_id 查 revision——不存在返回 None。
+
+        依赖 uq_web_message_revision_request 索引保证一个 request_id 至多一条 revision。
+        """
+        db = self._require_db()
+        try:
+            cursor = await db.execute(
+                "SELECT * FROM web_message_revisions WHERE request_id = ?",
+                (request_id,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            return self._row_to_revision(row) if row is not None else None
+        except Exception as e:
+            raise ExtensionStoreError(self._safe_db_error(e)) from None
+
+    async def list_revisions(
+        self,
+        *,
+        session_id: str,
+        assistant_message_id: str,
+        limit: int = 20,
+        before_revision_number: int | None = None,
+    ) -> list[PersistedMessageRevision]:
+        """分页列出某 assistant 的 revisions，按 revision_number DESC 排序。
+
+        - limit 默认 20，clamp 到 [1, 100]
+        - before_revision_number=None → 不限；否则只返回 revision_number < 它的
+        """
+        db = self._require_db()
+        clamped_limit = max(1, min(100, limit))
+        try:
+            if before_revision_number is None:
+                cursor = await db.execute(
+                    "SELECT * FROM web_message_revisions "
+                    "WHERE session_id = ? AND assistant_message_id = ? "
+                    "ORDER BY revision_number DESC LIMIT ?",
+                    (session_id, assistant_message_id, clamped_limit),
+                )
+            else:
+                cursor = await db.execute(
+                    "SELECT * FROM web_message_revisions "
+                    "WHERE session_id = ? AND assistant_message_id = ? "
+                    "AND revision_number < ? "
+                    "ORDER BY revision_number DESC LIMIT ?",
+                    (
+                        session_id, assistant_message_id,
+                        before_revision_number, clamped_limit,
+                    ),
+                )
+            rows = await cursor.fetchall()
+            await cursor.close()
+            return [self._row_to_revision(r) for r in rows]
+        except Exception as e:
+            raise ExtensionStoreError(self._safe_db_error(e)) from None
+
+    async def finalize_revision(
+        self,
+        *,
+        revision_id: str,
+        request_id: str,
+        candidate_content_json: str,
+    ) -> PersistedMessageRevision:
+        """Finalize running revision → completed，原子切换 active assistant content。
+
+        **D2-3 核心**——单 BEGIN IMMEDIATE transaction 内 10 步，事务中**不**做任何
+        Agent 调用 / 网络 / 文件 I/O / sleep / 不可控 await。
+
+        步骤：
+            1. 读目标 revision
+            2. 校验 revision_id / request_id / status（幂等 + reject 路径）
+            3. 读目标 messages row
+            4. 校验 session / role / 最新 assistant
+            5. 校验 base_content_sha256 == sha256(当前 content_json)
+            6. 首次成功（无 revision 0）→ INSERT revision 0 (WHERE NOT EXISTS)
+            7. UPDATE 旧 completed → superseded
+            8. UPDATE 本 running → completed + 写 candidate
+            9. UPDATE messages.content_json（保留 id / idx / created_at）
+            10. commit
+
+        步骤 7 必须先于 8——否则违反 uq_web_message_revision_active。
+
+        失败处理：
+            - RevisionBaseContentChangedError：rollback，messages 保持现状，
+              上层在**独立** transaction 中决定是否 mark_revision_error
+            - 任何 SQL 失败：rollback，version 不变
+        """
+        db = self._require_db()
+        now = self._now_iso()
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+
+            # 1. 读目标 revision
+            cursor = await db.execute(
+                "SELECT * FROM web_message_revisions WHERE id = ?",
+                (revision_id,),
+            )
+            revision = await cursor.fetchone()
+            await cursor.close()
+            if revision is None:
+                raise RevisionNotFoundError("revision not found")
+
+            # 2. 校验 request_id
+            if revision["request_id"] != request_id:
+                raise RevisionRequestConflictError(
+                    "request_id does not match this revision"
+                )
+
+            status = revision["status"]
+
+            # 幂等：已 completed + request_id 匹配 → 直接返回，不创建 revision 0
+            # 不改 completed_at，不动 messages
+            if status == "completed":
+                await db.commit()
+                return self._row_to_revision(revision)
+
+            # 非终态合法转换之外都拒绝：superseded / error / aborted / interrupted
+            if status != "running":
+                raise RevisionStateTransitionError(
+                    f"cannot finalize revision in status {status!r}"
+                )
+
+            assistant_id = revision["assistant_message_id"]
+            session_id = revision["session_id"]
+
+            # 3-4. 校验 messages row + 最新 assistant
+            msg = await self._verify_target_assistant_latest(
+                db,
+                session_id=session_id,
+                assistant_message_id=assistant_id,
+            )
+
+            # 5. base_content_sha256 一致性校验
+            current_sha = self._sha256_of_content_json(msg["content_json"])
+            if current_sha != revision["base_content_sha256"]:
+                raise RevisionBaseContentChangedError(
+                    "messages.content_json has changed since this revision was created"
+                )
+
+            # 6. 首次成功：INSERT revision 0（WHERE NOT EXISTS 保证幂等）
+            old_content_json = msg["content_json"]
+            old_content_sha = revision["base_content_sha256"]
+            revision_zero_id = self._gen_revision_id()
+            await db.execute(
+                """
+                INSERT INTO web_message_revisions
+                    (id, session_id, assistant_message_id, revision_number,
+                     request_id, status, base_content_sha256, content_json,
+                     created_at, completed_at, error_summary)
+                SELECT ?, ?, ?, 0, NULL, 'superseded', ?, ?,
+                       ?, ?, NULL
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM web_message_revisions
+                    WHERE assistant_message_id = ?
+                      AND revision_number = 0
+                )
+                """,
+                (
+                    revision_zero_id, session_id, assistant_id,
+                    old_content_sha, old_content_json,
+                    revision["created_at"], now,
+                    assistant_id,
+                ),
+            )
+
+            # 7. 旧 completed → superseded（必须先于步骤 8）
+            await db.execute(
+                """
+                UPDATE web_message_revisions
+                SET status = 'superseded', completed_at = ?
+                WHERE assistant_message_id = ?
+                  AND status = 'completed'
+                  AND id != ?
+                """,
+                (now, assistant_id, revision_id),
+            )
+
+            # 8. 本 running → completed + 写 candidate
+            cursor = await db.execute(
+                """
+                UPDATE web_message_revisions
+                SET status = 'completed',
+                    content_json = ?,
+                    completed_at = ?
+                WHERE id = ? AND status = 'running'
+                """,
+                (candidate_content_json, now, revision_id),
+            )
+            if cursor.rowcount != 1:
+                raise RevisionStateTransitionError(
+                    "revision is no longer running (concurrent state change)"
+                )
+
+            # 9. UPDATE messages.content_json（id / idx / created_at 保持不变）
+            cursor = await db.execute(
+                """
+                UPDATE messages
+                SET content_json = ?
+                WHERE id = ? AND session_id = ? AND role = 'assistant'
+                """,
+                (candidate_content_json, assistant_id, session_id),
+            )
+            if cursor.rowcount != 1:
+                raise ExtensionStoreError(
+                    "finalize failed: target message row missing or not assistant"
+                )
+
+            # 推 session.updated_at
+            await db.execute(
+                "UPDATE sessions SET updated_at = ? WHERE id = ?",
+                (now, session_id),
+            )
+
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+
+        result = await self.get_revision(revision_id)
+        assert result is not None, "finalized revision missing"
+        return result
+
+    async def mark_revision_error(
+        self,
+        *,
+        revision_id: str,
+        request_id: str,
+        error_summary: str,
+    ) -> PersistedMessageRevision:
+        """running → error。条件 UPDATE WHERE status='running' + rowcount 检查。
+
+        幂等：已是 error → 返回现有；其它终态 → RevisionStateTransitionError。
+        error_summary 安全截断到 500 字符。
+        """
+        return await self._transition_terminal(
+            revision_id=revision_id,
+            request_id=request_id,
+            new_status="error",
+            error_summary=self._truncate_error_summary(error_summary),
+        )
+
+    async def mark_revision_aborted(
+        self,
+        *,
+        revision_id: str,
+        request_id: str,
+    ) -> PersistedMessageRevision:
+        """running → aborted。条件 UPDATE WHERE status='running' + rowcount 检查。"""
+        return await self._transition_terminal(
+            revision_id=revision_id,
+            request_id=request_id,
+            new_status="aborted",
+            error_summary=None,
+        )
+
+    async def _transition_terminal(
+        self,
+        *,
+        revision_id: str,
+        request_id: str,
+        new_status: str,
+        error_summary: str | None,
+    ) -> PersistedMessageRevision:
+        """共享 terminal 转换逻辑——error / aborted。
+
+        幂等：已是目标状态 → 返回现有（不改 completed_at / error_summary）
+        非法：其它终态 → RevisionStateTransitionError
+        合法：running → new_status，条件 UPDATE
+        """
+        db = self._require_db()
+        now = self._now_iso()
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+
+            cursor = await db.execute(
+                "SELECT * FROM web_message_revisions WHERE id = ?",
+                (revision_id,),
+            )
+            revision = await cursor.fetchone()
+            await cursor.close()
+            if revision is None:
+                raise RevisionNotFoundError("revision not found")
+
+            if revision["request_id"] != request_id:
+                raise RevisionRequestConflictError(
+                    "request_id does not match this revision"
+                )
+
+            current_status = revision["status"]
+
+            # 幂等：已是目标状态
+            if current_status == new_status:
+                await db.commit()
+                return self._row_to_revision(revision)
+
+            # 非法：其它终态（completed / superseded / 其它 error 或 aborted）
+            if current_status != "running":
+                raise RevisionStateTransitionError(
+                    f"cannot transition revision from {current_status!r} "
+                    f"to {new_status!r}"
+                )
+
+            cursor = await db.execute(
+                """
+                UPDATE web_message_revisions
+                SET status = ?, completed_at = ?, error_summary = ?
+                WHERE id = ? AND request_id = ? AND status = 'running'
+                """,
+                (new_status, now, error_summary, revision_id, request_id),
+            )
+            if cursor.rowcount != 1:
+                raise RevisionStateTransitionError(
+                    "revision state changed during transition (concurrent write)"
+                )
+
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+
+        result = await self.get_revision(revision_id)
+        assert result is not None, "transitioned revision missing"
+        return result
+
+    async def mark_running_revisions_interrupted(
+        self,
+        *,
+        completed_at: str,
+    ) -> int:
+        """Startup sweep——所有 status='running' 改为 'interrupted'。
+
+        单 BEGIN IMMEDIATE transaction UPDATE。返回受影响行数；重复执行返回 0。
+        **不**修改 messages / completed / superseded / error / aborted；
+        **不**恢复 request registry；**不**写 candidate content。
+
+        接入 lifespan 留到 D2-6；本方法 D2-3 完成。
+        """
+        db = self._require_db()
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                """
+                UPDATE web_message_revisions
+                SET status = 'interrupted',
+                    completed_at = ?,
+                    error_summary = 'Generation interrupted by server restart'
+                WHERE status = 'running'
+                """,
+                (completed_at,),
+            )
+            affected = cursor.rowcount
+            await db.commit()
+            return affected
+        except Exception:
+            await db.rollback()
+            raise
+
 
 __all__ = [
     "ExtensionStoreError",
     "ExtensionStoreValidationError",
     "ExtensionStoreConflictError",
+    "RevisionError",
+    "RevisionNotFoundError",
+    "RevisionTargetNotFoundError",
+    "RevisionTargetNotAssistantError",
+    "RevisionTargetNotLatestError",
+    "RevisionAlreadyRunningError",
+    "RevisionRequestConflictError",
+    "RevisionBaseContentChangedError",
+    "RevisionStateTransitionError",
     "PersistedSkill",
     "PersistedMCPServer",
     "PersistedDisabledTool",
     "SkillRowResult",
     "MCPServerRowResult",
+    "PersistedMessageRevision",
     "ExtensionSQLiteStore",
     "SCHEMA_VERSION",
 ]
