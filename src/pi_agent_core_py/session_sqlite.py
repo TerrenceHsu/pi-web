@@ -505,35 +505,91 @@ class SQLiteSessionStore:
     async def replace_messages(
         self, session_id: str, messages: list[AgentMessage],
     ) -> None:
-        """覆盖式重置 session 的 messages（用新一批替换）。
+        """覆盖式同步 session 的 messages——diff-based，保留历史 row id + created_at。
 
-        用例：harness.run_prompt 后用 final_messages 覆盖保存——简单正确，
-        写放大可接受（单用户场景）。
+        算法（D2-1）：
+        1. 读取当前 DB 中所有 messages 按 idx 升序（含 id / created_at）
+        2. 共同前缀 [0, min(old, new))：
+           - role + content_json 都相同：不动（id + created_at 保持）
+           - role 相同但 content_json 不同：UPDATE content_json
+             （id + created_at 保持——审计/revision FK 稳定）
+           - role 不同：从此处 truncate（first_mismatch = i）
+        3. 共同前缀之外 [first_mismatch, ...)：
+           - 旧 row 全部 DELETE
+           - 新 message 全部 INSERT（生成新 id + created_at = now）
+        4. session.updated_at 总是更新到 now
+        5. 任一步失败 → transaction ROLLBACK（含已 UPDATE 的共同前缀）
+
+        用例：harness.run_prompt 后用 final_messages 覆盖（追加尾部 / 内容修订）；
+        保证未来 D2 revision 表的 assistant_message_id FK 永远指向稳定的 row id。
 
         不存在 session 抛 SessionNotFoundError。
         """
         db = self._require_db()
         await self._require_session(session_id)
         now = _now_ms()
-        # aiosqlite 单连接，所有 SQL 在 sqlite worker thread 上串行；
-        # 不需要显式 BEGIN IMMEDIATE
-        await db.execute(
-            "DELETE FROM messages WHERE session_id = ?", (session_id,)
-        )
-        for idx, msg in enumerate(messages):
-            msg_id = _gen_id("msg")
-            role = getattr(msg, "role", "custom") or "custom"
-            content_json = _serialize_message(msg)
-            await db.execute(
-                "INSERT INTO messages (id, session_id, idx, role, content_json, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (msg_id, session_id, idx, role, content_json, now),
+        new_messages = list(messages)
+        new_count = len(new_messages)
+
+        try:
+            cur = await db.execute(
+                "SELECT id, idx, role, content_json, created_at "
+                "FROM messages WHERE session_id = ? "
+                "ORDER BY idx ASC",
+                (session_id,),
             )
-        await db.execute(
-            "UPDATE sessions SET updated_at = ? WHERE id = ?",
-            (now, session_id),
-        )
-        await db.commit()
+            old_rows = await cur.fetchall()
+            await cur.close()
+            old_count = len(old_rows)
+            common_len = min(old_count, new_count)
+
+            # 共同前缀：UPDATE content（同 role 不同内容）或 detect role-mismatch
+            first_mismatch = common_len
+            for i in range(common_len):
+                old = old_rows[i]
+                new_msg = new_messages[i]
+                new_role = getattr(new_msg, "role", "custom") or "custom"
+                new_content_json = _serialize_message(new_msg)
+
+                if old["role"] != new_role:
+                    first_mismatch = i
+                    break
+                if old["content_json"] != new_content_json:
+                    await db.execute(
+                        "UPDATE messages SET content_json = ? WHERE id = ?",
+                        (new_content_json, old["id"]),
+                    )
+
+            # 删除 [first_mismatch, old_count) 的旧 row
+            if first_mismatch < old_count:
+                truncate_from_idx = old_rows[first_mismatch]["idx"]
+                await db.execute(
+                    "DELETE FROM messages "
+                    "WHERE session_id = ? AND idx >= ?",
+                    (session_id, truncate_from_idx),
+                )
+
+            # 插入 [first_mismatch, new_count) 的新 row
+            for j in range(first_mismatch, new_count):
+                msg = new_messages[j]
+                msg_id = _gen_id("msg")
+                role = getattr(msg, "role", "custom") or "custom"
+                content_json = _serialize_message(msg)
+                await db.execute(
+                    "INSERT INTO messages "
+                    "(id, session_id, idx, role, content_json, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (msg_id, session_id, j, role, content_json, now),
+                )
+
+            await db.execute(
+                "UPDATE sessions SET updated_at = ? WHERE id = ?",
+                (now, session_id),
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
     # ------------------------------------------------------------------
     # snapshot CRUD
