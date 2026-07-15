@@ -349,6 +349,21 @@ def create_app(
         state.extension_store = extension_store
         state.skill_mutation_lock = asyncio.Lock()
 
+        # P1-D2-6: sweep 遗留 running revisions → interrupted
+        # **必须在 restore Skills/MCP 之前**——sweep 只依赖 session/extension SQLite，
+        # 不应被 MCP 连接超时延迟；即使 MCP restore 失败，stale running revision
+        # 也应先被清理（否则 partial unique running index 会阻止后续 regenerate）。
+        # Sweep 失败 = 启动失败（不吞掉）——避免半损坏状态。
+        try:
+            await extension_store.mark_running_revisions_interrupted(
+                completed_at=datetime.now(UTC).isoformat()
+            )
+        except Exception as e:
+            # 安全摘要——不含 content / SQL / 绝对路径 / traceback / secret
+            raise RuntimeError(
+                f"startup sweep failed: {type(e).__name__}"
+            ) from e
+
         # 启动恢复 uploaded Skills（逐行隔离 + sha256 校验 + model_validate）
         await _restore_uploaded_skills(extension_store)
 
@@ -1971,9 +1986,10 @@ def create_app(
         """列出 messages。
 
         P0-1：支持 `?session_id=` 查 sqlite 历史消息。
-        - 不传 session_id → 返回当前 agent.state.messages（fallback 旧路径）
-        - 传 session_id → 返回 sqlite 中该 session 的 messages（按 idx 升序，
-          强类型对象，不会退化成 dict）
+        - 不传 session_id → 返回当前 agent.state.messages（fallback 旧路径，
+          无 message_id——这些 message 不在 DB 中）
+        - 传 session_id → 返回 sqlite 中该 session 的 messages（**D2-6 起含
+          message_id**——使用 PersistedMessage DTO，按 idx 升序，强类型对象）
 
         若指定 session 不存在，返回 404。
         """
@@ -1991,17 +2007,19 @@ def create_app(
                 content={"detail": "session store not initialized"},
             )
         from ..session_sqlite import SessionNotFoundError
+        from .serializers import serialize_persisted_message
         try:
-            msgs = await store.list_messages(session_id)
+            # D2-6：用 list_persisted_messages——含 message_id（regenerate 必需）
+            stored_msgs = await store.list_persisted_messages(session_id)
         except SessionNotFoundError:
             return JSONResponse(
                 status_code=404,
                 content={"detail": f"session {session_id!r} not found"},
             )
         return {
-            "count": len(msgs),
+            "count": len(stored_msgs),
             "session_id": session_id,
-            "messages": [serialize_message(m) for m in msgs],
+            "messages": [serialize_persisted_message(m) for m in stored_msgs],
         }
 
     # ========================================================================

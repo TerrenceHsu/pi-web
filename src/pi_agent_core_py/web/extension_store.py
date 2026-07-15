@@ -1366,10 +1366,11 @@ class ExtensionSQLiteStore:
                     "finalize failed: target message row missing or not assistant"
                 )
 
-            # 推 session.updated_at
+            # 推 session.updated_at——注意 sessions 表用 INTEGER（ms timestamp），
+            # 不要与 revision 表的 TEXT (ISO) 混淆
             await db.execute(
                 "UPDATE sessions SET updated_at = ? WHERE id = ?",
-                (now, session_id),
+                (_now_ms(), session_id),
             )
 
             await db.commit()

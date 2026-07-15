@@ -78,10 +78,44 @@ def serialize_message(message: Any) -> dict[str, Any]:
     `message` 应该是 UserMessage / AssistantMessage / ToolResultMessage /
     SummaryMessage / CustomMessage 中的一种（都是 Pydantic BaseModel）。
     非 BaseModel 输入直接走 to_json_safe fallback。
+
+    **注意**：此函数**不**含 DB row metadata（id / idx / created_at）。
+    对需要稳定 message_id 的路径（如 regenerate），改用
+    `serialize_persisted_message` 配合 `SQLiteStoredMessage`。
     """
     if isinstance(message, BaseModel):
         return message.model_dump(mode="json")
     return cast("dict[str, Any]", to_json_safe(message))
+
+
+def serialize_persisted_message(stored: Any) -> dict[str, Any]:
+    """D2-6：SQLiteStoredMessage → JSON-safe dict，含稳定 message_id。
+
+    返回结构（审核推荐）：
+        {
+          "message_id": "msg-...",
+          "session_id": "sess-...",
+          "idx": 3,
+          "role": "assistant",
+          "content": [...],   # content blocks list（同 serialize_message 的 content）
+          "created_at": 178...,
+          "message": {...},   # 完整 AgentMessage（含 api/provider/model/usage 等）
+        }
+
+    `message` 字段保留完整 AgentMessage（用于前端拿到 stop_reason / usage 等）。
+    `content` 是 content blocks 列表（向后兼容旧 serialize_message 使用方）。
+    `message_id` 是 SQLite messages.id（稳定，regenerate 后不变）。
+    """
+    full_msg = serialize_message(stored.message)
+    return {
+        "message_id": stored.id,
+        "session_id": stored.session_id,
+        "idx": stored.idx,
+        "role": stored.role,
+        "content": full_msg.get("content", []),
+        "created_at": stored.created_at,
+        "message": full_msg,
+    }
 
 
 def serialize_event(event: Any) -> dict[str, Any]:

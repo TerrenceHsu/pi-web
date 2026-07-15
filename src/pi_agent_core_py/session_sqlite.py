@@ -502,6 +502,37 @@ class SQLiteSessionStore:
         await cur.close()
         return [_deserialize_message(r["content_json"]) for r in rows]
 
+    async def list_persisted_messages(
+        self, session_id: str
+    ) -> list[SQLiteStoredMessage]:
+        """D2-6：列出 messages 含 DB row 元数据（id / idx / created_at）。
+
+        与 `list_messages` 不同——返回 `SQLiteStoredMessage` 而非裸 AgentMessage，
+        让 Web DTO 能暴露稳定 message_id 给前端（regenerate 路径必需）。
+
+        不存在 session 抛 SessionNotFoundError。
+        """
+        db = self._require_db()
+        await self._require_session(session_id)
+        cur = await db.execute(
+            "SELECT id, session_id, idx, role, content_json, created_at "
+            "FROM messages WHERE session_id = ? ORDER BY idx ASC",
+            (session_id,),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        return [
+            SQLiteStoredMessage(
+                id=r["id"],
+                session_id=r["session_id"],
+                idx=r["idx"],
+                role=r["role"],
+                message=_deserialize_message(r["content_json"]),
+                created_at=r["created_at"],
+            )
+            for r in rows
+        ]
+
     async def replace_messages(
         self, session_id: str, messages: list[AgentMessage],
     ) -> None:
