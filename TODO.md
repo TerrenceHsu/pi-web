@@ -1228,9 +1228,9 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
 
 ---
 
-## 🔄 P1-D2 Regenerate（D2-1 + D2-2 ✅ 完成，等审核进入 D2-3 CRUD，2026-07-15）
+## 🔄 P1-D2 Regenerate（D2-1 + D2-2 + D2-3 ✅ 完成，等审核进入 D2-4 执行链路拆分，2026-07-15）
 
-**状态**：D2 准备工作 + D2-1 + D2-2 已落地；D2-3 revision CRUD 等下一次审核。
+**状态**：D2 准备工作 + D2-1 + D2-2 + D2-3 已落地；D2-4 `_execute_prompt` 拆分等下一次审核。
 
 ### 已落地
 
@@ -1247,6 +1247,23 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
     - try/except ROLLBACK 整个 transaction
   - `tests/test_session_message_id_stability.py`（rename from test_d2_message_id_stability.py）14 测试全 PASS
   - 范围边界：未实现 revision schema / regenerate endpoint / _execute_prompt 拆分 / 前端 Regenerate / request metadata / revision 清理（留待 D2-2+）
+
+- **D2-3 revision repository**（commit `813831d`）：
+  - 8 个 async 方法（按审核固定接口）：`create_running_revision` / `get_revision` / `get_revision_by_request_id` / `list_revisions` / `finalize_revision` / `mark_revision_error` / `mark_revision_aborted` / `mark_running_revisions_interrupted`
+  - 9 个错误类型（`RevisionError` 基类）：NotFound / TargetNotFound / TargetNotAssistant / TargetNotLatest / AlreadyRunning / RequestConflict / BaseContentChanged / StateTransition
+  - `PersistedMessageRevision` frozen dataclass
+  - 关键约束：
+    - `create_running_revision`：BEGIN IMMEDIATE 内 9 步校验（target 存在 + session 匹配 + role=assistant + 最新 assistant + 无 running + request_id 未占）+ 算 base_content_sha256（**不**重序列化）+ revision_number（MAX+1，从 1 开始）+ INSERT
+    - `finalize_revision`：BEGIN IMMEDIATE 单 transaction 10 步原子切换——读 revision → 校验 request_id/status → 读 messages → 校验 session/role/latest → 校验 base hash → INSERT revision 0 (WHERE NOT EXISTS) → UPDATE 旧 completed→superseded（**必须先于** running→completed）→ UPDATE running→completed + candidate → UPDATE messages.content_json（保留 id/idx/created_at）→ commit
+    - finalize 幂等：completed + request_id 匹配 → 直接返回（不动 messages/completed_at）
+    - finalize hash 不匹配 → `RevisionBaseContentChangedError` + rollback（上层在独立 transaction 决定是否 mark_error）
+    - 状态转换单向：running → error/aborted/interrupted；条件 UPDATE `WHERE status='running'` + rowcount 检查
+    - `error_summary` 安全截断到 500 字符；错误信息不含 content / prompt / SQL / 路径
+    - `mark_running_revisions_interrupted`：startup sweep 单 UPDATE 返回 rowcount（接入 lifespan 留 D2-6）
+    - `list_revisions`：limit clamp 到 [1, 100]；`before_revision_number` 分页
+  - `session_sqlite.replace_messages` 加 orphan cleanup：删 messages 前查 `sqlite_master` 确认 revisions 表存在 → 收集待删 assistant IDs → DELETE revisions → DELETE messages（同一 transaction；v1 兼容跳过）
+  - `tests/test_extension_store_message_revisions.py` 40 用例全 PASS（Create 9 + Finalize 12 + Terminal 8 + Query/Cleanup 9 + 额外 2）
+  - 范围边界：未实现 Regenerate API / `_execute_prompt` 拆分 / 前端 / WS event / request registry metadata / PDF（留 D2-4+）
 
 - **D2-2 web_message_revisions schema + migration v1→v2**（commit `e25b319`）：
   - `SCHEMA_VERSION = 1` → `2`
@@ -1291,9 +1308,19 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
 3. ✅ **不**硬限制 revision 数量——查询接口必须分页
 4. ✅ 自动 active 切换必做，手动切换**不做**
 
-### 下一步 D2-3
+### 下一步 D2-4
 
-revision CRUD（create_running / finalize / list / sweep_interrupted）——核心是 finalize 的单 transaction 内 5 步 SQL（INSERT revision 0 或 UPDATE prev completed→superseded + UPDATE running→completed + UPDATE messages.content_json）+ base_content_sha256 optimistic concurrency check + error code `revision_base_content_changed`
+`web/app.py::_run_prompt_core` 拆分为 `_execute_prompt`（只执行模型，不持久化）+ `_persist_normal_prompt_result` + `_persist_regeneration_result`（调用 `finalize_revision`）。regenerate 用专用路径，**不**调 `replace_messages`——避免覆盖 active。同时加 `_reset_harness_to_session` helper（每个 prompt 开始前重置 harness agent messages 到 SQLite 当前 active state）。
+
+### D2-3 测试覆盖（40 用例）
+
+**Create（9）**：创建 running / revision_number 从 1 开始 / 单调增长 / base hash 来自原始 content_json / 非 assistant 拒绝 / session 不匹配拒绝 / 非最新 assistant 拒绝 / 第二个 running 拒绝 / request_id 重复拒绝
+
+**Finalize（12）**：首次成功创建 revision 0 / revision 0 保存旧回答 / candidate 成为 completed / messages 同 ID 内容更新 / idx+created_at 不变 / 第二次成功改旧 completed→superseded / 每 assistant 至多 1 completed / base hash 变化拒绝 / request_id 不匹配拒绝 / 重复 finalize 幂等 / 终态不可 finalize / SQL 失败完整回滚
+
+**Terminal state（8）**：running→error / running→aborted / running→interrupted（sweep）/ 终态不能互转 / sweep 只处理 running / sweep 重复返回 0 / error_summary 截断 500 / 幂等返回现有
+
+**Query/Cleanup（9）**：history 按 revision_number DESC / before_revision_number 分页 / limit clamp 100 / limit clamp 1 / session delete CASCADE / replace_messages 删 message 清理 revision（orphan 防护）/ 不影响 Skill/MCP / 普通 message API 不回归 / get_revision_by_request_id
 
 ---
 
@@ -1313,13 +1340,14 @@ revision CRUD（create_running / finalize / list / sweep_interrupted）——核
 
 ---
 
-## 当前测试基线（HEAD `e25b319`——D2-2 完成）
+## 当前测试基线（HEAD `813831d`——D2-3 完成）
 
 | 命令 | 结果 |
 |---|---|
-| `pytest -m "not slow and not integration and not docker"` | **1023 passed**（1003 baseline + 20 D2-2），14 deselected（~50s） |
-| Coverage gate | 83.82% ≥ 75% ✅（D2-2 不影响 coverage） |
+| `pytest -m "not slow and not integration and not docker"` | **1063 passed**（1023 + 40 D2-3），14 deselected（~50s） |
+| D2 专项 4 文件 | **95 passed**（migration 20 + revisions 40 + message_id_stability 13 + markdown_export 22） |
+| Coverage gate | 83.82% ≥ 75% ✅（D2-3 不影响 coverage） |
 | Playwright e2e（build:e2e） | **26/28**（已知 P1-C 跨测试污染，非 D1/D2 引入） |
-| ruff | All checks passed |
+| ruff | All checks passed（src tests scripts） |
 | Frontend build (e2e mode) | 137.53 KB JS / 39.80 KB CSS |
 
