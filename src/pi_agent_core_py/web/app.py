@@ -153,9 +153,42 @@ class _PromptValidated:
     attached_summary: list[dict[str, Any]]
 
 
-@dataclass
+@dataclass(frozen=True)
 class PromptExecutionResult:
-    """_run_prompt_core 成功后的产物。"""
+    """D2-4：纯执行产物——_execute_prompt 的返回值。
+
+    **不含任何持久化状态**——只反映模型/Agent 的执行结果。持久化由
+    `_persist_normal_prompt_result` / `_persist_regeneration_result` 负责。
+
+    字段语义：
+    - `messages`：本次执行**结束后** harness.agent.state.messages 完整列表
+    - `assistant_message`：本次执行产生的最终 assistant candidate（来自 suffix，
+      排除中间 tool-call-only assistant；如果没有合格 candidate 则为 None）
+    - `messages_before`：执行前 harness state 的 messages 快照
+    - `messages_after`：执行后 harness state 的 messages 快照（同 messages）
+    - `stop_reason`：从 harness.last_snapshot.metadata 提取（如果有）
+    - `usage`：同上
+    - `snapshot_payload`：harness.last_snapshot 的可序列化视图（如果有）
+    - `result_summary`：额外元数据（applied_skill_names / attachment_meta 等）
+    """
+
+    messages: list[Any]
+    assistant_message: Any | None
+    messages_before: list[Any]
+    messages_after: list[Any]
+    stop_reason: str | None
+    usage: Any | None
+    snapshot_payload: dict[str, Any] | None
+    result_summary: dict[str, Any] | None
+
+
+@dataclass
+class PromptRunOutcome:
+    """_run_prompt_core 成功后的产物——执行 + 持久化后的最终视图（caller 兼容）。
+
+    D2-4 起 _run_prompt_core 是 thin wrapper：调 _execute_prompt + 普通 persist；
+    返回此结构兼容 _run_prompt_background / sync /api/prompt。
+    """
 
     messages: list[Any]
     serialized_messages: list[dict[str, Any]]
@@ -970,16 +1003,235 @@ def create_app(
 
     async def _run_prompt_core(
         validated: _PromptValidated,
+    ) -> PromptRunOutcome:
+        """D2-4 thin wrapper——执行 + 普通 persist。
+
+        保持 POST /api/prompt / async prompt / WebEventEnvelope / abort /
+        reconnect replay 行为不回归。原有的 PromptRuntimeError 异常类型保留。
+
+        旧调用方无需改动——此函数返回 PromptRunOutcome（旧 PromptExecutionResult
+        的重命名），字段完全兼容。
+        """
+        execution = await _execute_prompt(validated)
+        return await _persist_normal_prompt_result(validated, execution)
+
+    def _extract_terminal_assistant(suffix: list[Any]) -> Any | None:
+        """D2-4：从执行 suffix 中提取最终 assistant candidate。
+
+        不能简单取最后一个 role=='assistant'——多轮 tool_use 会产生
+        AssistantMessage(tool_call) → ToolResultMessage → AssistantMessage(text)
+        的中间状态。本函数从 suffix **末尾向前**扫描，跳过：
+        - 非 AssistantMessage（ToolResultMessage / UserMessage / etc.）
+        - AssistantMessage 但 `error_message` 非空（执行错误）
+        - AssistantMessage 但 content 只含 ToolCall（中间 tool-call turn）
+
+        返回最后一个**合格** candidate；没有则 None。
+        """
+        from ..messages import AssistantMessage, TextContent, ToolCall
+
+        for msg in reversed(suffix):
+            if not isinstance(msg, AssistantMessage):
+                continue
+            if getattr(msg, "error_message", None):
+                continue
+            # 必须含至少一个 TextContent（纯 ToolCall 的中间 turn 不算 terminal）
+            has_text = any(isinstance(c, TextContent) for c in msg.content)
+            has_only_tool_calls = all(
+                isinstance(c, ToolCall) for c in msg.content
+            ) and msg.content
+            if has_text or not has_only_tool_calls:
+                return msg
+        return None
+
+    def _serialize_assistant_for_messages(assistant_msg: Any) -> str:
+        """序列化 AssistantMessage 为 messages.content_json 格式（`{type, data}`）。
+
+        与 SQLiteSessionStore._serialize_message 对齐——确保 list_messages 能
+        正确反序列化（regenerate finalize 写入的 content_json 必须可被普通 API 读回）。
+        """
+        payload = {
+            "type": type(assistant_msg).__name__,
+            "data": assistant_msg.model_dump(),
+        }
+        return json.dumps(payload, ensure_ascii=False, default=str)
+
+    async def _run_regeneration_core(
+        validated: _PromptValidated,
+        *,
+        assistant_message_id: str,
+        request_id: str,
+    ) -> PromptRunOutcome:
+        """D2-4：Regenerate 编排核心——不暴露 HTTP（D2-5 才加 /regenerate route）。
+
+        完整生命周期：
+            1. create_running_revision（短事务）
+            2. 读 canonical messages → 截断到 preceding user → 临时替换 harness state
+            3. _execute_prompt（长 LLM 执行，无 DB transaction 跨越）
+            4. _persist_regeneration_result（finalize_revision + best-effort snapshot）
+            5. _reset_harness_to_session（成功 / 失败都要 reset）
+
+        异常 → revision 状态映射（D2-4 审核 §6）：
+            - 用户主动 abort → revision.aborted
+            - Provider/Agent 执行失败（PromptRuntimeError） → revision.error
+            - Candidate 缺失 → revision.error
+            - Base hash stale (RevisionBaseContentChangedError) → revision.error
+            - Finalize SQL 失败 → revision.error
+
+        Snapshot 失败（finalize 已成功）→ revision 仍 completed，request 仍 completed。
+
+        **事务边界**：create_running_revision 短事务 → 释放 → 长执行 → finalize 短事务。
+        没有任何 SQLite BEGIN IMMEDIATE 跨越 LLM 调用。
+        """
+        from .extension_store import (
+            ExtensionStoreError,
+            RevisionBaseContentChangedError,
+            RevisionError,
+        )
+
+        ext_store = state.extension_store
+        if ext_store is None:
+            raise ExtensionStoreError("extension_store not initialized")
+
+        store = validated.store
+        session_id = validated.session_id
+        if store is None or session_id is None:
+            raise ExtensionStoreError("regenerate requires session + store")
+
+        # 1. 创建 running revision（短事务）
+        revision = await ext_store.create_running_revision(
+            session_id=session_id,
+            assistant_message_id=assistant_message_id,
+            request_id=request_id,
+        )
+
+        # 保存原 harness state 用于 fallback；读 canonical 构建 regeneration history
+        original_harness_messages = list(harness.agent.state.messages)
+        canonical_before = await store.list_messages(session_id)
+
+        # 截断：create_running_revision 已经校验过目标是 session 最新 assistant，
+        # 所以 canonical_before 中最后一个 AssistantMessage 就是它。regeneration_history
+        # = canonical_before[:last_assistant_idx]（含 preceding user，不含旧 assistant）
+        from ..messages import AssistantMessage
+
+        try:
+            target_idx = max(
+                i for i, m in enumerate(canonical_before)
+                if isinstance(m, AssistantMessage)
+            )
+        except ValueError:
+            # canonical 找不到 assistant——mark error
+            await ext_store.mark_revision_error(
+                revision_id=revision.id,
+                request_id=request_id,
+                error_summary="target assistant message not in canonical history",
+            )
+            await _reset_harness_to_session(store, session_id, original_harness_messages)
+            raise ExtensionStoreError("regenerate target not found in canonical") from None
+
+        regeneration_history = list(canonical_before[:target_idx])
+
+        # 2. 临时替换 harness state，执行 model
+        harness.agent.state.messages = list(regeneration_history)
+        try:
+            execution = await _execute_prompt(
+                validated,
+                override_initial_messages=regeneration_history,
+                suppress_user_append=True,
+            )
+        except PromptRuntimeError as e:
+            # 模型/Agent 执行失败 → revision.error
+            await ext_store.mark_revision_error(
+                revision_id=revision.id,
+                request_id=request_id,
+                error_summary=_safe_error(e),
+            )
+            await _reset_harness_to_session(store, session_id, original_harness_messages)
+            raise
+        except Exception as e:
+            # 兜底——未预期异常也 mark error
+            await ext_store.mark_revision_error(
+                revision_id=revision.id,
+                request_id=request_id,
+                error_summary=_safe_error(e),
+            )
+            await _reset_harness_to_session(store, session_id, original_harness_messages)
+            raise
+
+        # 3. 持久化——finalize_revision + best-effort snapshot
+        try:
+            outcome = await _persist_regeneration_result(
+                validated,
+                execution,
+                revision_id=revision.id,
+                request_id=request_id,
+            )
+        except (ValueError, RevisionBaseContentChangedError, RevisionError) as e:
+            # Candidate 缺失 / hash stale / SQL 失败 → revision.error
+            await ext_store.mark_revision_error(
+                revision_id=revision.id,
+                request_id=request_id,
+                error_summary=_safe_error(e),
+            )
+            await _reset_harness_to_session(store, session_id, original_harness_messages)
+            raise
+
+        # 4. 成功——从 SQLite canonical 重载（含新 active assistant）
+        await _reset_harness_to_session(store, session_id, original_harness_messages)
+        return outcome
+
+    async def _execute_prompt(
+        validated: _PromptValidated,
+        *,
+        override_initial_messages: list[Any] | None = None,
+        suppress_user_append: bool = False,
     ) -> PromptExecutionResult:
-        """执行 prompt——假定已校验完毕。抛 PromptRuntimeError 表示 harness 失败。"""
+        """D2-4：纯执行——只跑模型/Agent，**不**碰 DB。
+
+        三种模式（由参数决定）：
+        - 普通 text prompt（默认）：harness.run_prompt(text, ...)
+        - 附件 prompt（默认 + attached_blocks）：append UserMessage + run_continue
+        - Regenerate（override_initial_messages + suppress_user_append）：
+          临时替换 harness state 为截断 history，run_continue 不 append 新 user
+
+        参数：
+        - `override_initial_messages`：regenerate 时传入截断后的 active history
+          （不含待替换的旧 assistant）；函数临时把它设到 harness state
+        - `suppress_user_append`：regenerate 路径设 True——不 append 新 user msg
+
+        **不变量**：
+        - **不**调用 replace_messages / finalize_revision / append_snapshot
+        - **不**修改 request status
+        - 异常路径抛 PromptRuntimeError（含 status_code）——caller 决定是否 persist
+        - 无论成功/失败，harness.agent.state.messages 在调用前后**应该**由 caller
+          保存/恢复；本函数只负责执行期间的 state 变化
+
+        返回 `PromptExecutionResult`——`assistant_message` 为本次执行 suffix 中
+        最后一个**合格** candidate（非 tool-call-only + 无 error_message）；无合格
+        candidate 时为 None（caller 决定是否转 revision error）。
+        """
         state.running = True
         state.last_error = None
+
+        # 执行前快照——caller 可用来 reset，也用于 candidate 提取的 suffix 边界
+        if override_initial_messages is not None:
+            messages_before = list(override_initial_messages)
+        else:
+            messages_before = list(harness.agent.state.messages)
+
         try:
-            if validated.attached_blocks:
+            if suppress_user_append:
+                # Regenerate 路径——caller 已设置 harness.agent.state.messages
+                messages = await harness.run_continue(
+                    skill_selection=validated.skill_selection
+                )
+            elif validated.attached_blocks:
                 from ..messages import TextContent, UserMessage
 
                 user_msg = UserMessage(
-                    content=[TextContent(text=validated.text), *validated.attached_blocks]
+                    content=[
+                        TextContent(text=validated.text),
+                        *validated.attached_blocks,
+                    ]
                 )
                 harness.agent.state.messages.append(user_msg)
                 messages = await harness.run_continue(
@@ -1002,10 +1254,67 @@ def create_app(
         finally:
             state.running = False
 
+        messages_after = list(harness.agent.state.messages)
+        # candidate 提取：从 suffix 中找最后一个合格 AssistantMessage
+        assistant_candidate = _extract_terminal_assistant(
+            messages_after[len(messages_before):]
+        )
+
+        # snapshot metadata 提取（如果有）
+        snapshot = harness.last_snapshot
+        snapshot_payload: dict[str, Any] | None = None
+        stop_reason: str | None = None
+        usage: Any | None = None
+        if snapshot is not None:
+            stop_reason = snapshot.metadata.get("stop_reason") if snapshot.metadata else None
+            usage = snapshot.metadata.get("usage") if snapshot.metadata else None
+            try:
+                # to_dict 是 dataclass method；可能抛异常——best-effort
+                snapshot_payload = snapshot.to_dict()  # type: ignore[attr-defined]
+            except Exception:
+                snapshot_payload = None
+
+        applied_skill_names: list[str] = list(
+            validated.skill_selection.names
+        ) if (
+            validated.skill_selection is not None
+            and validated.skill_selection.names
+        ) else []
+
+        attachment_meta = _build_attachment_meta(validated.attached_summary)
+
+        return PromptExecutionResult(
+            messages=list(messages),
+            assistant_message=assistant_candidate,
+            messages_before=messages_before,
+            messages_after=messages_after,
+            stop_reason=stop_reason,
+            usage=usage,
+            snapshot_payload=snapshot_payload,
+            result_summary={
+                "applied_skill_names": applied_skill_names,
+                "attachment_meta": attachment_meta,
+                "session_id": validated.session_id,
+            },
+        )
+
+    async def _persist_normal_prompt_result(
+        validated: _PromptValidated,
+        execution: PromptExecutionResult,
+    ) -> PromptRunOutcome:
+        """D2-4：普通 prompt 持久化路径——replace_messages + append_snapshot。
+
+        保留旧语义：历史 message ID 由 diff-based replace_messages 保持；
+        snapshot 失败仍记 state.last_error 但不影响主流程（旧 wrapper 兼容）。
+
+        finally 恢复 harness.agent.state.messages 到 validated.original_messages
+        （保持旧行为——普通 prompt 不需要从 SQLite reload，因为 replace_messages
+        已经把 final_messages 写回，agent state 与 DB 一致）。
+        """
         if validated.store is not None and validated.session_id is not None:
             try:
                 await validated.store.replace_messages(
-                    validated.session_id, list(messages)
+                    validated.session_id, list(execution.messages)
                 )
                 if harness.last_snapshot is not None:
                     await validated.store.append_snapshot(
@@ -1017,21 +1326,122 @@ def create_app(
                 if validated.original_messages is not None:
                     harness.agent.state.messages = validated.original_messages
 
-        attachment_meta = _build_attachment_meta(validated.attached_summary)
         applied_skill_names: list[str] = list(
             validated.skill_selection.names
         ) if (
             validated.skill_selection is not None
             and validated.skill_selection.names
         ) else []
+        attachment_meta = _build_attachment_meta(validated.attached_summary)
 
-        return PromptExecutionResult(
-            messages=messages,
-            serialized_messages=[serialize_message(m) for m in messages],
+        return PromptRunOutcome(
+            messages=execution.messages,
+            serialized_messages=[
+                serialize_message(m) for m in execution.messages
+            ],
             session_id=validated.session_id,
             attachment_meta=attachment_meta,
             applied_skill_names=applied_skill_names,
         )
+
+    async def _persist_regeneration_result(
+        validated: _PromptValidated,
+        execution: PromptExecutionResult,
+        *,
+        revision_id: str,
+        request_id: str,
+    ) -> PromptRunOutcome:
+        """D2-4：regenerate 持久化路径——finalize_revision + best-effort snapshot。
+
+        **不**调用 replace_messages（finalize 内部 UPDATE messages.content_json）。
+        **不**创建第二条 assistant row——通过 messages.id 不变保证。
+
+        Snapshot 失败语义（D2-4 固定）：
+        - revision finalize commit = 核心事务，必须成功
+        - snapshot append = best-effort——失败时记 state.last_error，**不**改
+          revision 状态（仍 completed），**不**改 request 状态（仍 completed）
+
+        Candidate 缺失（execution.assistant_message is None）：
+        - 抛 ValueError（caller 在 revision mark_error 后转 request error）
+        """
+        from .extension_store import RevisionBaseContentChangedError
+
+        if execution.assistant_message is None:
+            raise ValueError("regeneration produced no qualified assistant candidate")
+
+        # candidate canonical 序列化——{type, data} 包装格式（与 messages 表对齐）
+        candidate_json = _serialize_assistant_for_messages(
+            execution.assistant_message
+        )
+
+        # 核心：finalize_revision（单 BEGIN IMMEDIATE transaction）
+        try:
+            await state.extension_store.finalize_revision(  # type: ignore[union-attr]
+                revision_id=revision_id,
+                request_id=request_id,
+                candidate_content_json=candidate_json,
+            )
+        except RevisionBaseContentChangedError:
+            # 重新抛出——caller 在独立 transaction 中决定是否 mark_error
+            raise
+
+        # Snapshot append 是 best-effort（finalize 已成功则 request 必须 completed）
+        snapshot_error: str | None = None
+        if (
+            validated.store is not None
+            and validated.session_id is not None
+            and harness.last_snapshot is not None
+        ):
+            try:
+                await validated.store.append_snapshot(
+                    validated.session_id, harness.last_snapshot
+                )
+            except Exception as e:
+                # finalize 已 commit——snapshot 失败不能回滚 active answer
+                snapshot_error = f"snapshot: {type(e).__name__}: {e}"
+                state.last_error = snapshot_error
+
+        applied_skill_names: list[str] = list(
+            validated.skill_selection.names
+        ) if (
+            validated.skill_selection is not None
+            and validated.skill_selection.names
+        ) else []
+        attachment_meta = _build_attachment_meta(validated.attached_summary)
+
+        return PromptRunOutcome(
+            messages=execution.messages,
+            serialized_messages=[
+                serialize_message(m) for m in execution.messages
+            ],
+            session_id=validated.session_id,
+            attachment_meta=attachment_meta,
+            applied_skill_names=applied_skill_names,
+        )
+
+    async def _reset_harness_to_session(
+        store: Any,
+        session_id: str,
+        fallback_messages: list[Any],
+    ) -> None:
+        """D2-4：把 harness.agent.state.messages 重置到 SQLite canonical state。
+
+        规则：
+        - 优先 `store.list_messages(session_id)`——SQLite 是最终真源
+        - 读失败时恢复 fallback_messages（不修改 DB）
+        - reset 失败本身**不**再次修改 DB
+        - 错误写入 state.last_error（安全摘要，不含正文/绝对路径）
+
+        所有 regenerate 路径退出时（成功 / 错误 / 中止 / finalize 失败）都必须调用。
+        """
+        try:
+            canonical = await store.list_messages(session_id)
+            harness.agent.state.messages = list(canonical)
+        except Exception as e:
+            state.last_error = (
+                f"reset_harness: {type(e).__name__}: {e}"[:500]
+            )
+            harness.agent.state.messages = list(fallback_messages)
 
     def _serialize_prompt_validation_error(
         e: PromptValidationError,
@@ -3452,6 +3862,16 @@ def create_app(
                         return
         finally:
             ws_clients.discard(client_queue)
+
+    # D2-4：内部函数挂到 app.state 便于测试访问——**不**是 public API；
+    # 调用方应继续用 POST /api/prompt / async / (D2-5 未来的) /regenerate。
+    app.state.d24_execute_prompt = _execute_prompt
+    app.state.d24_persist_normal = _persist_normal_prompt_result
+    app.state.d24_persist_regeneration = _persist_regeneration_result
+    app.state.d24_reset_harness = _reset_harness_to_session
+    app.state.d24_run_regeneration = _run_regeneration_core
+    app.state.d24_extract_terminal = _extract_terminal_assistant
+    app.state.d24_validated_factory = _validate_prompt_payload
 
     return app
 
