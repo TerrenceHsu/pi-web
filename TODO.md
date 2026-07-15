@@ -1228,9 +1228,9 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
 
 ---
 
-## 🔄 P1-D2 Regenerate（D2-1 + D2-2 + D2-3 + D2-4 ✅ 完成，等审核进入 D2-5 Regenerate API，2026-07-15）
+## 🔄 P1-D2 Regenerate（D2-1 + D2-2 + D2-3 + D2-4 + D2-5 ✅ 完成，等审核进入 D2-6 lifespan sweep + D2-7 E2E，2026-07-16）
 
-**状态**：D2 准备工作 + D2-1 + D2-2 + D2-3 + D2-4 已落地；D2-5 `/regenerate` HTTP route 等下一次审核。
+**状态**：D2 准备工作 + D2-1 + D2-2 + D2-3 + D2-4 + D2-5 已落地；D2-6 `mark_running_revisions_interrupted` lifespan 接入 + D2-7 E2E + D2-8 release 等下一次审核。
 
 ### 已落地
 
@@ -1247,6 +1247,21 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
     - try/except ROLLBACK 整个 transaction
   - `tests/test_session_message_id_stability.py`（rename from test_d2_message_id_stability.py）14 测试全 PASS
   - 范围边界：未实现 revision schema / regenerate endpoint / _execute_prompt 拆分 / 前端 Regenerate / request metadata / revision 清理（留待 D2-2+）
+
+- **D2-5 regenerate HTTP API**（commit `72fa2f4`）：
+  - `POST /api/sessions/{sid}/messages/{aid}/regenerate` → 202 + `{ok, operation: "regenerate", regeneration_id, request_id, session_id, assistant_message_id, status: "queued"}`
+  - `GET /api/sessions/{sid}/messages/{aid}/revisions?limit=&before_revision_number=` → `{session_id, assistant_message_id, items: [{revision_id, revision_number, status, created_at, completed_at, is_current}], next_before_revision_number}`
+  - `WebRunRequest` 加 3 字段（向后兼容）：`operation: Literal["prompt","regenerate"]="prompt"` / `regeneration_id: str|None` / `target_message_id: str|None`
+  - `regeneration_id == revision.id`（不另生成第三个 ID）
+  - 14 步 POST route 顺序：validate → create_running_revision → register request → create task → 202
+  - 3 类失败补偿：revision 创建失败 / registry 注册失败 / task 创建失败（mark_revision_error + 清理）
+  - 10 个稳定错误 code：`session_not_found` / `message_not_found` / `regenerate_target_not_assistant` / `regenerate_target_not_latest` / `regenerate_missing_user_message` / `request_already_active` / `revision_already_running` / `request_conflict` / `extension_store_unavailable` / `regenerate_start_failed`
+  - GET revisions 安全 serializer：**不**返回 `content_json` / `base_content_sha256` / `request_id`；`is_current = (status == "completed")`；`limit` clamp [1,100]
+  - `_run_regeneration_core` 加 `revision_id: str|None=None` 参数：None→自创建（D2-4 行为）；传入→跳过创建（D2-5 POST route 已创建，避免双创建）
+  - `_run_regeneration_background`：asyncio.CancelledError 显式 mark_revision_aborted；PromptRuntimeError / RevisionBaseContentChangedError / RevisionError / ValueError → mark_revision_error；finally `_reset_harness_to_session`
+  - **不**实现 `revision_finalized` WS event（当前 polling + reconcileMessagesFromServer 已足够——审核 §0 明确）
+  - `tests/test_web_regenerate_api.py` 31 用例全 PASS（POST 15 + Lifecycle 6 + GET 11，含 barrier 测试验证 finalize commit 前 request 仍 running）
+  - 范围边界：未实现前端按钮 / regeneration draft bubble / revision history UI / 手动切换 / Playwright / PDF（留 D2-6+）
 
 - **D2-4 execution/persistence split**（commit `260bbff`）：
   - `_run_prompt_core` 改为 thin wrapper：调 `_execute_prompt` + `_persist_normal_prompt_result`
@@ -1322,9 +1337,23 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
 3. ✅ **不**硬限制 revision 数量——查询接口必须分页
 4. ✅ 自动 active 切换必做，手动切换**不做**
 
-### 下一步 D2-5
+### 下一步 D2-6 + D2-7 + D2-8
 
-`POST /api/sessions/{sid}/messages/{mid}/regenerate` HTTP route——包装 `_run_regeneration_core`；返回 202 + revision_id；接入异步 request registry；request lifecycle 顺序保证 `completed` 发生在 `finalize_revision` COMMIT 之后。`GET /api/sessions/{sid}/messages/{mid}/revisions` 分页列表 endpoint。`revision_finalized` WS event + 前端 active 切换 UI。
+- **D2-6**：`mark_running_revisions_interrupted` 接入 lifespan startup（在 `_restore_mcp_servers` 之后调用）；补 startup sweep 测试
+- **D2-7**：Playwright E2E——regenerate flow + abort + restart recovery（7-10 用例）
+- **D2-8**：release notes + tag `v0.0.27-regenerate`
+
+### D2-5 测试覆盖（31 用例）
+
+**POST 成功（3）**：返回 202 + operation + regeneration_id == revision.id + registry metadata
+
+**POST 校验失败（8）**：session_not_found / message_not_found / wrong session / user message / not latest / missing user / active request / 双击只一个 202
+
+**POST 补偿（3）**：revision 创建失败 / task 创建失败 mark_revision_error + registry 无残留 / route 不调 replace_messages
+
+**Lifecycle（6）**：finalize commit 后 completed / finalize 失败 error / abort 双 aborted / canonical 不变 / normal prompt operation=prompt / barrier 测试（commit 前 running）
+
+**GET Revisions（11）**：空 / DESC / before cursor / limit clamp / is_current / 不返回 content_json / 不返回 base_content_sha256 / 不返回 request_id / session 404 / message 404 / 普通 messages API 不回归
 
 ### D2-4 测试覆盖（20 用例）
 
@@ -1370,12 +1399,12 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
 
 ---
 
-## 当前测试基线（HEAD `260bbff`——D2-4 完成）
+## 当前测试基线（HEAD `72fa2f4`——D2-5 完成）
 
 | 命令 | 结果 |
 |---|---|
-| `pytest -m "not slow and not integration and not docker"` | **1083 passed**（1063 + 20 D2-4），14 deselected（~50s） |
-| D2 专项 5 文件 | **105 passed**（execution_split 20 + revisions 40 + message_id_stability 13 + prompt_async 20 + request_recovery 12） |
+| `pytest -m "not slow and not integration and not docker"` | **1114 passed**（1083 + 31 D2-5），14 deselected（~67s） |
+| D2 专项 8 文件 | **178 passed**（regenerate_api 31 + execution_split 20 + revisions 40 + migration 20 + message_id_stability 13 + prompt_async 20 + request_recovery 12 + markdown_export 22） |
 | Coverage gate | 83.82% ≥ 75% ✅ |
 | Playwright e2e（build:e2e） | **26/28**（已知 P1-C 跨测试污染，非 D1/D2 引入） |
 | ruff | All checks passed（src tests scripts） |
