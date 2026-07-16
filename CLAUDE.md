@@ -68,7 +68,9 @@
 
 # 项目说明
 
-`pi-agent-core-py` 是 [`@earendil-works/pi-agent-core`](../pi-main/packages/agent)（TypeScript）的 Python 完整移植。
+`pi-agent-core-py` 是 `@earendil-works/pi-agent-core`（TypeScript 上游项目）的 Python 完整移植。
+
+> 上游 TypeScript 项目路径（不在本副本）：`../pi-main/packages/agent`
 
 ## 进度
 

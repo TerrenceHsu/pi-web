@@ -1,5 +1,11 @@
 # P1-D2 Regenerate — Detailed Design
 
+> **Archived**: this document is retained for historical reference and is no longer the source of truth.
+> 长期架构见 [Regenerate Revision Model](../../architecture/regenerate-revision-model.md)；
+> 冻结证据见 [P1-D2 Validation Report](../../validation/p1-d/P1_D2_VALIDATION_REPORT.md)。
+
+---
+
 > **状态**：✅ 设计已批准（用户 2026-07-15 审核 4 个决策点定稿）——按 §6 commit 顺序进入实现
 > **前置**：P1-D1 ✅ FROZEN（tag `v0.0.26-export-markdown` @ `ebbc896`）
 > **依赖阻塞**：Message ID 稳定性 characterization test ✅ 已落地（commit `a124697`，2 个 xfail）
