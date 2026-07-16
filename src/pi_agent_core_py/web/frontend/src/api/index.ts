@@ -29,6 +29,7 @@ export * from "./skills"
 export * from "./mcp"
 export * from "./websocket"
 export * from "./state"
+export * from "./regenerate"
 
 // ----- 旧 api.ts 兼容签名（让 9 个 .vue 不改一行） -----
 // 注意：旧 .vue 直接 import * as api 然后 api.getState() / api.sendPrompt(text, sel)

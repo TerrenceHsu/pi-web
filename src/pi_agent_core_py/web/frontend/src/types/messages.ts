@@ -47,9 +47,47 @@ export interface AgentMessage {
 /** GET /api/messages response。 */
 export interface MessagesResponse {
   count: number
-  messages: AgentMessage[]
+  /**
+   * D2-6 起：传 session_id 时返回 PersistedMessageDto（含 message_id）；
+   * 不传 session_id 时返回 legacy AgentMessage（无 message_id）。
+   * 前端用 'message_id' in m 区分。
+   */
+  messages: PersistedMessageDto[] | AgentMessage[]
   /** 后端在指定 session_id 时回填 */
   session_id?: string
+}
+
+/**
+ * D2-6：persisted message DTO——SQLite row 的 Web 层视图。
+ *
+ * `message_id` 是 SQLite messages.id（稳定，regenerate 后不变）。
+ * 前端 reconciliation 必须用此 ID 而非 index。
+ *
+ * **映射规则**（D2-7 审核 §1 集成注意事项）：
+ * - 持久化字段（message_id / session_id / idx / created_at）→ 始终读 DTO 顶层
+ * - 完整 AgentMessage 内容 → 统一读 dto.message
+ * - 兼容 role/content → 仅旧客户端兼容字段
+ *
+ * 顶层 role/content 与嵌套 message 必须从同一反序列化对象生成——不能独立加工。
+ */
+export interface PersistedMessageDto {
+  message_id: string
+  session_id: string
+  idx: number
+  /** 兼容字段——同 message.role */
+  role: AgentMessage["role"]
+  /** 兼容字段——同 message.content */
+  content: AgentMessage["content"]
+  created_at: number
+  /** 完整 AgentMessage——前端应统一从此字段读完整内容 */
+  message: AgentMessage
+}
+
+/** Type guard：响应中的 message 是否是 PersistedMessageDto。 */
+export function isPersistedMessageDto(
+  m: PersistedMessageDto | AgentMessage,
+): m is PersistedMessageDto {
+  return typeof (m as PersistedMessageDto).message_id === "string"
 }
 
 /** POST /api/prompt body。 */
@@ -141,6 +179,9 @@ export interface PromptAsyncResponse {
  * GET /api/requests/{request_id} response——active + history 都查。
  *
  * 安全约束：**不含** task / payload / system prompt / MCP env / traceback。
+ *
+ * D2-5 起新增 operation / regeneration_id / target_message_id（向后兼容）——
+ * 普通 prompt 三字段分别为 "prompt" / null / null。
  */
 export interface RequestSummary {
   request_id: string
@@ -159,10 +200,62 @@ export interface RequestSummary {
   } | null
   event_start_sequence: number | null
   event_end_sequence: number | null
+  /** D2-5：操作类型——prompt / regenerate */
+  operation?: RequestOperation
+  /** D2-5：regenerate 路径下的 revision.id（== regeneration_id） */
+  regeneration_id?: string | null
+  /** D2-5：regenerate 目标 assistant_message_id */
+  target_message_id?: string | null
 }
+
+/** D2-5：request operation 类型。 */
+export type RequestOperation = "prompt" | "regenerate"
 
 /** GET /api/requests?session_id=&status=active&limit=N response（P1-B3-3） */
 export interface RequestListResponse {
   count: number
   requests: RequestSummary[]
+}
+
+/**
+ * D2-5：POST /api/sessions/{sid}/messages/{aid}/regenerate response（202）。
+ *
+ * regeneration_id == revision.id（不另生成第三个 ID）。
+ */
+export interface RegenerateResponse {
+  ok: boolean
+  operation: "regenerate"
+  regeneration_id: string
+  request_id: string
+  session_id: string
+  assistant_message_id: string
+  status: "queued"
+}
+
+/**
+ * D2-5：GET /api/sessions/{sid}/messages/{aid}/revisions response。
+ *
+ * **安全 serializer**——不含 content_json / base_content_sha256 / request_id。
+ */
+export interface RevisionListItem {
+  revision_id: string
+  revision_number: number
+  status:
+    | "running"
+    | "completed"
+    | "superseded"
+    | "error"
+    | "aborted"
+    | "interrupted"
+  created_at: string
+  completed_at: string | null
+  /** true 当且仅当 status == "completed" */
+  is_current: boolean
+}
+
+export interface RevisionListResponse {
+  session_id: string
+  assistant_message_id: string
+  items: RevisionListItem[]
+  next_before_revision_number: number | null
 }

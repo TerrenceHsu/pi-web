@@ -2,6 +2,7 @@
 import { computed } from "vue"
 
 import type { ChatStreamItem, FileRef } from "../../types"
+import { useChatStore } from "../../stores/chatStore"
 import ErrorCard from "./ErrorCard.vue"
 import FileChip from "./FileChip.vue"
 import FileReadCard from "./FileReadCard.vue"
@@ -20,6 +21,8 @@ const props = withDefaults(
   { sessionId: null },
 )
 
+const chatStore = useChatStore()
+
 const kind = computed(() => props.item.kind)
 const text = computed(() => {
   const it: any = props.item
@@ -35,6 +38,49 @@ const userFiles = computed<FileRef[]>(() => {
   if (!Array.isArray(files) || files.length === 0) return []
   return files as FileRef[]
 })
+
+/**
+ * D2-7: 是否显示 Regenerate 按钮——审核 §5 显示条件全检：
+ * - assistant role
+ * - persisted === true
+ * - messageId 存在
+ * - 是当前 session 最新 persisted assistant（与 chatStore computed 比对）
+ * - 无 active request（sending/streaming/aborting 都 false）
+ * - 不是临时 draft（streaming-only 或 isRegenerationDraft）
+ */
+const canRegenerate = computed(() => {
+  const it: any = props.item
+  if (kind.value !== "assistant_message") return false
+  if (it.persisted !== true) return false
+  if (!it.messageId) return false
+  if (it.isRegenerationDraft) return false
+  if (it.streaming) return false
+  // 必须是最新 persisted assistant
+  if (chatStore.latestPersistedAssistantMessageId !== it.messageId) return false
+  // 无 active request
+  if (chatStore.sending || chatStore.streaming || chatStore.aborting) return false
+  if (chatStore.currentRequestId) return false
+  // regeneration 进行中——禁用
+  const regStatus = chatStore.regeneration?.status
+  if (regStatus === "queued" || regStatus === "running" || regStatus === "syncing") {
+    return false
+  }
+  return true
+})
+
+async function onRegenerate() {
+  if (!canRegenerate.value) return
+  const it: any = props.item
+  if (!it.messageId || !props.sessionId) return
+  try {
+    await chatStore.regenerateAssistantMessage({
+      sessionId: props.sessionId,
+      assistantMessageId: it.messageId,
+    })
+  } catch {
+    // 错误已写入 chatStore.error + push ErrorItem；此处不二次处理
+  }
+}
 </script>
 
 <template>
@@ -64,6 +110,18 @@ const userFiles = computed<FileRef[]>(() => {
       </div>
       <div v-else-if="(item as any).streaming" class="typing">
         <span></span><span></span><span></span>
+      </div>
+      <!-- D2-7: Regenerate 按钮——仅在最新 persisted assistant + 无 active request 时显示 -->
+      <div v-if="canRegenerate" class="regen-actions">
+        <button
+          type="button"
+          class="regen-btn"
+          data-testid="message-regenerate-btn"
+          aria-label="Regenerate response"
+          @click="onRegenerate"
+        >
+          Regenerate
+        </button>
       </div>
     </div>
   </div>
@@ -249,5 +307,26 @@ const userFiles = computed<FileRef[]>(() => {
   overflow-x: auto;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* D2-7: Regenerate 按钮 */
+.regen-actions {
+  margin-top: 6px;
+  display: flex;
+  gap: 6px;
+}
+.regen-btn {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--code-bg);
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.regen-btn:hover {
+  background: var(--border);
+  color: var(--fg);
 }
 </style>

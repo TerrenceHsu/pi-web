@@ -81,6 +81,13 @@ export interface UserMessageItem {
   content: string
   /** 本轮附件——FileChip 渲染用（Step 6 启用） */
   files?: FileRef[]
+  /** D2-7：来自 SQLite persisted message 的稳定 row id（regenerate 后不变）。
+   * 流式期间的临时 user_message item 为 undefined。 */
+  messageId?: string
+  /** D2-7：是否来自 SQLite persisted（用于决定是否显示 Regenerate 按钮） */
+  persisted?: boolean
+  /** D2-7：SQLite row idx（reconciliation 按 idx 排序） */
+  messageIndex?: number
 }
 
 export interface AssistantMessageItem {
@@ -89,6 +96,15 @@ export interface AssistantMessageItem {
   content: string
   /** 流式进行中——true 时显示 stream cursor */
   streaming?: boolean
+  /** D2-7：来自 SQLite persisted message 的稳定 row id（regenerate 后不变）。
+   * 流式期间的临时 assistant draft item 为 undefined。 */
+  messageId?: string
+  /** D2-7：是否来自 SQLite persisted（用于决定是否显示 Regenerate 按钮） */
+  persisted?: boolean
+  /** D2-7：SQLite row idx（reconciliation 按 idx 排序） */
+  messageIndex?: number
+  /** D2-7：regeneration 流式 draft——独立 bubble，不覆盖原 active assistant */
+  isRegenerationDraft?: boolean
 }
 
 export interface TurnInfoItem {

@@ -35,6 +35,8 @@ async function activateSession(id: string) {
   // P1-B2.1: 同步 chatStore.activeSessionId + reset turn cards
   chatStore.setActiveSession(id)
   chatStore.resetForSession()
+  // D2-7: 清当前 session 的 regeneration draft（不串流到新 session）
+  chatStore.clearRegenerationForSessionSwitch()
   await Promise.all([
     chatStore.loadMessages(id),
     fileStore.loadFiles(id),

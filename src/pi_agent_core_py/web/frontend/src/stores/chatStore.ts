@@ -16,6 +16,7 @@ import { computed, ref } from "vue"
 
 import * as messagesApi from "../api/messages"
 import * as eventsApi from "../api/events"
+import * as regenerateApi from "../api/regenerate"
 import { ApiError } from "../api/client"
 import { createEventSocket, type EventSocket } from "../api/websocket"
 import type {
@@ -23,6 +24,7 @@ import type {
   ChatStreamItem,
   FileRef,
   MCPToolCallItem,
+  PersistedMessageDto,
   ToolCallItem,
   ToolResultItem,
   FileReadItem,
@@ -30,6 +32,7 @@ import type {
   WebEvent,
   WebEventEnvelope,
 } from "../types"
+import { isPersistedMessageDto } from "../types/messages"
 import { isWebEventEnvelope } from "../types/events"
 
 // ============================================================================
@@ -199,6 +202,50 @@ export const useChatStore = defineStore("chat", () => {
   /** 用户点 Stop——只 set 此 flag；等 status=aborted 后才 finalize。 */
   const aborting = ref(false)
 
+  // D2-7: Regeneration state——单对象，避免多个 ref 不一致
+  /**
+   * Regenerate 路径的状态——currentRequestId 仍存普通 prompt 的 request id，
+   * 但当 operation=regenerate 时，流式 delta 必须写入独立 draft item。
+   *
+   * `draftItemId` 是临时 ID（`regen-draft:{request_id}`），不能用 targetMessageId
+   * 否则会覆盖原 active assistant。
+   */
+  type RegenerationStatus =
+    | "idle"
+    | "queued"
+    | "running"
+    | "syncing"
+    | "completed"
+    | "error"
+    | "aborted"
+  interface RegenerationState {
+    regenerationId: string | null
+    requestId: string | null
+    targetMessageId: string | null
+    draftItemId: string | null
+    status: RegenerationStatus
+    errorMessage: string | null
+  }
+  const regeneration = ref<RegenerationState>({
+    regenerationId: null,
+    requestId: null,
+    targetMessageId: null,
+    draftItemId: null,
+    status: "idle",
+    errorMessage: null,
+  })
+
+  /**
+   * D2-7: request_id → operation metadata（prompt / regenerate）。
+   *
+   * 用于在 handleEvent 时判断 assistant delta 应路由到普通 draft 还是 regeneration draft。
+   * 由 sendPrompt / regenerateAssistantMessage / findActiveRequest 填充。
+   */
+  const requestMetadataById = new Map<
+    string,
+    { operation: "prompt" | "regenerate"; targetMessageId?: string | null }
+  >()
+
   /** turn-control 事件——会修改当前 turn 的 draft / sending / streaming 状态；
    * 必须属于 currentRequestId 才能处理。 */
   const TURN_CONTROL_TYPES = new Set([
@@ -269,14 +316,60 @@ export const useChatStore = defineStore("chat", () => {
     }
   }
 
+  /**
+   * D2-7: PersistedMessageDto → ChatStreamItem，使用 dto.message_id 作为 item id。
+   *
+   * **关键不变量**：regenerate 成功后服务器返回同 message_id 的 DTO——前端按
+   * message_id 精确匹配，**就地更新 content**，不新增第二个 assistant bubble。
+   *
+   * `persisted: true` 让 MessageBubble 知道此 item 可显示 Regenerate 按钮。
+   */
+  function persistedMessageToItem(dto: PersistedMessageDto): ChatStreamItem | null {
+    // 顶层 role/content 与嵌套 message 必须来自同一 dto——审核 §1 集成注意
+    const msg = dto.message
+    if (msg.role === "user") {
+      return {
+        kind: "user_message",
+        id: dto.message_id,
+        messageId: dto.message_id,
+        messageIndex: dto.idx,
+        persisted: true,
+        content: textOf(msg) || "(empty user message)",
+      }
+    }
+    if (msg.role === "assistant") {
+      return {
+        kind: "assistant_message",
+        id: dto.message_id,
+        messageId: dto.message_id,
+        messageIndex: dto.idx,
+        persisted: true,
+        content: textOf(msg),
+      }
+    }
+    return {
+      kind: "turn_info",
+      id: dto.message_id,
+      title: msg.role || "info",
+      summary: textOf(msg) || "(no text)",
+      muted: true,
+    }
+  }
+
   async function loadMessages(sessionId?: string) {
     error.value = null
     try {
       const resp = await messagesApi.getMessages(sessionId)
       const items: ChatStreamItem[] = []
       resp.messages.forEach((m, i) => {
-        const item = messageToItem(m, `hist-${i}`)
-        if (item) items.push(item)
+        // D2-7: 优先用 persisted DTO（含 message_id）；fallback 到旧 AgentMessage
+        if (isPersistedMessageDto(m)) {
+          const item = persistedMessageToItem(m)
+          if (item) items.push(item)
+        } else {
+          const item = messageToItem(m, `hist-${i}`)
+          if (item) items.push(item)
+        }
       })
       streamItems.value = items
       // reset turn-tracking 状态
@@ -290,34 +383,47 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   /**
-   * P1-B3-3: 用服务端 messages 校正 streamItems——保留当前 request 的 turn cards，
+   * P1-B3-3 + D2-7: 用服务端 messages 校正 streamItems——保留当前 request 的 turn cards，
    * 替换 user_message / assistant_message 为服务端最终事实，删除 streaming draft。
+   *
+   * **D2-7 关键**：按 message_id 精确匹配，regenerate 成功后服务器返回同 message_id
+   * 的 DTO——前端**就地更新 content**，不新增第二个 assistant bubble。
    *
    * 调用时机：
    * - request status 进入 terminal（completed/error/aborted）后
    * - gap fallback 时（needsFinalResync=true）
    * - 用户手动刷新
-   *
-   * 不重复 append——按服务端 message 顺序重建持久化 item，与 turn cards 不冲突。
    */
   async function reconcileMessagesFromServer(sessionId: string) {
     try {
       const resp = await messagesApi.getMessages(sessionId)
       // 收集服务端的 user_message / assistant_message item（顺序敏感）
+      // D2-7: 优先用 persisted DTO 的 message_id；fallback 到 index
       const persistedItems: ChatStreamItem[] = []
       resp.messages.forEach((m, i) => {
-        if (m.role === "user" || m.role === "assistant") {
-          const item = messageToItem(m, `srv-${i}`)
-          if (item) persistedItems.push(item)
+        if (isPersistedMessageDto(m)) {
+          if (m.message.role === "user" || m.message.role === "assistant") {
+            const item = persistedMessageToItem(m)
+            if (item) persistedItems.push(item)
+          }
+        } else {
+          // legacy 路径——无 message_id，用 index fallback
+          if (m.role === "user" || m.role === "assistant") {
+            const item = messageToItem(m, `srv-${i}`)
+            if (item) persistedItems.push(item)
+          }
         }
       })
 
       // 保留当前 streamItems 中的 turn cards（tool_call / tool_result / file_read /
       // skill_used / mcp_tool_call / turn_info / error）——它们由 WS event 创建，
       // 服务端 messages 不可重建。删除 user_message / assistant_message（避免重复）。
+      // D2-7: 也删除 regeneration draft（kind=assistant_message && isRegenerationDraft）
       const turnCards = streamItems.value.filter(
         (it: any) =>
-          it.kind !== "user_message" && it.kind !== "assistant_message",
+          it.kind !== "user_message" &&
+          !(it.kind === "assistant_message" && !it.persisted) &&
+          !(it.kind === "assistant_message" && it.isRegenerationDraft),
       )
 
       // 合并：服务端 messages 在前（历史 + 本轮 user/assistant 最终文本）；
@@ -345,6 +451,10 @@ export const useChatStore = defineStore("chat", () => {
     const startedAt = Date.now()
     let delay = 250
 
+    // D2-7: 判断 request operation（regenerate vs prompt）——决定 terminal 后处理
+    const meta = requestMetadataById.get(requestId)
+    const isRegenerate = meta?.operation === "regenerate"
+
     while (Date.now() - startedAt < MAX_TIMEOUT_MS) {
       await new Promise((r) => setTimeout(r, delay))
       delay = Math.min(delay * 2, 500)
@@ -355,15 +465,79 @@ export const useChatStore = defineStore("chat", () => {
           r.status === "error" ||
           r.status === "aborted"
         ) {
-          // terminal——reconcile messages
-          if (r.session_id) {
-            await reconcileMessagesFromServer(r.session_id)
+          // D2-7: regenerate 路径——completed 先 syncing 再 reconcile
+          if (isRegenerate && r.status === "completed") {
+            regeneration.value = {
+              ...regeneration.value,
+              status: "syncing",
+            }
+            // 同步失败时保持 syncing（审核 §9 reconcile 失败语义）
+            if (r.session_id) {
+              try {
+                await reconcileMessagesFromServer(r.session_id)
+                // reconcile 成功——删 draft + status=completed
+                if (regeneration.value.draftItemId) {
+                  streamItems.value = streamItems.value.filter(
+                    (it: any) => it.id !== regeneration.value.draftItemId,
+                  )
+                }
+                regeneration.value = {
+                  ...regeneration.value,
+                  status: "completed",
+                }
+              } catch {
+                // reconcile 失败——保持 syncing + 显示安全提示（不删 draft）
+                error.value =
+                  "Response regenerated — waiting for server sync"
+                // 仍清 currentRequestId 让用户可发新 prompt
+                sending.value = false
+                streaming.value = false
+                aborting.value = false
+                currentRequestId.value = null
+                return
+              }
+            } else {
+              // 无 session_id——直接完成
+              if (regeneration.value.draftItemId) {
+                streamItems.value = streamItems.value.filter(
+                  (it: any) => it.id !== regeneration.value.draftItemId,
+                )
+              }
+              regeneration.value = {
+                ...regeneration.value,
+                status: "completed",
+              }
+            }
+          } else if (isRegenerate && (r.status === "error" || r.status === "aborted")) {
+            // D2-7: error/abort → 删 draft + 原回答不变
+            if (regeneration.value.draftItemId) {
+              streamItems.value = streamItems.value.filter(
+                (it: any) => it.id !== regeneration.value.draftItemId,
+              )
+            }
+            regeneration.value = {
+              ...regeneration.value,
+              status: r.status,
+              errorMessage: r.error,
+            }
+            // 普通 reconcile 不必要（messages 没变）；但调用一次保证一致性
+            if (r.session_id) {
+              await reconcileMessagesFromServer(r.session_id)
+            }
+          } else {
+            // 普通 prompt 路径——reconcile messages
+            if (r.session_id) {
+              await reconcileMessagesFromServer(r.session_id)
+            }
           }
+
           // 清 state
           sending.value = false
           streaming.value = false
           aborting.value = false
           currentRequestId.value = null
+          // 清 metadata（避免长期累积）
+          requestMetadataById.delete(requestId)
           return
         }
       } catch {
@@ -407,14 +581,22 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   /**
-   * P1-B3-3: 查询 session 的 active request——页面刷新 / session 切换恢复用。
-   * 返回 request_id 或 null。
+   * P1-B3-3 + D2-7: 查询 session 的 active request——页面刷新 / session 切换恢复用。
+   * 返回 request_id 或 null；同时记录 metadata（operation / targetMessageId）用于
+   * 流式 delta 路由和恢复 regeneration state。
    */
   async function findActiveRequest(sessionId: string): Promise<string | null> {
     try {
       const resp = await messagesApi.listActiveRequests(sessionId, 1)
       if (resp.count > 0 && resp.requests[0]) {
-        return resp.requests[0].request_id
+        const r = resp.requests[0]
+        // D2-7: 记录 metadata——让后续 WS delta 正确路由
+        const op = r.operation ?? "prompt"
+        requestMetadataById.set(r.request_id, {
+          operation: op,
+          targetMessageId: r.target_message_id ?? null,
+        })
+        return r.request_id
       }
     } catch {
       // 忽略——降级为无 active request
@@ -423,16 +605,41 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   /**
-   * P1-B3-4: 页面刷新恢复——set currentRequestId + sending/streaming=true，
+   * P1-B3-4 + D2-7: 页面刷新恢复——set currentRequestId + sending/streaming=true，
    * 让 handleEvent 把后续 envelope 关联到该 request。
    * WS reconnect 后 replay 会补播该 request 的事件。
+   *
+   * D2-7：若 request 是 regenerate operation，恢复 regeneration state + 独立 draft。
    */
   function resumeActiveRequest(requestId: string) {
+    const meta = requestMetadataById.get(requestId)
     currentRequestId.value = requestId
     pendingRequest.value = false
     sending.value = true
     streaming.value = true
     terminalEventSeen.value = false
+
+    // D2-7: 恢复 regeneration draft——审核 §8 reload 顺序
+    if (meta?.operation === "regenerate") {
+      const draftId = `regen-draft:${requestId}`
+      // 创建独立 draft（不覆盖原 active assistant）
+      streamItems.value.push({
+        kind: "assistant_message",
+        id: draftId,
+        content: "",
+        streaming: true,
+        isRegenerationDraft: true,
+      })
+      currentAssistantItemId = draftId
+      regeneration.value = {
+        regenerationId: meta.targetMessageId ?? null, // 不可靠——实际 regeneration_id 需另查
+        requestId,
+        targetMessageId: meta.targetMessageId ?? null,
+        draftItemId: draftId,
+        status: "running",
+        errorMessage: null,
+      }
+    }
   }
 
   // ----------------------------------------------------------------------
@@ -514,6 +721,8 @@ export const useChatStore = defineStore("chat", () => {
 
       currentRequestId.value = resp.request_id
       pendingRequest.value = false
+      // D2-7: 记录 metadata——assistant delta 路由用
+      requestMetadataById.set(resp.request_id, { operation: "prompt" })
 
       // flush 该 request 的 pending envelopes（按 sequence 排序，已通过 event_id 去重）
       const pending = pendingEventsByRequest.get(resp.request_id) ?? []
@@ -549,6 +758,140 @@ export const useChatStore = defineStore("chat", () => {
       })
       finalizeTurnInfo("error")
       // **不**自动 fallback 同步 POST /api/prompt（用户原指令 §3：避免双发）
+      throw e
+    }
+  }
+
+  // ----------------------------------------------------------------------
+  // D2-7: regenerateAssistantMessage
+  // ----------------------------------------------------------------------
+
+  /**
+   * D2-7: 触发 regenerate——保持原 active assistant 可见，独立 draft bubble 接收流式。
+   *
+   * 流程（审核 §6）：
+   *   1. 同步 submitting guard（防双击）
+   *   2. POST regenerate → 拿到 request_id + regeneration_id
+   *   3. 设 currentRequestId + regeneration state + 创建独立空 draft
+   *   4. WS delta 走 appendAssistantDelta → 由 requestMetadataById 路由到 draft
+   *   5. pollRequestUntilTerminal 监听 status → completed → reconcileMessagesFromServer
+   *
+   * **不**用 targetMessageId 作 draft id——会覆盖原 active assistant。
+   */
+  async function regenerateAssistantMessage(input: {
+    sessionId: string
+    assistantMessageId: string
+  }) {
+    // 同步 guard——防快速双击在第一次 202 前发出第二个请求
+    if (sending.value || regeneration.value.status === "queued" ||
+        regeneration.value.status === "running") {
+      return
+    }
+
+    activeSessionId.value = input.sessionId
+    sending.value = true
+    streaming.value = true
+    error.value = null
+    currentTurnEvents.value = []
+    gapDetected.value = false
+    pendingRequest.value = true
+    currentRequestId.value = null
+    terminalEventSeen.value = false
+    needsFinalResync.value = false
+    aborting.value = false
+
+    // 重置 regeneration state
+    regeneration.value = {
+      regenerationId: null,
+      requestId: null,
+      targetMessageId: input.assistantMessageId,
+      draftItemId: null,
+      status: "queued",
+      errorMessage: null,
+    }
+
+    try {
+      const resp = await regenerateApi.regenerateMessage(
+        input.sessionId,
+        input.assistantMessageId,
+      )
+
+      currentRequestId.value = resp.request_id
+      pendingRequest.value = false
+
+      // 创建独立 draft item——不覆盖原 active assistant
+      const draftId = `regen-draft:${resp.request_id}`
+      streamItems.value.push({
+        kind: "assistant_message",
+        id: draftId,
+        content: "",
+        streaming: true,
+        isRegenerationDraft: true,
+      })
+      // 让 appendAssistantDelta 写入这个 draft
+      currentAssistantItemId = draftId
+
+      // 记录 metadata——delta 路由用
+      requestMetadataById.set(resp.request_id, {
+        operation: "regenerate",
+        targetMessageId: input.assistantMessageId,
+      })
+
+      // 更新 regeneration state
+      regeneration.value = {
+        regenerationId: resp.regeneration_id,
+        requestId: resp.request_id,
+        targetMessageId: input.assistantMessageId,
+        draftItemId: draftId,
+        status: "running",
+        errorMessage: null,
+      }
+
+      // flush 该 request 的 pending envelopes（202 前到达的 delta）
+      const pending = pendingEventsByRequest.get(resp.request_id) ?? []
+      pendingEventsByRequest.delete(resp.request_id)
+      if (pending.length > 0) {
+        pending.sort((a, b) => a.sequence - b.sequence)
+        for (const env of pending) {
+          applyEventToStreamItems({ ...env.payload, type: env.type })
+        }
+      }
+
+      return resp
+    } catch (e: any) {
+      let msg: string
+      if (e instanceof ApiError) {
+        // D2-5 错误响应是 {detail: {code, message}} 格式
+        const detail = e.payload?.detail
+        if (detail && typeof detail === "object" && detail.message) {
+          msg = detail.message
+        } else if (e.status === 409) {
+          msg = "Agent is already running"
+        } else {
+          msg = e.detail
+        }
+      } else {
+        msg = String(e?.message ?? e)
+      }
+      error.value = msg
+      pendingRequest.value = false
+      sending.value = false
+      streaming.value = false
+      // 回滚 regeneration state
+      regeneration.value = {
+        regenerationId: null,
+        requestId: null,
+        targetMessageId: null,
+        draftItemId: null,
+        status: "error",
+        errorMessage: msg,
+      }
+      streamItems.value.push({
+        kind: "error",
+        id: genId("e"),
+        message: msg,
+        details: e instanceof ApiError ? { status: e.status, payload: e.payload } : undefined,
+      })
       throw e
     }
   }
@@ -1303,6 +1646,33 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   /**
+   * D2-7: 计算当前 stream 中**最新 persisted assistant** 的 messageId——
+   * 用于 MessageBubble 判断是否显示 Regenerate 按钮。
+   *
+   * **审核 §5 关键**：从 streamItems 末尾向前扫，跳过：
+   * - 非 assistant_message
+   * - 未 persisted 的 streaming draft
+   * - isRegenerationDraft
+   * - 任何 ErrorCard / ToolCard / turn_info
+   *
+   * 返回 messageId 或 null。
+   */
+  const latestPersistedAssistantMessageId = computed(() => {
+    for (let i = streamItems.value.length - 1; i >= 0; i--) {
+      const it: any = streamItems.value[i]
+      if (
+        it.kind === "assistant_message" &&
+        it.persisted === true &&
+        !it.isRegenerationDraft &&
+        typeof it.messageId === "string"
+      ) {
+        return it.messageId as string
+      }
+    }
+    return null
+  })
+
+  /**
    * 同步当前 active session id——供 sessionStore 切换/新建/删除 session 时调用。
    * 必须在所有切换路径调用，否则 handleEvent 的 session 隔离会用过期的 session_id。
    *
@@ -1313,6 +1683,30 @@ export const useChatStore = defineStore("chat", () => {
    */
   function setActiveSession(sid: string | null) {
     activeSessionId.value = sid
+  }
+
+  /**
+   * D2-7: 切换 session 时清理 regeneration UI state——但**不**清服务器 request。
+   * 审核 §11：Session A 的 regeneration delta 不应出现在 Session B。
+   *
+   * 与 resetForSession 区别：resetForSession 清全部 turn state；本函数只清
+   * regeneration draft + state。
+   */
+  function clearRegenerationForSessionSwitch() {
+    // 删除 regeneration draft item（若有）
+    if (regeneration.value.draftItemId) {
+      streamItems.value = streamItems.value.filter(
+        (it: any) => it.id !== regeneration.value.draftItemId,
+      )
+    }
+    regeneration.value = {
+      regenerationId: null,
+      requestId: null,
+      targetMessageId: null,
+      draftItemId: null,
+      status: "idle",
+      errorMessage: null,
+    }
   }
 
   return {
@@ -1337,8 +1731,14 @@ export const useChatStore = defineStore("chat", () => {
     replaying,
     // P1-B3-4: 暴露给 E2E 测试重置——生产 UI 不读
     lastGlobalSequence,
+    // D2-7: regeneration 单对象 state + computed
+    regeneration,
+    latestPersistedAssistantMessageId,
     loadMessages,
     sendPrompt,
+    // D2-7: regenerate action
+    regenerateAssistantMessage,
+    clearRegenerationForSessionSwitch,
     connectEvents,
     disconnectEvents,
     closeEventSocketForTest,
