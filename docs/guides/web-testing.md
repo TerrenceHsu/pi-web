@@ -1,6 +1,6 @@
 # Web Testing
 
-> **Web Claude P0 MVP**（2026-07-07）。详见 [`docs/RELEASE_NOTES_WEB_CLAUDE_P0.md`](RELEASE_NOTES_WEB_CLAUDE_P0.md)。
+> **Web Claude P0 MVP**（2026-07-07）。详见 [v0.0.23-web-claude-p0-mvp release notes](../releases/v0.0.23-web-claude-p0-mvp.md)。
 >
 > 测试覆盖 v0.0.22 Web backend baseline + P0-1 sqlite sessions + P0-2 files + P0-3 file tools + P0-4 Skills/MCP Web UI Step 1–2 + P0-5 default system prompt。
 > 所有 web 相关测试统一标 `@pytest.mark.slow`，离线 baseline 不依赖。
@@ -199,7 +199,7 @@ cd src/pi_agent_core_py/web/frontend && npm install && npm run build
 
 ## P1-B1 Async Prompt + Request Registry（2026-07-12）
 
-详细报告：[`docs/P1_B_VALIDATION_REPORT.md`](P1_B_VALIDATION_REPORT.md)。
+详细报告：[P1-B Validation Report](../validation/p1-b/P1_B_VALIDATION_REPORT.md)。
 
 ### 新增测试
 
@@ -237,7 +237,7 @@ PYTHONPATH=src /d/miniconda/envs/pipy/python.exe -m pytest \
 
 ## P1-B2 WebEventEnvelope + Event Dedup（2026-07-12）
 
-详细报告：[`docs/P1_B2_VALIDATION_REPORT.md`](P1_B2_VALIDATION_REPORT.md)。
+详细报告：[P1-B2 Validation Report](../validation/p1-b/P1_B2_VALIDATION_REPORT.md)。
 
 ### 新增测试
 
@@ -287,7 +287,7 @@ interface WebEventEnvelope {
 
 P0 MVP freeze 后的真实环境验证阶段。把上面 25 项 checklist 中尚未自动化的项补完，并新增 MCP tool enable/disable 真链路 E2E + 真实 GLM 多轮 tool_use smoke。
 
-详细报告：[`docs/P1_A_BROWSER_SMOKE_REPORT.md`](P1_A_BROWSER_SMOKE_REPORT.md) + [`docs/P1_A_VALIDATION_REPORT.md`](P1_A_VALIDATION_REPORT.md)。
+详细报告：[P1-A Browser Smoke Report](../validation/p1-a/P1_A_BROWSER_SMOKE_REPORT.md) + [P1-A Validation Report](../validation/p1-a/P1_A_VALIDATION_REPORT.md)。
 
 ### 25 项 checklist 当前状态
 

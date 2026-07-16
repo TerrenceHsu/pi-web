@@ -1,5 +1,10 @@
 # Web Claude 改造计划
 
+> **Archived**: this document is retained for historical reference and is no longer the source of truth.
+> 当前真源见 [STATUS.md](../../../STATUS.md) / [ROADMAP.md](../../../ROADMAP.md) / [CHANGELOG.md](../../../CHANGELOG.md)。
+
+---
+
 > **目标**：在 Step 1–21 baseline 与 v0.0.22 Web backend stable baseline 之上，把项目从「agent runtime 调试器」改造为「claude.ai 风格的 Web 端对话助手」。
 >
 > **本版核心调整**：
@@ -146,7 +151,7 @@ P0 MVP freeze 后做的工程化改进，**零源码功能变更**——仅修 b
 
 ### 后续 P1 建议（不在 P0 范围，按推荐优先级）
 
-1. **真实浏览器 smoke test 剩余 15 项**——按 [`docs/WEB_TESTING.md`](docs/WEB_TESTING.md) 25 项 checklist 中未自动化的部分（手动）
+1. **真实浏览器 smoke test 剩余 15 项**——按 [Web Testing guide](../../guides/web-testing.md) 25 项 checklist 中未自动化的部分（手动）
 2. **Playwright MCP tool enable 真链路**——需要 start_test_web_app.py 加 fake stdio subprocess（Smoke 10 当前跳过）
 3. **真实 GLM 端到端冒烟**——含多轮 tool_use 的真实链路
 4. **MCP / Skill 配置持久化**——重启后恢复（目前重启即丢）

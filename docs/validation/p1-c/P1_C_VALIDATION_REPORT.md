@@ -32,7 +32,7 @@ P1-C 全部完成——Skill + MCP server + MCP disabled tool 配置持久化 + 
 
 ## 3. 最终 SQLite Schema
 
-详见 [`docs/P1_C_PERSISTENCE_ARCHITECTURE.md`](P1_C_PERSISTENCE_ARCHITECTURE.md)。
+详见 [Persistence and Startup](../../architecture/persistence-and-startup.md)（长期架构）与 [archived P1-C design](../../archive/superseded-designs/P1_C_PERSISTENCE_ARCHITECTURE.md)。
 
 ## 4. API 变化
 

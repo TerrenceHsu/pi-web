@@ -37,7 +37,7 @@ P0 MVP 在真实环境下经得起检验，**建议进入 P1-B**（异步 prompt
 | #9 | 上传图片 → 不支持回复 | unsupported 分支已在 `test_file_tools.py` 单测覆盖 |
 | #10 | 上传 PDF → 未解析回复 | 同上 |
 
-详见：[`P1_A_BROWSER_SMOKE_REPORT.md`](P1_A_BROWSER_SMOKE_REPORT.md)
+详见：[P1_A_BROWSER_SMOKE_REPORT.md](./P1_A_BROWSER_SMOKE_REPORT.md)
 
 ---
 
@@ -225,7 +225,7 @@ P1-B（`/api/prompt/async` + WebSocket event_id 去重 + reconnect 补播）可�
 
 ## 14. 下一步建议
 
-按 [`MEMORY.md`](../C:/Users/Administrator/.claude/projects/D--LLMTutorial-test/memory/project_p1_backlog.md) 中 P1-B 子项顺序推进：
+按 P1-B 子项顺序推进（详见 [P1-B Validation Report](../p1-b/P1_B_VALIDATION_REPORT.md)）。
 
 1. **P1-B1** 抽取同步 /api/prompt 公共执行逻辑 + 新增 request registry + 新增 `/api/prompt/async`
 2. **P1-B2** 所有事件补 request/session/sequence + 前端按 event_id 去重

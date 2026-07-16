@@ -1,7 +1,7 @@
 # Web API Reference
 
 > Web Claude P0 MVP（2026-07-07）。
-> 详见 [`docs/RELEASE_NOTES_WEB_CLAUDE_P0.md`](RELEASE_NOTES_WEB_CLAUDE_P0.md) 与 [`WEB_CLAUDE_PLAN.md`](../WEB_CLAUDE_PLAN.md)。
+> 详见 [v0.0.23-web-claude-p0-mvp release notes](../releases/v0.0.23-web-claude-p0-mvp.md) 与 [archived Web Claude plan](../archive/legacy-plans/WEB_CLAUDE_PLAN_ORIGINAL.md)。
 >
 > ⚠️ Web app **仅 localhost 使用**——无鉴权 / 无多用户隔离 / 无 rate limit；
 > **Web Claude P0 MVP is complete for local development. Localhost-first, no authentication, not suitable for public exposure.**

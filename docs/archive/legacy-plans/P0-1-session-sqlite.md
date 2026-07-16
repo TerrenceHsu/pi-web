@@ -1,5 +1,10 @@
 # P0-1：Session 线性化（sqlite）
 
+> **Archived**: this document is retained for historical reference and is no longer the source of truth.
+> 当前真源见 [STATUS.md](../../../STATUS.md) / [CHANGELOG.md](../../../CHANGELOG.md)。
+
+---
+
 > **目标**：在 v0.0.21 baseline 之上，新增 sqlite-based 会话管理；Web App 切换为多会话模型。
 >
 > **约束**：零回归。现有 `session.py` / `session_sync.py` / `compaction/branch_summary.py` 暂不删，留到 P2 清理。

@@ -3,7 +3,8 @@
 [`@earendil-works/pi-agent-core`](../pi-main/packages/agent)（TypeScript）的 Python 完整移植版本——一个面向"本地优先、可观察、可回放"的 Agent 开发框架，内置 MCP 工具生态、权限沙箱、Skill 体系、Session 记忆和网页端调试器。
 
 > 当前进度：Step 1–21 完成（核心 15 步 + Phase A MCP/权限 + Phase B Skill Loader + Phase C Web App + Provider Adapter Refactor）；
-> **Web Claude P0 MVP 完成**（2026-07-07）—— 见 [`WEB_CLAUDE_PLAN.md`](WEB_CLAUDE_PLAN.md) 与 [`docs/RELEASE_NOTES_WEB_CLAUDE_P0.md`](docs/RELEASE_NOTES_WEB_CLAUDE_P0.md)。
+> Web Claude P0 MVP + P1-A 真实环境验证 + P1-B 异步架构 + P1-C 持久化 + P1-D1 Export Markdown + P1-D2 Regenerate 全部完成 ✅。
+> 当前状态见 [`STATUS.md`](STATUS.md)；未来计划见 [`ROADMAP.md`](ROADMAP.md)；版本历史见 [`CHANGELOG.md`](CHANGELOG.md)。
 >
 > **Web Claude P0 MVP is complete for local development. Localhost-first, no authentication, not suitable for public exposure.**
 
@@ -560,11 +561,11 @@ npm run build
 
 ### Browser smoke tests
 
-Playwright E2E smoke（5 核心用例 + 1 skip）位于 `tests/e2e/`，覆盖真实浏览器下的 layout / chat / file upload / image unsupported / Skills & MCP modals + env value 不回显。运行说明见 [`docs/WEB_TESTING.md`](docs/WEB_TESTING.md) 的「Browser smoke tests / Playwright」段。
+Playwright E2E smoke（5 核心用例 + 1 skip）位于 `tests/e2e/`，覆盖真实浏览器下的 layout / chat / file upload / image unsupported / Skills & MCP modals + env value 不回显。运行说明见 [`docs/guides/web-testing.md`](docs/guides/web-testing.md) 的「Browser smoke tests / Playwright」段。
 
 ### REST endpoints
 
-完整 API 详见 [`docs/WEB_API.md`](docs/WEB_API.md)。常用：
+完整 API 详见 [`docs/api/web-api.md`](docs/api/web-api.md)。常用：
 
 | 路径 | 方法 | 说明 |
 |------|------|------|

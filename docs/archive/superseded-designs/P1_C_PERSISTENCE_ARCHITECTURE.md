@@ -1,5 +1,10 @@
 # P1-C Extension Persistence Architecture
 
+> **Archived**: this document is retained for historical reference and is no longer the source of truth.
+> 内容已提炼到 [Persistence and Startup](../../architecture/persistence-and-startup.md)。
+
+---
+
 > **阶段**: P1-C（MCP / Skill 配置持久化）
 > **Tag**: `v0.0.25-extension-persistence`
 
