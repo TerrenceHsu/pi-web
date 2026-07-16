@@ -56,13 +56,11 @@ class TestRestartPersistence:
     async def test_record_survives_reopen(self, tmp_path) -> None:
         db_path = str(tmp_path / "creds.db")
 
-        s1 = SQLiteCredentialStore(db_path)
-        await s1.init()
+        s1 = await SQLiteCredentialStore.open(db_path)
         await s1.create(_make_record())
         await s1.close()
 
-        s2 = SQLiteCredentialStore(db_path)
-        await s2.init()
+        s2 = await SQLiteCredentialStore.open(db_path)
         got = await s2.get("cred-1")
         assert got.id == "cred-1"
         assert got.label == "Test"
@@ -72,16 +70,14 @@ class TestRestartPersistence:
     async def test_multiple_records_survive_reopen(self, tmp_path) -> None:
         db_path = str(tmp_path / "creds.db")
 
-        s1 = SQLiteCredentialStore(db_path)
-        await s1.init()
+        s1 = await SQLiteCredentialStore.open(db_path)
         for i in range(3):
             await s1.create(
                 _make_record(id=f"cred-{i}", secret_ref=f"ref-{i}")
             )
         await s1.close()
 
-        s2 = SQLiteCredentialStore(db_path)
-        await s2.init()
+        s2 = await SQLiteCredentialStore.open(db_path)
         records = await s2.list()
         assert len(records) == 3
         await s2.close()
@@ -238,8 +234,7 @@ class TestResolverSafety:
         await store.set("cred-ref-1", "sk-test-aaaaaaaa")
 
         db_path = str(tmp_path / "creds.db")
-        sqlite_store = SQLiteCredentialStore(db_path)
-        await sqlite_store.init()
+        sqlite_store = await SQLiteCredentialStore.open(db_path)
         await sqlite_store.create(_make_record(secret_ref="cred-ref-1"))
 
         rec = await sqlite_store.get("cred-1")

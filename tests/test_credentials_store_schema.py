@@ -31,8 +31,7 @@ from pi_agent_core_py.web.extension_store import SCHEMA_VERSION as EXTENSION_SCH
 
 class TestFreshDB:
     async def test_fresh_db_initializes_to_v1(self, tmp_path) -> None:
-        store = SQLiteCredentialStore(str(tmp_path / "creds.db"))
-        await store.init()
+        store = await SQLiteCredentialStore.open(str(tmp_path / "creds.db"))
 
         version = await store.get_schema_version()
         assert version == WEB_CREDENTIALS_SCHEMA_VERSION == 1
@@ -41,8 +40,7 @@ class TestFreshDB:
 
     async def test_init_creates_credentials_table(self, tmp_path) -> None:
         db_path = tmp_path / "creds.db"
-        store = SQLiteCredentialStore(str(db_path))
-        await store.init()
+        store = await SQLiteCredentialStore.open(str(db_path))
         await store.close()
 
         # 重开 raw connection 检查 schema
@@ -56,8 +54,7 @@ class TestFreshDB:
 
     async def test_init_creates_indexes(self, tmp_path) -> None:
         db_path = tmp_path / "creds.db"
-        store = SQLiteCredentialStore(str(db_path))
-        await store.init()
+        store = await SQLiteCredentialStore.open(str(db_path))
         await store.close()
 
         async with aiosqlite.connect(str(db_path)) as raw:
@@ -72,8 +69,7 @@ class TestFreshDB:
 
     async def test_init_creates_schema_meta(self, tmp_path) -> None:
         db_path = tmp_path / "creds.db"
-        store = SQLiteCredentialStore(str(db_path))
-        await store.init()
+        store = await SQLiteCredentialStore.open(str(db_path))
         await store.close()
 
         async with aiosqlite.connect(str(db_path)) as raw:
@@ -93,23 +89,22 @@ class TestFreshDB:
 
 class TestIdempotency:
     async def test_repeated_init_is_idempotent(self, tmp_path) -> None:
-        store = SQLiteCredentialStore(str(tmp_path / "creds.db"))
-        await store.init()
-        # Second init via same instance is no-op
-        await store.init()
+        db_path = str(tmp_path / "creds.db")
+        store = await SQLiteCredentialStore.open(db_path)
+        # open() validates existing schema——calling again via separate instance is OK
+        store_2 = await SQLiteCredentialStore.open(db_path)
         version = await store.get_schema_version()
         assert version == 1
         await store.close()
+        await store_2.close()
 
     async def test_reopen_db_preserves_version(self, tmp_path) -> None:
         db_path = str(tmp_path / "creds.db")
 
-        s1 = SQLiteCredentialStore(db_path)
-        await s1.init()
+        s1 = await SQLiteCredentialStore.open(db_path)
         await s1.close()
 
-        s2 = SQLiteCredentialStore(db_path)
-        await s2.init()
+        s2 = await SQLiteCredentialStore.open(db_path)
         assert await s2.get_schema_version() == 1
         await s2.close()
 
@@ -124,8 +119,7 @@ class TestUnknownVersion:
         db_path = str(tmp_path / "creds.db")
 
         # 用第一次 init 建立 schema
-        s1 = SQLiteCredentialStore(db_path)
-        await s1.init()
+        s1 = await SQLiteCredentialStore.open(db_path)
         await s1.close()
 
         # 手动 bump version 到未来值
@@ -137,10 +131,8 @@ class TestUnknownVersion:
             await raw.commit()
 
         # 重开应抛 CredentialsSchemaVersionError
-        s2 = SQLiteCredentialStore(db_path)
         with pytest.raises(CredentialsSchemaVersionError):
-            await s2.init()
-        await s2.close()
+            await SQLiteCredentialStore.open(db_path)
 
 
 # ============================================================================
@@ -152,8 +144,7 @@ class TestValidationFailures:
     async def _init_then_break(self, tmp_path, breaker) -> str:
         """helper: init fresh schema, run breaker on raw conn, return db_path."""
         db_path = str(tmp_path / "creds.db")
-        s = SQLiteCredentialStore(db_path)
-        await s.init()
+        s = await SQLiteCredentialStore.open(db_path)
         await s.close()
 
         async with aiosqlite.connect(db_path) as raw:
@@ -167,10 +158,8 @@ class TestValidationFailures:
 
         db_path = await self._init_then_break(tmp_path, breaker)
 
-        s = SQLiteCredentialStore(db_path)
         with pytest.raises(CredentialsSchemaValidationError, match="missing"):
-            await s.init()
-        await s.close()
+            await SQLiteCredentialStore.open(db_path)
 
     async def test_version_present_but_column_missing(self, tmp_path) -> None:
         async def breaker(raw: aiosqlite.Connection) -> None:
@@ -199,10 +188,8 @@ class TestValidationFailures:
 
         db_path = await self._init_then_break(tmp_path, breaker)
 
-        s = SQLiteCredentialStore(db_path)
         with pytest.raises(CredentialsSchemaValidationError, match="missing columns"):
-            await s.init()
-        await s.close()
+            await SQLiteCredentialStore.open(db_path)
 
     async def test_version_present_but_index_missing(self, tmp_path) -> None:
         async def breaker(raw: aiosqlite.Connection) -> None:
@@ -210,13 +197,11 @@ class TestValidationFailures:
 
         db_path = await self._init_then_break(tmp_path, breaker)
 
-        s = SQLiteCredentialStore(db_path)
         with pytest.raises(
             CredentialsSchemaValidationError,
             match="idx_web_credentials_updated_at",
         ):
-            await s.init()
-        await s.close()
+            await SQLiteCredentialStore.open(db_path)
 
 
 # ============================================================================
@@ -228,19 +213,22 @@ class TestExtensionStoreIndependence:
     async def test_credentials_store_does_not_touch_extension_schema_meta(
         self, tmp_path
     ) -> None:
-        """credentials_store 用 web_credentials_schema_meta——不污染 web_extension_schema_meta."""
+        """credentials_store 用 web_credentials_schema_meta——不污染 web_extension_schema_meta.
+
+        E1-2.1：两个 store 用**独立 connection** 共享同一 DB 文件（生产路径）.
+        """
         db_path = str(tmp_path / "shared.db")
 
-        # 同时 init extension_store + credentials_store 共享 connection
-        async with aiosqlite.connect(db_path) as shared_conn:
-            shared_conn.row_factory = aiosqlite.Row
-            from pi_agent_core_py.web.extension_store import ExtensionSQLiteStore
+        from pi_agent_core_py.web.extension_store import ExtensionSQLiteStore
 
-            ext = ExtensionSQLiteStore(db_path, connection=shared_conn)
+        # ext 用自己的 connection（默认 isolation_level）
+        async with aiosqlite.connect(db_path) as ext_conn:
+            ext_conn.row_factory = aiosqlite.Row
+            ext = ExtensionSQLiteStore(db_path, connection=ext_conn)
             await ext.init()
 
-            creds = SQLiteCredentialStore(db_path, connection=shared_conn)
-            await creds.init()
+            # credentials 用独立 connection（isolation_level=None——由 open() 配置）
+            creds = await SQLiteCredentialStore.open(db_path)
 
             # 各自独立 version
             ext_version = await ext.get_schema_version()
@@ -248,8 +236,8 @@ class TestExtensionStoreIndependence:
             assert ext_version == EXTENSION_SCHEMA_VERSION  # 仍为 2
             assert cred_version == WEB_CREDENTIALS_SCHEMA_VERSION  # 1
 
-            # 各自独立 meta 表
-            async with shared_conn.execute(
+            # 各自独立 meta 表（通过任一 connection 可见——同一 DB 文件）
+            async with ext_conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name LIKE 'web_%_schema_meta'"
             ) as cur:
@@ -258,22 +246,28 @@ class TestExtensionStoreIndependence:
             assert "web_extension_schema_meta" in meta_names
             assert "web_credentials_schema_meta" in meta_names
 
+            await creds.close()
+
     async def test_extension_store_schema_version_unchanged_after_credential_init(
         self, tmp_path
     ) -> None:
         db_path = str(tmp_path / "shared.db")
-        async with aiosqlite.connect(db_path) as shared_conn:
-            shared_conn.row_factory = aiosqlite.Row
-            from pi_agent_core_py.web.extension_store import ExtensionSQLiteStore
 
-            ext = ExtensionSQLiteStore(db_path, connection=shared_conn)
+        from pi_agent_core_py.web.extension_store import ExtensionSQLiteStore
+
+        async with aiosqlite.connect(db_path) as ext_conn:
+            ext_conn.row_factory = aiosqlite.Row
+            ext = ExtensionSQLiteStore(db_path, connection=ext_conn)
             await ext.init()
 
             before = await ext.get_schema_version()
 
-            creds = SQLiteCredentialStore(db_path, connection=shared_conn)
-            await creds.init()
-            await creds.init()  # 多次也不影响
+            # credentials store 用独立 connection——不影响 ext schema
+            creds = await SQLiteCredentialStore.open(db_path)
+            await creds.close()
+            # 再次 open 也不影响（idempotent validation）
+            creds_2 = await SQLiteCredentialStore.open(db_path)
+            await creds_2.close()
 
             after = await ext.get_schema_version()
             assert before == after == EXTENSION_SCHEMA_VERSION
@@ -288,8 +282,7 @@ class TestTransactionRollback:
     async def test_create_failure_rolls_back(self, tmp_path) -> None:
         """create() IntegrityError 时 ROLLBACK——meta 和 table 仍在，下次 init 可重试."""
         db_path = str(tmp_path / "creds.db")
-        store = SQLiteCredentialStore(db_path)
-        await store.init()
+        store = await SQLiteCredentialStore.open(db_path)
 
         from pi_agent_core_py.web.credentials_store import (
             CredentialAlreadyExistsError,

@@ -37,8 +37,7 @@ from pi_agent_core_py.web.credentials_store import (
 
 @pytest.fixture
 async def store(tmp_path):
-    s = SQLiteCredentialStore(str(tmp_path / "creds.db"))
-    await s.init()
+    s = await SQLiteCredentialStore.open(str(tmp_path / "creds.db"))
     yield s
     await s.close()
 
@@ -206,7 +205,8 @@ class TestReplaceSecretMetadata:
         await store.create(_make_record())
         rotated = await store.replace_secret_metadata(
             "cred-1",
-            secret_ref="new-ref",
+            expected_secret_ref="cred-ref-1",
+            new_secret_ref="new-ref",
             masked_value="sk****NEW0",
             fingerprint_sha256="sha256:newfingerprint",
         )
@@ -220,6 +220,7 @@ class TestReplaceSecretMetadata:
         # 先 mark validated
         await store.update_validation_state(
             "cred-1",
+            expected_secret_ref="cred-ref-1",
             validation_status="valid",
             provider_id="glm",
             validated_at=5000,
@@ -229,10 +230,11 @@ class TestReplaceSecretMetadata:
         assert validated.validation_status == "valid"
         assert validated.last_validated_provider_id == "glm"
 
-        # Now rotate
+        # Now rotate（CAS 用刚刚的 secret_ref）
         rotated = await store.replace_secret_metadata(
             "cred-1",
-            secret_ref="new-ref",
+            expected_secret_ref="cred-ref-1",
+            new_secret_ref="new-ref",
             masked_value="sk****NEW0",
             fingerprint_sha256="sha256:new",
         )
@@ -245,7 +247,8 @@ class TestReplaceSecretMetadata:
         with pytest.raises(CredentialNotFoundError):
             await store.replace_secret_metadata(
                 "never-exists",
-                secret_ref="x",
+                expected_secret_ref="x",
+                new_secret_ref="y",
                 masked_value="x",
                 fingerprint_sha256=None,
             )
@@ -258,7 +261,8 @@ class TestReplaceSecretMetadata:
         with pytest.raises(CredentialSecretRefConflictError):
             await store.replace_secret_metadata(
                 "cred-2",
-                secret_ref="ref-1",
+                expected_secret_ref="ref-2",
+                new_secret_ref="ref-1",
                 masked_value="sk****X",
                 fingerprint_sha256=None,
             )
@@ -274,6 +278,7 @@ class TestUpdateValidationState:
         await store.create(_make_record())
         updated = await store.update_validation_state(
             "cred-1",
+            expected_secret_ref="cred-ref-1",
             validation_status="valid",
             provider_id="glm",
             validated_at=9999,
@@ -287,6 +292,7 @@ class TestUpdateValidationState:
         await store.create(_make_record())
         updated = await store.update_validation_state(
             "cred-1",
+            expected_secret_ref="cred-ref-1",
             validation_status="invalid",
             provider_id="glm",
             validated_at=9999,
@@ -299,6 +305,7 @@ class TestUpdateValidationState:
         await store.create(_make_record())
         updated = await store.update_validation_state(
             "cred-1",
+            expected_secret_ref="cred-ref-1",
             validation_status="error",
             provider_id="glm",
             validated_at=9999,
@@ -312,6 +319,7 @@ class TestUpdateValidationState:
         with pytest.raises(CredentialStoreError, match="validation_status"):
             await store.update_validation_state(
                 "cred-1",
+                expected_secret_ref="cred-ref-1",
                 validation_status="bogus",  # type: ignore[arg-type]
                 provider_id=None,
                 validated_at=None,
@@ -322,6 +330,7 @@ class TestUpdateValidationState:
         with pytest.raises(CredentialNotFoundError):
             await store.update_validation_state(
                 "never-exists",
+                expected_secret_ref="whatever",
                 validation_status="valid",
                 provider_id="glm",
                 validated_at=9999,
@@ -403,7 +412,8 @@ class TestTimestamps:
         before = int(time.time() * 1000)
         rotated = await store.replace_secret_metadata(
             "cred-1",
-            secret_ref="new",
+            expected_secret_ref="cred-ref-1",
+            new_secret_ref="new",
             masked_value="sk****NEW",
             fingerprint_sha256=None,
         )
@@ -415,6 +425,7 @@ class TestTimestamps:
         before = int(time.time() * 1000)
         updated = await store.update_validation_state(
             "cred-1",
+            expected_secret_ref="cred-ref-1",
             validation_status="valid",
             provider_id="glm",
             validated_at=9999,

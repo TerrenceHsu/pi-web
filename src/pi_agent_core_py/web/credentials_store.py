@@ -1,4 +1,4 @@
-"""SQLite-backed CredentialRecord repository（P1-E1-2）.
+"""SQLite-backed CredentialRecord repository（P1-E1-2 + E1-2.1）.
 
 持久化 user credentials 的 metadata——**不**含 API Key 本体。
 
@@ -6,7 +6,7 @@
 - ✅ `web_credentials_schema_meta` 独立 schema 版本管理（v1）
 - ✅ `web_credentials` 表 + CHECK 约束 + 索引
 - ✅ Repository primitives（CRUD / label / rotate / validation state）
-- ✅ Schema 初始化 / 校验 / 版本检查
+- ✅ Schema 初始化 / 校验 / 版本检查（含 DDL 字符串约束校验，E1-2.1）
 - ✅ Restart persistence（重开 connection 后 record 仍在）
 - ✅ `resolve_storage_status(record, secret_store)` 运行时派生
 - ❌ 不调 SecretStore（补偿事务在 E1-3 service 层做）
@@ -14,15 +14,32 @@
 - ❌ 不修改 `extension_store` 的 SCHEMA_VERSION（保持 v2 不变量）
 - ❌ 不持久化 `storage_status`（运行时派生）
 
+**事务隔离（E1-2.1）**：
+- 生产路径拥有**独立 aiosqlite.Connection**（与 session/extension store 共享数据库
+  文件但不同 connection 对象）
+- connection 用 `isolation_level=None`（autocommit 模式）
+- 每个写方法显式 `BEGIN IMMEDIATE` → SQL → `COMMIT` / `ROLLBACK`
+- 这样多个并发协程共享 store 时，每个写操作有明确事务边界，不会互相污染
+- injected connection（测试）必须也是 `isolation_level=None`，由测试保证不被
+  其他 Repository 并发共享
+
+**CAS（E1-2.1）**：
+- `replace_secret_metadata` / `update_validation_state` 必传 `expected_secret_ref`
+- `delete` 可选传 `expected_secret_ref`
+- WHERE 子句加 `secret_ref = ?`——rowcount=0 时区分 not_found vs concurrent_modification
+
 **安全约束**：
 - SQLite 行不得含 api_key / secret / authorization / headers
-- `fingerprint_sha256` 仅用于内部去重——索引非 UNIQUE（允许两个 profile 显式共享同一 Key）
+- `fingerprint_sha256` 仅用于内部去重——索引非 UNIQUE
 - Error 消息可含 credential_id / safe field name / schema version，但**不得**含
-  secret / fingerprint / masked value / SQLite row dump / SQL 参数
+  secret / fingerprint / masked value / SQLite row dump / SQL 参数 / secret_ref
 - `CredentialRecordDecodeError` 不得把整个 row 放进异常
+- `CredentialConcurrentModificationError` 不得输出 expected/current secret_ref
 """
 from __future__ import annotations
 
+import asyncio
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -113,7 +130,16 @@ class CredentialAlreadyExistsError(CredentialStoreError):
 
 
 class CredentialSecretRefConflictError(CredentialStoreError):
-    """Raised when create() hits duplicate secret_ref UNIQUE constraint."""
+    """Raised when create()/rotate hits duplicate secret_ref UNIQUE constraint."""
+
+
+class CredentialConcurrentModificationError(CredentialStoreError):
+    """CAS 失败——expected_secret_ref 不匹配（被并发 rotate / delete）.
+
+    **关键安全约束**：异常 str/repr **不得**包含 expected/current secret_ref——
+    secret_ref 本身不含 Key 片段但属于内部状态，泄漏会让攻击者推断 CAS 时机。
+    只能含 credential_id（safe）和错误类别。
+    """
 
 
 class CredentialsSchemaError(CredentialStoreError):
@@ -125,7 +151,7 @@ class CredentialsSchemaVersionError(CredentialsSchemaError):
 
 
 class CredentialsSchemaValidationError(CredentialsSchemaError):
-    """Raised when version=1 but expected tables/columns/checks missing."""
+    """Raised when version=1 but expected tables/columns/checks/constraints missing."""
 
 
 class CredentialRecordDecodeError(CredentialStoreError):
@@ -196,6 +222,25 @@ _CREDENTIALS_DDL_STATEMENTS: tuple[str, ...] = (
 _SCHEMA_META_KEY = "version"
 
 
+# DDL 字符串归一化后的必含片段——_validate_v1_schema 用
+_DDL_CHECK_PATTERNS: tuple[tuple[str, str], ...] = (
+    # (描述, regex pattern)——pattern 在归一化 DDL 上匹配
+    ("label non-empty CHECK", r"length\s*\(\s*trim\s*\(\s*label\s*\)\s*\)\s*>\s*0"),
+    ("storage_mode CHECK", r"storage_mode\s+IN\s*\(\s*'keyring'"),
+    ("validation_status CHECK", r"validation_status\s+IN\s*\(\s*'never_validated'"),
+    (
+        "provider_hint_confidence CHECK",
+        r"provider_hint_confidence\s+IS\s+NULL\s+OR\s+provider_hint_confidence\s+IN",
+    ),
+)
+_DDL_UNIQUE_PATTERN = r"secret_ref\s+TEXT\s+NOT\s+NULL\s+UNIQUE"
+
+
+def _normalize_ddl(sql: str) -> str:
+    """归一化 DDL 字符串——折叠空白（保留 case，pattern 用 IGNORECASE）."""
+    return re.sub(r"\s+", " ", sql)
+
+
 # ============================================================================
 # SQLiteCredentialStore
 # ============================================================================
@@ -204,81 +249,89 @@ _SCHEMA_META_KEY = "version"
 class SQLiteCredentialStore:
     """SQLite-backed CredentialRecord repository.
 
-    与 `extension_store` 共享 connection（`:memory:` 必须），但用独立
-    `web_credentials_schema_meta`——不污染 extension_store 的 SCHEMA_VERSION。
+    与 `extension_store` 共享数据库文件但**不**共享 aiosqlite.Connection（E1-2.1）——
+    生产路径 `open()` 建立独立 connection + `isolation_level=None`；每个写方法
+    用显式 `BEGIN IMMEDIATE / COMMIT / ROLLBACK` 包事务。
+
+    用 `web_credentials_schema_meta` 独立 schema 版本——不污染 extension_store
+    的 SCHEMA_VERSION。
     """
 
     def __init__(
         self,
-        db_path: str,
         *,
-        connection: aiosqlite.Connection | None = None,
+        connection: aiosqlite.Connection,
+        owns_connection: bool,
     ) -> None:
-        self._db_path = db_path
-        self._injected_connection = connection
-        self._owns_connection = connection is None
-        self._db: aiosqlite.Connection | None = None
+        """Private constructor——用 `open()` 或 `for_testing()` 工厂方法."""
+        self._db = connection
+        self._owns_connection = owns_connection
         self._closed = False
+        # E1-2.1：单 store 内的写操作序列化锁——独立 connection 场景下足够
+        # 保证 BEGIN/SQL/COMMIT 不会在多协程并发时交错
+        self._write_lock = asyncio.Lock()
+
+    # ------------------------------------------------------------------
+    # Factories
+    # ------------------------------------------------------------------
+
+    @classmethod
+    async def open(cls, db_path: str) -> SQLiteCredentialStore:
+        """Production factory——独立 connection with isolation_level=None.
+
+        每个 SQLiteCredentialStore 拥有自己的 aiosqlite.Connection——
+        不与 session_store / extension_store 共享 connection 对象。
+        多个 store 写同一 DB 文件时由 SQLite 跨连接写锁保证一致性。
+        """
+        if db_path != ":memory:":
+            from pathlib import Path
+
+            parent = Path(db_path).parent
+            if str(parent) and not parent.exists():
+                parent.mkdir(parents=True, exist_ok=True)
+
+        conn = await aiosqlite.connect(db_path, isolation_level=None)
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA foreign_keys=ON")
+        await conn.execute("PRAGMA busy_timeout=5000")
+        store = cls(connection=conn, owns_connection=True)
+        await store._initialize_schema()
+        return store
+
+    @classmethod
+    async def for_testing(
+        cls,
+        connection: aiosqlite.Connection,
+        *,
+        owns_connection: bool = False,
+    ) -> SQLiteCredentialStore:
+        """Test factory——注入 connection.
+
+        Args:
+            connection: 必须是 isolation_level=None 的 aiosqlite.Connection.
+            owns_connection: True 时 close() 会关闭 connection；False 时不关闭.
+
+        Raises:
+            CredentialStoreError: connection 不满足 isolation_level=None.
+        """
+        if getattr(connection, "isolation_level", "") is not None:
+            raise CredentialStoreError(
+                "Injected connection must have isolation_level=None "
+                "(autocommit mode)——E1-2.1 transaction isolation requirement"
+            )
+        connection.row_factory = aiosqlite.Row
+        store = cls(connection=connection, owns_connection=owns_connection)
+        await store._initialize_schema()
+        return store
 
     # ------------------------------------------------------------------
     # lifecycle
     # ------------------------------------------------------------------
 
     def _require_db(self) -> aiosqlite.Connection:
-        if self._db is None:
+        if self._db is None or self._closed:
             raise CredentialStoreError("store not initialized or already closed")
         return self._db
-
-    async def init(self) -> None:
-        """Open or accept connection + initialize schema. Idempotent.
-
-        初始化顺序（镜像 extension_store）：
-            1. open / accept connection（含 PRAGMA）
-            2. 只确保 schema_meta 表存在
-            3. 读 version
-            4. 按 version 分支：
-               - None → fresh DB，单 transaction 建 v1 schema
-               - 1 → 只 validate，不重建
-               - >1 → raise（防 downgrade）
-               - 其它 → raise
-        """
-        if self._db is not None:
-            return
-        if self._injected_connection is not None:
-            self._db = self._injected_connection
-            # shared connection——约定所有 store 都用 aiosqlite.Row（idempotent set）
-            self._db.row_factory = aiosqlite.Row
-        else:
-            db_path = self._db_path
-            if db_path != ":memory:":
-                from pathlib import Path
-
-                parent = Path(db_path).parent
-                if str(parent) and not parent.exists():
-                    parent.mkdir(parents=True, exist_ok=True)
-            self._db = await aiosqlite.connect(db_path)
-            self._db.row_factory = aiosqlite.Row
-            await self._db.execute("PRAGMA foreign_keys=ON")
-            await self._db.execute("PRAGMA busy_timeout=5000")
-
-        await self._db.executescript(_SCHEMA_META_DDL)
-        await self._db.commit()
-
-        version = await self.get_schema_version()
-
-        if version is None:
-            await self._initialize_fresh_v1_schema()
-        elif version == WEB_CREDENTIALS_SCHEMA_VERSION:
-            await self._validate_v1_schema()
-        elif version > WEB_CREDENTIALS_SCHEMA_VERSION:
-            raise CredentialsSchemaVersionError(
-                "Web credentials database schema is newer than this application "
-                f"(got v{version}, supported v{WEB_CREDENTIALS_SCHEMA_VERSION})"
-            )
-        else:
-            raise CredentialsSchemaVersionError(
-                f"Unsupported web credentials schema version: {version}"
-            )
 
     async def close(self) -> None:
         """Close the store if it owns its connection."""
@@ -306,9 +359,44 @@ class SQLiteCredentialStore:
     # schema 初始化 / 校验
     # ------------------------------------------------------------------
 
+    async def _initialize_schema(self) -> None:
+        """Initialize or validate schema. Idempotent.
+
+        初始化顺序（镜像 extension_store）：
+            1. 只确保 schema_meta 表存在（独立 executescript）
+            2. 读 version
+            3. 按 version 分支：
+               - None → fresh DB，建 v1 schema
+               - 1 → 只 validate，不重建
+               - >1 → raise（防 downgrade）
+               - 其它 → raise
+        """
+        db = self._db
+        assert db is not None  # _initialize_schema 在 factories 内调用
+
+        # schema_meta 用 CREATE IF NOT EXISTS——autocommit 模式立即生效
+        await db.execute(_SCHEMA_META_DDL)
+
+        version = await self.get_schema_version()
+
+        if version is None:
+            await self._initialize_fresh_v1_schema()
+        elif version == WEB_CREDENTIALS_SCHEMA_VERSION:
+            await self._validate_v1_schema()
+        elif version > WEB_CREDENTIALS_SCHEMA_VERSION:
+            raise CredentialsSchemaVersionError(
+                "Web credentials database schema is newer than this application "
+                f"(got v{version}, supported v{WEB_CREDENTIALS_SCHEMA_VERSION})"
+            )
+        else:
+            raise CredentialsSchemaVersionError(
+                f"Unsupported web credentials schema version: {version}"
+            )
+
     async def _initialize_fresh_v1_schema(self) -> None:
         """Fresh DB：单 BEGIN IMMEDIATE transaction 建 credentials 表 + 索引 + meta row."""
-        db = self._require_db()
+        db = self._db
+        assert db is not None
         try:
             await db.execute("BEGIN IMMEDIATE")
             for stmt in _CREDENTIALS_DDL_STATEMENTS:
@@ -317,17 +405,19 @@ class SQLiteCredentialStore:
                 "INSERT INTO web_credentials_schema_meta (key, value) VALUES (?, ?)",
                 (_SCHEMA_META_KEY, WEB_CREDENTIALS_SCHEMA_VERSION),
             )
-            await db.commit()
+            await db.execute("COMMIT")
         except Exception:
-            await db.rollback()
+            await db.execute("ROLLBACK")
             raise
 
     async def _validate_v1_schema(self) -> None:
-        """version=1：只读校验表 / 关键列 / 索引存在——**不**静默重建."""
+        """version=1：只读校验表 / 关键列 / 索引 / DDL CHECK 约束——**不**静默重建."""
         db = self._require_db()
 
+        # 1. Table exists
         async with db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='web_credentials'"
+            "SELECT name, sql FROM sqlite_master "
+            "WHERE type='table' AND name='web_credentials'"
         ) as cursor:
             row = await cursor.fetchone()
         if row is None:
@@ -335,6 +425,7 @@ class SQLiteCredentialStore:
                 "version=1 but table 'web_credentials' is missing"
             )
 
+        # 2. Required columns
         async with db.execute("PRAGMA table_info(web_credentials)") as cursor:
             rows = await cursor.fetchall()
         columns = {r["name"] for r in rows}
@@ -350,6 +441,7 @@ class SQLiteCredentialStore:
                 f"version=1 but web_credentials missing columns: {sorted(missing)}"
             )
 
+        # 3. Required indexes
         async with db.execute(
             "SELECT name FROM sqlite_master WHERE type='index' "
             "AND name IN ('idx_web_credentials_updated_at', 'idx_web_credentials_fingerprint')"
@@ -365,6 +457,21 @@ class SQLiteCredentialStore:
                 "version=1 but index 'idx_web_credentials_fingerprint' is missing"
             )
 
+        # 4. DDL string contains required CHECK + UNIQUE constraints (E1-2.1)
+        ddl_sql = row["sql"] or ""
+        normalized = _normalize_ddl(ddl_sql)
+
+        if not re.search(_DDL_UNIQUE_PATTERN, normalized, re.IGNORECASE):
+            raise CredentialsSchemaValidationError(
+                "version=1 but secret_ref UNIQUE constraint missing from DDL"
+            )
+
+        for description, pattern in _DDL_CHECK_PATTERNS:
+            if not re.search(pattern, normalized, re.IGNORECASE):
+                raise CredentialsSchemaValidationError(
+                    f"version=1 but {description} missing from DDL"
+                )
+
     # ------------------------------------------------------------------
     # Repository primitives
     # ------------------------------------------------------------------
@@ -373,28 +480,28 @@ class SQLiteCredentialStore:
         """Insert a new record. Raises on duplicate id or secret_ref."""
         db = self._require_db()
         _validate_record_fields(record)
-        try:
-            await db.execute(_INSERT_SQL, _encode_record(record))
-            await db.commit()
-        except aiosqlite.IntegrityError as e:
-            await db.rollback()
-            msg = str(e).lower()
-            # SQLite message: "UNIQUE constraint failed: web_credentials.id"
-            # or "UNIQUE constraint failed: web_credentials.secret_ref"
-            if "web_credentials.id" in msg or ".id)" in msg:
-                raise CredentialAlreadyExistsError(
-                    f"credential id already exists: {record.id}"
+        async with self._write_lock:
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                await db.execute(_INSERT_SQL, _encode_record(record))
+                await db.execute("COMMIT")
+            except aiosqlite.IntegrityError as e:
+                await db.execute("ROLLBACK")
+                msg = str(e).lower()
+                if "web_credentials.id" in msg or ".id)" in msg:
+                    raise CredentialAlreadyExistsError(
+                        f"credential id already exists: {record.id}"
+                    ) from e
+                if "web_credentials.secret_ref" in msg or "secret_ref" in msg:
+                    raise CredentialSecretRefConflictError(
+                        f"secret_ref already in use (credential_id={record.id})"
+                    ) from e
+                raise CredentialStoreError(
+                    f"integrity error during create (credential_id={record.id})"
                 ) from e
-            if "web_credentials.secret_ref" in msg or "secret_ref" in msg:
-                raise CredentialSecretRefConflictError(
-                    f"secret_ref already in use (credential_id={record.id})"
-                ) from e
-            raise CredentialStoreError(
-                f"integrity error during create (credential_id={record.id})"
-            ) from e
-        except Exception:
-            await db.rollback()
-            raise
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
 
     async def get(self, credential_id: str) -> CredentialRecord:
         """Return record or raise CredentialNotFoundError."""
@@ -447,16 +554,18 @@ class SQLiteCredentialStore:
             raise CredentialStoreError("label must be non-empty and non-whitespace")
 
         db = self._require_db()
-        try:
-            async with db.execute(
-                "UPDATE web_credentials SET label = ?, updated_at = ? WHERE id = ?",
-                (label, _now_ms(), credential_id),
-            ) as cursor:
-                rowcount = cursor.rowcount
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
+        async with self._write_lock:
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                async with db.execute(
+                    "UPDATE web_credentials SET label = ?, updated_at = ? WHERE id = ?",
+                    (label, _now_ms(), credential_id),
+                ) as cursor:
+                    rowcount = cursor.rowcount
+                await db.execute("COMMIT")
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
 
         if rowcount == 0:
             raise CredentialNotFoundError(f"credential not found: {credential_id}")
@@ -466,122 +575,201 @@ class SQLiteCredentialStore:
         self,
         credential_id: str,
         *,
-        secret_ref: str,
+        expected_secret_ref: str,
+        new_secret_ref: str,
         masked_value: str,
         fingerprint_sha256: str | None,
     ) -> CredentialRecord:
         """Atomically replace secret_ref + masked + fingerprint + reset validation.
 
-        Used by E1-3 rotate flow. Optimistic concurrency via WHERE id = ? AND secret_ref = ?
-        is the service layer's responsibility——this method does a simple atomic replace
-        on credential_id, plus validation state reset.
+        CAS via `WHERE id = ? AND secret_ref = ?`——rowcount=0 区分 not_found vs
+        concurrent_modification.
+
+        Used by E1-3 rotate flow. Caller must pass the secret_ref it read before
+        rotate——stale rotate raises ConcurrentModificationError.
         """
-        if not secret_ref or not secret_ref.strip():
-            raise CredentialStoreError("secret_ref must be non-empty")
+        if not expected_secret_ref or not expected_secret_ref.strip():
+            raise CredentialStoreError("expected_secret_ref must be non-empty")
+        if not new_secret_ref or not new_secret_ref.strip():
+            raise CredentialStoreError("new_secret_ref must be non-empty")
         if not masked_value:
             raise CredentialStoreError("masked_value must be non-empty")
 
         db = self._require_db()
-        try:
-            async with db.execute(
-                """
-                UPDATE web_credentials SET
-                    secret_ref = ?,
-                    masked_value = ?,
-                    fingerprint_sha256 = ?,
-                    validation_status = 'never_validated',
-                    last_validated_provider_id = NULL,
-                    last_validated_at = NULL,
-                    last_error_code = NULL,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (secret_ref, masked_value, fingerprint_sha256, _now_ms(), credential_id),
-            ) as cursor:
-                rowcount = cursor.rowcount
-            await db.commit()
-        except aiosqlite.IntegrityError as e:
-            await db.rollback()
-            raise CredentialSecretRefConflictError(
-                f"secret_ref already in use (credential_id={credential_id})"
-            ) from e
-        except Exception:
-            await db.rollback()
-            raise
+        async with self._write_lock:
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                async with db.execute(
+                    """
+                    UPDATE web_credentials SET
+                        secret_ref = ?,
+                        masked_value = ?,
+                        fingerprint_sha256 = ?,
+                        validation_status = 'never_validated',
+                        last_validated_provider_id = NULL,
+                        last_validated_at = NULL,
+                        last_error_code = NULL,
+                        updated_at = ?
+                    WHERE id = ? AND secret_ref = ?
+                    """,
+                    (
+                        new_secret_ref,
+                        masked_value,
+                        fingerprint_sha256,
+                        _now_ms(),
+                        credential_id,
+                        expected_secret_ref,
+                    ),
+                ) as cursor:
+                    rowcount = cursor.rowcount
+                await db.execute("COMMIT")
+            except aiosqlite.IntegrityError as e:
+                await db.execute("ROLLBACK")
+                raise CredentialSecretRefConflictError(
+                    f"secret_ref already in use (credential_id={credential_id})"
+                ) from e
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
 
         if rowcount == 0:
-            raise CredentialNotFoundError(f"credential not found: {credential_id}")
+            # 区分：id 不存在 vs secret_ref 已变化
+            await self._raise_not_found_or_concurrent(
+                credential_id, expected_secret_ref
+            )
         return await self.get(credential_id)
 
     async def update_validation_state(
         self,
         credential_id: str,
         *,
+        expected_secret_ref: str,
         validation_status: CredentialValidationStatus,
         provider_id: str | None,
         validated_at: int | None,
         error_code: str | None,
     ) -> CredentialRecord:
-        """Update validation state."""
+        """Update validation state with CAS.
+
+        Caller must pass the secret_ref it read before validation——stale validation
+        raises ConcurrentModificationError，避免旧 Key 验证结果被错误应用到新 Key.
+        """
+        if not expected_secret_ref or not expected_secret_ref.strip():
+            raise CredentialStoreError("expected_secret_ref must be non-empty")
         if validation_status not in _VALID_VALIDATION_STATUSES:
             raise CredentialStoreError(
                 f"invalid validation_status: {validation_status}"
             )
 
         db = self._require_db()
-        try:
-            async with db.execute(
-                """
-                UPDATE web_credentials SET
-                    validation_status = ?,
-                    last_validated_provider_id = ?,
-                    last_validated_at = ?,
-                    last_error_code = ?,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    validation_status,
-                    provider_id,
-                    validated_at,
-                    error_code,
-                    _now_ms(),
-                    credential_id,
-                ),
-            ) as cursor:
-                rowcount = cursor.rowcount
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
+        async with self._write_lock:
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                async with db.execute(
+                    """
+                    UPDATE web_credentials SET
+                        validation_status = ?,
+                        last_validated_provider_id = ?,
+                        last_validated_at = ?,
+                        last_error_code = ?,
+                        updated_at = ?
+                    WHERE id = ? AND secret_ref = ?
+                    """,
+                    (
+                        validation_status,
+                        provider_id,
+                        validated_at,
+                        error_code,
+                        _now_ms(),
+                        credential_id,
+                        expected_secret_ref,
+                    ),
+                ) as cursor:
+                    rowcount = cursor.rowcount
+                await db.execute("COMMIT")
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
 
         if rowcount == 0:
-            raise CredentialNotFoundError(f"credential not found: {credential_id}")
+            await self._raise_not_found_or_concurrent(
+                credential_id, expected_secret_ref
+            )
         return await self.get(credential_id)
 
-    async def delete(self, credential_id: str) -> CredentialRecord:
-        """Delete record and return the pre-deletion snapshot. Raises if not found.
+    async def delete(
+        self,
+        credential_id: str,
+        *,
+        expected_secret_ref: str | None = None,
+    ) -> CredentialRecord:
+        """Delete record and return the pre-deletion snapshot.
+
+        Args:
+            expected_secret_ref: Optional CAS guard. None = no CAS check（向后兼容
+                简单场景）. E1-3 service 应当传读到的 secret_ref 避免删除已被
+                rotate 过的新 row.
 
         **Important**: does NOT call SecretStore.delete——that's the service layer's job.
         """
         db = self._require_db()
         # Read pre-deletion snapshot for caller to do best-effort secret cleanup
         pre_delete = await self.get(credential_id)
-        try:
-            async with db.execute(
-                "DELETE FROM web_credentials WHERE id = ?",
-                (credential_id,),
-            ) as cursor:
-                rowcount = cursor.rowcount
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
+
+        if expected_secret_ref is not None:
+            if pre_delete.secret_ref != expected_secret_ref:
+                raise CredentialConcurrentModificationError(
+                f"credential concurrently modified (credential_id={credential_id})"
+                )
+            where_clause = "WHERE id = ? AND secret_ref = ?"
+            params: tuple[Any, ...] = (credential_id, expected_secret_ref)
+        else:
+            where_clause = "WHERE id = ?"
+            params = (credential_id,)
+
+        async with self._write_lock:
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                async with db.execute(
+                    f"DELETE FROM web_credentials {where_clause}",
+                    params,
+                ) as cursor:
+                    rowcount = cursor.rowcount
+                await db.execute("COMMIT")
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
 
         if rowcount == 0:
             # 不应发生（get 刚刚成功）——但为安全起见
             raise CredentialNotFoundError(f"credential not found: {credential_id}")
         return pre_delete
+
+    # ------------------------------------------------------------------
+    # CAS helper
+    # ------------------------------------------------------------------
+
+    async def _raise_not_found_or_concurrent(
+        self,
+        credential_id: str,
+        expected_secret_ref: str,
+    ) -> None:
+        """区分 not_found vs concurrent_modification.
+
+        异常 str/repr 不得包含 expected/current secret_ref——只含 credential_id.
+        """
+        db = self._require_db()
+        async with db.execute(
+            "SELECT 1 FROM web_credentials WHERE id = ?",
+            (credential_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise CredentialNotFoundError(f"credential not found: {credential_id}")
+        # row 存在但 CAS 失败 → secret_ref 已变化
+        raise CredentialConcurrentModificationError(
+            f"credential concurrently modified (credential_id={credential_id})"
+        )
 
 
 # ============================================================================
@@ -739,6 +927,7 @@ __all__ = [
     "CredentialNotFoundError",
     "CredentialAlreadyExistsError",
     "CredentialSecretRefConflictError",
+    "CredentialConcurrentModificationError",
     "CredentialsSchemaError",
     "CredentialsSchemaVersionError",
     "CredentialsSchemaValidationError",

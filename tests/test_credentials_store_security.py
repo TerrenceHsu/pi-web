@@ -56,8 +56,7 @@ def _record_with_marker(marker_secret_ref: str = "cred-marker") -> CredentialRec
 @pytest.fixture
 async def store_with_marker(tmp_path):
     db_path = str(tmp_path / "leak_check.db")
-    s = SQLiteCredentialStore(db_path)
-    await s.init()
+    s = await SQLiteCredentialStore.open(db_path)
     await s.create(_record_with_marker())
     yield s, db_path
     await s.close()
@@ -148,8 +147,7 @@ class TestRepositoryExceptions:
 class TestDecodeErrorSafety:
     async def test_decode_error_does_not_dump_row(self, tmp_path) -> None:
         db_path = str(tmp_path / "decode.db")
-        s = SQLiteCredentialStore(db_path)
-        await s.init()
+        s = await SQLiteCredentialStore.open(db_path)
 
         # 手动 INSERT 一行 malformed 数据（缺 required field）
         async with s._require_db().execute(
@@ -201,8 +199,7 @@ class TestDecodeErrorSafety:
     async def test_decode_error_safe_message_on_missing_column(self, tmp_path) -> None:
         """如果 row 缺关键列——decode 抛但 message 只含 credential_id."""
         db_path = str(tmp_path / "decode.db")
-        s = SQLiteCredentialStore(db_path)
-        await s.init()
+        s = await SQLiteCredentialStore.open(db_path)
 
         # 手动建一个缺列的表（绕过 schema）
         async with s._require_db().execute(
@@ -291,29 +288,32 @@ class TestNoSensitiveFieldNames:
 class TestExtensionSchemaPreserved:
     async def test_extension_schema_unchanged_after_credentials_init(self, tmp_path) -> None:
         db_path = str(tmp_path / "shared.db")
-        async with aiosqlite.connect(db_path) as shared:
+        async with aiosqlite.connect(db_path) as ext_conn:
+            ext_conn.row_factory = aiosqlite.Row
             from pi_agent_core_py.web.extension_store import ExtensionSQLiteStore
 
-            ext = ExtensionSQLiteStore(db_path, connection=shared)
+            ext = ExtensionSQLiteStore(db_path, connection=ext_conn)
             await ext.init()
 
-            creds = SQLiteCredentialStore(db_path, connection=shared)
-            await creds.init()
+            # credentials 用独立 connection——不影响 ext schema
+            creds = await SQLiteCredentialStore.open(db_path)
+            await creds.close()
 
             ext_version = await ext.get_schema_version()
             assert ext_version == EXTENSION_SCHEMA_VERSION  # 仍为 2
 
     async def test_credentials_meta_table_distinct(self, tmp_path) -> None:
         db_path = str(tmp_path / "shared.db")
-        async with aiosqlite.connect(db_path) as shared:
+        async with aiosqlite.connect(db_path) as ext_conn:
+            ext_conn.row_factory = aiosqlite.Row
             from pi_agent_core_py.web.extension_store import ExtensionSQLiteStore
 
-            ext = ExtensionSQLiteStore(db_path, connection=shared)
+            ext = ExtensionSQLiteStore(db_path, connection=ext_conn)
             await ext.init()
-            creds = SQLiteCredentialStore(db_path, connection=shared)
-            await creds.init()
+            creds = await SQLiteCredentialStore.open(db_path)
+            await creds.close()
 
-            async with shared.execute(
+            async with ext_conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name LIKE 'web_%_schema_meta' ORDER BY name"
             ) as cur:
