@@ -1228,9 +1228,9 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
 
 ---
 
-## 🔄 P1-D2 Regenerate（D2-1 + D2-2 + D2-3 + D2-4 + D2-5 + D2-6 + D2-7 ✅ 完成，等审核进入 D2-8 E2E/Docs/Freeze，2026-07-16）
+## ✅ P1-D2 Regenerate（D2-1 → D2-8 全部完成，FROZEN，2026-07-16）
 
-**状态**：D2 准备工作 + D2-1 + D2-2 + D2-3 + D2-4 + D2-5 + D2-6 + D2-7 已落地；D2-8 Playwright 新场景 + Docs + Freeze 等下一次审核。
+**状态**：D2 全 8 阶段完成。Tag 策略：D2/D3 不打正式 tag；P1-D4 全部完成才打 `v0.0.26-product-actions`；`v0.0.27` 留给 P1-D 之后。
 
 ### 已落地
 
@@ -1247,6 +1247,21 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
     - try/except ROLLBACK 整个 transaction
   - `tests/test_session_message_id_stability.py`（rename from test_d2_message_id_stability.py）14 测试全 PASS
   - 范围边界：未实现 revision schema / regenerate endpoint / _execute_prompt 拆分 / 前端 Regenerate / request metadata / revision 清理（留待 D2-2+）
+
+- **D2-8 E2E isolation + Regenerate E2E + Freeze**（commit `484c338`）：
+  - **D2-8.0 隔离修复**（26/28 → 37/37）：
+    - extension-persistence.spec.ts 加 afterEach DELETE 5 个 skill + 4 个 MCP server
+    - web-claude-smoke.spec.ts Smoke 5/6 加 afterEach DELETE（e2e-fake server / e2e_demo_skill）
+    - Smoke 3 加 new-chat-button 隔离避免 default session 同名消息累积
+    - async-stream-reconnect Test 7 改 `.last()` 避免 strict mode violation
+    - start_test_web_app.py FakeClient scripts 20 → 200（支持 37 E2E）
+  - **D2-8.1 Regenerate E2E 8 用例**（`tests/e2e/regenerate.spec.ts`）：
+    - 按钮可见性 / 流式期间旧回答保留 / 同 message_id 就地更新 / Abort 保留 / WS 重连 / 双击单 request / Export 无 revision 元数据 / 下一轮不重复 assistant
+  - 前端配合：
+    - `MessageBubble.vue` 加 `data-message-id` / `data-persisted` / `data-regeneration-draft` 属性（E2E 选择器）+ `localInFlight` 同步 flag + watch 终态重置（防双击 race）
+    - `chatStore.ts` 修复 reconcile bug——删除所有 assistant_message（之前保留 persisted 导致 regenerate 后同 ID 出现 2 个 bubble）；模块级 `_regenerateInFlight` 兜底
+  - 测试基线：pytest **1130 passed** + ruff clean + frontend prod build **142.91 KB JS** + E2E **37/37 PASS**（默认 + --workers=1 都通过）
+  - **D2 freeze 不打 tag**——按审核 §Tag 策略修正
 
 - **D2-7 frontend regenerate flow**（commit `2175faa`）：
   - **前端 DTO**：`PersistedMessageDto`（message_id/session_id/idx/role/content/created_at/message）+ `isPersistedMessageDto` type guard；`RequestSummary` 加 operation/regeneration_id/target_message_id（向后兼容）；新增 RegenerateResponse / RevisionListItem / RevisionListResponse
@@ -1361,11 +1376,13 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
 3. ✅ **不**硬限制 revision 数量——查询接口必须分页
 4. ✅ 自动 active 切换必做，手动切换**不做**
 
-### 下一步 D2-8
+### 下一步 P1-D3 PDF Text Extraction
 
-- **Playwright 新场景 7-10 用例**：最新 assistant 显示 Regenerate 按钮 / 历史 assistant 不显示 / 流式期间旧回答可见 / completed 同 bubble 更新为新回答 / abort 后旧回答保持 / reload/reconnect delta 不重不漏 / 双击只产生一个 request / server restart 后 running revision 变 interrupted / Export Markdown 只含新 active answer / 普通 Send 在 regenerate 后用新 active 作历史
-- **完整发布检查**：offline pytest / coverage ≥75% / ruff / frontend production build / 既有 28 E2E 不回归 / 新增 Regenerate E2E 通过 / production hooks 0 / core runtime 未修改 / working tree clean
-- **Tag 策略修正**：D2/D3 阶段不打正式 tag；P1-D4 全部完成才打 `v0.0.26-product-actions`；`v0.0.27` 留给 P1-D 之后
+D2 全 8 阶段完成；下一步进入 P1-D3——3 个边界冲突待解决：
+- `tools/view_file.py` 修改边界（允许 PDF adapter vs 不改 tools/）
+- asyncio.to_thread + wait_for 是软超时（不是硬取消）
+- PDF metadata 存储位置（FileRef 需加 metadata 字段）
+- 失败文件清理策略（方案 A 整体拒绝 vs 方案 B 保存但标记）
 
 ### D2-7 测试覆盖
 
@@ -1436,15 +1453,14 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
 
 ---
 
-## 当前测试基线（HEAD `2175faa`——D2-7 完成）
+## 当前测试基线（HEAD `484c338`——D2-8 完成 / D2 FROZEN）
 
 | 命令 | 结果 |
 |---|---|
-| `pytest -m "not slow and not integration and not docker"` | **1130 passed**（D2-7 不改后端，无新增），14 deselected（~163s 含 build） |
-| D2 专项 9 文件 | **194 passed** |
+| `pytest -m "not slow and not integration and not docker"` | **1130 passed**, 14 deselected |
 | Coverage gate | 83.82% ≥ 75% ✅ |
-| Playwright e2e（build:e2e） | **26/28**（P1-C 既有污染：mcp-tool-lifecycle + Smoke 6——非 D2-7 引入） |
+| Playwright e2e（默认 workers） | **37/37 PASS**（28 既有 + 9 新增 Regenerate）|
+| Playwright e2e（--workers=1） | **37/37 PASS** |
 | ruff | All checks passed（src tests scripts） |
-| Frontend production build | **142.32 KB JS / 40.15 KB CSS**（gzip 49.10 / 6.91 KB） |
-| Frontend e2e build | 142.69 KB JS |
+| Frontend production build | **142.91 KB JS / 40.15 KB CSS**（gzip 49.29 / 6.91 KB） |
 
