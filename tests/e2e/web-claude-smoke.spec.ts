@@ -105,6 +105,11 @@ test.describe("Smoke 3: file upload", () => {
     await page.goto("/")
     await expect(page.locator('[data-testid="chat-input-field"]')).toBeVisible()
 
+    // D2-8.0: 新建独立 session——避免前 test 在 default session 留的同名 user_message
+    // 让 filter({ hasText: "read this file" }) 匹配多条触发 strict mode violation
+    await page.locator('[data-testid="new-chat-button"]').click()
+    await page.waitForTimeout(150)
+
     // 用 file-input 直接 setInputFiles（绕过 popup）
     const fileInput = page.locator('[data-testid="file-input"]')
     await fileInput.setInputFiles(path.join(FIXTURES, "sample.md"))
@@ -208,6 +213,22 @@ test.describe("Smoke 5: modals + env value non-echo", () => {
 
     await dismissModalIfPresent(page)
   })
+
+  // D2-8.0: 跨测试隔离——清理本 test 创建的 MCP server "e2e-fake"
+  // 不清理会导致 repeat-each / 跨测试时下次 fill("e2e-fake") + submit 因 conflict
+  // 失败，进而 resetForm 不触发，name input 残留 "e2e-fake" 让 toHaveValue("") 失败。
+  test.afterEach(async ({ page }) => {
+    try {
+      await page.request.post("/api/mcp/servers/e2e-fake/disable")
+    } catch {
+      // 忽略
+    }
+    try {
+      await page.request.delete("/api/mcp/servers/e2e-fake")
+    } catch {
+      // 忽略
+    }
+  })
 })
 
 // ============================================================================
@@ -275,6 +296,16 @@ test.describe("Smoke 6 (optional): skill upload + use this turn", () => {
     await expect(
       page.getByText("Skills: e2e_demo_skill"),
     ).toBeVisible({ timeout: 10_000 })
+  })
+
+  // D2-8.0: 跨测试隔离——清理本 test 上传的 skill "e2e_demo_skill"
+  // 不清理会导致下次跑此 test 时 skill-card count >= 2（DB 持久化）
+  test.afterEach(async ({ page }) => {
+    try {
+      await page.request.delete("/api/skills/e2e_demo_skill")
+    } catch {
+      // 忽略
+    }
   })
 })
 

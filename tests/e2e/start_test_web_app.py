@@ -74,7 +74,9 @@ def _build_test_harness():
                         await asyncio.sleep(random.uniform(0.075, 0.150))
                     yield ev
 
-        scripts = [list(script) for _ in range(20)]
+        # D2-8.0: 20 scripts 不够支撑 37 个 E2E（含 regenerate 多次 prompt）
+        # 提升到 200 避免脚本耗尽导致后续测试无响应
+        scripts = [list(script) for _ in range(200)]
         fake = _DelayedFakeClient(scripts)
     else:
         # 默认 fast FakeClient
@@ -82,7 +84,8 @@ def _build_test_harness():
             TextDeltaEvent(delta="hello from fake backend"),
             DoneEvent(stop_reason="stop"),
         ]
-        scripts = [list(one) for _ in range(20)]
+        # D2-8.0: 同步提升 fast FakeClient 脚本数
+        scripts = [list(one) for _ in range(200)]
         fake = FakeClient(scripts)
 
     agent = Agent(system_prompt="", client=fake)

@@ -390,9 +390,11 @@ test.describe("P1-B3 reconnect replay (Tests 4-7)", () => {
     await page.locator("[data-testid='chat-input-field']").fill("reload test")
     await page.locator("[data-testid='send-button']").click()
 
-    // 等 assistant draft 出现——说明 prompt 在 running
+    // 等 assistant draft 出现——说明 prompt 在 running。
+    // D2-8.0: default session 跨 repeat-each 累积多个 assistant-message——
+    // 用 .last() 锁定最新的 streaming draft，避免 strict mode violation
     await expect(
-      page.locator("[data-testid='assistant-message']"),
+      page.locator("[data-testid='assistant-message']").last(),
     ).toBeVisible({ timeout: 5_000 })
 
     // 等 currentRequestId set（async sendPrompt await 202 后才 set）

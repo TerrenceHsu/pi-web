@@ -46,6 +46,16 @@ function genId(prefix: string): string {
 
 const ChatStoreSeed = { counter: 0 }
 
+/**
+ * D2-8.1: 模块级同步 lock——防双击 race。
+ *
+ * **必须在 setup 闭包外**——Pinia setup 函数内的 `let` 在某些场景下可能被多次实例化
+ * （HMR / 多 Pinia instance），模块级保证全局唯一。
+ *
+ * 在 regenerateAssistantMessage 入口设 true，finally 设 false。
+ */
+let _regenerateInFlight = false
+
 function textOf(msg: AgentMessage): string {
   if (!Array.isArray(msg?.content)) return ""
   return msg.content
@@ -418,12 +428,12 @@ export const useChatStore = defineStore("chat", () => {
       // 保留当前 streamItems 中的 turn cards（tool_call / tool_result / file_read /
       // skill_used / mcp_tool_call / turn_info / error）——它们由 WS event 创建，
       // 服务端 messages 不可重建。删除 user_message / assistant_message（避免重复）。
-      // D2-7: 也删除 regeneration draft（kind=assistant_message && isRegenerationDraft）
+      // D2-7: 必须删除**所有** assistant_message（包括 persisted 和 regeneration draft）——
+      // persistedItems 已包含全部 SQLite canonical assistant，turnCards 再保留旧的会
+      // 产生重复 message_id（regenerate 后同 ID 出现两条）。
       const turnCards = streamItems.value.filter(
         (it: any) =>
-          it.kind !== "user_message" &&
-          !(it.kind === "assistant_message" && !it.persisted) &&
-          !(it.kind === "assistant_message" && it.isRegenerationDraft),
+          it.kind !== "user_message" && it.kind !== "assistant_message",
       )
 
       // 合并：服务端 messages 在前（历史 + 本轮 user/assistant 最终文本）；
@@ -783,10 +793,13 @@ export const useChatStore = defineStore("chat", () => {
     assistantMessageId: string
   }) {
     // 同步 guard——防快速双击在第一次 202 前发出第二个请求
-    if (sending.value || regeneration.value.status === "queued" ||
+    // D2-8.1: 用模块级同步 flag 兜底——ref 的响应式更新在两次 microtask 间
+    // 可能尚未生效，模块级 boolean 立即生效
+    if (_regenerateInFlight || sending.value || regeneration.value.status === "queued" ||
         regeneration.value.status === "running") {
       return
     }
+    _regenerateInFlight = true
 
     activeSessionId.value = input.sessionId
     sending.value = true
@@ -893,6 +906,9 @@ export const useChatStore = defineStore("chat", () => {
         details: e instanceof ApiError ? { status: e.status, payload: e.payload } : undefined,
       })
       throw e
+    } finally {
+      // D2-8.1: 清同步 guard——允许下次 regenerate
+      _regenerateInFlight = false
     }
   }
 

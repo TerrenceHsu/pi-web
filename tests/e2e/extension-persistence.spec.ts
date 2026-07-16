@@ -170,4 +170,45 @@ test.describe("P1-C5 Extension Persistence + Secret Safety", () => {
     expect(pageHtml).not.toContain("__storeHooks")
     expect(pageHtml).not.toContain("__e2eHooks")
   })
+
+  // D2-8.0: 修复跨测试 SQLite 持久化污染——webServer 进程跨整套测试共享，
+  // extension_store SQLite 中的 skill/MCP server 行会泄漏到后续测试
+  // （导致 Smoke 6 看到 2 个 skill-card、mcp-tool-lifecycle 看到 0 tool-row 失败）。
+  // 本测试套 5 个用例各自创建的资源**必须**清理——通过 DELETE endpoints（生产 API），
+  // 不依赖执行顺序、不降低断言、不标 flaky。
+  test.afterEach(async ({ page }) => {
+    // 清理本套测试可能创建的所有 skill / MCP server（即使本次 test 失败也跑）
+    const skillsToClean = [
+      "e2e_persisted_skill",
+      "e2e_demo_skill", // Smoke 6 创建（防止反向污染 Smoke 6 之后跑别的测试）
+    ]
+    const serversToClean = [
+      "e2e_secret_test",
+      "e2e_tool_test",
+      "e2e_missing_env",
+      "e2e_safety_scan",
+    ]
+    for (const name of skillsToClean) {
+      try {
+        await page.request.delete(`/api/skills/${encodeURIComponent(name)}`)
+      } catch {
+        // 忽略——可能不存在
+      }
+    }
+    for (const name of serversToClean) {
+      // MCP server delete 需先 disable（detach transport）避免子进程残留
+      try {
+        await page.request.post(
+          `/api/mcp/servers/${encodeURIComponent(name)}/disable`,
+        )
+      } catch {
+        // 忽略
+      }
+      try {
+        await page.request.delete(`/api/mcp/servers/${encodeURIComponent(name)}`)
+      } catch {
+        // 忽略
+      }
+    }
+  })
 })

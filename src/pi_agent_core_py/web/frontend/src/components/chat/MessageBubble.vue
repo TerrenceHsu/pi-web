@@ -70,8 +70,13 @@ const canRegenerate = computed(() => {
 
 async function onRegenerate() {
   if (!canRegenerate.value) return
+  if (regenInFlight.value) return
   const it: any = props.item
   if (!it.messageId || !props.sessionId) return
+  // 立即同步标记——防止 click 事件 race
+  localInFlight.value = true
+  // **不在 finally 重置**——localInFlight 在 regeneration status 进入终态时
+  // 由 watch 自动重置；这样在请求生命周期内（即使 POST 已返回）双击也会被拦
   try {
     await chatStore.regenerateAssistantMessage({
       sessionId: props.sessionId,
@@ -79,8 +84,41 @@ async function onRegenerate() {
     })
   } catch {
     // 错误已写入 chatStore.error + push ErrorItem；此处不二次处理
+    localInFlight.value = false
   }
 }
+
+// D2-8.1: component-local synchronous flag——比 store-level ref 更可靠地
+// 防止同一 MessageBubble 实例的双击 race（store ref 的响应式更新在两次 click
+// 事件之间可能尚未 propagate）
+import { ref as _ref, watch as _watch } from "vue"
+const localInFlight = _ref(false)
+
+/** 综合判断是否在 in-flight——store 状态 + 本地同步 flag */
+const regenInFlight = computed(() => {
+  const regStatus = chatStore.regeneration?.status
+  return (
+    localInFlight.value ||
+    regStatus === "queued" ||
+    regStatus === "running" ||
+    regStatus === "syncing"
+  )
+})
+
+// 终态自动重置 localInFlight——completed/error/aborted 都允许下次 regenerate
+_watch(
+  () => chatStore.regeneration?.status,
+  (newStatus) => {
+    if (
+      newStatus === "completed" ||
+      newStatus === "error" ||
+      newStatus === "aborted" ||
+      newStatus === "idle"
+    ) {
+      localInFlight.value = false
+    }
+  },
+)
 </script>
 
 <template>
@@ -102,7 +140,14 @@ async function onRegenerate() {
   </div>
 
   <!-- assistant_message -->
-  <div v-else-if="kind === 'assistant_message'" class="row row-assistant" data-testid="assistant-message">
+  <div
+    v-else-if="kind === 'assistant_message'"
+    class="row row-assistant"
+    data-testid="assistant-message"
+    :data-message-id="(item as any).messageId ?? ''"
+    :data-persisted="(item as any).persisted ? 'true' : 'false'"
+    :data-regeneration-draft="(item as any).isRegenerationDraft ? 'true' : 'false'"
+  >
     <div class="avatar">AI</div>
     <div class="body">
       <div v-if="text" class="text">
@@ -118,6 +163,8 @@ async function onRegenerate() {
           class="regen-btn"
           data-testid="message-regenerate-btn"
           aria-label="Regenerate response"
+          :disabled="regenInFlight"
+          :data-in-flight="regenInFlight ? 'true' : 'false'"
           @click="onRegenerate"
         >
           Regenerate
