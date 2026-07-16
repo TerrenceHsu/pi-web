@@ -1,10 +1,27 @@
 # Web API Reference
 
-> Web Claude P0 MVP（2026-07-07）。
-> 详见 [v0.0.23-web-claude-p0-mvp release notes](../releases/v0.0.23-web-claude-p0-mvp.md) 与 [archived Web Claude plan](../archive/legacy-plans/WEB_CLAUDE_PLAN_ORIGINAL.md)。
+> 当前基线：P1-D2 Regenerate FROZEN @ `d53f331`（2026-07-16）。
+> 已发布最新 tag：`v0.0.26-export-markdown`（P1-D1 Export Markdown）。
+> 详见 [CHANGELOG](../../CHANGELOG.md) / [STATUS](../../STATUS.md)。
+> P0 MVP 的 release notes 见 [v0.0.23-web-claude-p0-mvp](../releases/v0.0.23-web-claude-p0-mvp.md)；
+> P0 改造计划（已归档）见 [archived Web Claude plan](../archive/legacy-plans/WEB_CLAUDE_PLAN_ORIGINAL.md)。
 >
 > ⚠️ Web app **仅 localhost 使用**——无鉴权 / 无多用户隔离 / 无 rate limit；
-> **Web Claude P0 MVP is complete for local development. Localhost-first, no authentication, not suitable for public exposure.**
+> **Localhost-first, no authentication, not suitable for public exposure.**
+
+## P1 当前状态（相对 P0 的增量）
+
+下表概括 P1-A / B / C / D 各阶段相对 P0 MVP 的增量。详细架构见 [docs/architecture/](../architecture/)。
+
+| 阶段 | Tag | API 增量 | 架构文档 |
+|---|---|---|---|
+| P1-A 真实环境验证 | `v0.0.23.1` | （无新 endpoint，新增 e2e + integration 测试） | — |
+| P1-B 异步架构 | `v0.0.24` | `POST /api/prompt/async`；`GET /api/requests/{id}`；`POST /api/requests/{id}/abort`；`GET /api/requests?session_id=&status=active`；WS hello 加 `first/last_available_sequence` / `server_time`；`GET /api/events` envelope + sequence | [web-request-lifecycle](../architecture/web-request-lifecycle.md) |
+| P1-C 持久化 | `v0.0.25` | Skills / MCP server / disabled tools 持久化字段（`desired_enabled` / `restore_status` / `missing_env_keys` / `last_restore_error`）；env value 永不返回 | [persistence-and-startup](../architecture/persistence-and-startup.md) |
+| P1-D1 Export | `v0.0.26` | `GET /api/sessions/{sid}/export/markdown` | — |
+| P1-D2 Regenerate | HEAD（未 tag） | `POST /api/sessions/{sid}/messages/{aid}/regenerate`；`GET /api/sessions/{sid}/messages/{aid}/revisions`；`GET /api/messages` 改用 Web PersistedMessage DTO（含 `message_id` / `session_id` / `idx`） | [regenerate-revision-model](../architecture/regenerate-revision-model.md) |
+
+各 P1 endpoint 的完整规格见下方对应章节。
 
 ## 设计要点
 
@@ -109,6 +126,8 @@ Agent 当前 messages。**P0-1 起支持 `?session_id=`**：
 
 - 不传 `session_id` → 返回当前 agent.state.messages（fallback 旧路径）
 - 传 `session_id` → 从 sqlite 读该 session 历史 messages（按 idx 升序，强类型对象）
+
+**P1-D2 起**：传 `session_id` 时返回 **Web PersistedMessage DTO**（每条消息含 `message_id` / `session_id` / `idx` / `role` / `content` / `created_at` / `message`）；`message_id` 在 regenerate 期间稳定（同位 UPDATE 而非 DELETE+INSERT）。
 
 **Query**: `session_id: string | null`
 
@@ -432,6 +451,99 @@ abort 单个 request——幂等。
 
 ---
 
+## Export Markdown（P1-D1）
+
+### `GET /api/sessions/{sid}/export/markdown`
+
+把 session 的所有 user / assistant messages 渲染为 Markdown 文件并下载。
+
+**Response 200**:
+- Content-Type: `text/markdown; charset=utf-8`
+- Content-Disposition: `attachment; filename="..."`（filename sanitized，RFC 5987 UTF-8 编码非 ASCII）
+- Body: rendered Markdown text
+
+**Response 404**: session 不存在。
+**Response 413**: 渲染后内容超过 `MAX_EXPORT_CHARS=2_000_000` 或 `MAX_EXPORT_BYTES=5_000_000`。
+**Response 503**: session store 未初始化。
+
+**安全过滤**：
+- 只导出 `role=user` / `role=assistant`——不导出 tool_result / summary / custom
+- **不读** `web_mcp_servers` 表（MCP env value 不会泄露）
+- 不导出 system prompt / request_id / snapshot / policy audit
+- filename sanitize：阻断 path traversal（`..`）/ 控制字符（`\x00-\x1f`，含 CRLF）/ 限 80 字符
+
+详见 [P1-D1 Validation Report](../validation/p1-d/P1_D1_VALIDATION_REPORT.md)。
+
+---
+
+## Regenerate（P1-D2）
+
+### `POST /api/sessions/{sid}/messages/{aid}/regenerate`
+
+对最新 assistant message 触发 Regenerate——后台异步重生成，**非破坏性**：旧回答在 finalize 前始终可见，finalize 时原子切换。
+
+**Response 202**:
+```json
+{
+  "request_id": "req-...",
+  "regeneration_id": "rev-...",
+  "target_message_id": "msg-...",
+  "session_id": "sess-...",
+  "status": "queued"
+}
+```
+
+**Response 400**: `aid` 不是 assistant message（`code: user_message_expected`）。
+**Response 404**: session / message 不存在 / message 不属于该 session（`code: session_not_found` / `message_not_found` / `message_wrong_session`）。
+**Response 409**: 任一以下情况：
+- `aid` 不是最新 assistant（`code: not_latest_assistant`）
+- 缺少 preceding user message（`code: missing_preceding_user`）
+- 已有 active request（`code: active_request_conflict`）
+- 已有 running revision（`code: revision_conflict`）
+- finalize 时 base_content_sha256 不匹配（`code: revision_base_content_changed`）
+
+**关键不变量**：
+- `aid`（message_id）在 regenerate 期间**不变**——`messages.content_json` 在 finalize 时 UPDATE（不 INSERT 不 DELETE）
+- 流式期间不写 DB——`messages.content_json` 仍是旧回答
+- finalize 成功后 messages.content_json 一次性切到新回答（单 `BEGIN IMMEDIATE` transaction 5 步）
+
+详见 [Regenerate Revision Model](../architecture/regenerate-revision-model.md)。
+
+### `GET /api/sessions/{sid}/messages/{aid}/revisions`
+
+列出该 assistant message 的所有 revision（按 `revision_number` DESC）。
+
+**Query**: `before_revision_number: int`（分页游标）/ `limit: int`（默认 20，clamp [1,100]）
+
+**Response 200**:
+```json
+{
+  "count": 3,
+  "items": [
+    {
+      "id": "rev-...",
+      "assistant_message_id": "msg-...",
+      "revision_number": 2,
+      "status": "completed",
+      "created_at": "2026-07-16T...",
+      "completed_at": "2026-07-16T...",
+      "is_current": true
+    },
+    ...
+  ],
+  "has_more": false
+}
+```
+
+**安全 serializer**——**不**返回：
+- `content_json`（revision 正文）
+- `base_content_sha256`（optimistic concurrency token）
+- `request_id`
+
+**Response 404**: session / message 不存在 / message 不属于该 session。
+
+---
+
 ## Skills（P0-4 Step 1）
 
 ### `GET /api/skills`
@@ -657,7 +769,9 @@ MCP servers / tools / prompts 全部状态（**旧 endpoint，向后兼容**）�
 **Response 409**: name 已存在。
 **Response 502**（enabled=true + attach 失败）: body 仍是 `MCPServerSummary`，含 `last_error` 字段——config 已保存但 attach 失败。
 
-> **env values 不回显**：response 类型本身只有 `env_keys`，**没有 `env` 字段**。env value 只在 create request 时被服务端接收，之后保存在 `state.mcp_server_configs[name].env`（内存）；任何 GET endpoint 都不会返回 value。P0 不持久化（重启即丢）。
+> **env values 不回显**：response 类型本身只有 `env_keys`，**没有 `env` 字段**。env value 只在 create request 时被服务端接收，之后保存在 `state.mcp_server_configs[name].env`（内存）；任何 GET endpoint 都不会返回 value。
+>
+> **P1-C 起持久化**：MCP server 配置（不含 env value）+ desired_enabled + env_keys + disabled tools 持久化到 SQLite；env value 重启时从 `os.environ` 读取。`restore_status` 字段（`not_requested` / `attached` / `needs_env` / `error`）+ `missing_env_keys` 反映启动恢复状态。详见 [Persistence and Startup](../architecture/persistence-and-startup.md)。
 
 ### `POST /api/mcp/servers/{name}/test`
 
@@ -833,16 +947,44 @@ Connection: keep-alive
 
 **spec 推荐通道**。前端 P0-4 默认用 WS。
 
-每连接一个 `asyncio.Queue(maxsize=100)`；on_event hook 广播到所有连接；慢客户端 queue 满时丢弃该 event，不阻塞其它客户端 / 主 loop。
+每连接一个 `asyncio.Queue(maxsize=100)`；`_web_event_hook` 一次性生成 envelope 广播到所有连接；慢客户端 queue 满时丢弃该 event，不阻塞其它客户端 / 主 loop。
 
 **消息格式**（server → client）：
 
-- 连接建立后立即发：`{"type": "hello", "agent_status": "idle", "_received_at_ms": ...}`
-- 后续广播：`{...AgentEvent..., "_received_at_ms": ...}`
+- **连接建立后立即发 hello**（P1-B3 起含 3 字段）：
+  ```json
+  {
+    "type": "hello",
+    "agent_status": "idle",
+    "first_available_sequence": 12300,
+    "last_available_sequence": 12345,
+    "server_time": "2026-07-16T..."
+  }
+  ```
+  `first/last_available_sequence` 用于客户端判断是否需要 replay；hello 是控制帧——**不**进 buffer / 不消耗 sequence / 不进 seenEventIds。
+- **后续广播 WebEventEnvelope**（P1-B2 起）：
+  ```json
+  {
+    "event_id": "evt-...",
+    "request_id": "req-...",
+    "session_id": "sess-...",
+    "sequence": 12346,
+    "type": "message_update",
+    "timestamp": "2026-07-16T...",
+    "payload": { ...AgentEvent 字段... }
+  }
+  ```
+  全局 sequence 单调（不是 per-session）；客户端通过 `seenEventIds` FIFO 去重 + `lastGlobalSequence` 跟踪。
 
 **client → server**：可不发；或发任意 keepalive 字符串（服务端不解析）。
 
-> P0 不实现 event_id 去重 / 重连补播（v0.0.22 已知限制）。前端在 WS 断连时用 `GET /api/messages` 兜底。
+**Reconnect Replay**（P1-B3）：
+- 客户端 WS reconnect 时（`lastGlobalSequence > 0`）触发 replay
+- 调 `GET /api/events?after_sequence=N&limit=200`（**不带 session_id**）
+- 合并 replay 与 live buffer → sort by sequence → dedupe by event_id
+- buffer 不够长（事件已被 deque 淘汰）→ 客户端 fallback `GET /api/messages` 全量同步
+
+> P1-B3 起 **已实现** envelope event_id 去重 + sequence-based reconnect replay。客户端 `seenEventIds` FIFO（1000 上限）+ `lastGlobalSequence` 全局跟踪；reconnect 时 `GET /api/events?after_sequence=N` 拉取 replay；replay 失败时 fallback `GET /api/messages` 全量同步。
 
 ---
 
@@ -876,12 +1018,14 @@ Connection: keep-alive
 
 ---
 
-## 已知限制（P0 MVP）
+## 已知限制（HEAD `d53f331`，P1-D2 后）
 
-- `POST /api/prompt` 仍是**同步阻塞**——慢 LLM 会让 HTTP 请求挂住；`/api/prompt/async` 未实现
-- **无鉴权 / 无多用户 / 无 rate limit**——仅 localhost 使用
-- **MCP / Skill 配置不持久化**——重启即丢
+- **Request registry 内存态**——server 重启后 active request 丢失；已持久化的 final messages 不丢
+- **Single harness / single active request**——不支持多 session 并行执行
+- **WebSocket 慢客户端**采用"丢弃事件"策略——可能漏事件；前端通过 reconcile + `GET /api/messages` 兜底（P1-B 已实现）
+- **完整浏览器 reload 后恢复原 session 依赖 URL routing**——当前 reload 后选第一个 session；WS reconnect recovery 已支持（P1-B3）
 - **不支持图片理解**（不做 OCR / 不做视觉理解）
-- **PDF 正文不解析**
-- WebSocket 慢客户端采用"丢弃事件"策略——可能漏事件；前端需自己补拉
-- `view_file` 大文本自动截断到 `max_bytes`（默认 8KB）
+- **PDF 正文不解析**——P1-D3 待实施
+- **`view_file` 大文本自动截断到 `max_bytes`**（默认 8KB）
+- **Regenerate 仅支持最新 assistant**——不支持历史 message regenerate / 手动切换 revision 为 active
+- **无鉴权 / 无多用户 / 无 rate limit**——仅 localhost 使用

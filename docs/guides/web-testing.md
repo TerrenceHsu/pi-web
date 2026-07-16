@@ -1,9 +1,69 @@
 # Web Testing
 
-> **Web Claude P0 MVP**（2026-07-07）。详见 [v0.0.23-web-claude-p0-mvp release notes](../releases/v0.0.23-web-claude-p0-mvp.md)。
+> 当前基线：**HEAD `d53f331`（P1-D2 Regenerate FROZEN，2026-07-16）**。
+> 已发布最新 tag：`v0.0.26-export-markdown`（P1-D1 Export Markdown）。
 >
-> 测试覆盖 v0.0.22 Web backend baseline + P0-1 sqlite sessions + P0-2 files + P0-3 file tools + P0-4 Skills/MCP Web UI Step 1–2 + P0-5 default system prompt。
-> 所有 web 相关测试统一标 `@pytest.mark.slow`，离线 baseline 不依赖。
+> 当前测试基线：
+>
+> | 项 | 值 |
+> |---|---|
+> | Offline pytest | **1131 passed**, 14 deselected |
+> | Coverage | **84.20%** ≥ 75% PASS |
+> | Playwright e2e | **37/37 PASS**（28 既有 + 9 Regenerate） |
+> | Ruff | All checks passed |
+> | Frontend prod build | 142.91 KB JS / 40.15 KB CSS |
+>
+> 历史基线：
+> - P0 MVP（`v0.0.23` @ `8817c84`）：678 offline / 6 e2e / coverage 73.75%
+> - P1-A（`v0.0.23.1` @ `80a2f6f`）：843 offline / 12 e2e / coverage 84.39%
+> - P1-B（`v0.0.24` @ `79cea14`）：889 offline / 23 e2e / coverage 84.36%
+> - P1-C（`v0.0.25` @ `b4640aa`）：968 offline / 28 e2e / coverage 83.78%
+> - P1-D1（`v0.0.26` @ `ebbc896`）：990 offline / coverage 90.38%
+> - P1-D2（HEAD `d53f331`）：1131 offline / 37 e2e / coverage 84.20%
+>
+> P0 MVP 详细 release notes 见 [v0.0.23-web-claude-p0-mvp](../releases/v0.0.23-web-claude-p0-mvp.md)。
+> 所有版本见 [CHANGELOG](../../CHANGELOG.md)；当前状态见 [STATUS](../../STATUS.md)。
+
+## P1 测试增量（相对 P0 MVP）
+
+| 阶段 | 测试增量 | 关键文件 |
+|---|---|---|
+| P1-A 真实环境验证 | +12 e2e（MCP lifecycle 真链路）+ 真实 GLM smoke | `tests/e2e/mcp-tool-lifecycle.spec.ts` / `tests/integration/test_real_glm_tool_use.py` |
+| P1-B 异步架构 | +12 recovery（async prompt / WS replay / reconnect）+ 14 envelope + 4 e2e dedup + 7 e2e async-stream | `tests/test_web_request_recovery.py` / `tests/test_web_event_envelope.py` / `tests/e2e/async-stream-reconnect.spec.ts` / `tests/e2e/event-dedup.spec.ts` |
+| P1-C 持久化 | +5 e2e persistence + 安全扫描（`P1C_SECRET_MARKER_7F3A91`） | `tests/e2e/extension-persistence.spec.ts` / `tests/test_web_extension_store.py` / `tests/test_web_extension_restore.py` / `tests/test_web_skill_persistence.py` / `tests/test_web_mcp_persistence.py` |
+| P1-D1 Export Markdown | +22 单元 + 4 审核补测 | `tests/test_web_markdown_export.py` |
+| P1-D2 Regenerate | +9 e2e + 多个 backend integration（HTTP API / lifecycle / repository） | `tests/e2e/regenerate.spec.ts` / `tests/test_web_regenerate_api.py`（32 用例）/ `tests/test_extension_store_message_revisions.py`（40 用例）/ `tests/test_web_prompt_execution_split.py`（20 用例）/ `tests/test_session_message_id_stability.py` / `tests/test_d2_6_startup_and_dto.py` |
+
+## P1-C 持久化测试要点
+
+- **5 个 e2e**：Upload Skill 持久化 / MCP env value 不在 response / disable tool 持久化 / Missing env 结构化返回 / Secret marker 安全扫描
+- **安全扫描 token** `P1C_SECRET_MARKER_7F3A91`：作为 env value 测试，扫描 SQLite 主文件 / WAL / SHM / API response / `body.innerText` / logs，**0 处泄露**
+- **失败隔离测试**：损坏 skill_json / sha256 不匹配 / MCP attach timeout / missing env 各自隔离，不阻塞其他
+
+## P1-D Export / Regenerate 测试要点
+
+### Export Markdown（D1）
+- **22 单元 + 4 审核**：基本导出 / filename 安全（path traversal / 控制字符 / 超长 / RFC 5987）/ 大小限制 / 边界（空 session / 404 双路径 / CRLF 阻断 / active draft 不导出）
+- **三道安全边界**：Blob URL try/finally + Content-Disposition CRLF 阻断 + MCP env value 不导出
+
+### Regenerate（D2）
+- **9 e2e**（`tests/e2e/regenerate.spec.ts`）：按钮可见性 / 流式保留 / 同 message_id 就地更新 / Abort / **WS reconnect recovery** / 双击单 request / Export 不含 revision / 下一轮不重复
+- **后端 integration 32 用例**（`tests/test_web_regenerate_api.py`）：POST route 18 / Lifecycle 6 / GET revisions 11（含 `test_next_prompt_after_regenerate_sees_b_not_a`——直接观察 FakeClient 输入含 B 不含 A）
+- **Revision repository 40 用例**（`tests/test_extension_store_message_revisions.py`）：Create 9 / Finalize 12 / Terminal 8 / Query/Cleanup 9 / 额外 2
+- **Execution split 20 用例**（`tests/test_web_prompt_execution_split.py`）：regenerate 路径不调 replace_messages / candidate 提取 / finalize transaction / state transitions / error 补偿
+
+## E2E 隔离与清理规则（D2-8 学习）
+
+P1-D2 时为修复 e2e 跨测试污染（26/28 → 37/37）总结的规则：
+
+1. **webServer 共享 SQLite**——每个 `afterEach` 必须清理创建的资源（Skills / MCP servers / sessions）
+2. **FakeClient scripts 数量 ≥ 测试数**——否则后写满后 FakeClient 抛 `no more scripts`
+3. **用 `.last()` / `.first()` 而非裸 selector**——避免 Playwright strict mode violation
+4. **不标 flaky / skip**——发现稳定根因再修；retry=1 仅对真实时序敏感测试用
+5. **E2E 前置必须用 `npm run build:e2e`**——普通 build 不暴露 `__storeHooks` / `__e2eHooks`，10 个 event-dedup / async-stream-reconnect 测试会 timeout
+6. **测试隔离命令前置**：`new-chat-button` 创建独立 session 避免消息累积
+
+详细 E2E 设置见下方「Playwright E2E」段。
 
 ## 测试分层
 
