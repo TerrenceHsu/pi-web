@@ -8,7 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Added
+### 路线调整（2026-07-16）
+
+- **P1-D3 PDF Text Extraction**：⏸ DEFERRED——转出主路线
+- **PDF / Vector RAG**：⏸ DEFERRED——转出主路线
+- **P1-E Multi-Provider / Model Profiles**：✅ DESIGN FROZEN——7 个跨阶段边界 + Custom URL 安全已冻结，详见 [ROADMAP.md](ROADMAP.md#p1-e--multi-provider--model-profiles-design-frozen-2026-07-16)
+- **P1-F Markdown Workspace Panel**：⚪ PLANNED
+- **P2 Web Agent Enhancements**：⚪ PLANNED（P2-A URL Routing / P2-B Human Approval / P2-C Context Budget）
+
+### Added（已 merge 到 master）
+
+- **Frontend dev/lint maintenance**（merge `1c2289d`，2026-07-16）——
+  - `fix(dev): proxy websocket events through vite`（`d8bd2ad`）——dev `/ws/events` proxy（MEMORY `feedback_dev_run_gotchas` 已记录的修复）
+  - `refactor(frontend): remove obsolete fallback and lint residue`（`b9f4b17`）——移除 `assistantSeenFromWs` flag / `pickFinalAssistantText` helper / 未使用 import ×4 / `let envelope` → `const` / `interface extends {}` → `type =` / `let args: string[]` 严格初始化
+  - `chore: ignore frontend upload runtime artifacts`（`7fbd082`）——`.gitignore` 加 `/src/pi_agent_core_py/web/frontend/uploads/`（保留 `/uploads/` 根路径规则）
+- **Documentation governance**（merge `d7df358` + finalize `834bd1d`，2026-07-16）——
+  - 根目录 6 文档（README / STATUS / ROADMAP / CHANGELOG / TODO / PLAN）+ `docs/` 六分类（architecture / api / guides / validation / releases / archive）
+  - markdown 链接 0 broken
 - **P1-D2 Regenerate**（已冻结，HEAD `d53f331`）——
   - Diff-based `replace_messages`（历史 message ID + `created_at` 稳定）
   - `web_message_revisions` schema + migration v1→v2（6 status / partial unique active / 4 索引）
@@ -27,8 +43,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Validation
 - HEAD `d53f331`：1131 offline pytest passed / coverage 84.20% / 37 e2e PASS / ruff clean
+- HEAD `1c2289d`（含 frontend maintenance）：bundle 142.91 KB JS / 40.15 KB CSS（与 D2 baseline 一致）+ E2E 37/37 双模式 + production hooks 0/0
 - Production hooks: `__storeHooks` 0 / `__e2eHooks` 0 in `web/static/assets/*.js`
-- Core runtime diff（`9264267..HEAD`）：0 modifications to loop/agent/context/providers/events/stream_events/mcp/tools/skill_loader
+- Core runtime diff（`9264267..HEAD`）：0 modifications to loop/agent/context/events/stream_events/messages（providers/ 在 P1-E 阶段允许扩展）
 - 详细证据见 [docs/validation/p1-d/P1_D2_VALIDATION_REPORT.md](docs/validation/p1-d/P1_D2_VALIDATION_REPORT.md)
 
 ## [v0.0.26-export-markdown] — 2026-07-14
