@@ -765,3 +765,78 @@ async def test_get_revisions_normal_messages_api_unaffected(web_app):
     assert "messages" in body
     # 必须仍能反序列化（candidate 是合法 AssistantMessage JSON）
     assert len(body["messages"]) >= 2
+
+
+# ============================================================================
+# Next-prompt context（D2-8.1 audit §test-8 assertion strength）
+# ============================================================================
+
+
+def _msg_text(m) -> str:
+    return "".join(getattr(c, "text", "") for c in m.content)
+
+
+async def test_next_prompt_after_regenerate_sees_b_not_a(tmp_path):
+    """Regenerate 把 A 替换为 B 后，下一轮 prompt 的 LLM 输入必须含 B 不含 A。
+
+    直接观察 FakeProviderAdapter.all_messages_calls——绕过 UI / 持久化层，
+    验证 LLM 边界上的 history 正确性。覆盖 D2-8.1 §test-8 加强的断言：
+      - 包含 B（regenerate 后的 active answer）
+      - 不包含 A（superseded）
+      - B 位于 user C 之前
+      - assistant turn 不重复
+    """
+    scripts = [
+        [TextDeltaEvent(delta="answer-A"), DoneEvent(stop_reason="stop")],
+        [TextDeltaEvent(delta="answer-B"), DoneEvent(stop_reason="stop")],
+        [TextDeltaEvent(delta="answer-D"), DoneEvent(stop_reason="stop")],
+    ]
+    harness = _make_harness(scripts)
+    app = create_app(harness, db_path=str(tmp_path / "d2-next-prompt.sqlite"))
+    with TestClient(app) as client:
+        # 1. seed：user "first" → assistant A
+        sid = _create_session(client)
+        _send_prompt(client, sid, "first")
+        aid = await _get_latest_assistant_id(client, sid)
+
+        # 2. regenerate → B 就地替换 A（同 message_id）
+        resp = client.post(f"/api/sessions/{sid}/messages/{aid}/regenerate")
+        assert resp.status_code == 202
+        _wait_for_request(client, resp.json()["request_id"])
+
+        # 3. 下一轮：user "third" → assistant D
+        _send_prompt(client, sid, "third")
+
+        # 取最后一次 LLM call 的输入（第三轮 prompt）
+        all_calls = harness.agent.client.all_messages_calls
+        assert len(all_calls) >= 3, f"expected >=3 calls, got {len(all_calls)}"
+        last_call = all_calls[-1]
+
+        concatenated = " | ".join(_msg_text(m) for m in last_call)
+
+        # 断言 1：含 B
+        assert "answer-B" in concatenated, (
+            f"B missing from next-prompt history: {concatenated!r}"
+        )
+        # 断言 2：不含 A（superseded 必须从 history 中剔除）
+        assert "answer-A" not in concatenated, (
+            f"superseded A leaked into next-prompt history: {concatenated!r}"
+        )
+
+        # 断言 3：B 位于 user "third" 之前
+        texts = [_msg_text(m) for m in last_call]
+        b_idx = next(i for i, t in enumerate(texts) if "answer-B" in t)
+        third_idx = next(i for i, t in enumerate(texts) if "third" in t)
+        assert b_idx < third_idx, (
+            f"B must precede user 'third': b_idx={b_idx} third_idx={third_idx}"
+        )
+
+        # 断言 4：assistant turn 不重复（只有一个 B，没有 A 残留）
+        assistant_texts = [
+            _msg_text(m) for m in last_call if m.role == "assistant"
+        ]
+        assert len(assistant_texts) == 1, (
+            f"expected 1 assistant turn, got {len(assistant_texts)}: "
+            f"{assistant_texts}"
+        )
+        assert "answer-B" in assistant_texts[0]
