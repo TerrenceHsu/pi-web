@@ -7,7 +7,6 @@
 // session_id / type / timestamp / payload 7 字段。chatStore.handleEvent 按这些字段
 // 去重 + 隔离不同 session/request。旧裸事件 schema 已退役。
 
-import type { AgentMessage } from "./messages"
 import type { FileRef } from "./files"
 
 /**

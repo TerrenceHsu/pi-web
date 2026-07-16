@@ -2,7 +2,6 @@
 import { computed } from "vue"
 
 import { useSkillStore } from "../../stores/skillStore"
-import { ApiError } from "../../api/client"
 import type { SkillSummary } from "../../types"
 
 const skillStore = useSkillStore()

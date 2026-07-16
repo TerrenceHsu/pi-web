@@ -28,7 +28,6 @@ import type {
   ToolCallItem,
   ToolResultItem,
   FileReadItem,
-  TurnInfoItem,
   WebEvent,
   WebEventEnvelope,
 } from "../types"
@@ -281,14 +280,6 @@ export const useChatStore = defineStore("chat", () => {
   let currentTurnInfoId: string | null = null
   /** 当前 streaming assistant draft item id——避免重复创建。 */
   let currentAssistantItemId: string | null = null
-  /**
-   * 本轮 WS 是否已经收到并处理过 assistant 内容（message_start/update/end）。
-   *
-   * 用于 POST /api/prompt 兜底逻辑判断——避免在 WS 已经渲染完 assistant 后，
-   * turn_end 清掉 currentAssistantItemId 导致 POST 返回时重复 push 一个
-   * assistant_message（典型 WS + 同步 POST 重复 bug）。
-   */
-  let assistantSeenFromWs = false
   /** tool_call.id → streamItem.id 映射——用于 start/end 配对。 */
   const toolItemIds: Record<string, string> = {}
   /** 已展示过的 SkillUsedItem signature——避免重复。 */
@@ -1002,24 +993,11 @@ export const useChatStore = defineStore("chat", () => {
         }
         applyEventToStreamItems({ ...env.payload, type: env.type })
       }
-    } catch (e) {
+    } catch {
       // replay 失败——降级为 needsFinalResync；用户可手动刷新
       needsFinalResync.value = true
       replaying.value = false
     }
-  }
-
-  /** 从 response.messages 取最后一条 assistant 文本——用于 WS 缺失时兜底。 */
-  function pickFinalAssistantText(messages: any[] | undefined): string | null {
-    if (!Array.isArray(messages) || messages.length === 0) return null
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i]
-      if (m?.role === "assistant") {
-        const t = assistantTextOf(m)
-        return t || ""
-      }
-    }
-    return null
   }
 
   function finalizeTurnInfo(status: "done" | "error") {
@@ -1089,10 +1067,10 @@ export const useChatStore = defineStore("chat", () => {
     // 去重 + session/request 隔离 + sequence gap 检测。hello / shutdown / legacy
     // 裸事件走 isWebEventEnvelope=false 分支，保留原行为。
     let event: any = rawEvent
-    let envelope: WebEventEnvelope | null = null
-    if (isWebEventEnvelope(rawEvent)) {
-      envelope = rawEvent as WebEventEnvelope
-
+    const envelope: WebEventEnvelope | null = isWebEventEnvelope(rawEvent)
+      ? (rawEvent as WebEventEnvelope)
+      : null
+    if (envelope) {
       // 去重：event_id 已见过 → 跳过（B2 验收 #8）
       // P1-B3 hardening: rememberEventId 实现 FIFO 淘汰——只淘汰最旧 ID，
       // 不清空全部历史，避免边界后旧 event 被 replay 时重复处理。
@@ -1262,8 +1240,6 @@ export const useChatStore = defineStore("chat", () => {
     if (t === "message_start") {
       const msg = (event as any).message
       if (msg?.role === "assistant") {
-        // 标记本轮 WS 已收到 assistant 内容——避免 POST 兜底重复 push
-        assistantSeenFromWs = true
         // 创建 streaming draft
         if (currentAssistantItemId === null) {
           const id = genId("a")
@@ -1306,8 +1282,6 @@ export const useChatStore = defineStore("chat", () => {
     if (t === "message_end") {
       const msg = (event as any).message
       if (msg?.role === "assistant") {
-        // 标记本轮 WS 已收到 assistant 内容——避免 POST 兜底重复 push
-        assistantSeenFromWs = true
         const full = assistantTextOf(msg)
         if (currentAssistantItemId !== null) {
           updateItem(currentAssistantItemId, (it: any) => {
@@ -1374,7 +1348,6 @@ export const useChatStore = defineStore("chat", () => {
 
   function appendAssistantDelta(delta: string) {
     if (!delta) return
-    assistantSeenFromWs = true
 
     // 关键修复：同 appendAssistantFull——不依赖 currentAssistantItemId 跨事件持久化
     let targetId: string | null = currentAssistantItemId
@@ -1411,7 +1384,6 @@ export const useChatStore = defineStore("chat", () => {
 
   function appendAssistantFull(full: string) {
     if (!full) return
-    assistantSeenFromWs = true
 
     // 关键修复：不依赖 currentAssistantItemId 跨事件持久化（实测会被某种方式
     // 重置成 null，疑似多 socket 实例 / Pinia 多订阅）。
@@ -1645,7 +1617,6 @@ export const useChatStore = defineStore("chat", () => {
     streaming.value = false
     currentTurnInfoId = null
     currentAssistantItemId = null
-    assistantSeenFromWs = false
     Object.keys(toolItemIds).forEach((k) => delete toolItemIds[k])
     lastSkillSignature = null
     // P1-B2: 重置去重 state（session 切换时不清理 lastSequenceBySession——
