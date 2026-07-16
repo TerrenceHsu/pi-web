@@ -16,7 +16,7 @@ export interface SkillSummary {
 }
 
 /** Skill 详情——GET /api/skills/{name}。结构与 SkillSummary 一致；保留独立类型便于演进。 */
-export interface SkillDetail extends SkillSummary {}
+export type SkillDetail = SkillSummary
 
 /** GET /api/skills response。 */
 export interface SkillListResponse {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { reactive, ref } from "vue"
+import { ref } from "vue"
 
 import { ApiError } from "../../api/client"
 import { useMcpStore } from "../../stores/mcpStore"
@@ -47,7 +47,7 @@ function buildPayload(): { payload: any | null; error: string | null } {
     return { payload: null, error: "command is required" }
   }
 
-  let args: string[] = []
+  let args: string[]
   try {
     const parsed = JSON.parse(argsJson.value || "[]")
     if (!Array.isArray(parsed)) {
