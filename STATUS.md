@@ -7,13 +7,12 @@
 | 项 | 值 |
 |---|---|
 | **Product baseline commit** | `d53f331` — test(d2-8): next-prompt-after-regenerate backend integration test |
-| **Documentation branch** | `chore/project-documentation-cleanup`（文档治理分支，merge 后回到 master） |
+| **Documentation governance** | merged into master |
+| **Documentation governance commits** | `51af04d`, `6a344d1` |
 | **Latest release tag** | `v0.0.26-export-markdown` — P1-D1 Export Markdown（2026-07-14，commit `ebbc896`） |
 | **Current phase** | P1-D3 PDF Text Extraction 设计（阻塞中） |
 
 > P1-D2 Regenerate 已冻结但未打 tag——按既定 tag 策略，P1-D2 / D3 合并到 `v0.0.27-product-actions`。
-
-> Documentation branch merge 后，本文件的 Documentation branch 字段会替换为 master 上的最新 commit hash。
 
 ## 当前测试基线
 
