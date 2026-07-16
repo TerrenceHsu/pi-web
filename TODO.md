@@ -1228,9 +1228,9 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
 
 ---
 
-## 🔄 P1-D2 Regenerate（D2-1 + D2-2 + D2-3 + D2-4 + D2-5 + D2-6 ✅ 完成，等审核进入 D2-7 前端 + D2-8 E2E/Freeze，2026-07-16）
+## 🔄 P1-D2 Regenerate（D2-1 + D2-2 + D2-3 + D2-4 + D2-5 + D2-6 + D2-7 ✅ 完成，等审核进入 D2-8 E2E/Docs/Freeze，2026-07-16）
 
-**状态**：D2 准备工作 + D2-1 + D2-2 + D2-3 + D2-4 + D2-5 + D2-6 已落地；D2-7 前端 Regenerate Flow + D2-8 Playwright/Docs/Freeze 等下一次审核。
+**状态**：D2 准备工作 + D2-1 + D2-2 + D2-3 + D2-4 + D2-5 + D2-6 + D2-7 已落地；D2-8 Playwright 新场景 + Docs + Freeze 等下一次审核。
 
 ### 已落地
 
@@ -1247,6 +1247,19 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
     - try/except ROLLBACK 整个 transaction
   - `tests/test_session_message_id_stability.py`（rename from test_d2_message_id_stability.py）14 测试全 PASS
   - 范围边界：未实现 revision schema / regenerate endpoint / _execute_prompt 拆分 / 前端 Regenerate / request metadata / revision 清理（留待 D2-2+）
+
+- **D2-7 frontend regenerate flow**（commit `2175faa`）：
+  - **前端 DTO**：`PersistedMessageDto`（message_id/session_id/idx/role/content/created_at/message）+ `isPersistedMessageDto` type guard；`RequestSummary` 加 operation/regeneration_id/target_message_id（向后兼容）；新增 RegenerateResponse / RevisionListItem / RevisionListResponse
+  - **API client**：`api/regenerate.ts` — `regenerateMessage` + `listMessageRevisions`（D2-7 不调）；错误响应支持稳定 code
+  - **message_id reconciliation**：`persistedMessageToItem` 用 dto.message_id 作 item.id；`loadMessages` / `reconcileMessagesFromServer` 优先用 persisted DTO；regenerate 成功后**就地更新** content，不新增 bubble；顶层 role/content 与嵌套 message 同源
+  - **RegenerationState 单对象**：`{ regenerationId, requestId, targetMessageId, draftItemId, status, errorMessage }`；status: idle/queued/running/syncing/completed/error/aborted；`requestMetadataById` Map 路由 delta
+  - **流式 delta 路由**：currentAssistantItemId 在 regenerate 时设为 draftItemId；202 前 buffered delta 通过 metadata 自动路由；**不**用 targetMessageId 作 draft id
+  - **MessageBubble 加按钮**：`data-testid="message-regenerate-btn"`；显示条件全检（assistant + persisted + 有 messageId + 最新 + 无 active request + 非 sending/streaming/aborting + 非 draft）；点击同步 submitting guard
+  - **completed syncing**：completed → status=syncing → reconcile → 删 draft → completed；reconcile 失败保持 syncing + 安全提示；error/aborted 删 draft + 原回答不变
+  - **Reload/reconnect**：`findActiveRequest` 记录 metadata；`resumeActiveRequest` 若 operation=regenerate 恢复独立 draft
+  - **Session 切换**：`clearRegenerationForSessionSwitch` 清当前 draft（不串流），不清服务器 request
+  - **不实现**：持久化 Regenerated badge（DTO 无信号）/ revision history drawer / 手动切换 / 新 WS event / Playwright 新场景（留 D2-8）
+  - 测试基线：frontend production build 142.32 KB JS / 40.15 KB CSS；offline pytest 1130 passed；ruff clean；E2E 26/28（P1-C 既有污染，非 D2-7 引入）
 
 - **D2-6 startup sweep + Web DTO**（commit `9b6db3d`）：
   - **Startup sweep**：`mark_running_revisions_interrupted` 接入 lifespan startup——固定顺序：session store init → extension store init/migrate → **sweep** → restore Skills → restore MCP → yield
@@ -1348,21 +1361,24 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
 3. ✅ **不**硬限制 revision 数量——查询接口必须分页
 4. ✅ 自动 active 切换必做，手动切换**不做**
 
-### 下一步 D2-7 + D2-8
+### 下一步 D2-8
 
-- **D2-7 Frontend Regenerate Flow**：
-  - `frontend/src/api/messages.ts` + `types/` 加 PersistedMessage / ChatMessage 类型（含 message_id）
-  - `chatStore.ts` 加 regeneration 状态：`regenerationId` / `regeneratingMessageId` / `regenerationDraft` / `regenerationStatus`
-  - `MessageBubble.vue` 加 Regenerate 按钮（仅最新 persisted assistant + 无 active request + 非 sending/streaming/aborting）
-  - 流式期间保留原 active bubble + 独立 regeneration draft bubble
-  - 成功：reconcileMessagesFromServer → 同 message_id content 更新 → 删 draft → Regenerated badge
-  - Error/Abort：删 draft + 保留原回答 + 清 currentRequestId
-  - Reload/reconnect：通过 `operation: "regenerate"` 恢复 regeneration 状态
-  - Stop 继续用 `POST /api/requests/{request_id}/abort`（**不**新增 regenerate 专用 abort）
-- **D2-8 Playwright + Docs + D2 Freeze**：
-  - Playwright 7-10 用例（最新 assistant 显示按钮 / 历史 assistant 不显示 / 流式期间旧回答可见 / completed 同 bubble 更新 / abort 保留旧回答 / reload delta 不重不漏 / 双击单 request / server restart running→interrupted / Export Markdown 只含新 active / 普通 Send 用新 active）
-  - 完整发布检查：offline pytest / coverage ≥75% / ruff / frontend build / 28 E2E 不回归 / 新增 E2E 通过 / production hooks 0 / core runtime 未修改 / working tree clean
-  - **Tag 策略修正**：D2/D3 阶段不打正式 tag；P1-D4 全部完成才打 `v0.0.26-product-actions`；`v0.0.27` 留给 P1-D 之后
+- **Playwright 新场景 7-10 用例**：最新 assistant 显示 Regenerate 按钮 / 历史 assistant 不显示 / 流式期间旧回答可见 / completed 同 bubble 更新为新回答 / abort 后旧回答保持 / reload/reconnect delta 不重不漏 / 双击只产生一个 request / server restart 后 running revision 变 interrupted / Export Markdown 只含新 active answer / 普通 Send 在 regenerate 后用新 active 作历史
+- **完整发布检查**：offline pytest / coverage ≥75% / ruff / frontend production build / 既有 28 E2E 不回归 / 新增 Regenerate E2E 通过 / production hooks 0 / core runtime 未修改 / working tree clean
+- **Tag 策略修正**：D2/D3 阶段不打正式 tag；P1-D4 全部完成才打 `v0.0.26-product-actions`；`v0.0.27` 留给 P1-D 之后
+
+### D2-7 测试覆盖
+
+- DTO 类型 + isPersistedMessageDto type guard
+- API client：regenerateMessage + listMessageRevisions（D2-7 不调）
+- chatStore：persistedMessageToItem + loadMessages/reconcile 改 message_id
+- chatStore：RegenerationState 单对象 + requestMetadataById Map
+- chatStore：regenerateAssistantMessage action（含 submitting guard）
+- chatStore：pollRequestUntilTerminal 处理 regeneration lifecycle（syncing/error/aborted）
+- chatStore：findActiveRequest/resumeActiveRequest 支持 operation metadata
+- chatStore：clearRegenerationForSessionSwitch（session 切换不串流）
+- MessageBubble：Regenerate 按钮 + canRegenerate computed（全条件检查）
+- SessionSidebar.activateSession：调 clearRegenerationForSessionSwitch
 
 ### D2-5 测试覆盖（31 用例）
 
@@ -1420,14 +1436,15 @@ P0 MVP freeze（`a210aba`）后做的工程化改进：真实环境激活发现 
 
 ---
 
-## 当前测试基线（HEAD `9b6db3d`——D2-6 完成）
+## 当前测试基线（HEAD `2175faa`——D2-7 完成）
 
 | 命令 | 结果 |
 |---|---|
-| `pytest -m "not slow and not integration and not docker"` | **1130 passed**（1114 + 16 D2-6），14 deselected（~63s） |
-| D2 专项 9 文件 | **194 passed**（d2_6_startup_and_dto 16 + regenerate_api 31 + execution_split 20 + revisions 40 + migration 20 + message_id_stability 13 + prompt_async 20 + request_recovery 12 + markdown_export 22） |
+| `pytest -m "not slow and not integration and not docker"` | **1130 passed**（D2-7 不改后端，无新增），14 deselected（~163s 含 build） |
+| D2 专项 9 文件 | **194 passed** |
 | Coverage gate | 83.82% ≥ 75% ✅ |
-| Playwright e2e（build:e2e） | **26/28**（已知 P1-C 跨测试污染，非 D1/D2 引入） |
+| Playwright e2e（build:e2e） | **26/28**（P1-C 既有污染：mcp-tool-lifecycle + Smoke 6——非 D2-7 引入） |
 | ruff | All checks passed（src tests scripts） |
-| Frontend build (e2e mode) | 137.53 KB JS / 39.80 KB CSS |
+| Frontend production build | **142.32 KB JS / 40.15 KB CSS**（gzip 49.10 / 6.91 KB） |
+| Frontend e2e build | 142.69 KB JS |
 
