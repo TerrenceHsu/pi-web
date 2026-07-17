@@ -242,6 +242,13 @@ def create_app(
     max_session_upload_size: int = 100 * 1024 * 1024,
     request_history_maxlen: int = 100,
     shutdown_grace_s: float = 5.0,
+    # P1-E1-4A: Credential runtime composition（可选）
+    # None / ":memory:" 时跳过 credential runtime——保持向后兼容
+    credential_secret_backend: str = "auto",
+    enable_credential_runtime: bool | None = None,
+    enable_trusted_host: bool = False,
+    credential_extra_hosts: tuple[str, ...] = (),
+    credential_extra_ui_origins: tuple[str, ...] = (),
 ) -> FastAPI:
     """构造一个 FastAPI 实例。
 
@@ -370,7 +377,57 @@ def create_app(
         # P1-C4: 恢复 MCP server 配置 + auto attach + apply disabled tools
         await _restore_mcp_servers(extension_store)
 
-        yield
+        # ====================================================================
+        # P1-E1-4A: Credential Runtime Composition Root
+        # 仅在文件型 DB 路径 + 显式 / 默认 enable 时启动；独立 connection
+        # 与 session/extension store 共享 DB 文件但生命周期独立
+        # ====================================================================
+        from .credentials_runtime import (
+            build_credential_runtime_config,
+            credential_runtime_context,
+        )
+        from .local_web_security import default_web_security_config
+
+        _should_enable_cred = enable_credential_runtime
+        if _should_enable_cred is None:
+            # auto-enable when db_path is a real file path
+            _should_enable_cred = (
+                db_path is not None
+                and str(db_path) != ":memory:"
+                and not str(db_path).startswith("file:")
+            )
+
+        cred_runtime_cm = None
+        if _should_enable_cred:
+            try:
+                cred_cfg = build_credential_runtime_config(
+                    database_path=str(db_path),
+                    secret_backend_mode=credential_secret_backend,
+                    web_security=default_web_security_config(
+                        extra_hosts=credential_extra_hosts,
+                        extra_ui_origins=credential_extra_ui_origins,
+                    ),
+                )
+                cred_runtime_cm = credential_runtime_context(cred_cfg)
+            except Exception as e:
+                # 配置错误——拒绝启动（不静默降级）
+                raise RuntimeError(
+                    f"credential runtime config error: {type(e).__name__}"
+                ) from e
+
+        if cred_runtime_cm is not None:
+            _app.state.credential_runtime = await cred_runtime_cm.__aenter__()
+            try:
+                yield
+            finally:
+                _app.state.credential_runtime = None
+                try:
+                    await cred_runtime_cm.__aexit__(None, None, None)
+                except Exception:
+                    pass
+        else:
+            _app.state.credential_runtime = None
+            yield
 
         # ====================================================================
         # P1-B1: shutdown 收敛——先收敛 active request，再走原清理流程
@@ -465,6 +522,25 @@ def create_app(
     app.state.web = state
     app.state.allow_prompt_preview = allow_prompt_preview
     app.state.event_buffer_max_size = event_buffer_max_size
+    # P1-E1-4A: credential_runtime placeholder——lifespan 启动时填入
+    app.state.credential_runtime = None
+
+    # P1-E1-4A: TrustedHost middleware（opt-in）
+    # 默认 False 保留所有既有测试的 TestClient (Host: testserver) 行为
+    # 生产 / E2E 显式 enable_trusted_host=True 启用 localhost 边界
+    if enable_trusted_host:
+        from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+        from .local_web_security import default_web_security_config
+
+        _ws_cfg = default_web_security_config(
+            extra_hosts=credential_extra_hosts,
+            extra_ui_origins=credential_extra_ui_origins,
+        )
+        app.add_middleware(
+            TrustedHostMiddleware,
+            allowed_hosts=list(_ws_cfg.allowed_hosts),
+        )
 
     # SSE 客户端队列集合——每个 SSE 连接独立 asyncio.Queue；
     # on_event hook 把 event 广播（put_nowait）到所有客户端队列
