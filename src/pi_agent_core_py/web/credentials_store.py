@@ -223,22 +223,44 @@ _SCHEMA_META_KEY = "version"
 
 
 # DDL 字符串归一化后的必含片段——_validate_v1_schema 用
-_DDL_CHECK_PATTERNS: tuple[tuple[str, str], ...] = (
-    # (描述, regex pattern)——pattern 在归一化 DDL 上匹配
-    ("label non-empty CHECK", r"length\s*\(\s*trim\s*\(\s*label\s*\)\s*\)\s*>\s*0"),
-    ("storage_mode CHECK", r"storage_mode\s+IN\s*\(\s*'keyring'"),
-    ("validation_status CHECK", r"validation_status\s+IN\s*\(\s*'never_validated'"),
-    (
-        "provider_hint_confidence CHECK",
-        r"provider_hint_confidence\s+IS\s+NULL\s+OR\s+provider_hint_confidence\s+IN",
-    ),
-)
 _DDL_UNIQUE_PATTERN = r"secret_ref\s+TEXT\s+NOT\s+NULL\s+UNIQUE"
+_DDL_LABEL_CHECK_PATTERN = r"length\s*\(\s*trim\s*\(\s*label\s*\)\s*\)\s*>\s*0"
+_CONFIDENCE_NULL_OR_PATTERN = (
+    r"provider_hint_confidence\s+IS\s+NULL\s+OR\s+provider_hint_confidence\s+IN\s*\("
+)
 
 
 def _normalize_ddl(sql: str) -> str:
     """归一化 DDL 字符串——折叠空白（保留 case，pattern 用 IGNORECASE）."""
     return re.sub(r"\s+", " ", sql)
+
+
+def _extract_check_enum_values(
+    ddl: str,
+    column_name: str,
+) -> frozenset[str] | None:
+    """提取 `<column> IN ( ... )` CHECK 子句中的字符串字面量集合.
+
+    E1-2.2：取代前缀 regex——必须精确比对**完整**枚举集合.
+
+    Returns:
+        frozenset[str]: IN 列表里的所有单引号字符串字面量.
+        None: DDL 中找不到该列的 `IN (...)` CHECK 子句.
+
+    Notes:
+        项目专用——只解析本项目可控的简单 SQLite DDL，不是通用 SQL parser.
+        假设 IN 列表里只有单引号字符串字面量（schema v1 DDL 满足该假设）.
+    """
+    pattern = (
+        rf"(?<!\w){re.escape(column_name)}\s+IN\s*\("
+        rf"((?:[^()]|\([^()]*\))*)"
+        rf"\)"
+    )
+    match = re.search(pattern, ddl, re.IGNORECASE)
+    if match is None:
+        return None
+    inner = match.group(1)
+    return frozenset(re.findall(r"'([^']*)'", inner))
 
 
 # ============================================================================
@@ -458,6 +480,7 @@ class SQLiteCredentialStore:
             )
 
         # 4. DDL string contains required CHECK + UNIQUE constraints (E1-2.1)
+        #    + 完整枚举值集合精确比对 (E1-2.2)
         ddl_sql = row["sql"] or ""
         normalized = _normalize_ddl(ddl_sql)
 
@@ -466,11 +489,49 @@ class SQLiteCredentialStore:
                 "version=1 but secret_ref UNIQUE constraint missing from DDL"
             )
 
-        for description, pattern in _DDL_CHECK_PATTERNS:
-            if not re.search(pattern, normalized, re.IGNORECASE):
-                raise CredentialsSchemaValidationError(
-                    f"version=1 but {description} missing from DDL"
-                )
+        if not re.search(_DDL_LABEL_CHECK_PATTERN, normalized, re.IGNORECASE):
+            raise CredentialsSchemaValidationError(
+                "version=1 but label non-empty CHECK missing from DDL"
+            )
+
+        storage_modes = _extract_check_enum_values(normalized, "storage_mode")
+        if storage_modes is None:
+            raise CredentialsSchemaValidationError(
+                "version=1 but storage_mode CHECK missing from DDL"
+            )
+        if storage_modes != _VALID_STORAGE_MODES:
+            raise CredentialsSchemaValidationError(
+                "version=1 but storage_mode CHECK has unexpected enum values"
+            )
+
+        statuses = _extract_check_enum_values(normalized, "validation_status")
+        if statuses is None:
+            raise CredentialsSchemaValidationError(
+                "version=1 but validation_status CHECK missing from DDL"
+            )
+        if statuses != _VALID_VALIDATION_STATUSES:
+            raise CredentialsSchemaValidationError(
+                "version=1 but validation_status CHECK has unexpected enum values"
+            )
+
+        # provider_hint_confidence 必须保留 nullable（IS NULL OR IN）+ 完整枚举
+        if not re.search(_CONFIDENCE_NULL_OR_PATTERN, normalized, re.IGNORECASE):
+            raise CredentialsSchemaValidationError(
+                "version=1 but provider_hint_confidence CHECK missing "
+                "IS NULL OR semantics"
+            )
+        confidences = _extract_check_enum_values(
+            normalized, "provider_hint_confidence"
+        )
+        if confidences is None:
+            raise CredentialsSchemaValidationError(
+                "version=1 but provider_hint_confidence CHECK missing from DDL"
+            )
+        if confidences != _VALID_HINT_CONFIDENCES:
+            raise CredentialsSchemaValidationError(
+                "version=1 but provider_hint_confidence CHECK "
+                "has unexpected enum values"
+            )
 
     # ------------------------------------------------------------------
     # Repository primitives

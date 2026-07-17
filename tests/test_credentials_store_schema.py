@@ -331,3 +331,248 @@ class TestTransactionRollback:
         version = await store.get_schema_version()
         assert version == 1
         await store.close()
+
+
+# ============================================================================
+# E1-2.2: 精确 schema 枚举值集合校验
+# ============================================================================
+
+
+def _make_credentials_ddl(
+    *,
+    storage_mode_values: str = "'keyring', 'session_only', 'env'",
+    validation_status_values: str = (
+        "'never_validated', 'valid', 'invalid', 'error'"
+    ),
+    confidence_clause: str = (
+        "CHECK (provider_hint_confidence IS NULL "
+        "OR provider_hint_confidence IN "
+        "('high', 'medium', 'low', 'unknown'))"
+    ),
+) -> str:
+    """Build a web_credentials CREATE TABLE DDL with custom enum values.
+
+    用于 E1-2.2 schema 精确枚举校验测试——把枚举集合替换成非法值后，
+    _validate_v1_schema 必须拒绝.
+    """
+    return f"""
+    CREATE TABLE web_credentials (
+        id                          TEXT PRIMARY KEY,
+        label                       TEXT NOT NULL,
+        storage_mode                TEXT NOT NULL,
+        secret_ref                  TEXT NOT NULL UNIQUE,
+        masked_value                TEXT NOT NULL,
+        fingerprint_sha256          TEXT,
+        provider_hint               TEXT,
+        provider_hint_confidence    TEXT,
+        validation_status           TEXT NOT NULL,
+        last_validated_provider_id  TEXT,
+        last_validated_at           INTEGER,
+        last_error_code             TEXT,
+        created_at                  INTEGER NOT NULL,
+        updated_at                  INTEGER NOT NULL,
+        CHECK (length(trim(label)) > 0),
+        CHECK (storage_mode IN ({storage_mode_values})),
+        CHECK (validation_status IN ({validation_status_values})),
+        {confidence_clause}
+    )
+    """
+
+
+class TestSchemaEnumValidation:
+    """E1-2.2: CHECK 枚举值集合必须**完整精确**匹配——前缀 regex 不再够用."""
+
+    async def _init_then_break(self, tmp_path, breaker) -> str:
+        db_path = str(tmp_path / "creds.db")
+        s = await SQLiteCredentialStore.open(db_path)
+        await s.close()
+
+        async with aiosqlite.connect(db_path) as raw:
+            await breaker(raw)
+            await raw.commit()
+        return db_path
+
+    async def _break_with_ddl(self, tmp_path, ddl: str) -> str:
+        async def breaker(raw: aiosqlite.Connection) -> None:
+            await raw.execute("ALTER TABLE web_credentials RENAME TO _old")
+            await raw.execute(ddl)
+
+        return await self._init_then_break(tmp_path, breaker)
+
+    # ------------------------------------------------------------------
+    # storage_mode——3 项
+    # ------------------------------------------------------------------
+
+    async def test_storage_mode_missing_session_only(self, tmp_path) -> None:
+        ddl = _make_credentials_ddl(storage_mode_values="'keyring', 'env'")
+        db_path = await self._break_with_ddl(tmp_path, ddl)
+        with pytest.raises(
+            CredentialsSchemaValidationError,
+            match="storage_mode CHECK has unexpected enum values",
+        ):
+            await SQLiteCredentialStore.open(db_path)
+
+    async def test_storage_mode_missing_env(self, tmp_path) -> None:
+        ddl = _make_credentials_ddl(
+            storage_mode_values="'keyring', 'session_only'"
+        )
+        db_path = await self._break_with_ddl(tmp_path, ddl)
+        with pytest.raises(
+            CredentialsSchemaValidationError,
+            match="storage_mode CHECK has unexpected enum values",
+        ):
+            await SQLiteCredentialStore.open(db_path)
+
+    async def test_storage_mode_extra_unknown_backend(self, tmp_path) -> None:
+        ddl = _make_credentials_ddl(
+            storage_mode_values=(
+                "'keyring', 'session_only', 'env', 'unknown_backend'"
+            )
+        )
+        db_path = await self._break_with_ddl(tmp_path, ddl)
+        with pytest.raises(
+            CredentialsSchemaValidationError,
+            match="storage_mode CHECK has unexpected enum values",
+        ):
+            await SQLiteCredentialStore.open(db_path)
+
+    # ------------------------------------------------------------------
+    # validation_status——4 项
+    # ------------------------------------------------------------------
+
+    async def test_validation_status_missing_valid(self, tmp_path) -> None:
+        ddl = _make_credentials_ddl(
+            validation_status_values="'never_validated', 'invalid', 'error'"
+        )
+        db_path = await self._break_with_ddl(tmp_path, ddl)
+        with pytest.raises(
+            CredentialsSchemaValidationError,
+            match="validation_status CHECK has unexpected enum values",
+        ):
+            await SQLiteCredentialStore.open(db_path)
+
+    async def test_validation_status_missing_invalid(self, tmp_path) -> None:
+        ddl = _make_credentials_ddl(
+            validation_status_values="'never_validated', 'valid', 'error'"
+        )
+        db_path = await self._break_with_ddl(tmp_path, ddl)
+        with pytest.raises(
+            CredentialsSchemaValidationError,
+            match="validation_status CHECK has unexpected enum values",
+        ):
+            await SQLiteCredentialStore.open(db_path)
+
+    async def test_validation_status_missing_error(self, tmp_path) -> None:
+        ddl = _make_credentials_ddl(
+            validation_status_values="'never_validated', 'valid', 'invalid'"
+        )
+        db_path = await self._break_with_ddl(tmp_path, ddl)
+        with pytest.raises(
+            CredentialsSchemaValidationError,
+            match="validation_status CHECK has unexpected enum values",
+        ):
+            await SQLiteCredentialStore.open(db_path)
+
+    async def test_validation_status_extra_pending(self, tmp_path) -> None:
+        ddl = _make_credentials_ddl(
+            validation_status_values=(
+                "'never_validated', 'valid', 'invalid', 'error', 'pending'"
+            )
+        )
+        db_path = await self._break_with_ddl(tmp_path, ddl)
+        with pytest.raises(
+            CredentialsSchemaValidationError,
+            match="validation_status CHECK has unexpected enum values",
+        ):
+            await SQLiteCredentialStore.open(db_path)
+
+    # ------------------------------------------------------------------
+    # provider_hint_confidence——5 项（含 IS NULL OR 语义）
+    # ------------------------------------------------------------------
+
+    async def test_confidence_missing_medium(self, tmp_path) -> None:
+        ddl = _make_credentials_ddl(
+            confidence_clause=(
+                "CHECK (provider_hint_confidence IS NULL "
+                "OR provider_hint_confidence IN ('high', 'low', 'unknown'))"
+            )
+        )
+        db_path = await self._break_with_ddl(tmp_path, ddl)
+        with pytest.raises(
+            CredentialsSchemaValidationError,
+            match="provider_hint_confidence CHECK has unexpected enum values",
+        ):
+            await SQLiteCredentialStore.open(db_path)
+
+    async def test_confidence_missing_low(self, tmp_path) -> None:
+        ddl = _make_credentials_ddl(
+            confidence_clause=(
+                "CHECK (provider_hint_confidence IS NULL "
+                "OR provider_hint_confidence IN ('high', 'medium', 'unknown'))"
+            )
+        )
+        db_path = await self._break_with_ddl(tmp_path, ddl)
+        with pytest.raises(
+            CredentialsSchemaValidationError,
+            match="provider_hint_confidence CHECK has unexpected enum values",
+        ):
+            await SQLiteCredentialStore.open(db_path)
+
+    async def test_confidence_missing_unknown(self, tmp_path) -> None:
+        ddl = _make_credentials_ddl(
+            confidence_clause=(
+                "CHECK (provider_hint_confidence IS NULL "
+                "OR provider_hint_confidence IN ('high', 'medium', 'low'))"
+            )
+        )
+        db_path = await self._break_with_ddl(tmp_path, ddl)
+        with pytest.raises(
+            CredentialsSchemaValidationError,
+            match="provider_hint_confidence CHECK has unexpected enum values",
+        ):
+            await SQLiteCredentialStore.open(db_path)
+
+    async def test_confidence_extra_certain(self, tmp_path) -> None:
+        ddl = _make_credentials_ddl(
+            confidence_clause=(
+                "CHECK (provider_hint_confidence IS NULL "
+                "OR provider_hint_confidence IN "
+                "('high', 'medium', 'low', 'unknown', 'certain'))"
+            )
+        )
+        db_path = await self._break_with_ddl(tmp_path, ddl)
+        with pytest.raises(
+            CredentialsSchemaValidationError,
+            match="provider_hint_confidence CHECK has unexpected enum values",
+        ):
+            await SQLiteCredentialStore.open(db_path)
+
+    async def test_confidence_missing_is_null_or(self, tmp_path) -> None:
+        """confidence 移除 IS NULL OR——把 nullable 改成强制非空，必须拒绝."""
+        ddl = _make_credentials_ddl(
+            confidence_clause=(
+                "CHECK (provider_hint_confidence IN "
+                "('high', 'medium', 'low', 'unknown'))"
+            )
+        )
+        db_path = await self._break_with_ddl(tmp_path, ddl)
+        with pytest.raises(
+            CredentialsSchemaValidationError,
+            match="provider_hint_confidence CHECK missing IS NULL OR semantics",
+        ):
+            await SQLiteCredentialStore.open(db_path)
+
+    # ------------------------------------------------------------------
+    # 完整合法 schema——1 项 sanity
+    # ------------------------------------------------------------------
+
+    async def test_complete_valid_schema_still_passes(self, tmp_path) -> None:
+        """完整合法 schema v1 必须仍能 open——验证新校验没有过严."""
+        ddl = _make_credentials_ddl()
+        db_path = await self._break_with_ddl(tmp_path, ddl)
+
+        # 不抛——构造一个完整合法 schema v1 应当正常 open
+        store = await SQLiteCredentialStore.open(db_path)
+        version = await store.get_schema_version()
+        assert version == WEB_CREDENTIALS_SCHEMA_VERSION
+        await store.close()

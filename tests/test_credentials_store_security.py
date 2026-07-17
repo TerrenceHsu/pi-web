@@ -17,6 +17,7 @@ from pi_agent_core_py.web.credentials_store import (
     CredentialNotFoundError,
     CredentialRecord,
     CredentialRecordDecodeError,
+    CredentialsSchemaValidationError,
     SQLiteCredentialStore,
 )
 from pi_agent_core_py.web.extension_store import SCHEMA_VERSION as EXTENSION_SCHEMA_VERSION
@@ -335,3 +336,65 @@ def test_credentials_store_module_globals_no_marker() -> None:
             assert SECRET_MARKER not in value, (
                 f"marker in module global {name}: {value!r}"
             )
+
+
+# ============================================================================
+# 9. E1-2.2 schema 校验错误——异常 str/repr 不得泄漏完整 DDL
+# ============================================================================
+
+
+class TestSchemaErrorNoDdlLeak:
+    """E1-2.2：schema 校验失败时，CredentialsSchemaValidationError 不得含完整 DDL.
+
+    DDL 里可能被攻击者注入 comment / identifier——必须保证异常只输出固定
+    描述（不含整段 DDL），防止信息泄漏.
+    """
+
+    async def test_enum_mismatch_error_does_not_leak_ddl(self, tmp_path) -> None:
+        db_path = str(tmp_path / "leak.db")
+        s = await SQLiteCredentialStore.open(db_path)
+        await s.close()
+
+        # 把 SECRET_MARKER 注入 DDL 注释里——schema 校验失败时必须不输出
+        async with aiosqlite.connect(db_path) as raw:
+            await raw.execute("ALTER TABLE web_credentials RENAME TO _old")
+            await raw.execute(
+                f"""
+                CREATE TABLE web_credentials (
+                    id TEXT PRIMARY KEY,
+                    label TEXT NOT NULL,
+                    storage_mode TEXT NOT NULL,
+                    secret_ref TEXT NOT NULL UNIQUE,
+                    masked_value TEXT NOT NULL,
+                    fingerprint_sha256 TEXT,
+                    provider_hint TEXT,
+                    provider_hint_confidence TEXT,
+                    validation_status TEXT NOT NULL,
+                    last_validated_provider_id TEXT,
+                    last_validated_at INTEGER,
+                    last_error_code TEXT,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    CHECK (length(trim(label)) > 0),
+                    -- {SECRET_MARKER}
+                    CHECK (storage_mode IN ('keyring')),
+                    CHECK (validation_status IN
+                        ('never_validated', 'valid', 'invalid', 'error')),
+                    CHECK (provider_hint_confidence IS NULL
+                        OR provider_hint_confidence IN
+                        ('high', 'medium', 'low', 'unknown'))
+                )
+                """
+            )
+            await raw.commit()
+
+        with pytest.raises(CredentialsSchemaValidationError) as exc_info:
+            await SQLiteCredentialStore.open(db_path)
+
+        msg = str(exc_info.value)
+        assert SECRET_MARKER not in msg, (
+            f"SECRET_MARKER leaked in schema error: {msg!r}"
+        )
+        assert SECRET_MARKER not in repr(exc_info.value)
+        # 不应包含 CREATE TABLE 等完整 DDL 片段
+        assert "CREATE TABLE" not in msg.upper()
