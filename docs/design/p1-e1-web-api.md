@@ -14,6 +14,7 @@
 |---|---|
 | 2026-07-17 | 初稿（DRAFT）——E1-4A/E1-4B 拆分；8 endpoints；safe DTO；secret 长度限制；HTTP 错误映射；测试矩阵 45 项. |
 | 2026-07-17 | **APPROVED—— CONDITIONAL PASS 升级为 APPROVED**：补 6 项阻塞设计——① Localhost Web Security Boundaries（Host allowlist + Origin 校验 + `X-PI-Agent-UI` 自定义 header + 严格 CORS） ② HTTP body-size 32 KiB 限制（流式累计，不只看 Content-Length） ③ Pydantic 错误脱敏只投影 `loc` + 受控 `code`（不返回 input / ctx / url / msg） ④ 绝对 DB path 一次性解析 ⑤ `AsyncExitStack` 部分初始化回滚 ⑥ readiness/degraded 语义（keyring 不可用不阻塞 app `ready`）. 新增 §7 SecretStr + `writeOnly` + 不提供 example / default. 测试矩阵从 45 扩到 68（+23：Local Web Security 8 + Body/Validation 9 + Lifespan/Path 6）. E1-4A scope 扩至含 TrustedHost + allowed origins；E1-4B 含 32 KiB body limit + Origin/Host/header enforcement + 安全 ValidationError handler. |
+| 2026-07-17 | **补 implementation constraint**：Credential Repository 独立 connection 语义下 `:memory:` 会变成不同空数据库——只支持文件型 SQLite；拒绝 `:memory:` / 空 / SQLite URI 形式；测试统一用 `tmp_path` 文件数据库. |
 
 ---
 
@@ -164,26 +165,51 @@ env          → EnvSecretStore
 - 解析结果存入 `CredentialRuntimeConfig`，请求过程中不得重新解析
 - 不得依赖 `cwd`——避免重复 `VirtualFileStore("./uploads")` 类问题
 
+**文件型 SQLite 唯一支持（implementation constraint）**：
+
+- Credential Repository 拥有**独立 connection**——`:memory:` 在 SQLite 中是 per-connection 的，独立 connection 访问 `:memory:` 会得到**不同**的空数据库，不能满足"同一数据库文件、不同 connection"的不变量
+- 因此 E1-4A **只支持文件型 SQLite 数据库**
+- **拒绝**：`:memory:`、空路径、未经设计的 SQLite URI（如 `file:...?mode=memory` 或带 query 的 URI 形式）
+- 测试统一使用 `tmp_path` 文件数据库（如 `tmp_path / "creds.db"`），不再用 `:memory:`
+
 实现：
 
 ```python
 # web/credentials_runtime.py
-def _resolve_db_path(configured: str) -> str:
-    """Resolve at app creation; never re-resolve per request."""
+def _resolve_db_path(configured: str | Path) -> Path:
+    """Resolve at app creation; never re-resolve per request.
+
+    Rejects:
+        - :memory: (independent connection would see different DB)
+        - empty path
+        - SQLite URI form (file:...?...)
+        - relative path (after expanduser)
+    """
     from pathlib import Path
+    if not configured:
+        raise CredentialRuntimeConfigError("credential DB path must be non-empty")
+    if isinstance(configured, str) and (
+        configured == ":memory:"
+        or configured.startswith("file:")
+    ):
+        raise CredentialRuntimeConfigError(
+            "credential DB path must be a filesystem path "
+            "(:memory: and SQLite URI form are rejected——"
+            "independent connection semantics)"
+        )
     p = Path(configured).expanduser()
     if not p.is_absolute():
-        # 显式拒绝相对路径——必须由调用方在 app 配置层完成 join
         raise CredentialRuntimeConfigError(
             f"credential DB path must be absolute after expanduser (got {configured!r})"
         )
-    return str(p.resolve())
+    return p.resolve(strict=False)
 ```
 
 **关键不变量**：
 
 - `same database file` ≠ `same connection`
 - Session/Extension Store 与 Credential Store **共享 DB 文件**，但事务和生命周期独立
+- 文件型 SQLite 是唯一支持模式（`:memory:` 在独立 connection 语义下失真）
 - 测试覆盖：从不同 cwd 启动 → Credential DB 仍写入同一文件；不产生第二个意外 SQLite 文件
 
 ### 3.3 SecretStoreRouter 构造
