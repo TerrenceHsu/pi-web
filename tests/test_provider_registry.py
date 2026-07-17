@@ -1,21 +1,26 @@
-"""Provider Registry 单元测试（P1-E1-1）.
+"""Provider Registry 单元测试（P1-E1-1 + E1-3B1）.
 
 覆盖：
 - list_provider_definitions 返回所有内置定义
 - get known / get unknown
 - has 检查
 - 重复 ID 拒绝
-- 非 HTTPS validation_endpoint 拒绝
 - 非 HTTPS default_base_url 拒绝
 - URL 内嵌 userinfo 拒绝
 - 内置定义都是 HTTPS / 无 userinfo
 - 不创建网络连接（monkeypatch network）
+- credential_validation_strategy ↔ endpoint 一致性（E1-3B1）
+- Anthropic strategy=anthropic_models + endpoint HTTPS
+- GLM strategy=unsupported + endpoint=None
+- unsupported 携带 endpoint 拒绝
+- 非 unsupported 缺 endpoint 拒绝
 """
 from __future__ import annotations
 
 import pytest
 
 from pi_agent_core_py.providers.registry import (
+    CredentialValidationStrategyId,
     ProviderAPIStyle,
     ProviderDefinition,
     ProviderRegistry,
@@ -52,19 +57,15 @@ class TestBuiltInRegistry:
     def test_get_unknown_returns_none(self) -> None:
         assert get_provider_definition("nonexistent") is None
 
-    def test_all_built_in_endpoints_are_https(self) -> None:
+    def test_all_built_in_base_urls_are_https(self) -> None:
         for d in list_provider_definitions():
             assert d.default_base_url.startswith("https://"), (
                 f"{d.id}.default_base_url must be HTTPS"
-            )
-            assert d.validation_endpoint.startswith("https://"), (
-                f"{d.id}.validation_endpoint must be HTTPS"
             )
 
     def test_no_built_in_has_url_userinfo(self) -> None:
         for d in list_provider_definitions():
             assert "@" not in d.default_base_url.split("://", 1)[-1].split("/", 1)[0]
-            assert "@" not in d.validation_endpoint.split("://", 1)[-1].split("/", 1)[0]
 
     def test_definitions_are_frozen(self) -> None:
         """ProviderDefinition 是 frozen dataclass——不可变."""
@@ -73,6 +74,35 @@ class TestBuiltInRegistry:
         # frozen dataclass 抛 FrozenInstanceError（AttributeError 子类）
         with pytest.raises(AttributeError):
             d.id = "tampered"  # type: ignore[misc]
+
+
+# ============================================================================
+# E1-3B1: credential_validation_strategy / endpoint
+# ============================================================================
+
+
+class TestCredentialValidationFields:
+    def test_anthropic_uses_anthropic_models_strategy(self) -> None:
+        d = get_provider_definition("anthropic")
+        assert d is not None
+        assert d.credential_validation_strategy == "anthropic_models"
+        assert d.credential_validation_endpoint == "https://api.anthropic.com/v1/models"
+        assert d.supports_model_listing is True
+
+    def test_glm_uses_unsupported_strategy(self) -> None:
+        d = get_provider_definition("glm")
+        assert d is not None
+        assert d.credential_validation_strategy == "unsupported"
+        assert d.credential_validation_endpoint is None
+        assert d.supports_model_listing is False
+
+    def test_anthropic_endpoint_has_no_userinfo(self) -> None:
+        d = get_provider_definition("anthropic")
+        assert d is not None
+        endpoint = d.credential_validation_endpoint
+        assert endpoint is not None
+        assert endpoint.startswith("https://")
+        assert "@" not in endpoint.split("://", 1)[-1].split("/", 1)[0]
 
 
 # ============================================================================
@@ -87,7 +117,8 @@ class TestCustomRegistry:
             "display_name": "Test",
             "api_style": "anthropic_compatible",
             "default_base_url": "https://example.com",
-            "validation_endpoint": "https://example.com/v1/messages",
+            "credential_validation_strategy": "unsupported",
+            "credential_validation_endpoint": None,
             "supports_model_listing": False,
             "key_prefix_hints": (),
         }
@@ -112,9 +143,11 @@ class TestCustomRegistry:
             ProviderRegistry((d,))
 
     def test_non_https_validation_endpoint_rejected(self) -> None:
-        d = self._make_def(validation_endpoint="http://insecure.example.com/v1/messages")
+        d = self._make_def(
+            credential_validation_strategy="anthropic_models",
+            credential_validation_endpoint="http://insecure.example.com/v1/models",
+        )
         with pytest.raises(ValueError, match="HTTPS"):
-            Registry = ProviderRegistry  # noqa: F841
             ProviderRegistry((d,))
 
     def test_url_with_userinfo_rejected(self) -> None:
@@ -126,7 +159,8 @@ class TestCustomRegistry:
 
     def test_validation_endpoint_userinfo_rejected(self) -> None:
         d = self._make_def(
-            validation_endpoint="https://user:pass@example.com/v1/messages",
+            credential_validation_strategy="anthropic_models",
+            credential_validation_endpoint="https://user:pass@example.com/v1/models",
         )
         with pytest.raises(ValueError, match="userinfo"):
             ProviderRegistry((d,))
@@ -139,7 +173,6 @@ class TestCustomRegistry:
     def test_empty_display_name_rejected(self) -> None:
         d = self._make_def(display_name="")
         with pytest.raises(ValueError, match="display_name"):
-            Registry = ProviderRegistry  # noqa: F841
             ProviderRegistry((d,))
 
     def test_file_scheme_rejected(self) -> None:
@@ -151,6 +184,36 @@ class TestCustomRegistry:
         reg = ProviderRegistry((self._make_def(),))
         assert reg.get("nonexistent") is None
         assert not reg.has("nonexistent")
+
+    # ------------------------------------------------------------------
+    # strategy ↔ endpoint 一致性（E1-3B1）
+    # ------------------------------------------------------------------
+
+    def test_unsupported_with_endpoint_rejected(self) -> None:
+        """strategy='unsupported' 不允许同时给 endpoint."""
+        d = self._make_def(
+            credential_validation_strategy="unsupported",
+            credential_validation_endpoint="https://example.com/v1/models",
+        )
+        with pytest.raises(ValueError, match="unsupported"):
+            ProviderRegistry((d,))
+
+    def test_anthropic_models_strategy_without_endpoint_rejected(self) -> None:
+        """strategy='anthropic_models' 必须给 HTTPS endpoint."""
+        d = self._make_def(
+            credential_validation_strategy="anthropic_models",
+            credential_validation_endpoint=None,
+        )
+        with pytest.raises(ValueError, match="HTTPS endpoint"):
+            ProviderRegistry((d,))
+
+    def test_unsupported_with_none_endpoint_accepted(self) -> None:
+        d = self._make_def(
+            credential_validation_strategy="unsupported",
+            credential_validation_endpoint=None,
+        )
+        reg = ProviderRegistry((d,))
+        assert reg.has("test-provider")
 
 
 # ============================================================================
@@ -192,7 +255,8 @@ class TestNetworkSafety:
             display_name="Net Safe Test",
             api_style="anthropic_compatible",
             default_base_url="https://example.com",
-            validation_endpoint="https://example.com/v1/messages",
+            credential_validation_strategy="unsupported",
+            credential_validation_endpoint=None,
             supports_model_listing=False,
         )
         reg = ProviderRegistry((d,))
@@ -205,4 +269,10 @@ class TestNetworkSafety:
 
         _accept("anthropic_compatible")
         _accept("openai_compatible")
-        # typing-checker 不会在 runtime 拒绝，但 literal 值应该清楚
+
+    def test_strategy_id_literal_has_expected_values(self) -> None:
+        def _accept(_s: CredentialValidationStrategyId) -> None:
+            pass
+
+        _accept("anthropic_models")
+        _accept("unsupported")

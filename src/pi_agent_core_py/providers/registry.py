@@ -1,20 +1,27 @@
-"""Provider definitions registry + provider hint（P1-E1-1）.
+"""Provider definitions registry + provider hint（P1-E1-1 + E1-3B1）.
 
 定义内置 Provider 的 metadata，用于：
-- P1-E1: provider hint 本地匹配 + validation endpoint 冻结
+- P1-E1: provider hint 本地匹配 + credential validation strategy 冻结
 - P1-E2: ProviderProfile 关联 + model catalog
 - P1-E3: request-scoped ModelClient 创建
 
 **关键安全约束**：
 - `ProviderDefinition` 是 frozen dataclass——不可变
-- `default_base_url` / `validation_endpoint` 必须是 HTTPS
+- `default_base_url` 必须是 HTTPS
+- `credential_validation_endpoint`（非 None 时）必须是 HTTPS、不含 userinfo、
+  host 与内置定义一致——不接受运行时自定义
+- `credential_validation_strategy="unsupported"` 时 endpoint 必须为 None
+- 其它 strategy 必须提供 HTTPS endpoint
 - URL 不得内嵌 userinfo（`user:pass@host`）
 - `detect_provider_hint()` 是纯函数——无 HTTP / socket / DNS 调用
 - 不创建网络连接
 - 不 import ProviderAdapter / SecretStore——保持模块依赖最小
 
-P1-E1 只注册当前明确支持验证的内置 provider（GLM / Anthropic）。
-`openai_compatible` 和 `custom` 留待 P1-E2 ProviderProfile 引入。
+P1-E1 只注册当前明确支持验证的内置 provider：
+- Anthropic：strategy=anthropic_models（GET /v1/models）
+- GLM：strategy=unsupported（远端验证暂未批准）
+
+`openai_compatible` 和 `custom` 留待 P1-E2 ProviderProfile 引入.
 """
 from __future__ import annotations
 
@@ -26,6 +33,7 @@ from urllib.parse import urlparse
 __all__ = [
     "ProviderAPIStyle",
     "ProviderHintConfidence",
+    "CredentialValidationStrategyId",
     "ProviderDefinition",
     "ProviderHintResult",
     "ProviderRegistry",
@@ -47,6 +55,14 @@ ProviderAPIStyle = Literal[
 
 ProviderHintConfidence = Literal["high", "medium", "low", "unknown"]
 
+# 凭证远端验证策略 ID——具体策略名而非泛化名（不同 provider 认证 Header /
+# 版本 Header / 响应结构不同，不能假设一个通用 Models 验证器适用所有 provider）.
+CredentialValidationStrategyId = Literal[
+    "anthropic_models",   # Anthropic Models API（GET /v1/models with x-api-key）
+    "unsupported",        # 暂无安全的远端验证策略——Service 层应直接返回
+                           # validation_not_supported，不发任何网络请求
+]
+
 
 # ============================================================================
 # Dataclasses
@@ -57,14 +73,17 @@ ProviderHintConfidence = Literal["high", "medium", "low", "unknown"]
 class ProviderDefinition:
     """Built-in provider metadata.
 
-    不含 user secret——仅描述 provider 协议特征与固定 endpoint。
+    不含 user secret——仅描述 provider 协议特征与固定 validation endpoint。
     """
 
     id: str
     display_name: str
     api_style: ProviderAPIStyle
     default_base_url: str
-    validation_endpoint: str
+
+    credential_validation_strategy: CredentialValidationStrategyId
+    credential_validation_endpoint: str | None      # None 当且仅当 strategy="unsupported"
+
     supports_model_listing: bool
     key_prefix_hints: tuple[str, ...] = field(default_factory=tuple)
 
@@ -114,14 +133,35 @@ def _validate_https_url(url: str, label: str) -> None:
 
 
 def _validate_definition(d: ProviderDefinition) -> None:
-    """Validate a ProviderDefinition at registry construction time."""
+    """Validate a ProviderDefinition at registry construction time.
+
+    Strategy ↔ endpoint 一致性：
+        - strategy="unsupported" → endpoint 必须为 None
+        - 其它 strategy → endpoint 必须为 HTTPS、无 userinfo
+    """
     if not d.id or not d.id.strip():
         raise ValueError("provider id must be non-empty")
     if not d.display_name:
         raise ValueError(f"provider {d.id}: display_name must be non-empty")
 
     _validate_https_url(d.default_base_url, f"provider {d.id}: default_base_url")
-    _validate_https_url(d.validation_endpoint, f"provider {d.id}: validation_endpoint")
+
+    if d.credential_validation_strategy == "unsupported":
+        if d.credential_validation_endpoint is not None:
+            raise ValueError(
+                f"provider {d.id}: credential_validation_strategy='unsupported' "
+                f"requires credential_validation_endpoint=None"
+            )
+    else:
+        if d.credential_validation_endpoint is None:
+            raise ValueError(
+                f"provider {d.id}: credential_validation_strategy="
+                f"{d.credential_validation_strategy!r} requires an HTTPS endpoint"
+            )
+        _validate_https_url(
+            d.credential_validation_endpoint,
+            f"provider {d.id}: credential_validation_endpoint",
+        )
 
 
 # ============================================================================
@@ -169,7 +209,10 @@ _GLM_DEFINITION = ProviderDefinition(
     display_name="Zhipu GLM (Anthropic-compatible)",
     api_style="anthropic_compatible",
     default_base_url="https://open.bigmodel.cn/api/anthropic",
-    validation_endpoint="https://open.bigmodel.cn/api/anthropic/v1/messages",
+    # GLM 远端验证 DEFERRED——公开 API 索引中未文档化无推理 / 无费用的统一
+    # 模型列表 endpoint. 不要用 Messages endpoint 做 probe.
+    credential_validation_strategy="unsupported",
+    credential_validation_endpoint=None,
     supports_model_listing=False,
     # GLM keys 不带确定性前缀——避免误报
     key_prefix_hints=(),
@@ -180,8 +223,10 @@ _ANTHROPIC_DEFINITION = ProviderDefinition(
     display_name="Anthropic",
     api_style="anthropic_compatible",
     default_base_url="https://api.anthropic.com",
-    validation_endpoint="https://api.anthropic.com/v1/messages",
-    supports_model_listing=False,
+    # 用 Models API 验证（无推理 / 无费用）：GET /v1/models with x-api-key
+    credential_validation_strategy="anthropic_models",
+    credential_validation_endpoint="https://api.anthropic.com/v1/models",
+    supports_model_listing=True,
     key_prefix_hints=("sk-ant-",),
 )
 

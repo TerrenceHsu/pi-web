@@ -39,6 +39,7 @@ from .errors import (
 from .fake import FakeProviderAdapter
 from .glm import GLMConfig, GLMProviderAdapter
 from .registry import (
+    CredentialValidationStrategyId,
     ProviderAPIStyle,
     ProviderDefinition,
     ProviderHintConfidence,
@@ -69,8 +70,9 @@ __all__ = [
     # conversion helpers
     "to_anthropic_messages",
     "to_anthropic_tools",
-    # registry (P1-E1-1)
+    # registry (P1-E1-1 + E1-3B1)
     "ProviderAPIStyle",
+    "CredentialValidationStrategyId",
     "ProviderDefinition",
     "ProviderHintConfidence",
     "ProviderHintResult",
