@@ -1,7 +1,7 @@
-"""CredentialService（P1-E1-3A）.
+"""CredentialService（P1-E1-3A + E1-3B2）.
 
 编排 `SQLiteCredentialStore`（Repository）+ `SecretStoreRouter` 的应用层服务.
-**不**实现远端 Provider 验证（留 E1-3B）、Web API（留 E1-4）、前端（留后续）.
+远端 Provider 验证在 E1-3B2 通过 `validate()` 接入；Web API / 前端留 E1-4 / 之后.
 
 **职责**：
 
@@ -12,6 +12,7 @@
 - `delete`     : 删 Secret → CAS 删 DB row；Secret 失败 → 保留 row；
                  DB 失败 → row 留存，state 变为 `needs_key`
 - `get`/`list` : 读 DB row + 运行时算 storage_status，返回安全 `CredentialView`
+- `validate`   : 按 `provider_id` 显式远端验证 Credential；CAS 写入 validation state
 
 **安全契约**（绝对不可破坏）：
 
@@ -32,7 +33,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
-from ..providers.registry import detect_provider_hint
+from ..providers.registry import (
+    ProviderRegistry,
+    detect_provider_hint,
+    list_provider_definitions,
+)
 from ..secrets import (
     SecretStore,
     SecretStoreError,
@@ -61,6 +66,12 @@ from .credentials_store import (
     SQLiteCredentialStore,
     resolve_storage_status,
 )
+from .provider_validation import (
+    CredentialValidationErrorCode,
+    ProviderValidationResult,
+    ValidationStrategyRegistry,
+    get_default_validation_strategy_registry,
+)
 from .secret_store_router import SecretStoreRouter
 
 __all__ = [
@@ -70,6 +81,7 @@ __all__ = [
     # Results
     "CredentialOperationResult",
     "CredentialDeleteResult",
+    "CredentialValidationOperationResult",
     "CredentialView",
     # Warnings
     "CredentialServiceWarning",
@@ -198,6 +210,43 @@ class CredentialView:
         )
 
 
+@dataclass(frozen=True)
+class CredentialValidationOperationResult:
+    """`CredentialService.validate()` 的安全返回 DTO（P1-E1-3B2）.
+
+    与 `ProviderValidationResult`（Strategy 层）不同——Service 还要表达
+    "没有发起远端验证"以及当前持久化的 validation state.
+
+    Fields:
+        credential_id: 验证目标 credential ID（safe）.
+        provider_id: 调用方显式传入的 provider ID（safe）.
+        attempted: True 表示发起了远端验证；False 表示因 provider/strategy/
+            secret 缺失等原因未发起.
+        valid: Strategy 层判定. None 当且仅当 attempted=False.
+        error_code: 远端错误码（attempted=True 时）或非远端原因（attempted=False 时）.
+            valid=True 时为 None.
+        validation_status: 当前持久化的 validation state. attempted=False 时
+            保持原值不变（Service 不修改 Repository）.
+        last_validated_at: 当前持久化的 last_validated_at（ms epoch）.
+            attempted=False 时保持原值.
+
+    不变量：
+        - attempted=True, valid=True  → error_code=None
+        - attempted=True, valid=False → error_code 必须是远端错误码
+        - attempted=False              → valid=None, error_code 必须是
+          credential_missing / provider_not_supported / validation_not_supported 之一
+        - 不含 secret / secret_ref / masked / fingerprint / raw response / HTTP status
+    """
+
+    credential_id: str
+    provider_id: str
+    attempted: bool
+    valid: bool | None
+    error_code: CredentialValidationErrorCode | None
+    validation_status: CredentialValidationStatus
+    last_validated_at: int | None
+
+
 # ============================================================================
 # Constants
 # ============================================================================
@@ -207,6 +256,34 @@ class CredentialView:
 _ENV_VAR_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 _STORED_MODES: frozenset[str] = frozenset({"keyring", "session_only"})
+
+
+# Strategy 错误码 → Repository validation_status 固定映射.
+# Service 不允许把 credential 层错误码（credential_missing 等）当作远端结果——
+# 那些码只允许在 attempted=False 路径产出.
+_VALIDATION_OUTCOME_INVALID: frozenset[str] = frozenset({"authentication_failed"})
+_VALIDATION_OUTCOME_ERROR: frozenset[str] = frozenset({
+    "permission_denied",
+    "rate_limited",
+    "endpoint_unreachable",
+    "request_timeout",
+    "tls_error",
+    "protocol_error",
+    "unknown_error",
+})
+# attempted=False 时允许的 error_code 集合——任何 Strategy 不得返回这些.
+_NON_ATTEMPTED_ERROR_CODES: frozenset[str] = frozenset({
+    "credential_missing",
+    "provider_not_supported",
+    "validation_not_supported",
+})
+
+
+def _default_now_ms() -> int:
+    """Return current time as integer milliseconds (epoch)."""
+    import time
+
+    return int(time.time() * 1000)
 
 
 # ============================================================================
@@ -243,11 +320,35 @@ class CredentialService:
         router: SecretStoreRouter,
         credential_id_factory: Callable[[], str] | None = None,
         secret_ref_factory: Callable[[], str] | None = None,
+        provider_registry: ProviderRegistry | None = None,
+        validation_strategy_registry: ValidationStrategyRegistry | None = None,
+        now_ms: Callable[[], int] | None = None,
     ) -> None:
+        """Initialize CredentialService.
+
+        Args:
+            repository: SQLiteCredentialStore (P1-E1-2).
+            router: SecretStoreRouter for storage_mode → SecretStore routing.
+            credential_id_factory: ID 生成器（默认 `cred-{urlsafe}`）.
+            secret_ref_factory: secret_ref 生成器（默认 `secret-{urlsafe}`）.
+            provider_registry: P1-E1-3B2 validate() 用的 Provider 注册表.
+                None → 用内置 default（Anthropic + GLM）.
+            validation_strategy_registry: validate() 用的 Strategy 注册表.
+                None → 用内置 default（含 AnthropicModelsValidationStrategy）.
+            now_ms: validate() 时间源（用于 last_validated_at）. None → epoch ms.
+        """
         self._repository = repository
         self._router = router
         self._credential_id_factory = credential_id_factory or _default_credential_id
         self._secret_ref_factory = secret_ref_factory or _default_secret_ref
+        self._provider_registry = provider_registry or ProviderRegistry(
+            list_provider_definitions()
+        )
+        self._validation_strategy_registry = (
+            validation_strategy_registry
+            or get_default_validation_strategy_registry()
+        )
+        self._now_ms = now_ms or _default_now_ms
 
     # ========================================================================
     # create
@@ -624,6 +725,175 @@ class CredentialService:
         return views
 
     # ========================================================================
+    # validate（P1-E1-3B2）
+    # ========================================================================
+
+    async def validate(
+        self,
+        credential_id: str,
+        provider_id: str,
+    ) -> CredentialValidationOperationResult:
+        """Validate credential against `provider_id`'s remote endpoint.
+
+        Provider 必须由调用方显式传入——不接受根据 provider_hint / key 格式
+        自动选择，不接受 fallback.
+
+        Non-attempted outcomes（attempted=False，不修改 Repository）：
+            - provider_not_supported       : provider_id 不在 registry
+            - validation_not_supported     : strategy=unsupported / 未注册
+            - credential_missing           : secret 在 backend 中找不到
+
+        Service errors（抛异常，不修改 Repository）：
+            - CredentialNotFoundError            : credential row 不存在
+            - CredentialBackendUnavailableError  : SecretStore backend 不可用
+            - CredentialServiceError             : secret 读失败 / strategy
+                                                  意外异常 / result 不变量违反 /
+                                                  Repository 写失败
+            - CredentialOperationConflictError   : CAS 冲突（并发 rotate / delete）
+
+        State mapping（attempted=True 时 CAS 写入 Repository）：
+            - valid=True                → validation_status='valid',   error_code=None
+            - authentication_failed     → validation_status='invalid', error_code 同
+            - permission_denied / rate_limited / endpoint_unreachable /
+              request_timeout / tls_error / protocol_error / unknown_error
+                                        → validation_status='error',   error_code 同
+        """
+        # Step 1: Read CredentialRecord——不存在时直接抛 NotFound（不是 outcome）
+        record = await self._repository.get(credential_id)
+
+        # Step 2: ProviderDefinition lookup
+        definition = self._provider_registry.get(provider_id)
+        if definition is None:
+            return self._non_attempted_result(
+                record, provider_id, "provider_not_supported"
+            )
+
+        # Step 3: ValidationStrategy lookup——'unsupported' / 未注册 → 不读 Secret
+        strategy = self._validation_strategy_registry.get(
+            definition.credential_validation_strategy
+        )
+        if strategy is None:
+            return self._non_attempted_result(
+                record, provider_id, "validation_not_supported"
+            )
+
+        # Step 4: SecretStore routing——backend 不可用属于 Service Error
+        store = self._router.resolve(record.storage_mode)
+        if not await store.is_available():
+            raise CredentialBackendUnavailableError(
+                f"backend not available for validate "
+                f"(storage_mode={record.storage_mode!r}, "
+                f"credential_id={record.id})"
+            )
+
+        # Step 5: Read Secret——None 表示缺失（attempted=False），其它失败抛
+        try:
+            secret = await store.get(record.secret_ref)
+        except SecretStoreError as e:
+            raise CredentialServiceError(
+                f"failed to read secret during validate "
+                f"(credential_id={record.id})"
+            ) from e
+
+        if secret is None or secret == "":
+            return self._non_attempted_result(
+                record, provider_id, "credential_missing"
+            )
+
+        # Step 6: Capture CAS guard——secret_ref 在网络请求前固定；secret 本身
+        # 不进 CAS / 日志 / result.
+        validated_secret_ref = record.secret_ref
+
+        # Step 7: Call Strategy——意外异常包装为 CredentialServiceError
+        # 使用 `from None` 中断 __cause__ 链：Strategy 异常文本可能含 secret
+        # （Strategy 不变量要求它不抛——但防御性脱敏），spec 要求"不输出原异常文本".
+        try:
+            try:
+                result = await strategy.validate(secret)
+            except Exception:
+                raise CredentialServiceError(
+                    f"validation strategy raised unexpectedly "
+                    f"(credential_id={record.id}, provider_id={provider_id})"
+                ) from None
+        finally:
+            # 缩短 secret 局部引用生命周期——不保证清除 Python 字符串内存
+            del secret
+
+        # Step 8: Validate Strategy 返回的不变量
+        if result.provider_id != provider_id:
+            raise CredentialServiceError(
+                f"validation strategy returned mismatched provider_id "
+                f"(credential_id={record.id}, expected={provider_id!r}, "
+                f"got={result.provider_id!r})"
+            )
+        if not result.valid and result.error_code is None:
+            raise CredentialServiceError(
+                f"validation strategy returned valid=False without error_code "
+                f"(credential_id={record.id}, provider_id={provider_id!r})"
+            )
+        if result.valid and result.error_code is not None:
+            raise CredentialServiceError(
+                f"validation strategy returned valid=True with error_code "
+                f"(credential_id={record.id}, provider_id={provider_id!r})"
+            )
+        if (
+            not result.valid
+            and result.error_code in _NON_ATTEMPTED_ERROR_CODES
+        ):
+            # credential_missing / provider_not_supported / validation_not_supported
+            # 是 Service 层码——Strategy 不允许返回这些
+            raise CredentialServiceError(
+                f"validation strategy returned non-attempted error_code "
+                f"(credential_id={record.id}, provider_id={provider_id!r})"
+            )
+
+        # Step 9: Map result → Repository validation_status
+        new_status, new_error_code = self._map_validation_outcome(result)
+
+        # Step 10: CAS update Repository——使用 strategy 完成后的时间，不是请求开始时间
+        validated_at = self._now_ms()
+        try:
+            updated = await self._repository.update_validation_state(
+                record.id,
+                expected_secret_ref=validated_secret_ref,
+                validation_status=new_status,
+                provider_id=provider_id,
+                validated_at=validated_at,
+                error_code=new_error_code,
+            )
+        except CredentialConcurrentModificationError as e:
+            raise CredentialOperationConflictError(
+                f"credential concurrently modified during validate "
+                f"(credential_id={record.id})"
+            ) from e
+        except CredentialNotFoundError as e:
+            # Row 在 read 和 CAS 之间被 delete——视为并发修改
+            raise CredentialOperationConflictError(
+                f"credential concurrently deleted during validate "
+                f"(credential_id={record.id})"
+            ) from e
+        except CredentialStoreError as e:
+            raise CredentialServiceError(
+                f"repository update_validation_state failed "
+                f"(credential_id={record.id})"
+            ) from e
+
+        # Step 11: Return safe projection——只从 updated record 投影
+        return CredentialValidationOperationResult(
+            credential_id=updated.id,
+            provider_id=provider_id,
+            attempted=True,
+            valid=result.valid,
+            error_code=result.error_code,
+            validation_status=updated.validation_status,
+            last_validated_at=updated.last_validated_at,
+        )
+
+    # ========================================================================
+    # Internal helpers
+    # ========================================================================
+
+    # ========================================================================
     # Internal helpers
     # ========================================================================
 
@@ -649,6 +919,58 @@ class CredentialService:
                 f"(storage_mode={storage_mode!r})"
             )
         return store
+
+    @staticmethod
+    def _non_attempted_result(
+        record: CredentialRecord,
+        provider_id: str,
+        error_code: Literal[
+            "credential_missing",
+            "provider_not_supported",
+            "validation_not_supported",
+        ],
+    ) -> CredentialValidationOperationResult:
+        """Build attempted=False result——Repository **不**被修改.
+
+        现有 validation_status / last_validated_at 保持原值.
+        """
+        return CredentialValidationOperationResult(
+            credential_id=record.id,
+            provider_id=provider_id,
+            attempted=False,
+            valid=None,
+            error_code=error_code,
+            validation_status=record.validation_status,
+            last_validated_at=record.last_validated_at,
+        )
+
+    @staticmethod
+    def _map_validation_outcome(
+        result: ProviderValidationResult,
+    ) -> tuple[CredentialValidationStatus, str | None]:
+        """Map Strategy result → (validation_status, error_code) for Repository.
+
+        valid=True                              → ('valid',    None)
+        authentication_failed                   → ('invalid',  'authentication_failed')
+        permission_denied / rate_limited /
+          endpoint_unreachable / request_timeout /
+          tls_error / protocol_error / unknown_error
+                                                → ('error',    <same code>)
+
+        Strategy 返回 credential-layer code 已在调用处拒绝.
+        """
+        if result.valid:
+            return "valid", None
+        # result.valid=False——error_code 必非 None（已在调用处校验）
+        assert result.error_code is not None
+        if result.error_code in _VALIDATION_OUTCOME_INVALID:
+            return "invalid", result.error_code
+        if result.error_code in _VALIDATION_OUTCOME_ERROR:
+            return "error", result.error_code
+        # 不应到达——非 attempted 码已在调用处拒绝；其余 Literal 由两组 frozenset 覆盖
+        raise CredentialServiceError(
+            f"unmappable validation error_code (error_code={result.error_code!r})"
+        )
 
     async def _compute_storage_status(
         self,
