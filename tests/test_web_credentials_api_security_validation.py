@@ -654,6 +654,51 @@ class TestLeakMatrix:
             assert "SQLiteCredentialStore" not in text
             assert "WebSecurityConfig" not in text
 
+    def test_openapi_credential_422_uses_safe_schema(self, tmp_path: Path) -> None:
+        """P1-E1-5B / LOW-1: Credential paths must not reference HTTPValidationError.
+
+        Credential routes' 422 response must reference SafeValidationErrorResponse
+        (no input / ctx / url / msg fields).
+        """
+        app = _build_app(tmp_path)
+        with TestClient(app) as client:
+            spec = client.get("/openapi.json").json()
+            cred_paths = [
+                p for p in spec["paths"]
+                if "credential" in p or "provider" in p
+            ]
+            assert cred_paths, "expected credential paths in OpenAPI"
+            for path in cred_paths:
+                for method, info in spec["paths"][path].items():
+                    r422 = info.get("responses", {}).get("422", {})
+                    schema_ref = (
+                        r422.get("content", {})
+                        .get("application/json", {})
+                        .get("schema", {})
+                        .get("$ref", "")
+                    )
+                    assert "SafeValidationErrorResponse" in schema_ref, (
+                        f"{method.upper()} {path} 422 must reference "
+                        f"SafeValidationErrorResponse; got {schema_ref!r}"
+                    )
+                    assert "HTTPValidationError" not in schema_ref
+
+    def test_openapi_safe_validation_error_response_has_no_sensitive_fields(
+        self, tmp_path: Path
+    ) -> None:
+        """SafeValidationErrorResponse schema must not include input / ctx / url / msg."""
+        app = _build_app(tmp_path)
+        with TestClient(app) as client:
+            spec = client.get("/openapi.json").json()
+            schemas = spec.get("components", {}).get("schemas", {})
+            assert "SafeValidationErrorResponse" in schemas
+            svr = schemas["SafeValidationErrorResponse"]
+            text = json.dumps(svr)
+            for forbidden in ['"input"', '"ctx"', '"url"', '"msg"']:
+                assert forbidden not in text, (
+                    f"SafeValidationErrorResponse schema leaks {forbidden}: {svr}"
+                )
+
     def test_access_log_no_authorization(self, tmp_path: Path, caplog) -> None:
         """Access log never includes Authorization / x-api-key header value."""
         app = _build_app(tmp_path)

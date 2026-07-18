@@ -1,10 +1,12 @@
 # P1-E1 Security Freeze — Credential Subsystem Audit
 
-> **状态**：AUDIT COMPLETE — pending user approval
+> **状态**：HARDENING COMPLETE — pending final regression
 > **审计基线**：`2f068e2`（feat/p1-e1-secure-credentials, 17 commits ahead of `08c5c8a`）
+> **Hardening 基线**：见 §12.4（MEDIUM-1 / LOW-1 / GAP-1 / GAP-2 / GAP-3 全部 RESOLVED 或 CLOSED）
 > **分支**：`feat/p1-e1-secure-credentials`
 > **审计日期**：2026-07-18
-> **审计模式**：Audit-only — 不修改生产实现
+> **Hardening 日期**：2026-07-18
+> **审计模式**：E1-5A audit-only；E1-5B hardening fix（无产品功能新增）
 
 ## 0. 审计元数据
 
@@ -119,13 +121,18 @@
 | HTTP response body（错误）| **PASS** | `credential_error_to_response`（`credentials_api.py:474-543`）固定 code+message，不返回 `str(exc)` |
 | Test artifact / trace | **PASS** | 测试断言要求 marker 不在 r.text / r.json()——`test_web_credentials_api_security_validation.py::TestLeakMatrix` 13 cases |
 
-### 2.1 状态：**PASS**（14/14 出口；WAL/SHM 通过 SQLite 主文件不变量间接覆盖，无独立 marker scan）
+### 2.1 状态：**PASS**（14/14 出口；WAL/SHM pre/post checkpoint marker scan 在 GAP-1 关闭后已验证）
 
-### 2.2 GAP-1（LOW）：WAL/SHM 无独立 marker scan 测试
+### 2.2 GAP-1：CLOSED @ E1-5B
 
-现有测试通过 marker scan 主 DB 文件 + 字段名检查（`test_credentials_store_security.py::test_sqlite_file_byte_scan`）证明应用层不写完整 secret。但未单独在 WAL checkpoint 前后扫描 WAL / SHM 文件。
-
-**风险评估**：LOW——SQLite WAL 是主 DB page 的写前日志，page 内容由 SQLite 引擎从应用层 SQL 决定；应用层 SQL 不写完整 secret，WAL page 也不含。可在 E1-5B 补一个 checkpoint 前后 marker scan 测试以消除理论 gap。
+E1-5B 新增 `tests/test_credentials_store_security.py::TestWalShmMarkerScan::test_wal_shm_files_pre_and_post_checkpoint_no_marker`：
+- 显式 `PRAGMA journal_mode=WAL` + `PRAGMA wal_autocheckpoint=0`（强制 WAL 模式 + 禁用自动 checkpoint）
+- 创建含 SECRET_MARKER 的 credential record（marker 仅以 masked_value + fingerprint 形式存在 SQLite，原 marker 串永不写入）
+- pre-checkpoint 扫描 `database.db` / `database.db-wal` / `database.db-shm` 三文件（utf-8 + latin-1 双解码）
+- 断言 WAL 文件存在（`-wal` 必须存在以证明 setup 有效）
+- `SELECT * FROM web_credentials` 全行扫描——任何字段不含 marker
+- 通过独立 aiosqlite 连接执行 `PRAGMA wal_checkpoint(FULL)` → post-checkpoint 重扫三文件
+- 全部 0 命中
 
 ---
 
@@ -297,26 +304,32 @@ TrustedHost (outermost)  → body-size  → Origin/header
 
 ### 5.3 差异分析
 
-**Finding MEDIUM-1：Middleware 顺序与 spec 不一致**
+**Finding MEDIUM-1：Middleware 顺序与 spec 不一致** — **RESOLVED @ E1-5B**
 
-- **现状**：CredentialBodyLimit 在外，TrustedHost 在内
+- **审计期现状**（@ `2f068e2`）：CredentialBodyLimit 在外，TrustedHost 在内
 - **Spec 期望**：TrustedHost 在外
-- **影响**：
+- **影响（审计期）**：
   - **Secret 安全性**：无影响——TrustedHost 仍会拒绝非法 Host；secret 永远不读
-  - **DoS 角度**：non-localhost attacker 可触发 32 KiB body buffering，然后被 TrustedHost 拒绝。每次请求消耗 ~32 KiB 内存 + ASGI buffer 时间。本地应用 + TrustedHost 仍 active——攻击面有限
-  - **代码注释**：`app.py:577-585` 显式承认该顺序差异，声称不影响安全
-- **建议修复**（留 E1-5B）：调换 add_middleware 顺序——先 add CredentialBodyLimit（innermost），后 add TrustedHost（outermost）
-- **阻塞冻结？** 否——secret 安全不受影响，且测试已验证两层都 active
+  - **DoS 角度（更准确的描述）**：因为 CredentialBodyLimit 在 TrustedHost 之外，非法 Host 请求会在 TrustedHost 拒绝前触发最多 32 KiB 的请求体预读取——构成有限的本地资源消耗与中间件顺序偏差
+  - **代码注释**：`app.py:577-585`（@ `2f068e2`）显式承认该顺序差异，声称不影响安全
+- **修复（E1-5B）**：`app.py` 收集 TrustedHost / BodyLimit 到 `_pending_middlewares` 列表；BodyLimit 先 add（innermost），TrustedHost 后 add（outermost）——通过统一的 flush 顺序保证跨 if 块的顺序正确
+- **测试证据（E1-5B）**：`tests/test_credentials_api_middleware_order.py`
+  - structural：`app.user_middleware` 列表中 TrustedHostMiddleware 索引 < CredentialBodyLimitMiddleware 索引
+  - unit ASGI（forged CL=100 + 40 KB body）：fixed order → `receive_call_count == 0` + status=400；buggy order → `receive_call_count > 0` + status=413
+  - integration：invalid Host + oversized body → 400（不是 413）
 
 ### 5.4 执行顺序测试覆盖
 
-现有测试覆盖**单层独立工作**：
-- `test_external_host_rejected` / `test_dns_rebinding_host_rejected`：invalid Host → 400（TrustedHost works）
-- `test_body_over_limit_returns_413`：valid Host + over-limit body → 413（BodyLimit works）
+E1-5B 新增 `tests/test_credentials_api_middleware_order.py`（5 cases）：
+- `TestMiddlewareOrderStructural::test_trusted_host_is_outermost`——`app.user_middleware` 列表顺序
+- `TestMiddlewareOrderUnit::test_correct_order_invalid_host_no_body_buffered`——fixed order，forged CL，receive_calls=0
+- `TestMiddlewareOrderUnit::test_buggy_order_invalid_host_buffers_body`——buggy order，证明 buffer loop 会被触发
+- `TestMiddlewareOrderIntegration::test_invalid_host_with_forged_cl_returns_400`——full app，invalid Host → 400
+- `TestMiddlewareOrderIntegration::test_valid_host_oversized_body_returns_413`——body limit 仍工作
 
-**GAP-2（LOW）**：无显式 spy 测试证明「invalid Host + body」时是 TrustedHost 先 400 而非 body buffer 先 413。
+**GAP-2：CLOSED @ E1-5B**
 
-### 5.5 状态：**PASS（with finding MEDIUM-1）**
+### 5.5 状态：**PASS — MEDIUM-1 RESOLVED, GAP-2 CLOSED**
 
 ---
 
@@ -339,11 +352,18 @@ TrustedHost (outermost)  → body-size  → Origin/header
 | 下游第二次读取 body | replay_receive 在 yielded_body + yielded_final 后返回 `http.disconnect`——第三次 receive 不会 hang | `credentials_api.py:225-242` replay_state machine |
 | 非保护路径 | `_is_target` False → 直接 `await self.app(scope, receive, send)`，不 buffer | `credentials_api.py:186-188` pass-through |
 
-### 6.2 GAP-3（LOW）：无独立 disconnect race 测试
+### 6.2 GAP-3：CLOSED @ E1-5B（含附带 bug 修复）
 
-无显式测试断言「buffering 中途收到 http.disconnect → 不阻塞、不 hang downstream」。源码逻辑正确（`credentials_api.py:204-207`），但缺独立测试。
+E1-5B 新增 `tests/test_credentials_api_body_limit.py::TestAsgiBodyMiddlewareEdgeCases`（5 cases）：
+- `test_empty_body_downstream_reads_empty`——空 body 正常传递
+- `test_multi_chunk_replayed_intact`——多 chunk（A, B, C more_body=True / final False）→ 下游 `request.body()` 收到 `A+B+C`，每字节只出现一次
+- `test_downstream_body_cached_across_reads`——Starlette Request body 缓存，多次 `request.body()` 返回相同结果，不 hang
+- `test_http_disconnect_mid_stream_no_endpoint_call`——`http.request more_body=True` + `http.disconnect` → middleware 不调用 endpoint、不发响应、不 hang
+- `test_over_limit_endpoint_not_called_no_body_replay`——超过 32 KiB → 413；endpoint 调用次数=0；413 响应 body 不含请求 body 片段
 
-### 6.3 状态：**PASS（with GAP-3）**
+**附带 bug 修复**：实施 GAP-3 测试时发现 `CredentialBodyLimitMiddleware` 在 `http.disconnect` 中途断开时，原代码会继续调用 inner app（`__call__` 设置 `overflow=False; break`，然后落入 `await self.app(scope, replay_receive, send)` 分支）。修复：新增 `disconnected` flag，disconnect 时直接 return——不调用 endpoint、不发送响应、不构造虚假 body。修复位置：`src/pi_agent_core_py/web/credentials_api.py` CredentialBodyLimitMiddleware.__call__。
+
+### 6.3 状态：**PASS — GAP-3 CLOSED（含附带 disconnect bug 修复）**
 
 ---
 
@@ -428,18 +448,21 @@ POST   /api/credentials/{credential_id}/validate
 
 OpenAPI 全 schema 文本扫描 `secret_ref` / `fingerprint` / `fingerprint_sha256` / `Authorization` / `x-api-key`：**0 命中**。
 
-### 8.4 Finding LOW-1：OpenAPI 422 schema 与运行时响应不一致
+### 8.4 Finding LOW-1：OpenAPI 422 schema 与运行时响应不一致 — **RESOLVED @ E1-5B**
 
-- **现状**：Credential paths 的 OpenAPI `422` response 仍引用 `HTTPValidationError` schema（默认 FastAPI 形状 `{detail: [{loc, msg, type, input, ctx, url}]}`）
+- **审计期现状**（@ `2f068e2`）：Credential paths 的 OpenAPI `422` response 仍引用 `HTTPValidationError` schema（默认 FastAPI 形状 `{detail: [{loc, msg, type, input, ctx, url}]}`）
 - **运行时**：`CredentialAPIRoute` 的 `safe_validation_response` 返回 `{error: {code, message, fields: [{path, code}]}}`
-- **影响**：
+- **影响（审计期）**：
   - **不是 secret 泄漏**——HTTPValidationError schema 只是 shape，不含 secret example
   - 是 **API 文档不一致**——客户端按 OpenAPI 生成 client 会期望错误的 422 shape
   - `input` / `ctx` / `url` 字段在 OpenAPI 文档里仍存在，但运行时不会返回
-- **建议修复**（留 E1-5B 或更晚）：给 Credential 路由显式声明 `responses={422: {"model": ...}}`，覆盖默认 schema
-- **阻塞冻结？** 否——非 secret 泄漏，仅文档精度问题
+- **修复（E1-5B）**：`credentials_dto.py` 新增 `SafeValidationField` / `SafeValidationErrorDetail` / `SafeValidationErrorResponse`（全 `extra="forbid"`）；`credentials_api.py::build_credential_router` 在 `APIRouter(responses={422: {"model": SafeValidationErrorResponse, "description": "Credential request validation failed."}})` 显式声明
+- **测试证据（E1-5B）**：`tests/test_web_credentials_api_security_validation.py`
+  - `test_openapi_credential_422_uses_safe_schema`——所有 8 个 credential path 的 422 response `$ref` 指向 SafeValidationErrorResponse；不引用 HTTPValidationError
+  - `test_openapi_safe_validation_error_response_has_no_sensitive_fields`——SafeValidationErrorResponse schema 不含 `"input"` / `"ctx"` / `"url"` / `"msg"`
+- **既有 API 不变**：HTTPValidationError schema 仍存在于 OpenAPI（其他非 credential 路由仍用默认 422）；只 credential 路由的 422 shape 改变
 
-### 8.5 状态：**PASS（with finding LOW-1）**
+### 8.5 状态：**PASS — LOW-1 RESOLVED**
 
 ---
 
@@ -517,15 +540,15 @@ Credential 子系统是**自包含模块**：
 
 ## 11. 发现项汇总
 
-### 11.1 Finding 列表
+### 11.1 Finding 列表（审计期 @ `2f068e2` + E1-5B remediation 状态）
 
-| ID | 等级 | 位置 | 描述 | 阻塞冻结？ |
-|---|---|---|---|---|
-| MEDIUM-1 | MEDIUM | `web/app.py:557-589` | Middleware 顺序与 spec 不一致——CredentialBodyLimit 在 TrustedHost 之外（spec 期望 TrustedHost 最外）。Secret 安全不受影响，DoS 角度有限（32 KiB buffer/请求） | 否 |
-| LOW-1 | LOW | `credentials_api.py`（OpenAPI 422 schema）| OpenAPI 422 response 仍引用默认 `HTTPValidationError` schema（含 input/ctx/url 字段），运行时实际返回 safe shape。文档/运行时不一致；非 secret 泄漏 | 否 |
-| GAP-1 | LOW（信息）| WAL/SHM marker scan | 主 DB 文件 marker scan 通过；无独立 WAL/SHM 文件 scan 测试。SQLite WAL 是主文件 page 拷贝，应用层不写 secret 即不泄漏 | 否 |
-| GAP-2 | LOW（信息）| Middleware order spy | 无显式 spy 测试证明 invalid Host + body 时 TrustedHost 先于 body limit buffer | 否 |
-| GAP-3 | LOW（信息）| ASGI disconnect race | 无独立测试断言 buffering 中途 `http.disconnect` 不阻塞 downstream | 否 |
+| ID | 等级 | 位置（审计期）| 描述 | 阻塞冻结？ | E1-5B 状态 |
+|---|---|---|---|---|---|
+| MEDIUM-1 | MEDIUM | `web/app.py:557-589` | Middleware 顺序与 spec 不一致——CredentialBodyLimit 在 TrustedHost 之外。Secret 安全不受影响，DoS 角度有限（forged CL + 32 KiB buffer/请求） | 否 | **RESOLVED** — TrustedHost 现在 outermost；receive_call_count==0 for invalid Host |
+| LOW-1 | LOW | `credentials_api.py`（OpenAPI 422 schema）| OpenAPI 422 response 引用默认 `HTTPValidationError` schema（含 input/ctx/url 字段）；运行时返回 safe shape | 否 | **RESOLVED** — Credential 路由声明 `responses={422: SafeValidationErrorResponse}` |
+| GAP-1 | LOW（信息）| WAL/SHM marker scan | 主 DB 文件 marker scan 通过；无独立 WAL/SHM 文件 scan 测试 | 否 | **CLOSED** — `TestWalShmMarkerScan` pre/post checkpoint 全部扫描 |
+| GAP-2 | LOW（信息）| Middleware order spy | 无显式 spy 测试证明 invalid Host + body 时 TrustedHost 先于 body limit buffer | 否 | **CLOSED** — `test_credentials_api_middleware_order.py`（structural + unit + integration）|
+| GAP-3 | LOW（信息）| ASGI disconnect race | 无独立测试断言 buffering 中途 `http.disconnect` 不阻塞 downstream | 否 | **CLOSED** — `TestAsgiBodyMiddlewareEdgeCases`（5 cases）+ 附带 disconnect bug 修复 |
 
 ### 11.2 阻塞规则
 
@@ -550,57 +573,69 @@ Credential 子系统是**自包含模块**：
 ## 12. 汇总
 
 ```
-Audit controls:   78 (across §1–§10)
-PASS:             78
-FAIL:              0
-GAP:               3 (GAP-1, GAP-2, GAP-3 — all LOW/INFO)
-CRITICAL:          0
-HIGH:              0
-MEDIUM:            1 (MEDIUM-1 — middleware ordering, secret-safe)
-LOW:               1 (LOW-1 — OpenAPI 422 doc mismatch)
-INFO:              0
+Planned audit controls:        78 (across §1–§10)
+PASS:                          78
+FAIL:                           0
+Supplemental evidence gaps:     3 (GAP-1, GAP-2, GAP-3 — closed in E1-5B)
 
-Blocking findings: 0 CRITICAL, 0 HIGH
-Residual risks:    MEDIUM-1（middleware 顺序差异，DoS 角度有限）
-                  LOW-1（OpenAPI 422 schema 与运行时 shape 不一致）
+Findings (audit baseline @ 2f068e2):
+  CRITICAL:   0
+  HIGH:       0
+  MEDIUM:     1 (MEDIUM-1 — middleware ordering)
+  LOW:        1 (LOW-1 — OpenAPI 422 doc mismatch)
+  INFO:       0
 
-E1-5B 是否需要：建议——
-  - 修复 MEDIUM-1（调换 add_middleware 顺序，1 行改动）
-  - 修复 LOW-1（声明 Credential 路由 responses={422:...}）
-  - 补 GAP-1/2/3 测试（共约 4 个测试用例）
-  
-  E1-5B 总规模约 1–2 commit，不阻塞 E1-5C final freeze。
+Hardening status (@ E1-5B):
+  MEDIUM-1:  RESOLVED — TrustedHost now outermost; receive_call_count == 0 for invalid Host
+  LOW-1:     RESOLVED — Credential routes declare responses={422: SafeValidationErrorResponse}
+  GAP-1:     CLOSED   — WAL/SHM marker scan test added (pre + post checkpoint)
+  GAP-2:     CLOSED   — Middleware order spy tests added (structural + unit ASGI + integration)
+  GAP-3:     CLOSED   — ASGI edge case tests added (empty / multi-chunk / replay / disconnect / over-limit)
+                        Plus: disconnect bug fixed (middleware no longer calls endpoint after http.disconnect)
+
+Blocking findings: 0 CRITICAL, 0 HIGH, 0 unresolved MEDIUM
+Residual risks:    none
 ```
 
 ### 12.1 冻结判定
 
-无 CRITICAL / HIGH finding。
-
-MEDIUM-1 的接受理由：
-1. Secret 安全性完全不受影响——两层 middleware 都 active，非法 Host 仍被拒绝
-2. DoS 角度有限——攻击者需为非 localhost（TrustedHost 仍 reject），且每次最多 32 KiB buffer
-3. 测试已验证两层独立工作（`test_external_host_rejected` + `test_body_over_limit_returns_413`）
-4. E1-5B 可一键修复（调换 add_middleware 顺序）
-
-LOW-1 的接受理由：
-1. 非 secret 泄漏——OpenAPI schema shape 不含 secret example
-2. 仅影响客户端生成代码的 422 处理精度
-3. E1-5B 可通过 `responses={422: {"model": ...}}` 修复
+无 CRITICAL / HIGH finding。MEDIUM-1 已在 E1-5B 修复——TrustedHost 现在是最外层
+middleware，非法 Host 在 CredentialBodyLimit 读取请求体前被拒绝（forged CL 场景下
+receive_call_count == 0，已通过 spy 测试证明）。
 
 ### 12.2 状态
 
-> **状态**：AUDIT COMPLETE — pending user approval
+> **状态**：HARDENING COMPLETE — pending final regression
 
-### 12.3 推荐 E1-5B scope
+### 12.3 E1-5B 实施记录
 
-如 user 授权 E1-5B（hardening fixes）：
-1. `app.py`：调换 add_middleware 顺序——TrustedHost 后 add（outermost）
-2. `credentials_api.py`：给 CredentialAPIRoute 用路由显式声明 `responses={422: {"model": SafeValidationErrorResponse}}`
-3. 新测试 `test_credentials_api_middleware_order.py`：spy 验证 TrustedHost 在 body buffer 之前执行
-4. 新测试 `test_credentials_store_security.py` 补 WAL/SHM marker scan
-5. 新测试 `test_credentials_api_body_limit.py` 补 `http.disconnect` race
+**5 项 finding / gap 全部修复**（基线 `2f068e2` → E1-5B HEAD）：
 
-E1-5B 估计 1–2 commit；完成后 E1-5C 重跑完整离线 pytest + 4-run E2E gate。
+| ID | 修复方式 | 涉及文件 | 测试 |
+|---|---|---|---|
+| MEDIUM-1 | `app.py` 收集 TrustedHost / BodyLimit 到 `_pending_middlewares` 列表，按 BodyLimit 先 add / TrustedHost 后 add 顺序 flush，保证 TrustedHost outermost | `src/pi_agent_core_py/web/app.py` | `tests/test_credentials_api_middleware_order.py`（5 cases：1 structural + 2 unit + 2 integration）|
+| LOW-1 | 新增 `SafeValidationField` / `SafeValidationErrorDetail` / `SafeValidationErrorResponse` 到 `credentials_dto.py`；`build_credential_router` 在 APIRouter 构造时声明 `responses={422:...}` | `src/pi_agent_core_py/web/credentials_dto.py`, `src/pi_agent_core_py/web/credentials_api.py` | `tests/test_web_credentials_api_security_validation.py`（新增 2 cases：OpenAPI 422 schema + 无 sensitive fields）|
+| GAP-1 | 新增 `TestWalShmMarkerScan` 类——强制 `journal_mode=WAL` + `wal_autocheckpoint=0`，pre-checkpoint + post-checkpoint 扫描 main / -wal / -shm | `tests/test_credentials_store_security.py` | 1 case |
+| GAP-2 | 新增 `tests/test_credentials_api_middleware_order.py`——structural（user_middleware ordering）+ unit ASGI（直接 middleware 构造，forged CL 触发 buffer loop）+ integration（TestClient）| 新文件 | 5 cases |
+| GAP-3 | 新增 `TestAsgiBodyMiddlewareEdgeCases` 类——empty body / multi-chunk replay / downstream cached replay / `http.disconnect` / over-limit endpoint not called | `tests/test_credentials_api_body_limit.py` | 5 cases |
+
+**附带 bug 修复**（GAP-3 实施过程中发现）：`CredentialBodyLimitMiddleware` 在
+`http.disconnect` 中途断开时，原代码会继续调用 inner app——已修复，新增
+`disconnected` 标志在 disconnect 时直接 return，不调用 endpoint、不发送响应。
+
+### 12.4 E1-5B 验证基线（pending final regression）
+
+| 命令 | 期望结果 |
+|---|---|
+| `/d/miniconda/envs/pipy/python.exe -m pytest tests/ -m "not slow and not integration and not docker" --no-cov -q` | ≥ 1820 + ~13 new = **~1833 passed** |
+| `/d/miniconda/envs/pipy/python.exe -m pytest tests/test_credentials_*.py tests/test_provider_validation_*.py tests/test_secret_store_router.py tests/test_local_web_security.py tests/test_web_credential_runtime_integration.py tests/test_web_credentials_api_security_validation.py --no-cov -q` | ≥ 554 + ~13 new = **~567 passed** |
+| `/d/miniconda/envs/pipy/python.exe -m ruff check src tests scripts` | All checks passed! |
+| `git diff --check` | clean |
+| `git status --short` | clean |
+| Playwright 默认 + `--workers=1`（各 1 次） | 37/37 PASS each（middleware 改动不影响前端，但按 spec 验证）|
+| 真实外部网络调用 | 0 |
+
+最终多轮稳定性门槛（4-run gate）留 E1-5C 执行。
 
 ---
 
@@ -610,10 +645,11 @@ E1-5B 估计 1–2 commit；完成后 E1-5C 重跑完整离线 pytest + 4-run E2
 - [x] §2 持久化出口（14 出口）
 - [x] §3 补偿/CAS 状态机（4 操作 × 多场景）
 - [x] §4 HTTP 安全边界（19 控制）
-- [x] §5 Middleware 顺序（含 finding MEDIUM-1）
-- [x] §6 ASGI body pre-buffer（10 行为 + GAP-3）
+- [x] §5 Middleware 顺序（MEDIUM-1 RESOLVED @ E1-5B）
+- [x] §6 ASGI body pre-buffer（10 行为 + GAP-3 CLOSED + disconnect bug 修复）
 - [x] §7 错误与日志（9 危险模式 + catch-all 投影）
-- [x] §8 OpenAPI（5 schema + finding LOW-1）
+- [x] §8 OpenAPI（5 schema + LOW-1 RESOLVED @ E1-5B）
 - [x] §9 配置矩阵（7 config + 5 readiness + 6 misc）
 - [x] §10 跨子系统隔离（10 子系统 + 架构依据）
-- [x] §11 Findings 分级（5 项，无 CRITICAL/HIGH）
+- [x] §11 Findings 分级（5 项；E1-5B 全部 RESOLVED/CLOSED）
+- [x] §12 汇总——状态 HARDENING COMPLETE — pending final regression

@@ -9,6 +9,10 @@
 3. OpenAPI 标记 `secret_value` 为 `format=password` + `writeOnly=True`
 4. 不提供 example / default——防御 OpenAPI 文档泄漏
 5. `extra="forbid"`——任何额外字段直接 422
+
+P1-E1-5B / LOW-1：新增 SafeValidation* 响应模型，覆盖 OpenAPI 默认 422 schema
+（默认 HTTPValidationError 含 input / ctx / url 字段——即使运行时不返回，OpenAPI
+文档仍声明，会让客户端按错误 shape 生成代码）。
 """
 from __future__ import annotations
 
@@ -27,6 +31,10 @@ __all__ = [
     "CredentialLabelUpdateRequest",
     "CredentialRotateRequest",
     "CredentialValidateRequest",
+    # 422 response models（P1-E1-5B / LOW-1）
+    "SafeValidationField",
+    "SafeValidationErrorDetail",
+    "SafeValidationErrorResponse",
 ]
 
 
@@ -269,3 +277,43 @@ class CredentialValidateRequest(BaseModel):
     @classmethod
     def _check_provider_id(cls, v: str) -> str:
         return _validate_provider_id(v)
+
+
+# ============================================================================
+# Safe 422 response models（P1-E1-5B / LOW-1）
+# ============================================================================
+
+
+class SafeValidationField(BaseModel):
+    """Single field projection in safe 422 response——path + code only.
+
+    Never contains input / ctx / msg / url（Pydantic default carries these
+    in `ValidationError`；we project only safe fields）.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    code: str
+
+
+class SafeValidationErrorDetail(BaseModel):
+    """Error body shape returned by `safe_validation_response`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: Literal["request_validation_failed"]
+    message: str
+    fields: list[SafeValidationField]
+
+
+class SafeValidationErrorResponse(BaseModel):
+    """Wrapper——top-level response model for Credential 422 responses.
+
+    Declared via `APIRouter(responses={422: {"model": SafeValidationErrorResponse}})`
+    to override FastAPI's default `HTTPValidationError` schema.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    error: SafeValidationErrorDetail

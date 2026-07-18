@@ -44,6 +44,7 @@ from .credentials_dto import (
     CredentialRotateRequest,
     CredentialValidateRequest,
     ProviderHintRequest,
+    SafeValidationErrorResponse,
 )
 from .credentials_errors import (
     CredentialBackendUnavailableError,
@@ -197,13 +198,20 @@ class CredentialBodyLimitMiddleware:
         # respond without reading body (e.g. simple JSON return). Stream
         # counting via wrapped receive alone would miss that case.
         # For 32 KiB max, buffering is acceptable.
+        #
+        # Disconnect handling (P1-E1-5B / GAP-3): if the client disconnects
+        # mid-body, return WITHOUT calling inner app and WITHOUT sending a
+        # response. Calling the endpoint after disconnect risks running
+        # side effects for a client that's already gone, and synthesizing
+        # a response that can never be delivered wastes resources.
         buffered = bytearray()
         overflow = False
+        disconnected = False
         while True:
             msg = await receive()
             mtype = msg.get("type")
             if mtype == "http.disconnect":
-                overflow = False
+                disconnected = True
                 break
             if mtype != "http.request":
                 continue
@@ -214,6 +222,10 @@ class CredentialBodyLimitMiddleware:
                 break
             if not msg.get("more_body", False):
                 break
+
+        if disconnected:
+            # Client already gone——do NOT call inner app, do NOT send response.
+            return
 
         if overflow:
             await self._send_413(send)
@@ -561,6 +573,8 @@ def build_credential_router(
     Security envelope applied to ALL routes on this router:
         - X-PI-Agent-UI: 1 required
         - Origin validated against allowed_ui_origins
+        - 422 responses use SafeValidationErrorResponse (not FastAPI default
+          HTTPValidationError, which exposes input / ctx / url)
     """
     router = APIRouter(
         prefix=prefix,
@@ -569,6 +583,12 @@ def build_credential_router(
             Depends(require_ui_header_dep(config)),
             Depends(require_allowed_origin_dep(config)),
         ],
+        responses={
+            422: {
+                "model": SafeValidationErrorResponse,
+                "description": "Credential request validation failed.",
+            },
+        },
     )
     return router
 

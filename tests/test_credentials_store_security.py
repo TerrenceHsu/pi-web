@@ -94,6 +94,97 @@ class TestSQLiteByteContent:
 
 
 # ============================================================================
+# 1b. P1-E1-5B / GAP-1: SQLite WAL / SHM marker scan pre-checkpoint
+# ============================================================================
+
+
+class TestWalShmMarkerScan:
+    """Scan main DB + WAL + SHM files for marker before AND after checkpoint.
+
+    SQLite WAL (write-ahead log) keeps recent writes in a -wal sidecar file
+    until checkpoint merges them into the main DB. The -shm file is a shared
+    memory index for WAL. We must verify the raw secret never appears in
+    any of these.
+
+    Setup explicitly forces journal_mode=WAL (default is delete) so a -wal
+    file actually exists to scan.
+    """
+
+    @staticmethod
+    def _scan_file(path, label: str) -> None:
+        """Assert SECRET_MARKER not in file bytes (utf-8 + latin-1 decode)."""
+        from pathlib import Path
+
+        p = Path(path)
+        if not p.exists():
+            return  # file not generated——skip (not a failure)
+        data = p.read_bytes()
+        for decode in ("utf-8", "latin-1"):
+            decoded = data.decode(decode, errors="ignore")
+            assert SECRET_MARKER not in decoded, (
+                f"SECRET_MARKER leaked into {label} ({decode} decode)"
+            )
+
+    async def test_wal_shm_files_pre_and_post_checkpoint_no_marker(self, tmp_path) -> None:
+        db_path = str(tmp_path / "wal_check.db")
+        s = await SQLiteCredentialStore.open(db_path)
+
+        # Force WAL mode——default is delete which produces no -wal/-shm files
+        async with s._require_db().execute("PRAGMA journal_mode=WAL") as cur:
+            row = await cur.fetchone()
+            assert row is not None and row[0].lower() == "wal", (
+                f"failed to enable WAL mode; got {row}"
+            )
+        # Disable auto-checkpoint so WAL retains writes until we explicitly checkpoint
+        async with s._require_db().execute("PRAGMA wal_autocheckpoint=0"):
+            pass
+
+        # Insert record with marker (only masked_value + fingerprint are stored;
+        # raw SECRET_MARKER must NEVER be written)
+        await s.create(_record_with_marker())
+
+        main_path = db_path
+        wal_path = db_path + "-wal"
+        shm_path = db_path + "-shm"
+
+        # Pre-checkpoint scan——WAL file MUST exist (we wrote + disabled autocheckpoint).
+        # Use os.path.exists (sync) wrapped in asyncio.to_thread to satisfy ASYNC240.
+        import asyncio
+        import os
+
+        wal_exists = await asyncio.to_thread(os.path.exists, wal_path)
+        assert wal_exists, (
+            "WAL file must exist pre-checkpoint after writes (test setup failure)"
+        )
+
+        self._scan_file(main_path, "main DB pre-checkpoint")
+        self._scan_file(wal_path, "WAL pre-checkpoint")
+        self._scan_file(shm_path, "SHM pre-checkpoint")
+
+        # SELECT * — verify rows themselves don't contain raw marker
+        async with s._require_db().execute("SELECT * FROM web_credentials") as cur:
+            rows = await cur.fetchall()
+        for row in rows:
+            for key in row.keys():
+                v = row[key]
+                if isinstance(v, str):
+                    assert SECRET_MARKER not in v, (
+                        f"SECRET_MARKER in row column {key}: {v!r}"
+                    )
+
+        # Now checkpoint via separate connection and re-scan
+        async with aiosqlite.connect(db_path) as conn:
+            await conn.execute("PRAGMA wal_checkpoint(FULL)")
+            await conn.commit()
+
+        self._scan_file(main_path, "main DB post-checkpoint")
+        self._scan_file(wal_path, "WAL post-checkpoint")
+        self._scan_file(shm_path, "SHM post-checkpoint")
+
+        await s.close()
+
+
+# ============================================================================
 # 2. SELECT * FROM web_credentials——marker 0 命中
 # ============================================================================
 
