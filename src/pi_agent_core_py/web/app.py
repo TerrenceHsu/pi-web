@@ -545,6 +545,16 @@ def create_app(
     # P1-E1-4A / B3: TrustedHost middleware（resolve 后的 flag 决定）
     # 默认 False 保留所有既有 create_app 调用点不变；启用 Credentials API
     # 时强制 True（已在 resolve_credential_api_configuration 中校验）
+    #
+    # Middleware 顺序（P1-E1-5B / MEDIUM-1 修复）：
+    # Starlette add_middleware 用 insert(0,...)——last add = outermost。
+    # 必须先 add BodyLimit（inner），再 add TrustedHost（outer），这样
+    # TrustedHost 在最外层——非法 Host 在 CredentialBodyLimit 读取请求体
+    # 前被拒绝。两个 if 块按 TrustedHost / BodyLimit 各自条件独立 add，
+    # 但通过统一的 _pending_middlewares 列表收集后按 TrustedHost 后 add
+    # 的顺序 flush，确保跨 if 块的顺序也正确。
+    _pending_middlewares: list[tuple[type, dict]] = []
+
     if _cred_resolved.trusted_host_enabled:
         from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -554,9 +564,11 @@ def create_app(
             extra_hosts=credential_extra_hosts,
             extra_ui_origins=credential_extra_ui_origins,
         )
-        app.add_middleware(
-            TrustedHostMiddleware,
-            allowed_hosts=list(_ws_cfg.allowed_hosts),
+        _pending_middlewares.append(
+            (
+                TrustedHostMiddleware,
+                {"allowed_hosts": list(_ws_cfg.allowed_hosts)},
+            )
         )
 
     # P1-E1-4B3: Credential REST API（8 endpoints）+ 32 KiB body limit
@@ -574,19 +586,25 @@ def create_app(
         )
         # Mount Credential Router——security deps 由 router 自带
         app.include_router(build_full_credential_router(_cred_ws_cfg))
-        # Body limit middleware——inner（TrustedHost outer 已经先 add）
-        # 顺序：先 add body limit（innermost）→ TrustedHost 已经 add 在前
-        # 实际：TrustedHost 最后 add → outermost；body limit → inner
-        # 但 Starlette add_middleware 是 insert(0,...)——last add = outermost
-        # 这里我们再 add body limit——它会成为 OUTERMOST
-        # 想要 TrustedHost outermost，应该 TrustedHost 最后 add
-        # 当前顺序：TrustedHost 先 add（在外层）→ body limit 后 add（更外层）
-        # 这意味着 body limit 检查发生在 TrustedHost 之前——不影响安全
-        # 因为两者都是 localhost 边界——任一拒绝都返回相同语义错误
-        app.add_middleware(
-            CredentialBodyLimitMiddleware,
-            max_bytes=_cred_ws_cfg.max_request_body_bytes,
+        # Body limit middleware——insert at HEAD of pending list so it's
+        # flushed FIRST (innermost); TrustedHost (already in list) is
+        # flushed LAST (outermost) per Starlette's insert(0, ...) semantics.
+        _pending_middlewares.insert(
+            0,
+            (
+                CredentialBodyLimitMiddleware,
+                {"max_bytes": _cred_ws_cfg.max_request_body_bytes},
+            ),
         )
+
+    # Flush in list order: each add_middleware does insert(0, ...).
+    # After flushing [BodyLimit, TrustedHost] in order:
+    #   user_middleware == [TrustedHost, BodyLimit]
+    #   build_middleware_stack iterates reversed → [BodyLimit, TrustedHost]
+    #   final wrap: router → BodyLimit(router) → TrustedHost(BodyLimit(router))
+    #   call order: TrustedHost first (outermost), then BodyLimit, then router.
+    for cls, kwargs in _pending_middlewares:
+        app.add_middleware(cls, **kwargs)
 
     # SSE 客户端队列集合——每个 SSE 连接独立 asyncio.Queue；
     # on_event hook 把 event 广播（put_nowait）到所有客户端队列
