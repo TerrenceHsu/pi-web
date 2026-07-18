@@ -44,6 +44,10 @@ web = [
     # Starlette TestClient 走 ASGI mock 不需要，所以测试全绿不代表线上能跑。
     # 2026-07-07 真实环境激活才发现；详见 docs/RELEASE_NOTES_WEB_CLAUDE_P0.md。
     "websockets>=12",
+    # OS keyring backend——P1-E1-1 加。
+    # Optional at runtime——OSKeyringSecretStore 延迟 import，缺失时 fallback 到
+    # InMemorySecretStore（CI / E2E / Docker）。永不 fallback 到 SQLite 明文。
+    "keyring>=25",
 ]
 
 [build-system]

@@ -242,6 +242,18 @@ def create_app(
     max_session_upload_size: int = 100 * 1024 * 1024,
     request_history_maxlen: int = 100,
     shutdown_grace_s: float = 5.0,
+    # P1-E1-4A: Credential runtime composition（可选）
+    # None / ":memory:" 时跳过 credential runtime——保持向后兼容
+    credential_secret_backend: str = "auto",
+    enable_credential_runtime: bool | None = None,
+    enable_trusted_host: bool = False,
+    credential_extra_hosts: tuple[str, ...] = (),
+    credential_extra_ui_origins: tuple[str, ...] = (),
+    # P1-E1-4B3: Credential REST API（8 endpoints）
+    # None=auto（runtime 启用时自动 mount）
+    # True=强制启用（需 runtime + TrustedHost + file SQLite）
+    # False=禁用
+    enable_credentials_api: bool | None = None,
 ) -> FastAPI:
     """构造一个 FastAPI 实例。
 
@@ -274,6 +286,27 @@ def create_app(
         "sse_clients": set(),
         "ws_clients": set(),
     }
+
+    # ========================================================================
+    # P1-E1-4B3: Resolve Credential API configuration at app creation
+    # ========================================================================
+    from .credentials_runtime import (
+        CredentialWebSecurityConfigurationError,
+        resolve_credential_api_configuration,
+    )
+
+    try:
+        _cred_resolved = resolve_credential_api_configuration(
+            enable_credentials_api=enable_credentials_api,
+            enable_credential_runtime=enable_credential_runtime,
+            enable_trusted_host=enable_trusted_host,
+            db_path=db_path,
+        )
+    except CredentialWebSecurityConfigurationError as e:
+        # 不静默降级——必须显式修正
+        raise RuntimeError(
+            f"credential web security configuration error: {e}"
+        ) from e
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -370,7 +403,48 @@ def create_app(
         # P1-C4: 恢复 MCP server 配置 + auto attach + apply disabled tools
         await _restore_mcp_servers(extension_store)
 
-        yield
+        # ====================================================================
+        # P1-E1-4A: Credential Runtime Composition Root
+        # 仅在文件型 DB 路径 + 显式 / 默认 enable 时启动；独立 connection
+        # 与 session/extension store 共享 DB 文件但生命周期独立
+        # ====================================================================
+        from .credentials_runtime import (
+            build_credential_runtime_config,
+            credential_runtime_context,
+        )
+        from .local_web_security import default_web_security_config
+
+        cred_runtime_cm = None
+        if _cred_resolved.runtime_enabled:
+            try:
+                cred_cfg = build_credential_runtime_config(
+                    database_path=str(db_path),
+                    secret_backend_mode=credential_secret_backend,
+                    web_security=default_web_security_config(
+                        extra_hosts=credential_extra_hosts,
+                        extra_ui_origins=credential_extra_ui_origins,
+                    ),
+                )
+                cred_runtime_cm = credential_runtime_context(cred_cfg)
+            except Exception as e:
+                # 配置错误——拒绝启动（不静默降级）
+                raise RuntimeError(
+                    f"credential runtime config error: {type(e).__name__}"
+                ) from e
+
+        if cred_runtime_cm is not None:
+            _app.state.credential_runtime = await cred_runtime_cm.__aenter__()
+            try:
+                yield
+            finally:
+                _app.state.credential_runtime = None
+                try:
+                    await cred_runtime_cm.__aexit__(None, None, None)
+                except Exception:
+                    pass
+        else:
+            _app.state.credential_runtime = None
+            yield
 
         # ====================================================================
         # P1-B1: shutdown 收敛——先收敛 active request，再走原清理流程
@@ -465,6 +539,72 @@ def create_app(
     app.state.web = state
     app.state.allow_prompt_preview = allow_prompt_preview
     app.state.event_buffer_max_size = event_buffer_max_size
+    # P1-E1-4A: credential_runtime placeholder——lifespan 启动时填入
+    app.state.credential_runtime = None
+
+    # P1-E1-4A / B3: TrustedHost middleware（resolve 后的 flag 决定）
+    # 默认 False 保留所有既有 create_app 调用点不变；启用 Credentials API
+    # 时强制 True（已在 resolve_credential_api_configuration 中校验）
+    #
+    # Middleware 顺序（P1-E1-5B / MEDIUM-1 修复）：
+    # Starlette add_middleware 用 insert(0,...)——last add = outermost。
+    # 必须先 add BodyLimit（inner），再 add TrustedHost（outer），这样
+    # TrustedHost 在最外层——非法 Host 在 CredentialBodyLimit 读取请求体
+    # 前被拒绝。两个 if 块按 TrustedHost / BodyLimit 各自条件独立 add，
+    # 但通过统一的 _pending_middlewares 列表收集后按 TrustedHost 后 add
+    # 的顺序 flush，确保跨 if 块的顺序也正确。
+    _pending_middlewares: list[tuple[type, dict]] = []
+
+    if _cred_resolved.trusted_host_enabled:
+        from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+        from .local_web_security import default_web_security_config
+
+        _ws_cfg = default_web_security_config(
+            extra_hosts=credential_extra_hosts,
+            extra_ui_origins=credential_extra_ui_origins,
+        )
+        _pending_middlewares.append(
+            (
+                TrustedHostMiddleware,
+                {"allowed_hosts": list(_ws_cfg.allowed_hosts)},
+            )
+        )
+
+    # P1-E1-4B3: Credential REST API（8 endpoints）+ 32 KiB body limit
+    # 仅在 API enabled 时 mount——Router 自带 X-PI-Agent-UI / Origin 强制
+    if _cred_resolved.api_enabled:
+        from .credentials_api import (
+            CredentialBodyLimitMiddleware,
+            build_full_credential_router,
+        )
+        from .local_web_security import default_web_security_config as _dws
+
+        _cred_ws_cfg = _dws(
+            extra_hosts=credential_extra_hosts,
+            extra_ui_origins=credential_extra_ui_origins,
+        )
+        # Mount Credential Router——security deps 由 router 自带
+        app.include_router(build_full_credential_router(_cred_ws_cfg))
+        # Body limit middleware——insert at HEAD of pending list so it's
+        # flushed FIRST (innermost); TrustedHost (already in list) is
+        # flushed LAST (outermost) per Starlette's insert(0, ...) semantics.
+        _pending_middlewares.insert(
+            0,
+            (
+                CredentialBodyLimitMiddleware,
+                {"max_bytes": _cred_ws_cfg.max_request_body_bytes},
+            ),
+        )
+
+    # Flush in list order: each add_middleware does insert(0, ...).
+    # After flushing [BodyLimit, TrustedHost] in order:
+    #   user_middleware == [TrustedHost, BodyLimit]
+    #   build_middleware_stack iterates reversed → [BodyLimit, TrustedHost]
+    #   final wrap: router → BodyLimit(router) → TrustedHost(BodyLimit(router))
+    #   call order: TrustedHost first (outermost), then BodyLimit, then router.
+    for cls, kwargs in _pending_middlewares:
+        app.add_middleware(cls, **kwargs)
 
     # SSE 客户端队列集合——每个 SSE 连接独立 asyncio.Queue；
     # on_event hook 把 event 广播（put_nowait）到所有客户端队列
