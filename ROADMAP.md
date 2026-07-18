@@ -42,14 +42,37 @@
 - Regenerate 模型切换（P1-E3）
 - OpenAI Adapter 完整实现（按需在 P1-E2 加）
 
-### P1-E2 — Profiles + Model Catalog + Session Binding
+### P1-E2 — Profiles + Session Model Bindings（最简后端方案，DESIGN FROZEN 2026-07-19）
 
-**范围**：
-- `ProviderProfile`（聚合 credential + provider + base_url + default_model）
-- `SessionModelBinding`（每 session 独立选择，全局默认仅用于新建）
-- model refresh（远端 `/models` + 内置静态目录 + 用户 custom）
-- `ModelCapabilities`（streaming / tool_calling / reasoning / vision / context_window——未知用 `None`）
-- restart persistence（SQLite profile + binding 恢复）
+> 详细方案：[docs/design/p1-e2-provider-profiles.md](docs/design/p1-e2-provider-profiles.md)
+>
+> 与原 ROADmap 比，**删除 Model Catalog / Custom Model / Capabilities 持久化 / 远程模型目录调用**——只保留 ProviderProfile + SessionModelBinding + `Profile.is_default`。模型列表只返回**静态建议常量**（Anthropic 静态 + GLM 静态），**E2 内不读取 Credential、不构造 HTTP client、不调用任何 `/v1/models` 远端**。Custom Base URL 暂不支持（仅内置 anthropic / glm）。
+
+**3 张表 / 4 个主要新增生产模块 + 现有最小接线修改 / 7 API 操作 / E2 真实网络调用 = 0**：
+
+- `web_provider_config_schema_meta`（schema version，独立）
+- `web_provider_profiles`（`id` 随机不可预测 / `name` / `provider_id` 创建后 immutable / `credential_id` 创建/更新时必须存在但无 FK / `default_model` / `enabled` / `is_default` / timestamps）
+- `web_session_model_bindings`（`session_id` PK / `profile_id` / `model_id` / `source ∈ {default, explicit}` / timestamps；FK profile ON DELETE RESTRICT；不对 session_id 建外键避免与 Session Store 耦合）
+- Store 独立 connection：`PRAGMA foreign_keys=ON` 必须验证返回 1；显式 profile-in-use 查询 + FK RESTRICT 双重保险
+- 主要新增模块：`web/provider_config_store.py` / `web/provider_config_service.py` / `web/provider_profiles_api.py` / `web/model_options.py`
+- 最小接线修改：`web/app.py` + 现有通用安全边界模块（E1 已落地，复用不复制）+ Session 创建路径（E2-3A 审计后确定）
+
+**E2 包含**：Profile CRUD（`provider_id` 创建后 immutable；`profile_id` 随机不可预测）；Session Binding get/upsert/delete；新 Session 自动物化默认 Profile（仅当 `enabled=true`，`source=default`，之后修改默认 Profile 不影响已有 Session）；Profile status 运行时派生（ready / disabled / needs_credential / needs_key / backend_unavailable / credential_invalid / credential_error——后两者仅在 `last_validated_provider_id == profile.provider_id` 时生效）；enabled/is_default 交叉约束（`is_default` 要求 `enabled`；禁用当前默认同事务清除 `is_default`；显式绑定 disabled Profile 返回 409 `profile_disabled`；已有 Binding 在 Profile 后续被禁用时继续保留）；restart persistence；Anthropic + GLM 静态建议 + 手动 `model_id`（控制字符 / 换行 / NUL 拒绝；不强制在静态列表内）；`model_id` / `provider_id` / `credential_id` 数据约束（§5.4）；E1 安全 envelope 复用（TrustedHost / Origin / `X-PI-Agent-UI` / 32 KiB body / SafeValidationError）。
+
+**E2 显式不包含**：当前 Prompt 真正切换 Provider（E3）；Regenerate 接入（E3）；Agent Runtime 改动（Core Runtime diff = 0）；前端模型选择器（E4）；**任何远程模型目录 API 调用 / HTTP client / Secret 读取 / remote `ModelOption` source**；模型目录表 / 模型能力表 / Custom Model CRUD / Global Default 表 / 模型 refresh 持久化 / Custom Base URL / Custom Provider / OpenAI-compatible Adapter / D2 Revision schema 修改；复制第二套安全中间件；大规模重构 `web/app.py`。
+
+**API（7 个）**：
+- `GET /api/provider-profiles`
+- `POST /api/provider-profiles`
+- `PATCH /api/provider-profiles/{profile_id}`
+- `DELETE /api/provider-profiles/{profile_id}`（被 Session 使用时 409 `profile_in_use`；FK RESTRICT + 显式查询双重保险）
+- `GET /api/provider-profiles/{profile_id}/models`（**静态建议**；不读 Credential、不访问网络；仍要求 UI header + Host/Origin）
+- `GET /api/sessions/{session_id}/model-binding`
+- `PUT /api/sessions/{session_id}/model-binding`
+
+**阶段拆分（5 个，含审计门）**：E2-1 Schema+Store → E2-2 Service+Static Model Options → **E2-3A Session Creation Audit（无生产代码）** → E2-3 REST API+Session Creation Binding → E2-4 Restart+Security+Freeze。
+
+**验收清单（29 项）**：详见 design doc §15（含 enabled/default 交叉、provider 作用域、随机 ID、控制字符拒绝、FK pragma 验证、E2 网络调用 = 0）。
 
 ### P1-E3 — Request-scoped Provider Selection
 
