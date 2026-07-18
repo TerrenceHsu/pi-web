@@ -37,10 +37,12 @@ __all__ = [
 
 MAX_SECRET_BYTES = 8192
 MAX_LABEL_CHARS = 128
-# Provider ID / Credential ID 限定 ASCII lower-case / digits / "-" / "_"
-# 避免任意超长字符串进日志或数据库查询
+# Provider ID——内置 ID（anthropic/glm）+ future user profiles.
+# 限定 ASCII lower-case / digits / "-" / "_"——避免任意字符串进日志或 SQL
 PROVIDER_ID_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,63}$"
-CREDENTIAL_ID_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,127}$"
+# Credential ID——由 secrets.token_urlsafe() 生成（mixed-case）+ "cred-" prefix.
+# 允许 ASCII letters（both cases）/ digits / "-" / "_"——但限定长度避免日志膨胀
+CREDENTIAL_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
 
 _PROVIDER_ID_RE = re.compile(PROVIDER_ID_PATTERN)
 _CREDENTIAL_ID_RE = re.compile(CREDENTIAL_ID_PATTERN)

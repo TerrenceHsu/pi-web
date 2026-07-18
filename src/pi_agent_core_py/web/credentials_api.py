@@ -24,14 +24,27 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from ..providers.registry import (
+    ProviderDefinition,
+    detect_provider_hint,
+    list_provider_definitions,
+)
+from .credentials_dto import (
+    CREDENTIAL_ID_PATTERN,
+    CredentialCreateRequest,
+    CredentialLabelUpdateRequest,
+    CredentialRotateRequest,
+    CredentialValidateRequest,
+    ProviderHintRequest,
+)
 from .credentials_errors import (
     CredentialBackendUnavailableError,
     CredentialCompensationError,
@@ -40,6 +53,13 @@ from .credentials_errors import (
     CredentialSecretDeleteError,
     CredentialSecretWriteError,
     CredentialServiceError,
+)
+from .credentials_service import (
+    CreateCredentialCommand,
+    CredentialService,
+    CredentialValidationOperationResult,
+    CredentialView,
+    RotateCredentialCommand,
 )
 from .credentials_store import (
     CredentialAlreadyExistsError,
@@ -62,6 +82,13 @@ __all__ = [
     "credential_error_to_response",
     # Router factory
     "build_credential_router",
+    "register_credential_endpoints",
+    "build_full_credential_router",
+    "get_credential_service",
+    # Serializers
+    "serialize_credential_view",
+    "serialize_validation_result",
+    "serialize_provider_definition",
     # Paths
     "CREDENTIAL_API_PATH_PREFIXES",
 ]
@@ -410,6 +437,31 @@ class CredentialAPIRoute(APIRoute):
                     "invalid_origin",
                     "Request origin is not allowed.",
                 )
+            except HTTPException as exc:
+                # Pass through HTTPException raised by deps (e.g. service
+                # not available)——convert detail to safe shape.
+                if isinstance(exc.detail, dict) and "code" in exc.detail:
+                    return _credential_error_response(
+                        exc.status_code,
+                        exc.detail["code"],
+                        exc.detail.get("message", ""),
+                    )
+                # Generic——don't leak detail
+                return _credential_error_response(
+                    exc.status_code,
+                    "credential_error",
+                    "Credential request failed.",
+                )
+            except Exception as exc:
+                mapped = credential_error_to_response(exc)
+                if mapped is not None:
+                    return mapped
+                # Unknown——return safe 500 (do not leak str(exc))
+                return _credential_error_response(
+                    status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    "credential_internal_error",
+                    "Credential service error.",
+                )
 
         return custom_route_handler
 
@@ -518,4 +570,278 @@ def build_credential_router(
             Depends(require_allowed_origin_dep(config)),
         ],
     )
+    return router
+
+
+# ============================================================================
+# Service dependency——reads CredentialService from app.state.credential_runtime
+# ============================================================================
+
+
+async def get_credential_service(request: Request) -> CredentialService:
+    """FastAPI dep——read CredentialService from app.state.credential_runtime.
+
+    Raises HTTPException(503) if runtime not initialized (e.g. App started
+    with db_path=None).
+    """
+    runtime = getattr(request.app.state, "credential_runtime", None)
+    if runtime is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "credential_runtime_unavailable",
+                "message": "Credential runtime is not initialized.",
+            },
+        )
+    return runtime.service
+
+
+# ============================================================================
+# Serializers
+# ============================================================================
+
+
+def serialize_credential_view(view: CredentialView) -> dict:
+    """Safe JSON projection of CredentialView.
+
+    Excludes secret_ref / fingerprint / raw record.
+    """
+    return {
+        "credential_id": view.id,
+        "label": view.label,
+        "storage_mode": view.storage_mode,
+        "storage_status": view.storage_status,
+        "masked_value": view.masked_value,
+        "provider_hint": view.provider_hint,
+        "provider_hint_confidence": view.provider_hint_confidence,
+        "validation_status": view.validation_status,
+        "last_validated_provider_id": view.last_validated_provider_id,
+        "last_validated_at": view.last_validated_at,
+        "last_error_code": view.last_error_code,
+        "created_at": view.created_at,
+        "updated_at": view.updated_at,
+    }
+
+
+def serialize_validation_result(
+    result: CredentialValidationOperationResult,
+) -> dict:
+    """Safe JSON projection of CredentialValidationOperationResult."""
+    return {
+        "credential_id": result.credential_id,
+        "provider_id": result.provider_id,
+        "attempted": result.attempted,
+        "valid": result.valid,
+        "error_code": result.error_code,
+        "validation_status": result.validation_status,
+        "last_validated_at": result.last_validated_at,
+    }
+
+
+def serialize_provider_definition(def_: ProviderDefinition) -> dict:
+    """Safe JSON projection——no internal endpoint / strategy / key hints."""
+    return {
+        "id": def_.id,
+        "display_name": def_.display_name,
+        "api_style": def_.api_style,
+        "validation_supported": def_.credential_validation_strategy != "unsupported",
+        "supports_model_listing": def_.supports_model_listing,
+    }
+
+
+# ============================================================================
+# Endpoint registration——8 endpoints
+# ============================================================================
+
+
+def register_credential_endpoints(router: APIRouter) -> None:
+    """Register the 8 Credential API endpoints on the given router.
+
+    Router must already have security deps installed (X-PI-Agent-UI / Origin).
+
+    All endpoints only call CredentialService——never touch Repository /
+    SecretStore / Strategy internals directly.
+    """
+
+    # ========================================================================
+    # 1. GET /api/provider-definitions
+    # ========================================================================
+
+    @router.get("/api/provider-definitions")
+    async def get_provider_definitions() -> list[dict]:
+        """Return built-in provider definitions (no internal endpoint info)."""
+        return [
+            serialize_provider_definition(d)
+            for d in list_provider_definitions()
+        ]
+
+    # ========================================================================
+    # 2. POST /api/provider-hints
+    # ========================================================================
+
+    @router.post("/api/provider-hints")
+    async def detect_hint(req: ProviderHintRequest) -> dict:
+        """Local provider hint detection——no network / no persistence."""
+        # Extract secret to local var, then release dto + secret ASAP
+        secret_value = req.secret_value.get_secret_value()
+        try:
+            result = detect_provider_hint(secret_value)
+        finally:
+            del secret_value
+        return {
+            "candidates": list(result.candidates),
+            "confidence": result.confidence,
+            "reason_code": result.reason_code,
+        }
+
+    # ========================================================================
+    # 3. GET /api/credentials
+    # ========================================================================
+
+    @router.get("/api/credentials")
+    async def list_credentials(
+        service: Annotated[CredentialService, Depends(get_credential_service)],
+        limit: int = 100,
+    ) -> dict:
+        """List user credentials as safe CredentialView projection."""
+        if limit < 1:
+            limit = 1
+        if limit > 500:
+            limit = 500
+        views = await service.list(limit=limit)
+        return {"credentials": [serialize_credential_view(v) for v in views]}
+
+    # ========================================================================
+    # 4. POST /api/credentials
+    # ========================================================================
+
+    @router.post("/api/credentials", status_code=status.HTTP_201_CREATED)
+    async def create_credential(
+        req: CredentialCreateRequest,
+        service: Annotated[CredentialService, Depends(get_credential_service)],
+    ) -> JSONResponse:
+        """Create credential + secret atomically (with compensation)."""
+        """Create credential + secret atomically (with compensation)."""
+        # Cross-field validation——raise as CredentialInputError for 422 mapping
+        try:
+            req.normalize()
+        except ValueError:
+            raise CredentialInputError(
+                "credential input combination is invalid"
+            ) from None
+        # Build command——secret_value only extracted here, kept in local frame
+        command = CreateCredentialCommand(
+            label=req.label,
+            storage_mode=req.storage_mode,
+            secret_value=(
+                req.secret_value.get_secret_value()
+                if req.secret_value is not None
+                else None
+            ),
+            env_var_name=req.env_var_name,
+        )
+        result = await service.create(command)
+        # Fetch fresh view (computes storage_status)
+        view = await service.get(result.record.id)
+        return JSONResponse(
+            status_code=status.HTTP_201_CREATED,
+            content={
+                "credential": serialize_credential_view(view),
+                "warnings": list(result.warnings),
+            },
+        )
+
+    # ========================================================================
+    # 5. PATCH /api/credentials/{credential_id}
+    # ========================================================================
+
+    @router.patch("/api/credentials/{credential_id}")
+    async def update_label(
+        credential_id: Annotated[str, Path(pattern=CREDENTIAL_ID_PATTERN)],
+        req: CredentialLabelUpdateRequest,
+        service: Annotated[CredentialService, Depends(get_credential_service)],
+    ) -> dict:
+        """Update label only——no secret / validation state change."""
+        result = await service.update_label(credential_id, req.label)
+        view = await service.get(result.record.id)
+        return {"credential": serialize_credential_view(view)}
+
+    # ========================================================================
+    # 6. PUT /api/credentials/{credential_id}/secret
+    # ========================================================================
+
+    @router.put("/api/credentials/{credential_id}/secret")
+    async def rotate_secret(
+        credential_id: Annotated[str, Path(pattern=CREDENTIAL_ID_PATTERN)],
+        req: CredentialRotateRequest,
+        service: Annotated[CredentialService, Depends(get_credential_service)],
+    ) -> dict:
+        """Rotate secret + reset validation state with CAS."""
+        try:
+            req.normalize()
+        except ValueError:
+            raise CredentialInputError(
+                "rotate input combination is invalid"
+            ) from None
+        command = RotateCredentialCommand(
+            credential_id=credential_id,
+            secret_value=(
+                req.secret_value.get_secret_value()
+                if req.secret_value is not None
+                else None
+            ),
+            env_var_name=req.env_var_name,
+        )
+        result = await service.rotate(command)
+        view = await service.get(result.record.id)
+        return {
+            "credential": serialize_credential_view(view),
+            "warnings": list(result.warnings),
+        }
+
+    # ========================================================================
+    # 7. DELETE /api/credentials/{credential_id}
+    # ========================================================================
+
+    @router.delete("/api/credentials/{credential_id}")
+    async def delete_credential(
+        credential_id: Annotated[str, Path(pattern=CREDENTIAL_ID_PATTERN)],
+        service: Annotated[CredentialService, Depends(get_credential_service)],
+    ) -> dict:
+        """Delete credential + secret (best-effort old secret cleanup)."""
+        result = await service.delete(credential_id)
+        return {
+            "credential_id": result.credential_id,
+            "deleted": True,
+            "warnings": list(result.warnings),
+        }
+
+    # ========================================================================
+    # 8. POST /api/credentials/{credential_id}/validate
+    # ========================================================================
+
+    @router.post("/api/credentials/{credential_id}/validate")
+    async def validate_credential(
+        credential_id: Annotated[str, Path(pattern=CREDENTIAL_ID_PATTERN)],
+        req: CredentialValidateRequest,
+        service: Annotated[CredentialService, Depends(get_credential_service)],
+    ) -> dict:
+        """Remote credential validation. Non-attempted outcomes return 200."""
+        result = await service.validate(credential_id, req.provider_id)
+        return serialize_validation_result(result)
+
+
+# ============================================================================
+# Convenience: build full Credential API router with all 8 endpoints
+# ============================================================================
+
+
+def build_full_credential_router(
+    config: WebSecurityConfig,
+    *,
+    prefix: str = "",
+) -> APIRouter:
+    """Build router with security deps + all 8 endpoints registered."""
+    router = build_credential_router(config, prefix=prefix)
+    register_credential_endpoints(router)
     return router
