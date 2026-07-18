@@ -1,12 +1,14 @@
 # P1-E1 Security Freeze — Credential Subsystem Audit
 
-> **状态**：HARDENING COMPLETE — pending final regression
+> **状态**：SECURITY FREEZE COMPLETE — approved for merge
 > **审计基线**：`2f068e2`（feat/p1-e1-secure-credentials, 17 commits ahead of `08c5c8a`）
 > **Hardening 基线**：见 §12.4（MEDIUM-1 / LOW-1 / GAP-1 / GAP-2 / GAP-3 全部 RESOLVED 或 CLOSED）
-> **分支**：`feat/p1-e1-secure-credentials`
+> **Final regression 基线**：见 §12.5（E1-5C @ `59f397c`，含完整离线 / Credential / E2E / Marker / OpenAPI / Leak matrix 全部通过）
+> **分支**：`feat/p1-e1-secure-credentials`（21 commits ahead of `master`）
 > **审计日期**：2026-07-18
 > **Hardening 日期**：2026-07-18
-> **审计模式**：E1-5A audit-only；E1-5B hardening fix（无产品功能新增）
+> **Final regression 日期**：2026-07-18
+> **审计模式**：E1-5A audit-only；E1-5B hardening fix；E1-5C final regression freeze（无产品功能新增）
 
 ## 0. 审计元数据
 
@@ -605,7 +607,7 @@ receive_call_count == 0，已通过 spy 测试证明）。
 
 ### 12.2 状态
 
-> **状态**：HARDENING COMPLETE — pending final regression
+> **状态**：SECURITY FREEZE COMPLETE — approved for merge
 
 ### 12.3 E1-5B 实施记录
 
@@ -637,6 +639,141 @@ receive_call_count == 0，已通过 spy 测试证明）。
 
 最终多轮稳定性门槛（4-run gate）留 E1-5C 执行。
 
+### 12.5 E1-5C Final Regression & Freeze 基线（@ `59f397c`）
+
+**执行日期**：2026-07-18
+**Code baseline**：`59f397c`（branch `feat/p1-e1-secure-credentials`，21 commits ahead of `master`）
+
+#### 分支完整性
+
+| 检查 | 结果 |
+|---|---|
+| `git status --short` | clean |
+| `git diff --check` | clean |
+| `git rev-list --left-right --count master...HEAD` | `0  21`（master 无未集成 commit） |
+| `git diff --name-status master...HEAD` | 仅涉及 `src/pi_agent_core_py/{providers,secrets,web}/`、`tests/`、`docs/`、`pyproject.toml`、`uv.lock`——frontend / core runtime / PDF / RAG / ModelCatalog 0 改动 |
+
+#### Credential 子集回归
+
+| 命令 | 结果 |
+|---|---|
+| 9-file security boundary subset（middleware order / body limit / validation errors / api security / store security / service security / service validation security / provider validation security / local web security） | **116 passed** / 0 failed |
+| Full credential subset（38 files：credentials_api / credentials_dto / credentials_endpoints / credentials_runtime / credentials_service / credentials_store / e1_secret_primitives / local_web_security / provider_hint / provider_registry / provider_validation / secret_store_* / secret_utils / web_credential_runtime_integration / web_credentials_api_security_validation） | **702 passed** / 0 failed |
+
+#### 完整离线 pytest
+
+| 命令 | 结果 |
+|---|---|
+| `pytest tests/ -m "not slow and not integration and not docker" --no-cov -q` | **1833 passed** / 14 deselected / 0 failed / 0 error（95s） |
+
+#### Ruff + diff check
+
+| 命令 | 结果 |
+|---|---|
+| `ruff check src tests scripts` | All checks passed! |
+| `git diff --check` | clean |
+
+#### Playwright E2E 稳定性门槛（4-run gate）
+
+| Run | Workers | 结果 | 耗时 |
+|---|---|---|---|
+| 1 | default | **37/37 PASS** | 1.5m |
+| 2 | default | **37/37 PASS** | 1.4m |
+| 3 | default | **37/37 PASS** | 1.5m |
+| 4 | `--workers=1` | **37/37 PASS** | 1.4m |
+
+4/4 通过，0 flaky，0 retry，exit code 0。所有 Stop button / async stream / event dedup / extension persistence / MCP / regenerate / web claude smoke 测试稳定。
+
+#### Secret Leak Matrix（持久化出口验证）
+
+E1-5C 显式重跑 45 项持久化出口 marker 测试，全部 PASS（覆盖 §2 全部 14 出口）：
+
+| 出口 | 关键测试（E1-5C 重跑通过）|
+|---|---|
+| SQLite main / WAL / SHM | `TestWalShmMarkerScan::test_wal_shm_files_pre_and_post_checkpoint_no_marker`、`test_sqlite_no_marker`、`TestLeakMatrix::test_sqlite_no_marker` |
+| SELECT * 全行扫描 | `TestLeakMatrix::test_sqlite_no_marker`（utf-8 + latin-1 双解码）|
+| Session Snapshot | `TestLeakMatrix::test_session_snapshot_no_marker` |
+| Revision content | （revision 由 regenerate 写；Credential 不调 revision repository——`rg 'credential' serializers.py` 0 hit）|
+| Export Markdown | `TestLeakMatrix::test_export_markdown_no_marker` |
+| WebSocket / event buffer | （Credential 不触发 AgentEvent——`_web_event_hook` 仅接收 harness event）|
+| OpenAPI | `TestLeakMatrix::test_openapi_no_marker`、`test_openapi_does_not_expose_internal_models`、`test_openapi_credential_422_uses_safe_schema`、`test_openapi_safe_validation_error_response_has_no_sensitive_fields`、`TestSecurityBoundaries::test_openapi_marks_secret_writeonly`、`test_openapi_has_no_secret_example` |
+| REST response（成功）| `TestLeakMatrix::test_rest_success_response_no_marker`、`test_response_headers_no_marker` |
+| REST response（错误）| `TestLeakMatrix::test_rest_error_response_no_marker`、`test_traceback_not_in_response` |
+| 日志 | `TestLeakMatrix::test_access_log_no_marker`、`test_access_log_no_authorization` |
+| secret_ref 出口 | `TestLeakMatrix::test_secret_ref_not_returned` |
+| 原始 provider response | `TestLeakMatrix::test_raw_provider_response_not_returned` |
+| 异常 `__cause__` 链 | `test_strategy_exception_does_not_leak_via_cause_chain`（via `_walk_cause_chain`）|
+| Server restart | `TestServerRestart::test_credential_record_persists_across_restart`、`TestRecordPersistence::test_record_survives_restart_same_db_file`、`test_record_survives_reopen` |
+| Store concurrency | `test_concurrent_modification_error_does_not_leak_ref` |
+
+#### Secret Marker 扫描（生产源码）
+
+| 命令 | 结果 |
+|---|---|
+| `rg 'PI_E1_SECRET_MARKER_7F3A91D2' src/ frontend/ scripts/` | **0 命中** |
+
+#### 危险模式扫描与分类
+
+扫描 `src/pi_agent_core_py/{web,providers,secrets}/`，对每个命中逐项分类：
+
+| 模式 | 命中位置 | 分类 |
+|---|---|---|
+| `secret_ref` 字面量 | `web/credentials_store.py` / `web/credentials_service.py` / `web/credentials_errors.py` / `web/secret_store_router.py` / `secrets/{base,memory,env,keyring_store,errors,__init__}.py` | **SAFE_INTERNAL_USE**（内部数据 store key / DTO 字段过滤注释 / debug-only `SecretStoreError.secret_ref` 属性——by design 不含 Key 片段）|
+| `fingerprint_sha256` 字面量 | `web/credentials_store.py`（DDL / row factory / serializer 过滤）| **SAFE_INTERNAL_USE**（内部 dedup 索引，serializer 永不输出）|
+| `x-api-key` 字面量 | `web/provider_validation.py:20,162,182,217,221`、`providers/registry.py:61,226` | **EXPECTED_PROVIDER_HEADER**（Anthropic Models API GET /v1/models——line 182 显式「**不**调用 response.json()/response.text」；异常 `from None` 切断 cause 链）|
+| `detail=str(` / `message=str(` / `logger.exception` / `repr(request)` / `request.json(` / `response.text` / `response.json()` / `Authorization` | **0 命中** | n/a |
+
+**分类统计**：
+- **FORBIDDEN_OUTPUT**：0
+- **REQUIRES_REVIEW**：0
+- **SAFE_INTERNAL_USE**：全部 internal-data / serializer / DTO / store / debug-only 属性
+- **EXPECTED_PROVIDER_HEADER**：Anthropic API 出站 header（合法使用，response body 不在错误路径中读取）
+
+#### OpenAPI 最终扫描
+
+实际生成 `/openapi.json`（`enable_credentials_api=True` + `enable_trusted_host=True` + file SQLite）：
+
+| 检查 | 结果 |
+|---|---|
+| 6 个 credential path entries（8 endpoints） | `/api/credentials`、`/api/credentials/{credential_id}`、`/api/credentials/{credential_id}/secret`、`/api/credentials/{credential_id}/validate`、`/api/provider-definitions`、`/api/provider-hints` 全部存在 |
+| `secret_value.writeOnly` | True（`CredentialCreateRequest` / `CredentialRotateRequest` / `ProviderHintRequest`）|
+| `secret_value.format` | password（同上 3 schema）|
+| `secret_value` example / default | 0 命中 |
+| `secret_ref` 出现在任何 schema | **0 命中** |
+| `fingerprint_sha256` 出现在任何 schema | **0 命中** |
+| `HTTPValidationError` 出现在任何 credential endpoint | **0 命中**（仍保留在 37 个非 credential endpoint——保持原行为）|
+| `SafeValidationErrorResponse` 在 credential endpoint 422 引用 | 8/8 endpoint |
+| `AnthropicModelsValidationStrategy` / `KeyringSecretStore` / `pi_agent_core_py.secrets.keyring` / `keyring_service_name` / `keyring://` / `credential_validation_endpoint` | **0 命中** |
+| `Strategy` 字面量出现在 OpenAPI | **0 命中** |
+
+#### 真实外部网络调用
+
+**0 次**。E1-5C 全部使用 TestClient + httpx MockTransport + FakeClient/FakeStrategy；不命中 Anthropic / GLM / 任何外部 endpoint。
+
+#### Findings / Gaps 终态
+
+| ID | 等级 | E1-5B 状态 | E1-5C 验证 |
+|---|---|---|---|
+| MEDIUM-1 | MEDIUM | RESOLVED | re-verified（5 middleware-order tests 全部通过；TrustedHost 仍 outermost）|
+| LOW-1 | LOW | RESOLVED | re-verified（OpenAPI credential 422 全部引用 SafeValidationErrorResponse）|
+| GAP-1 | INFO | CLOSED | re-verified（TestWalShmMarkerScan pre/post checkpoint 0 命中）|
+| GAP-2 | INFO | CLOSED | re-verified（structural + unit ASGI + integration 5 cases 全部通过）|
+| GAP-3 | INFO | CLOSED | re-verified（5 edge case + disconnect bug 修复保持）|
+
+**CRITICAL**：0；**HIGH**：0；**MEDIUM open**：0；**LOW open**：0；**GAP open**：0。
+
+#### 残余风险（架构边界，不阻塞冻结）
+
+1. Python `str` 无法提供可靠的内存清零保证——进程内存中可能在 GC 前残留 secret 副本。E1 通过 `SecretStr` + 局部变量尽早出栈 + `finally: del secret` 尽力缩短窗口，但无法提供 zeroization 保证。
+2. OS Keyring 的安全性依赖宿主系统 backend（Windows Credential Manager / macOS Keychain / libsecret 等）——应用层无法控制 backend 的加密强度与访问控制。
+3. `session_only`（`InMemorySecretStore`）按设计在进程重启后丢失——用户必须预期此行为。
+4. GLM credential remote validation 仍为 unsupported（无 `GLMValidationStrategy`）——只有 Anthropic Models API 走远端验证；GLM credential 只能通过本地 storage readiness 检查。
+5. localhost-only 安全模型（TrustedHost allowlist + 32 KiB body limit + UI header + Origin 检查）不等同于多用户公共部署安全模型——不应直接暴露到公网或共享主机环境。
+
+#### E1-5C 状态
+
+> **状态**：PASS / FROZEN — 所有 final-regression 门槛通过；准备 no-ff merge 到 master + 创建 annotated tag `v0.0.27-secure-credentials`。
+
 ---
 
 ## 13. 审计清单（参考）
@@ -652,4 +789,4 @@ receive_call_count == 0，已通过 spy 测试证明）。
 - [x] §9 配置矩阵（7 config + 5 readiness + 6 misc）
 - [x] §10 跨子系统隔离（10 子系统 + 架构依据）
 - [x] §11 Findings 分级（5 项；E1-5B 全部 RESOLVED/CLOSED）
-- [x] §12 汇总——状态 HARDENING COMPLETE — pending final regression
+- [x] §12 汇总——状态 SECURITY FREEZE COMPLETE — approved for merge（含 §12.5 E1-5C final regression 基线 @ `59f397c`）
