@@ -664,6 +664,30 @@ def create_app(
             ),
         )
 
+    # P1-E2-3B2: Provider Profiles REST API（7 endpoints）
+    # 与 Credential API 共用 WebSecurityConfig；Router 复用 E1 安全 deps
+    if _pc_resolved.api_enabled:
+        from .local_web_security import default_web_security_config as _pc_ws
+        from .provider_profiles_api import (
+            ProviderProfileBodyLimitMiddleware,
+            build_full_provider_profile_router,
+        )
+
+        _pc_ws_cfg = _pc_ws(
+            extra_hosts=credential_extra_hosts,
+            extra_ui_origins=credential_extra_ui_origins,
+        )
+        app.include_router(build_full_provider_profile_router(_pc_ws_cfg))
+        # Body limit middleware—reuses CredentialBodyLimitMiddleware via subclass
+        # with Provider-Profile-specific path predicate. Flushed innermost.
+        _pending_middlewares.insert(
+            0,
+            (
+                ProviderProfileBodyLimitMiddleware,
+                {"max_bytes": _pc_ws_cfg.max_request_body_bytes},
+            ),
+        )
+
     # Flush in list order: each add_middleware does insert(0, ...).
     # After flushing [BodyLimit, TrustedHost] in order:
     #   user_middleware == [TrustedHost, BodyLimit]
