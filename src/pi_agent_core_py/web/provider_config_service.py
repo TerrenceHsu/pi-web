@@ -470,6 +470,53 @@ class ProviderConfigService:
     # Session binding
     # ------------------------------------------------------------------
 
+    async def initialize_new_session_binding(
+        self,
+        *,
+        session_id: str,
+    ) -> SessionModelBinding | None:
+        """Initialize default binding for a freshly-created Session.
+
+        Called by Session create handler AFTER session row commits, BEFORE HTTP
+        response returns. Returns the new binding, or None if no default Profile.
+
+        Semantics (E2-3A audit §5.5):
+            1. ``store.get_default_profile()``—none → return None (Session
+               created without binding—valid outcome)
+            2. Default Profile exists → ``upsert_binding(session_id,
+               profile.id, profile.default_model, source="default")``
+            3. Return binding
+
+        Does NOT (per E2-3A):
+            - call ``session_exists`` (caller just created the session)
+            - read Credential or check Profile status
+            - check Profile.enabled (default Profile is always enabled per
+              E2-1 partial unique index + E2-2 enabled/is_default cross-constraint)
+
+        Failure modes (handled by caller's compensation logic):
+            - Profile deleted between query and binding insert (FK fails)
+              → ``ProviderProfileNotFoundError`` propagated; caller compensates
+                by deleting Session.
+            - Other Store errors → propagate; caller compensates.
+
+        Notes:
+            - Profile query + binding insert are NOT in a single transaction
+              (different connection from Session Store, so cross-store atomic
+              is impossible per SQLite standard).
+            - Snapshot semantics: the Profile's ``default_model`` at this
+              moment is captured. Later changes to Profile.default_model do
+              not affect this Binding.
+        """
+        profile = await self._store.get_default_profile()
+        if profile is None:
+            return None
+        return await self._store.upsert_binding(
+            session_id=session_id,
+            profile_id=profile.id,
+            model_id=profile.default_model,
+            source="default",
+        )
+
     async def get_session_binding(
         self,
         session_id: str,

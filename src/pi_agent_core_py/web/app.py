@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections import deque
 from collections.abc import AsyncIterator
@@ -2394,10 +2395,16 @@ def create_app(
         return {"count": len(items), "sessions": items}
 
     @app.post("/api/sessions", response_model=None)
-    async def post_sessions(payload: dict[str, Any]) -> dict[str, Any] | JSONResponse:
+    async def post_sessions(
+        request: Request, payload: dict[str, Any],
+    ) -> dict[str, Any] | JSONResponse:
         """创建新 session（spec endpoint，P0-1）。
 
         Body: `{"title": "..."}` （title 可选）
+
+        P1-E2-3B3: After Session row commits, snapshot the current default
+        Provider Profile into a SessionModelBinding (source="default").
+        Binding failure triggers shielded compensation delete per E2-3A audit.
         """
         store = state.session_store
         if store is None:
@@ -2408,6 +2415,50 @@ def create_app(
         title = (payload or {}).get("title") or "default"
         meta = (payload or {}).get("metadata") or {}
         s = await store.create_session(title=title, metadata=meta)
+
+        # P1-E2-3B3: Snapshot default Profile/Model into a binding.
+        # Provider config runtime is optional (legacy create_app without flags
+        # has it disabled). When None, Session is created without binding.
+        pc_runtime = getattr(request.app.state, "provider_config_runtime", None)
+        if pc_runtime is not None:
+            try:
+                await pc_runtime.service.initialize_new_session_binding(
+                    session_id=s.id,
+                )
+            except asyncio.CancelledError:
+                # Client disconnect during binding write—shield compensation
+                await _compensate_delete_session(state, s.id)
+                raise
+            except Exception:
+                # Binding failed (FK race / Store error / etc.)—compensate.
+                try:
+                    await asyncio.shield(
+                        _compensate_delete_session(state, s.id)
+                    )
+                except Exception:
+                    _logger.critical(
+                        "session_creation_rollback_failed",
+                        extra={"error_code": "session_creation_rollback_failed"},
+                    )
+                    return JSONResponse(
+                        status_code=500,
+                        content={
+                            "error": {
+                                "code": "session_creation_rollback_failed",
+                                "message": "Session creation rollback failed.",
+                            }
+                        },
+                    )
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "error": {
+                            "code": "default_binding_failed",
+                            "message": "Default binding initialization failed.",
+                        }
+                    },
+                )
+
         return {
             "id": s.id,
             "title": s.title,
@@ -4649,6 +4700,32 @@ def create_app(
 # ============================================================================
 # App 生命周期辅助
 # ============================================================================
+
+
+_logger = logging.getLogger(__name__)
+
+
+async def _compensate_delete_session(state: Any, session_id: str) -> None:
+    """Best-effort compensation delete for Session binding failure (P1-E2-3B3).
+
+    Per E2-3A audit §5.2:
+        - Idempotent: SessionNotFoundError is treated as success
+        - Other exceptions propagate (caller logs critical)
+        - Does NOT broadcast any UI event (silent compensation)
+        - Does NOT log Session content—only safe session_id
+
+    Caller must wrap in ``asyncio.shield`` if cancellation safety is required.
+    """
+    from ..session_sqlite import SessionNotFoundError
+
+    try:
+        await state.session_store.delete_session(session_id)
+    except SessionNotFoundError:
+        # Already gone—idempotent success
+        pass
+    except Exception:
+        # Re-raise so caller's asyncio.shield surfaces the failure for logging
+        raise
 
 
 def dispose_app(app: FastAPI) -> None:
