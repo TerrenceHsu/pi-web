@@ -254,6 +254,11 @@ def create_app(
     # True=强制启用（需 runtime + TrustedHost + file SQLite）
     # False=禁用
     enable_credentials_api: bool | None = None,
+    # P1-E2-3B1: Provider Profiles REST API（7 endpoints）+ default binding
+    # None=auto（仅当 Credential API enabled + TrustedHost + file SQLite 时启用）
+    # True=强制启用（前置条件同 Credential API）
+    # False=禁用——不打开 Store、不挂路由、不改 Session 创建
+    enable_provider_profiles_api: bool | None = None,
 ) -> FastAPI:
     """构造一个 FastAPI 实例。
 
@@ -306,6 +311,28 @@ def create_app(
         # 不静默降级——必须显式修正
         raise RuntimeError(
             f"credential web security configuration error: {e}"
+        ) from e
+
+    # ========================================================================
+    # P1-E2-3B1: Resolve Provider Profiles API configuration at app creation
+    # Depends on Credential resolver—must be called AFTER _cred_resolved.
+    # ========================================================================
+    from .provider_config_runtime import (
+        ProviderConfigWebSecurityConfigurationError,
+        resolve_provider_profiles_api_configuration,
+    )
+
+    try:
+        _pc_resolved = resolve_provider_profiles_api_configuration(
+            enable_provider_profiles_api=enable_provider_profiles_api,
+            credential_api_enabled=_cred_resolved.api_enabled,
+            credential_runtime_enabled=_cred_resolved.runtime_enabled,
+            trusted_host_enabled=_cred_resolved.trusted_host_enabled,
+            db_path=db_path,
+        )
+    except ProviderConfigWebSecurityConfigurationError as e:
+        raise RuntimeError(
+            f"provider config web security configuration error: {e}"
         ) from e
 
     @asynccontextmanager
@@ -435,7 +462,44 @@ def create_app(
         if cred_runtime_cm is not None:
             _app.state.credential_runtime = await cred_runtime_cm.__aenter__()
             try:
-                yield
+                # P1-E2-3B1: Provider Config runtime nested inside credential runtime.
+                # Depends on CredentialService (safe API) — must init AFTER credential
+                # runtime entered, shutdown BEFORE credential runtime exits.
+                if _pc_resolved.runtime_enabled:
+                    from .provider_config_runtime import (
+                        provider_config_runtime_context,
+                    )
+
+                    # Build session_exists callback bound to current session_store.
+                    # SQLiteSessionStore.get_session returns None for not-found (no raise).
+                    async def _session_exists_cb(session_id: str) -> bool:
+                        if state.session_store is None:
+                            return False
+                        try:
+                            session = await state.session_store.get_session(session_id)
+                        except Exception:
+                            return False
+                        return session is not None
+
+                    pc_runtime_cm = provider_config_runtime_context(
+                        database_path=str(db_path),
+                        credential_service=_app.state.credential_runtime.service,
+                        session_exists=_session_exists_cb,
+                    )
+                    _app.state.provider_config_runtime = (
+                        await pc_runtime_cm.__aenter__()
+                    )
+                    try:
+                        yield
+                    finally:
+                        _app.state.provider_config_runtime = None
+                        try:
+                            await pc_runtime_cm.__aexit__(None, None, None)
+                        except Exception:
+                            pass
+                else:
+                    _app.state.provider_config_runtime = None
+                    yield
             finally:
                 _app.state.credential_runtime = None
                 try:
@@ -444,6 +508,7 @@ def create_app(
                     pass
         else:
             _app.state.credential_runtime = None
+            _app.state.provider_config_runtime = None
             yield
 
         # ====================================================================
@@ -541,6 +606,8 @@ def create_app(
     app.state.event_buffer_max_size = event_buffer_max_size
     # P1-E1-4A: credential_runtime placeholder——lifespan 启动时填入
     app.state.credential_runtime = None
+    # P1-E2-3B1: provider_config_runtime placeholder——lifespan 启动时填入
+    app.state.provider_config_runtime = None
 
     # P1-E1-4A / B3: TrustedHost middleware（resolve 后的 flag 决定）
     # 默认 False 保留所有既有 create_app 调用点不变；启用 Credentials API
