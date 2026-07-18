@@ -807,7 +807,11 @@ Service 固定写入 `source = "explicit"`。
 
 ## 13. Session 创建接线（审计门 pending）
 
-> **本节实现细节不冻结**——必须先完成 E2-3A Session Creation Audit（见 §14）后才能确定补偿策略。
+> **本节实现细节不冻结**——必须先完成 E2-3A Session Creation Audit 后才能确定补偿策略。
+>
+> **审计已完成 @ 2026-07-19**：详见 [docs/design/p1-e2-session-binding-integration-audit.md](p1-e2-session-binding-integration-audit.md)。
+>
+> 审计结论：**方案 A 选定**——Session 创建后初始化 Binding，失败时 `asyncio.shield` 包裹的补偿删除（`_compensate_delete`）。Session 创建无 WS 事件、无 `current_session_id` 更新、无 harness attach，副作用极简；现有 `delete_session()` 可用作内部补偿；窗口期 < 100ms 可接受。错误码：`provider_config_unavailable` / `default_binding_failed` / `session_creation_rollback_failed` / `session_not_found` / `profile_deleted_during_binding`。**可进入 E2-3 编码**。
 
 在现有 Web Session 创建成功后调用：
 
