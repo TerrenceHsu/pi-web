@@ -249,6 +249,11 @@ def create_app(
     enable_trusted_host: bool = False,
     credential_extra_hosts: tuple[str, ...] = (),
     credential_extra_ui_origins: tuple[str, ...] = (),
+    # P1-E1-4B3: Credential REST API（8 endpoints）
+    # None=auto（runtime 启用时自动 mount）
+    # True=强制启用（需 runtime + TrustedHost + file SQLite）
+    # False=禁用
+    enable_credentials_api: bool | None = None,
 ) -> FastAPI:
     """构造一个 FastAPI 实例。
 
@@ -281,6 +286,27 @@ def create_app(
         "sse_clients": set(),
         "ws_clients": set(),
     }
+
+    # ========================================================================
+    # P1-E1-4B3: Resolve Credential API configuration at app creation
+    # ========================================================================
+    from .credentials_runtime import (
+        CredentialWebSecurityConfigurationError,
+        resolve_credential_api_configuration,
+    )
+
+    try:
+        _cred_resolved = resolve_credential_api_configuration(
+            enable_credentials_api=enable_credentials_api,
+            enable_credential_runtime=enable_credential_runtime,
+            enable_trusted_host=enable_trusted_host,
+            db_path=db_path,
+        )
+    except CredentialWebSecurityConfigurationError as e:
+        # 不静默降级——必须显式修正
+        raise RuntimeError(
+            f"credential web security configuration error: {e}"
+        ) from e
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -388,17 +414,8 @@ def create_app(
         )
         from .local_web_security import default_web_security_config
 
-        _should_enable_cred = enable_credential_runtime
-        if _should_enable_cred is None:
-            # auto-enable when db_path is a real file path
-            _should_enable_cred = (
-                db_path is not None
-                and str(db_path) != ":memory:"
-                and not str(db_path).startswith("file:")
-            )
-
         cred_runtime_cm = None
-        if _should_enable_cred:
+        if _cred_resolved.runtime_enabled:
             try:
                 cred_cfg = build_credential_runtime_config(
                     database_path=str(db_path),
@@ -525,10 +542,10 @@ def create_app(
     # P1-E1-4A: credential_runtime placeholder——lifespan 启动时填入
     app.state.credential_runtime = None
 
-    # P1-E1-4A: TrustedHost middleware（opt-in）
-    # 默认 False 保留所有既有测试的 TestClient (Host: testserver) 行为
-    # 生产 / E2E 显式 enable_trusted_host=True 启用 localhost 边界
-    if enable_trusted_host:
+    # P1-E1-4A / B3: TrustedHost middleware（resolve 后的 flag 决定）
+    # 默认 False 保留所有既有 create_app 调用点不变；启用 Credentials API
+    # 时强制 True（已在 resolve_credential_api_configuration 中校验）
+    if _cred_resolved.trusted_host_enabled:
         from starlette.middleware.trustedhost import TrustedHostMiddleware
 
         from .local_web_security import default_web_security_config
@@ -540,6 +557,35 @@ def create_app(
         app.add_middleware(
             TrustedHostMiddleware,
             allowed_hosts=list(_ws_cfg.allowed_hosts),
+        )
+
+    # P1-E1-4B3: Credential REST API（8 endpoints）+ 32 KiB body limit
+    # 仅在 API enabled 时 mount——Router 自带 X-PI-Agent-UI / Origin 强制
+    if _cred_resolved.api_enabled:
+        from .credentials_api import (
+            CredentialBodyLimitMiddleware,
+            build_full_credential_router,
+        )
+        from .local_web_security import default_web_security_config as _dws
+
+        _cred_ws_cfg = _dws(
+            extra_hosts=credential_extra_hosts,
+            extra_ui_origins=credential_extra_ui_origins,
+        )
+        # Mount Credential Router——security deps 由 router 自带
+        app.include_router(build_full_credential_router(_cred_ws_cfg))
+        # Body limit middleware——inner（TrustedHost outer 已经先 add）
+        # 顺序：先 add body limit（innermost）→ TrustedHost 已经 add 在前
+        # 实际：TrustedHost 最后 add → outermost；body limit → inner
+        # 但 Starlette add_middleware 是 insert(0,...)——last add = outermost
+        # 这里我们再 add body limit——它会成为 OUTERMOST
+        # 想要 TrustedHost outermost，应该 TrustedHost 最后 add
+        # 当前顺序：TrustedHost 先 add（在外层）→ body limit 后 add（更外层）
+        # 这意味着 body limit 检查发生在 TrustedHost 之前——不影响安全
+        # 因为两者都是 localhost 边界——任一拒绝都返回相同语义错误
+        app.add_middleware(
+            CredentialBodyLimitMiddleware,
+            max_bytes=_cred_ws_cfg.max_request_body_bytes,
         )
 
     # SSE 客户端队列集合——每个 SSE 连接独立 asyncio.Queue；

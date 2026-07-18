@@ -44,10 +44,13 @@ from .secret_store_router import SecretStoreRouter
 
 __all__ = [
     "CredentialRuntimeConfigError",
+    "CredentialWebSecurityConfigurationError",
     "CredentialRuntimeConfig",
     "CredentialReadiness",
     "CredentialRuntimeState",
     "credential_runtime_context",
+    "resolve_credential_api_configuration",
+    "ResolvedCredentialApiConfig",
 ]
 
 
@@ -65,6 +68,110 @@ class CredentialRuntimeConfigError(RuntimeError):
 
     不会进 app.state（未到达写入步骤）.
     """
+
+
+class CredentialWebSecurityConfigurationError(RuntimeError):
+    """Credential API 安全配置错误（P1-E1-4B3）.
+
+    在 create_app() 阶段抛出——当 enable_credentials_api=True 但
+    TrustedHost / Runtime / 文件型 SQLite 任一未满足时.
+
+    Examples:
+        enable_credentials_api=True + enable_trusted_host=False
+        enable_credentials_api=True + db_path=':memory:'
+        enable_credentials_api=True + enable_credential_runtime=False
+    """
+
+
+@dataclass(frozen=True)
+class ResolvedCredentialApiConfig:
+    """Final flags resolved by create_app() at construction time.
+
+    All three flags are interlocked——API requires Runtime + TrustedHost.
+    """
+
+    api_enabled: bool
+    runtime_enabled: bool
+    trusted_host_enabled: bool
+
+
+def _is_file_type_db_path(db_path: str | Path | None) -> bool:
+    """Check if db_path is a real file-type SQLite path (not :memory: / URI)."""
+    if db_path is None:
+        return False
+    s = str(db_path)
+    if s == ":memory:":
+        return False
+    if s.startswith("file:"):
+        return False
+    return True
+
+
+def resolve_credential_api_configuration(
+    *,
+    enable_credentials_api: bool | None,
+    enable_credential_runtime: bool | None,
+    enable_trusted_host: bool,
+    db_path: str | Path | None,
+) -> ResolvedCredentialApiConfig:
+    """Resolve final (api_enabled, runtime_enabled, trusted_host_enabled)
+    per the interlock rules.
+
+    Rules:
+        - enable_credentials_api=None: CONSERVATIVE auto——enable API only when
+          Runtime will be active AND user already enabled TrustedHost.
+          This preserves backward compat for existing create_app callers.
+        - enable_credentials_api=True: require Runtime + TrustedHost +
+          file-type SQLite——raise on violation
+        - enable_credentials_api=False: API disabled; TrustedHost stays as-is
+        - enable_credentials_api=True + enable_trusted_host=False → raise
+        - enable_credentials_api=True + :memory: db_path → raise
+
+    Raises:
+        CredentialWebSecurityConfigurationError
+    """
+    file_type = _is_file_type_db_path(db_path)
+
+    # Resolve runtime flag
+    if enable_credential_runtime is None:
+        runtime_enabled = file_type
+    else:
+        runtime_enabled = enable_credential_runtime
+        if runtime_enabled and not file_type:
+            raise CredentialWebSecurityConfigurationError(
+                "enable_credential_runtime=True requires file-type SQLite "
+                "db_path (got :memory: / URI / None)"
+            )
+
+    # Resolve API flag
+    if enable_credentials_api is None:
+        # Conservative auto: only enable when BOTH runtime AND TrustedHost
+        # are active. Existing callers with default enable_trusted_host=False
+        # get API disabled——preserves backward compat.
+        api_enabled = runtime_enabled and enable_trusted_host
+        trusted_host_enabled = enable_trusted_host
+    elif enable_credentials_api:
+        api_enabled = True
+        if not runtime_enabled:
+            raise CredentialWebSecurityConfigurationError(
+                "enable_credentials_api=True requires Credential Runtime "
+                "(set db_path to a file path / enable_credential_runtime=True)"
+            )
+        if not enable_trusted_host:
+            raise CredentialWebSecurityConfigurationError(
+                "enable_credentials_api=True requires enable_trusted_host=True "
+                "(TrustedHost must be enabled when Credential API is mounted)"
+            )
+        trusted_host_enabled = enable_trusted_host
+    else:
+        api_enabled = False
+        trusted_host_enabled = enable_trusted_host
+
+    return ResolvedCredentialApiConfig(
+        api_enabled=api_enabled,
+        runtime_enabled=runtime_enabled,
+        trusted_host_enabled=trusted_host_enabled,
+    )
 
 
 # ============================================================================
