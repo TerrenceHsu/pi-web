@@ -8,7 +8,11 @@ license = { text = "MIT" }
 authors = [{ name = "Pi Python Port" }]
 dependencies = [
     "pydantic>=2.7",
-    "openai>=1.40",
+    # M1-1：openai 2.x 用于 OpenAICompatibleProvider（Qwen / Kimi 共用）。
+    # 2.x 提供 chat.completions.stream() async context manager + 完整异常层级
+    # （AuthenticationError / RateLimitError / APIConnectionError 等）。
+    # 受控范围 >=2.0,<3；具体版本由 uv.lock 固定（当前 2.44.0）。
+    "openai>=2.0,<3",
     # anthropic + python-dotenv 是 GLM provider 的硬依赖：
     # `import pi_agent_core_py` 会 eager 加载 providers.anthropic_compat（from anthropic import AsyncAnthropic）。
     # Step 21 起 GLM 是核心 provider——不再单独拆 [glm] extra。
