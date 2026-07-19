@@ -231,13 +231,62 @@ _ANTHROPIC_DEFINITION = ProviderDefinition(
 )
 
 
+# --- P1-E M1-2: Qwen / Kimi OpenAI-compatible presets ---------------------
+#
+# Qwen M1 preset:
+#   China Beijing shared endpoint only.
+#   Aliyun 公开文档同时列出 Workspace 专属域名（含 Workspace ID），但 M1 不支持
+#   Custom Base URL / 不保存 Workspace ID——只接入 cn-beijing 共享 DashScope
+#   OpenAI-compatible endpoint. 其它地域（Singapore / US / Japan）、Workspace
+#   专属域名、Trial / Coding Plan / Token Plan endpoint 均不进入当前版本。
+#
+# Kimi M1 preset:
+#   https://api.moonshot.cn/v1 是 Moonshot 官方 OpenAI SDK base_url. M1 不引入
+#   Kimi 专有能力（thinking / partial mode / official tools / file API /
+#   balance API / extra_body）——这些不属于通用 Adapter 必要能力。
+#
+# 两者 credential_validation_strategy="unsupported"：可保存 Credential / 可创建
+# Profile / 后续 M1 Runtime 可真实调用，但**不**提供独立的"验证 Key"远程请求。
+# Key 实际有效性在 M1-5 第一次真实 Prompt 时由 Adapter 返回固定安全错误。
+#
+# key_prefix_hints=()：sk- 并不能区分 Qwen / Kimi / OpenAI / 其它兼容供应商；
+# 同时为两者注册相同 hint 会让本地 heuristic 错误推荐。Provider 由用户显式
+# 选择，不从 Key 前缀推断。
+_QWEN_DEFINITION = ProviderDefinition(
+    id="qwen",
+    display_name="Qwen",
+    api_style="openai_compatible",
+    default_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    credential_validation_strategy="unsupported",
+    credential_validation_endpoint=None,
+    supports_model_listing=False,
+    key_prefix_hints=(),
+)
+
+_KIMI_DEFINITION = ProviderDefinition(
+    id="kimi",
+    display_name="Kimi",
+    api_style="openai_compatible",
+    default_base_url="https://api.moonshot.cn/v1",
+    credential_validation_strategy="unsupported",
+    credential_validation_endpoint=None,
+    supports_model_listing=False,
+    key_prefix_hints=(),
+)
+
+
 # ============================================================================
 # Built-in registry singleton + module-level accessors
 # ============================================================================
 
 
 _DEFAULT_REGISTRY: ProviderRegistry = ProviderRegistry(
-    (_GLM_DEFINITION, _ANTHROPIC_DEFINITION),
+    (
+        _GLM_DEFINITION,
+        _ANTHROPIC_DEFINITION,
+        _QWEN_DEFINITION,
+        _KIMI_DEFINITION,
+    ),
 )
 
 
