@@ -4,11 +4,13 @@
 
 ---
 
-## P1-E — Multi-Provider / Model Profiles（✅ DESIGN FROZEN 2026-07-16）
+## P1-E — Multi-Provider Switching（M1 / M2 / M3 milestone，PIVOT @ 2026-07-19）
 
-让用户保存多个 API Key、为每个 Key 配置供应商 / Base URL / 默认模型、校验 Key、拉取模型列表、在聊天顶部一键切换、每个 Session 独立保存选择、Regenerate 使用当前模型、重启后恢复——且不泄露 Key。
+> **Pivot 决策（2026-07-19）**：原 P1-E2 / E3 / E4 / E5 拆分过细，且 E2-4 独立 Security Freeze 会冻结一个用户无法直接使用的配置后端。改为单一 milestone——**M1 Runtime / M2 Frontend / M3 Unified Freeze**，最终统一 security + E2E freeze。详细 Pivot 见 [docs/design/p1-e2-provider-profiles.md](docs/design/p1-e2-provider-profiles.md) §19。
 
-### 跨阶段冻结决策（7 项边界 + Custom URL 安全）
+**产品目标（M1~M3 完成时达成）**：用户配置 GLM / Qwen / Kimi Key → 每个 Provider 选择模型 → 聊天顶部切换 Provider/Model → 每个 Session 独立保存 → Regenerate 使用当前选择 → 重启后恢复——且 Key 不进入 SQLite 明文 / 日志 / 消息 / 事件 / 导出。
+
+### 跨阶段冻结决策（7 边界 + Custom URL 安全，M1/M2/M3 全程有效）
 
 | # | 边界 | 冻结结论 |
 |---|---|---|
@@ -23,89 +25,109 @@
 
 详细设计冻结备忘：见本仓库 conversation history 2026-07-16。
 
-### P1-E1 — Provider Registry + Secure Credentials 🟡 NEXT
+### Backend Foundation（✅ FROZEN @ master，不单独 merge / tag）
 
-**范围**：
-- `ProviderDefinition` 内置表（GLM / Anthropic-compatible / OpenAI-compatible / Custom）
-- `SecretStore` Protocol + 3 实现（OSKeyringSecretStore / InMemorySecretStore / EnvSecretStore）
-- `CredentialRecord` repository（SQLite 只存 `secret_ref` / `fingerprint` / `masked_value`，不存明文）
-- masked/fingerprint serializer（前端只见 `sk-****8A31`）
-- provider hint local heuristic（`sk-` 前缀等格式规则——不向第三方发请求探测）
-- credential CRUD + validate API（`POST /api/credentials` / `PATCH` / `DELETE` / `POST /validate`）
-- secret leak tests（grep REST response / WS event / snapshot / log / export 等所有出口，必须 0 命中）
+P1-E M1 之前的配置后端已 frozen，不再扩展。
 
-**显式不包含**：
-- 模型目录（P1-E2）
-- Session 绑定（P1-E2）
-- 请求执行切换（P1-E3）
-- 前端模型选择器（P1-E4）
-- Regenerate 模型切换（P1-E3）
-- OpenAI Adapter 完整实现（按需在 P1-E2 加）
+| 子阶段 | 状态 | Commit |
+|---|---|---|
+| P1-E1 Secure Credentials | ✅ MERGED + TAGGED `v0.0.27-secure-credentials` | `de05c66`（22 commit） |
+| P1-E2-1 Schema + Store | ✅ FROZEN | `89fabfd` |
+| P1-E2-2 Service + Static Model Options | ✅ FROZEN | `a2c7932` |
+| P1-E2-3A Session Creation Audit | ✅ FROZEN | `9878ef9` |
+| P1-E2-3 Composition + REST API + Session binding | ✅ FROZEN（3 commit） | `17c843d` / `9bbd0f2` / `cad7ca7` |
 
-### P1-E2 — Profiles + Session Model Bindings（最简后端方案，DESIGN FROZEN 2026-07-19）
+**配置后端能力清单（M1/M2/M3 不再扩展）**：
 
-> 详细方案：[docs/design/p1-e2-provider-profiles.md](docs/design/p1-e2-provider-profiles.md)
->
-> 与原 ROADmap 比，**删除 Model Catalog / Custom Model / Capabilities 持久化 / 远程模型目录调用**——只保留 ProviderProfile + SessionModelBinding + `Profile.is_default`。模型列表只返回**静态建议常量**（Anthropic 静态 + GLM 静态），**E2 内不读取 Credential、不构造 HTTP client、不调用任何 `/v1/models` 远端**。Custom Base URL 暂不支持（仅内置 anthropic / glm）。
+- 3 张表：`web_provider_config_schema_meta` / `web_provider_profiles` / `web_session_model_bindings`
+- 4 个生产模块：`provider_config_store.py` / `provider_config_service.py` / `provider_profiles_api.py` / `model_options.py`
+- 7 API：4 Profile CRUD + 1 models + 2 session binding
+- Provider Registry：内置 `anthropic` / `glm`（M1-2 加 `qwen` / `kimi`）
+- Credential 子系统：`SecretStore` Protocol + OSKeyring / InMemory / Env；`CredentialRecord` repository；masked/fingerprint serializer；不存明文
+- 测试基线：2063 full pytest + 37/37 E2E + ruff clean + 0 Core Runtime diff + 0 network + 0 secret reads
 
-**3 张表 / 4 个主要新增生产模块 + 现有最小接线修改 / 7 API 操作 / E2 真实网络调用 = 0**：
+**E2-4 独立 Security Freeze cancelled**——并入 M3 Unified Freeze。
 
-- `web_provider_config_schema_meta`（schema version，独立）
-- `web_provider_profiles`（`id` 随机不可预测 / `name` / `provider_id` 创建后 immutable / `credential_id` 创建/更新时必须存在但无 FK / `default_model` / `enabled` / `is_default` / timestamps）
-- `web_session_model_bindings`（`session_id` PK / `profile_id` / `model_id` / `source ∈ {default, explicit}` / timestamps；FK profile ON DELETE RESTRICT；不对 session_id 建外键避免与 Session Store 耦合）
-- Store 独立 connection：`PRAGMA foreign_keys=ON` 必须验证返回 1；显式 profile-in-use 查询 + FK RESTRICT 双重保险
-- 主要新增模块：`web/provider_config_store.py` / `web/provider_config_service.py` / `web/provider_profiles_api.py` / `web/model_options.py`
-- 最小接线修改：`web/app.py` + 现有通用安全边界模块（E1 已落地，复用不复制）+ Session 创建路径（E2-3A 审计后确定）
+### M1 — Multi-Provider Runtime
 
-**E2 包含**：Profile CRUD（`provider_id` 创建后 immutable；`profile_id` 随机不可预测）；Session Binding get/upsert/delete；新 Session 自动物化默认 Profile（仅当 `enabled=true`，`source=default`，之后修改默认 Profile 不影响已有 Session）；Profile status 运行时派生（ready / disabled / needs_credential / needs_key / backend_unavailable / credential_invalid / credential_error——后两者仅在 `last_validated_provider_id == profile.provider_id` 时生效）；enabled/is_default 交叉约束（`is_default` 要求 `enabled`；禁用当前默认同事务清除 `is_default`；显式绑定 disabled Profile 返回 409 `profile_disabled`；已有 Binding 在 Profile 后续被禁用时继续保留）；restart persistence；Anthropic + GLM 静态建议 + 手动 `model_id`（控制字符 / 换行 / NUL 拒绝；不强制在静态列表内）；`model_id` / `provider_id` / `credential_id` 数据约束（§5.4）；E1 安全 envelope 复用（TrustedHost / Origin / `X-PI-Agent-UI` / 32 KiB body / SafeValidationError）。
+把 Backend Foundation 接到真实 Prompt/Regenerate 执行。Core Runtime 继续冻结（GLM 包装现有，Qwen/Kimi 共用 OpenAI-compatible Adapter）。
 
-**E2 显式不包含**：当前 Prompt 真正切换 Provider（E3）；Regenerate 接入（E3）；Agent Runtime 改动（Core Runtime diff = 0）；前端模型选择器（E4）；**任何远程模型目录 API 调用 / HTTP client / Secret 读取 / remote `ModelOption` source**；模型目录表 / 模型能力表 / Custom Model CRUD / Global Default 表 / 模型 refresh 持久化 / Custom Base URL / Custom Provider / OpenAI-compatible Adapter / D2 Revision schema 修改；复制第二套安全中间件；大规模重构 `web/app.py`。
+**M1-0 Provider Contract Audit**（设计文档，无生产代码）：
 
-**API（7 个）**：
-- `GET /api/provider-profiles`
-- `POST /api/provider-profiles`
-- `PATCH /api/provider-profiles/{profile_id}`
-- `DELETE /api/provider-profiles/{profile_id}`（被 Session 使用时 409 `profile_in_use`；FK RESTRICT + 显式查询双重保险）
-- `GET /api/provider-profiles/{profile_id}/models`（**静态建议**；不读 Credential、不访问网络；仍要求 UI header + Host/Origin）
-- `GET /api/sessions/{session_id}/model-binding`
-- `PUT /api/sessions/{session_id}/model-binding`
+- 只读审计 `providers/base.py` / `glm.py` / `anthropic_compat.py` / `registry.py` + Agent Provider 持有 + Prompt/Regenerate 入口
+- 输出 `docs/design/p1-e-m1-provider-runtime.md`：冻结统一 Adapter 接口（`stream()` / `close()` / tool_call 增量 / usage / finish_reason）
+- 不为 OpenAI-compatible 重新发明第二套事件模型——围绕现有 contract 实现
 
-**阶段拆分（5 个，含审计门）**：E2-1 Schema+Store → E2-2 Service+Static Model Options → **E2-3A Session Creation Audit（无生产代码）** → E2-3 REST API+Session Creation Binding → E2-4 Restart+Security+Freeze。
+**M1-1 `providers/openai_compat.py`**：Qwen / Kimi 共用 OpenAI-compatible Adapter——request / SSE stream / assistant text delta / tool calls / finish reason / usage / safe error mapping / client close。
 
-**验收清单（29 项）**：详见 design doc §15（含 enabled/default 交叉、provider 作用域、随机 ID、控制字符拒绝、FK pragma 验证、E2 网络调用 = 0）。
+**M1-2 Qwen / Kimi ProviderDefinition presets**：`registry.py` 加 `qwen` / `kimi`，protocol=`openai_compatible`，各自 `default_base_url`。
 
-### P1-E3 — Request-scoped Provider Selection
+**M1-3 `providers/factory.py`**：唯一知道「哪个 Provider 用哪个 Adapter」的位置——输入 `ProviderDefinition` + `api_key` + `model_id`，输出 RequestProvider。GLM → 包装现有；其他 → `OpenAICompatibleProvider`。
 
-**范围**：
-- `web/provider_runtime.py`（`RequestProviderRuntime` + `bind_to_harness` async context manager）
-- `_run_prompt_core` / `_run_regeneration_core` 接入——请求启动前解析 SessionModelBinding → 临时替换 `harness.agent.<provider>` → finally 恢复 + close
-- request metadata 记录 `provider_profile_id` / `provider_id` / `model_id` / `selection_source`（不记 credential_id / api_key / Authorization）
-- Regenerate 用当前 session 当前模型（不动 D2 schema；revision `content_json` 自带 model 信息）
-- 错误隔离（provider 创建失败 → Agent 不执行；不污染下一请求）
+**M1-4 `web/provider_runtime.py`**：`RequestProviderRuntime` + `bind_to_harness` async context manager。Session Binding → Profile → Credential → Secret → Factory → 临时绑定 `harness.agent.<provider>` → 执行 → finally 恢复 + close。复用现有单 active request lock。
 
-### P1-E4 — Frontend Provider / Model Selector
+**M1-5 Prompt integration**：`_run_prompt_core` 接入 `provider_runtime.bind_to_harness`。
 
-**范围**：
-- `components/provider/`（`ProviderModelSelector.vue` / `ProviderProfileModal.vue` / `ProviderProfileList.vue` / `CredentialForm.vue` / `ModelPicker.vue` / `ProviderStatusBadge.vue`）
+**M1-6 Regenerate integration**：`_run_regeneration_core` 接入；Regenerate 用当前 Session 当前模型（不动 D2 不变量；revision `content_json` 自带 model 信息）。
+
+**M1-7 Runtime tests**：GLM / Qwen / Kimi 真实流式回答 + 工具调用 + 切换只影响下次请求 + 失败不污染下请求；Core Runtime diff = 0。
+
+**M1 显式不包含**：前端切换 UI（M2）；最终 security freeze（M3）；Custom Base URL；Custom Provider；远程模型目录；多 Key 复杂管理。
+
+**请求级不可变快照**（边界 C 落地）：请求开始时记录 `RequestProviderSelection(profile_id, provider_id, model_id, selection_source)`；运行中切换只影响下次请求；Regenerate 用当前 Session 当前模型。
+
+### M2 — Frontend Switching
+
+最简前端：两个组件 + 一个 store。
+
 - `stores/providerStore.ts`（不膨胀 chatStore）
-- 顶部 selector：显示当前 Profile/Model + 快速切换 + 打开管理 Modal
-- Key 创建/删除/校验放在 Modal（不放主聊天界面）
-- session 独立选择（A/B 不同模型）
+- `components/provider/ProviderSelector.vue`（顶部切换器；运行时禁用并提示 `Generating...`）
+- `components/provider/ProviderSettingsModal.vue`（每个 Provider 一张卡：API Key + Model ID + status；支持 GLM / Qwen / Kimi）
+- Session binding restore（刷新后保留选择）
+- Prompt 运行时禁用 selector
 
-### P1-E5 — E2E + Docs + Freeze
+**M2 显式不包含**：`ProviderProfileList` / `CredentialForm` / `ModelPicker` / `ProviderStatusBadge` / `ProviderHealthPanel` / `ModelCatalogModal`（全部并入 Settings Modal）；Custom Provider / Custom Base URL 入口；远程模型搜索；模型能力展示。
 
-**验收清单（至少 11 项）**：
-1. 添加 2 个不同 Provider Profile
+**模型输入策略**：少量静态建议 + 自由填写 `model_id`（不调用 `/v1/models`）。
+
+### M3 — Unified Freeze
+
+最终验收 + 安全 + merge + tag（合并原 P1-E5 + E2-4）。
+
+**验收清单（至少 18 项）**：
+
+1. 添加 GLM / Qwen / Kimi Profile
 2. Key 不出现在任何 API response（含 list / get / WS event / export markdown）
-3. 一键切换 Profile
-4. Session A/B 使用不同模型
-5. **server restart** 后 Profile 恢复
+3. 一键切换 Profile / Model
+4. Session A/B 使用不同 Provider
+5. **server restart** 后 Profile + Binding 恢复
 6. session-only Key restart 后 → `needs_key`
 7. env reference Key restart 后 → 重新解析
 8. 模型切换只影响下一请求（active request 中途切换不污染当前）
-9. Regenerate 使用新模型（in-place message_id 不变）
+9. Regenerate 使用当前 Session 当前模型（in-place `message_id` 不变）
 10. 删除 Key 后 Profile → `needs_key`
 11. invalid Key 安全报错（错误信息不含 Key / Authorization）
+12. GLM / Qwen / Kimi 真实流式回答 + tool_use 正常
+13. 切换 Provider 后失败不污染下一请求
+14. Request 启动后 provider/model 不可变（请求快照生效）
+15. Core Runtime diff = 0
+16. API / SQLite / log / WS / export 无 Key（含 marker 测试）
+17. 错误信息不含 Authorization / 内部 endpoint
+18. Playwright E2E 全 PASS
+
+**M3 提交**：`feat(providers): deliver multi-provider switching`（M1+M2+M3 统一 merge）+ tag。
+
+### P1-E 显式不包含（M1 / M2 / M3 全程排除）
+
+- Custom Provider / Custom Base URL（M3 之后单独评估）
+- Model Catalog 持久化 / remote `/v1/models` 调用
+- Provider health / 限流状态 / 成本统计
+- 自动 provider fallback / 模型负载均衡
+- 复杂多 Key / 同 Provider 多 Profile 管理 UI
+- 远程模型搜索 / 模型能力说明
+- Anthropic 作为主要产品 Provider 入口（底层兼容代码可保留）
+- 大规模重构 `web/app.py`（留 P3）
+- 修改 Core Runtime（`loop.py` / `agent.py` / `context.py` / `events.py` / `stream_events.py` / `messages.py` / `providers/base.py` / `providers/glm.py` / `providers/anthropic_compat.py`）
 
 ---
 

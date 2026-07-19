@@ -12,7 +12,8 @@
 | **Frontend dev/lint maintenance** | merged into master（commits `d8bd2ad`, `b9f4b17`, `7fbd082`, merge `1c2289d`） |
 | **P1-E1 Secure Credentials** | ✅ MERGED into master via `de05c66`（no-ff；保留 22 commit 阶段性历史） |
 | **Latest release tag** | `v0.0.27-secure-credentials` — P1-E1 Secure Credential Management（2026-07-18，commit `de05c66`） |
-| **Current phase** | P1-E2 Provider Profiles design（DESIGN FROZEN 2026-07-19，待 E2-1 编码） |
+| **Backend Foundation HEAD** | `cad7ca7` — feat(web): bind default provider profile on session creation（P1-E2 Backend Foundation ✅ FROZEN @ 3 commits） |
+| **Current phase** | P1-E Multi-Provider Switching — M1 Multi-Provider Runtime（PIVOT @ 2026-07-19，待 M1-0 审计） |
 
 > P1-D2 Regenerate 已冻结但未打 tag——已通过 P1-E1 合并到下一 release `v0.0.27-secure-credentials`。
 
@@ -20,13 +21,15 @@
 
 | 项 | 值 | 命令 |
 |---|---|---|
-| Offline pytest | **1833 passed**, 14 deselected | `pytest tests/ -m "not slow and not integration and not docker" --no-cov` |
-| Coverage |Credential 子系统 ~95%+；总 coverage 阈值 75% PASS | 同上 |
-| Playwright e2e（默认 + `--workers=1`） | **37/37 PASS** | `cd tests/e2e && npx playwright test` |
+| Offline pytest | **2063 passed**（含 P1-E2 Backend Foundation 144 新增） | `pytest tests/ -m "not slow and not integration and not docker" --no-cov` |
+| Coverage | Credential + Profile + Binding 子系统 ~95%+；总 coverage 阈值 75% PASS | 同上 |
+| Playwright e2e（默认 + `--workers=1`） | **37/37 PASS** ×2（E2-3 REST API + Session binding 各跑一轮） | `cd tests/e2e && npx playwright test` |
 | Ruff | All checks passed | `ruff check src tests scripts` |
 | Frontend prod build | 143.28 KB JS / 40.15 KB CSS | `cd src/pi_agent_core_py/web/frontend && npm run build` |
 | Production hooks scan | `__storeHooks` 0 / `__e2eHooks` 0 in `web/static/assets/*.js` | grep build artifacts |
-| Core runtime diff（P1-E1 范围） | 0 modifications to loop/agent/context/events/stream_events/messages（providers/ 允许新增 registry；web/ 允许 credentials/profile 模块） | `git diff --name-only` |
+| Core runtime diff（P1-E1 + P1-E2 范围） | 0 modifications to loop/agent/context/events/stream_events/messages（providers/ 允许新增 registry；web/ 允许 credentials/profile 模块） | `git diff --name-only` |
+| P1-E2 网络调用 | **0**（marker 测试：所有 E2 测试均不发出 HTTP 请求） | grep test markers |
+| P1-E2 Secret 读取 | **0**（marker 测试：所有 E2 测试不读 OS Keyring / env value） | grep test markers |
 
 ## 已冻结阶段
 
@@ -42,6 +45,7 @@
 | Documentation governance | ✅ FROZEN | merge `d7df358` + finalize `834bd1d` |
 | Frontend dev/lint maintenance | ✅ FROZEN | merge `1c2289d` |
 | **P1-E1 Secure Credentials** | **✅ PASS / FROZEN / MERGED / TAGGED** | **`v0.0.27-secure-credentials` @ `de05c66`**（2026-07-18） |
+| **P1-E2 Backend Foundation**（Schema+Store / Service+ModelOptions / Session Creation Audit / REST API + Session binding） | ✅ FROZEN @ `89fabfd` / `a2c7932` / `9878ef9` / `17c843d` / `9bbd0f2` / `cad7ca7` | 不单独 merge / tag；M1+M2+M3 统一交付 |
 
 ### P1-E1 子阶段终态
 
@@ -56,23 +60,37 @@
 - P1-E1-5B Security Hardening ✅ FROZEN（MEDIUM-1 / LOW-1 RESOLVED；GAP-1/2/3 CLOSED；含 disconnect bug 修复）
 - P1-E1-5C Final Regression ✅ FROZEN（1833 pytest + 37/37 E2E + 0 marker + 0 forbidden pattern）
 
+### P1-E2 Backend Foundation 子阶段终态（PIVOT @ 2026-07-19，原 E2-4 独立 Security Freeze cancelled）
+
+- P1-E2-1 Schema + Store ✅ FROZEN @ `89fabfd`（3 张表 + 独立 connection + `PRAGMA foreign_keys=ON` 验证 + Profile/Binding CRUD + default 单事务切换 + restart persistence）
+- P1-E2-2 Service + Static Model Options ✅ FROZEN @ `a2c7932`（ProviderConfigService + Profile status 派生 + provider 作用域 + enabled/is_default 交叉 + Anthropic/GLM 静态 + `validate_model_id`）
+- P1-E2-3A Session Creation Audit ✅ FROZEN @ `9878ef9`（方案 A 选定：Session 创建后初始化 Binding + `asyncio.shield` 补偿删除）
+- P1-E2-3 Composition + REST API + Session binding ✅ FROZEN @ 3 commits：
+  - `17c843d` Composition（`provider_config_runtime.py` + AsyncExitStack lifespan + resolver）
+  - `9bbd0f2` REST API（`provider_profiles_api.py` 7 endpoints + `ProviderProfileBodyLimitMiddleware` + `ProviderProfileAPIRoute` + 复用 E1 安全 envelope）
+  - `cad7ca7` Session binding（`initialize_new_session_binding` on Service + `asyncio.shield` 补偿 + 5 错误码 + CancelledError 处理）
+- ~~P1-E2-4 Restart + Security + Freeze~~ → **cancelled**：合并到 M3 Unified Freeze
+
+测试基线（HEAD `cad7ca7`）：2063 full pytest + 2×37/37 E2E + ruff clean + 0 Core Runtime diff + 0 network + 0 secret reads。
+
 ## 当前阶段
 
-**P1-E2 Provider Profiles + Session Model Bindings**——设计 DESIGN FROZEN（2026-07-19），待 E2-1 编码启动。
+**P1-E Multi-Provider Switching — M1 Multi-Provider Runtime**（PIVOT @ 2026-07-19）。
 
-- 设计文档：[docs/design/p1-e2-provider-profiles.md](docs/design/p1-e2-provider-profiles.md)
-- 最简后端方案：3 张表 / 4 个主要新增生产模块 / 7 API 操作 / **E2 真实网络调用 = 0**
-- 阶段拆分：E2-1 Schema+Store → E2-2 Service+Static Model Options → E2-3A Session Creation Audit（审计门）→ E2-3 REST API+Binding → E2-4 Restart+Security+Freeze
+- 路线：[ROADMAP.md](ROADMAP.md) § P1-E（M1 / M2 / M3 milestone）
+- Pivot 决策：原 P1-E2/E3/E4/E5 拆分过细，E2-4 独立 Security Freeze 会冻结一个用户无法直接使用的配置后端——改为 M1 Runtime / M2 Frontend / M3 Unified Freeze 单一 milestone
+- Pivot 附录：[docs/design/p1-e2-provider-profiles.md](docs/design/p1-e2-provider-profiles.md) §19
+- M1 子阶段：M1-0 Provider Contract Audit → M1-1 `OpenAICompatibleProvider` → M1-2 Qwen/Kimi presets → M1-3 `ProviderFactory` → M1-4 `web/provider_runtime.py` → M1-5 Prompt integration → M1-6 Regenerate integration → M1-7 Runtime tests
 
 P1-D3 PDF Text Extraction ⏸ **DEFERRED**（2026-07-16 决策，转出主路线）。PDF / Vector RAG ⏸ **DEFERRED**（同上）。
 
 ## 当前阻塞项
 
-无 P1-E2 实施阻塞。8 个跨阶段设计边界已冻结（详见 ROADMAP.md P1-E / P1-F 段；含 Custom URL 安全——E2 暂不使用）。
+无 M1-0 实施阻塞。8 个跨阶段设计边界已冻结（详见 ROADMAP.md P1-E 段；Custom URL 安全 M1/M2/M3 全程排除）。
 
 ## 下一步
 
-**P1-E2-1 实施**（Schema + Store）：3 张表 + Provider Config Store + `PRAGMA foreign_keys=ON` 验证 + Profile/Binding CRUD + default Profile 单事务切换 + restart persistence。
+**M1-0 Provider Contract Audit**（设计文档，无生产代码）：只读审计 `providers/base.py` / `glm.py` / `anthropic_compat.py` / `registry.py` + Agent Provider 持有 + Prompt/Regenerate 入口；产出 `docs/design/p1-e-m1-provider-runtime.md`，冻结统一 Adapter 接口（`stream()` / `close()` / tool_call 增量 / usage / finish_reason）。审计完成后停止审核，再启动 M1-1 `openai_compat.py`。
 
 ## 已知限制
 
@@ -80,14 +98,14 @@ P1-D3 PDF Text Extraction ⏸ **DEFERRED**（2026-07-16 决策，转出主路线
 - Request registry 是内存态——server 重启后 active request 丢失
 - Single harness——不支持多 session 并行执行
 - Localhost only / no auth——不适合公网部署
-- Provider/Model 当前仍是单一 Provider；P1-E2 完成后**仅持久化选择**，E3 才真正切换
+- Provider/Model Backend Foundation ✅ frozen（Credential + Profile + Binding 持久化）；**M1 才真正执行 Prompt/Regenerate 切换**
 
 ### Web UI
 - 完整浏览器 reload 后恢复原 session 依赖 URL routing（**未实现**）——P2-A 处理
 - WebSocket reconnect recovery 已支持（`regenerate.spec.ts:243-290`）
 - `POST /api/prompt/async` 单 active request——不支持并发 prompt
 - Markdown 文件预览依赖下载或 `view_file` 工具——P1-F 实施后支持侧栏预览
-- 前端 Provider/Model 选择器未实现——P1-E4
+- 前端 Provider/Model 选择器未实现——M2 Frontend Switching
 
 ### Regenerate
 - 仅支持最新 assistant 的 regenerate

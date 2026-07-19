@@ -1,7 +1,9 @@
 # P1-E2 Provider Profiles + Session Model Bindings — 最简后端方案
 
-> **状态**：DESIGN FROZEN — APPROVED for E2-1 implementation
+> **状态**：BACKEND FOUNDATION ✅ FROZEN（实施完成 @ `cad7ca7`；不单独 merge / tag）
+> **PIVOT（2026-07-19）**：原 E2-4 独立 Security Freeze cancelled。E2 配置后端停止扩展，进入 P1-E M1 Multi-Provider Runtime。详见 [§19 Pivot 附录](#19-pivot-附录--2026-07-19)。
 > **基线**：master `de05c66`（P1-E1 已 MERGED + TAGGED `v0.0.27-secure-credentials`）
+> **实施 HEAD**：`89fabfd` / `a2c7932` / `9878ef9` / `17c843d` / `9bbd0f2` / `cad7ca7`
 > **前置**：P1-E1 ✅ FROZEN（Credential 子系统已交付）
 > **日期**：2026-07-19
 > **设计模式**：最小持久化——3 张表 / 4 个主要新增生产模块 + 现有 app/lifespan/session/security 最小接线修改 / 7 个 API；**E2 内零远程模型目录调用**（静态建议 + 手动 `model_id`）
@@ -1059,3 +1061,70 @@ Session B 已保存：
 1. **本设计 doc 已 DESIGN FROZEN @ 2026-07-19** → 进入 E2-1 编码
 2. **若需进一步调整** → 标注修订项，重新进入 DRAFT 状态，重审后定稿
 3. **若发现实施期不可行** → E2-3A 审计结论可调整 §13 失败策略；其余冻结项需重新审议
+
+---
+
+## 19. Pivot 附录 — 2026-07-19
+
+> **决策**：E2 配置后端 frozen 不扩展；E2-4 独立 Security Freeze cancelled；进入 P1-E M1 Multi-Provider Runtime。
+
+### 19.1 历史状态
+
+- E2-1 / E2-2 / E2-3A / E2-3（Composition + REST API + Session binding）已 ✅ FROZEN @ `89fabfd` / `a2c7932` / `9878ef9` / `17c843d` / `9bbd0f2` / `cad7ca7`
+- 测试基线：2063 full pytest + 2×37/37 E2E + ruff clean + 0 Core Runtime diff + 0 network + 0 secret reads
+- 原 §14 阶段拆分中 E2-4「Restart + Security + Freeze」**未实施**—— cancelled，并入 M3 Unified Freeze
+
+### 19.2 Pivot 动机
+
+原 ROADMAP 把「多 Provider 切换」拆为 P1-E2（持久化）/ E3（请求执行）/ E4（前端）/ E5（验收），拆得过细；并且 E2-4 独立 Security Freeze 会冻结一个用户无法直接使用的配置后端——冻结口径与产品价值错配。
+
+改为单一 milestone：**P1-E Multi-Provider Switching = M1 Runtime / M2 Frontend / M3 Unified Freeze**。
+
+### 19.3 本文档的语义变化
+
+- §0 ~ §17 保留为**历史设计**（不再作为 active design）
+- §0 设计动机仍然成立：E2 只解决「把 Credential 组合成可选择的 Profile 并持久化绑定到 Session」——这件事已经做完
+- §3 / §4 / §5 / §9 / §10 / §11 / §12 / §13 / §14 / §15 / §16 全部已实施并 frozen，作为 **M1 持久化基础**继续使用
+- §6 / §7（静态模型列表策略）继续有效——M1/M2/M3 不引入 remote ModelOption source
+
+### 19.4 M1 之后不再扩展的能力
+
+E2 配置后端 frozen 不再增加：
+
+- Profile 表字段
+- Binding 表字段
+- REST API 数量（保持 7 个）
+- Profile status 枚举
+- ProviderDefinition 字段
+- 静态模型选项数据来源
+
+如需新增能力，进入 M2/M3 之后单独评估，不回填 E2 设计。
+
+### 19.5 后续阶段定位
+
+| 阶段 | 范围 | 状态 |
+|---|---|---|
+| ~~E2-4 Restart + Security + Freeze~~ | cancelled | 并入 M3 |
+| **M1 Multi-Provider Runtime** | `providers/openai_compat.py` + Qwen/Kimi presets + `factory.py` + `web/provider_runtime.py` + Prompt/Regenerate 接线 | ⚪ 待启动（M1-0 审计先行）|
+| **M2 Frontend Switching** | `providerStore` + `ProviderSelector` + `ProviderSettingsModal` | ⚪ 待启动 |
+| **M3 Unified Freeze** | Secret leak audit + GLM/Qwen/Kimi contract tests + Playwright + merge + tag | ⚪ 待启动 |
+
+详细 M1/M2/M3 范围见 [ROADMAP.md](../../ROADMAP.md) § P1-E。
+
+### 19.6 跨阶段 frozen 边界（M1/M2/M3 全程有效）
+
+E2 已冻结的所有约束继续有效：
+
+- 3 张表 schema 不变（§5）
+- Profile / Binding 字段不变（§3 / §4）
+- 7 个 API 不变（§11）
+- Profile status 派生规则不变（§8）
+- enabled/is_default 交叉约束不变（§4.2）
+- `profile_id` 随机不可预测（§5.4.1）
+- `credential_id` 创建后可独立删除（§5.4.2）
+- `model_id` 控制字符 / 换行 / NUL 拒绝（§5.4）
+
+### 19.7 source of truth
+
+- **仓库文档**（ROADMAP / STATUS / TODO / 本设计 doc）是 source of truth
+- **memory** 仅作辅助上下文，可能与仓库文档存在时差——以仓库文档为准
