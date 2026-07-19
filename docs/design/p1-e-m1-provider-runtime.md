@@ -1,10 +1,10 @@
 # P1-E M1 — Multi-Provider Runtime Design
 
-> **状态**：M1-0 Provider Contract Audit（DESIGN DRAFT，待 user 审核）
-> **基线**：master `3a1e011`（P1-E2 Backend Foundation ✅ FROZEN @ `cad7ca7` + Pivot docs committed）
+> **状态**：DESIGN FROZEN — APPROVED FOR M1-1
+> **基线**：master `c796a01`（M1-0 audit committed @ `3a1e011` pivot）
 > **日期**：2026-07-19
 > **前置**：[p1-e2-provider-profiles.md §19 Pivot 附录](p1-e2-provider-profiles.md)
-> **范围**：只读审计现有 Provider contract + 冻结 M1 实施接口；不写生产代码
+> **范围**：M1-0 Provider Contract Audit + 冻结决策 + 修订缺口；M1-1 实施前不再变更
 
 ## 0. M1 目标
 
@@ -25,8 +25,8 @@
 
 ```python
 class ProviderAdapter(abc.ABC):
-    provider_id: str = ""   # 类属性
-    model: str = ""         # 类属性
+    provider_id: str = ""   # 类属性 / 实例可覆盖
+    model: str = ""         # 类属性 / 实例可覆盖
 
     @abc.abstractmethod
     def stream(self, request: ProviderRequest) -> AsyncIterator[StreamEvent]: ...
@@ -89,8 +89,6 @@ class ModelClient:
     async def close(self) -> None: ...   # 转发 adapter.aclose()；吞异常
 ```
 
-**M1 决策**：`ProviderFactory` 返回 `ProviderAdapter`，`provider_runtime` 包装成 `ModelClient`。理由：保持 factory 简单，runtime 负责 ModelClient 生命周期。
-
 ## 2. Agent 持有 Provider 的方式
 
 ### 2.1 Agent.client 字段（`agent.py:128, 138, 375`）
@@ -138,25 +136,11 @@ finally:
     self._snapshot_builder = None
 ```
 
-**M1-4 `bind_to_harness`** 沿用此模式：
+**M1-4 `bind_to_harness`** 沿用此模式（详见 §7.7）。
 
-```python
-@asynccontextmanager
-async def bind_to_harness(harness, selection: RequestProviderSelection):
-    new_adapter = factory.create_provider(...)
-    new_client = ModelClient(new_adapter)
-    original_client = harness.agent.client
-    harness.agent.client = new_client
-    try:
-        yield selection
-    finally:
-        harness.agent.client = original_client
-        await new_client.close()   # 关闭 request client
-```
+## 3. _execute_prompt 是唯一 bind_to_harness 接入点（修订 A）
 
-## 3. _run_prompt_core / _run_regeneration_core 审计
-
-### 3.1 真正的执行入口：`_execute_prompt`
+### 3.1 `_execute_prompt` 是真正的执行入口
 
 `_run_prompt_core`（`web/app.py:1280-1292`）是 D2-4 thin wrapper：
 
@@ -166,40 +150,46 @@ async def _run_prompt_core(validated: _PromptValidated) -> PromptRunOutcome:
     return await _persist_normal_prompt_result(validated, execution)
 ```
 
-`_execute_prompt` 是真正调用 harness 的位置——**M1-5 接入点在这里**（在调用 harness 之前 wrap `bind_to_harness`）。
-
-### 3.2 _run_regeneration_core 的临时替换范例（`web/app.py:1334-1434+`）
+`_run_regeneration_core`（`web/app.py:1334+`）同样通过 `_execute_prompt` 执行 LLM：
 
 ```python
 async def _run_regeneration_core(validated, *, assistant_message_id, request_id, revision_id=None):
-    # 1. create_running_revision（短事务）
-    # 2. 读 canonical → 截断到 preceding user
-    original_harness_messages = list(harness.agent.state.messages)
-    # 3. 临时替换 harness state
-    harness.agent.state.messages = list(regeneration_history)
-    try:
-        execution = await _execute_prompt(
-            validated,
-            override_initial_messages=regeneration_history,
-            suppress_user_append=True,
-        )
-    except PromptRuntimeError as e:
-        await ext_store.mark_revision_error(...)
-        await _reset_harness_to_session(store, session_id, original_harness_messages)
-        raise
-    # 4. _persist_regeneration_result（finalize_revision + snapshot）
-    # 5. _reset_harness_to_session（无论成败都要 reset）
+    # ... revision 创建 + canonical 截断 + 临时替换 harness state ...
+    execution = await _execute_prompt(
+        validated,
+        override_initial_messages=regeneration_history,
+        suppress_user_append=True,
+    )
+    # ... finalize_revision + reset ...
 ```
 
-**M1-6 接入点**：`_execute_prompt` 之前同样 wrap `bind_to_harness`；regenerate 用当前 Session Binding（不动 D2 不变量；revision `content_json` 自带 model 信息）。
+两条路径都汇聚到 `_execute_prompt`——**这是唯一接入点**。
 
-### 3.3 事务边界（D2-4 不变量）
+### 3.2 修订 A 决策：只 wrap 一次
 
-D2-4 保证：**短事务 create_running_revision → 释放 → 长 LLM 执行 → finalize 短事务**——没有任何 SQLite `BEGIN IMMEDIATE` 跨越 LLM 调用。
+`provider_runtime.bind_to_harness` **只在 `_execute_prompt` 内激活一次**。`_run_regeneration_core` 不再单独 wrap。
+
+理由：
+- 避免 nested context manager（regenerate 路径已有 harness state 临时替换 + revision 事务边界，再加一层 wrap 增加复杂度）
+- `_execute_prompt` 是 Prompt 和 Regenerate 的公共底层
+- Regenerate 仍使用当前 Session Binding（请求启动时 `resolve_selection` 冻结）——符合 §8.5 决策 7
+
+### 3.3 M1-6 仅增加 Regenerate 行为测试
+
+M1-6 **不修改** `_run_regeneration_core` 源码——只加端到端行为测试验证：
+
+- Regenerate 用当前 Session Binding 的 Provider/Model
+- Regenerate 后 revision `content_json` 含正确的 `provider` / `model` / `usage`
+- Regenerate 失败（如 401）→ revision.status="error"，不影响下个请求
+- Regenerate 期间切换 Binding → 当前 regenerate 不变；下一次 regenerate 用新 Binding
+
+### 3.4 事务边界（D2-4 不变量）
+
+D2-4 保证：**短事务 create_running_revision → 释放 → 长 LLM 执行 → finalize 短事务**——没有 SQLite `BEGIN IMMEDIATE` 跨越 LLM 调用。
 
 M1-4 `bind_to_harness` 在 LLM 执行窗口内激活——**不跨 SQLite 事务**，与 D2-4 不变量兼容。
 
-## 4. ProviderDefinition 现状 + M1-2 扩展
+## 4. ProviderDefinition + M1-2 Qwen / Kimi presets
 
 ### 4.1 当前 `_DEFAULT_REGISTRY`（`registry.py:239-241`）
 
@@ -215,13 +205,9 @@ _DEFAULT_REGISTRY = ProviderRegistry((_GLM_DEFINITION, _ANTHROPIC_DEFINITION))
 ProviderAPIStyle = Literal["anthropic_compatible", "openai_compatible"]
 ```
 
-`registry.py:24` 文档注释：
+`registry.py:24` 文档注释明确「`openai_compatible` 留待 P1-E2 引入」——E2 没引入（按 Pivot），**M1-2 顺势引入 `qwen` / `kimi`**。
 
-> `openai_compatible` 和 `custom` 留待 P1-E2 ProviderProfile 引入.
-
-E2 没引入（按 Pivot 决策）—— **M1-2 顺势引入 `qwen` / `kimi`**，符合 E2 原设计意图。
-
-### 4.3 M1-2: Qwen / Kimi presets（建议）
+### 4.3 冻结决策 1 / 2：Qwen / Kimi base_url
 
 ```python
 _QWEN_DEFINITION = ProviderDefinition(
@@ -229,7 +215,7 @@ _QWEN_DEFINITION = ProviderDefinition(
     display_name="Alibaba Qwen (OpenAI-compatible)",
     api_style="openai_compatible",
     default_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-    credential_validation_strategy="unsupported",  # M1 不做远端 Key validation
+    credential_validation_strategy="unsupported",   # M1 不做远端 Key validation
     credential_validation_endpoint=None,
     supports_model_listing=False,
     key_prefix_hints=("sk-",),   # 弱提示，confidence=unknown
@@ -250,6 +236,10 @@ _DEFAULT_REGISTRY = ProviderRegistry(
     (_GLM_DEFINITION, _ANTHROPIC_DEFINITION, _QWEN_DEFINITION, _KIMI_DEFINITION),
 )
 ```
+
+**Qwen 范围明确（决策 1）**：只支持**中国华北 2 北京共享 DashScope endpoint**。海外区域（如新加坡 / 法兰克福）和 Workspace 专属 endpoint **不在 M1 范围**——若用户需要其他区域，需要等 Custom Base URL 单独评估。
+
+**Kimi 范围（决策 2）**：`https://api.moonshot.cn/v1`——Moonshot 官方公开 endpoint。
 
 `base_url` 用户不能改（M1 不支持 Custom Base URL）；用户在 Provider Settings Modal 只能填 API Key + Model ID。
 
@@ -273,22 +263,28 @@ _DEFAULT_REGISTRY = ProviderRegistry(
 src/pi_agent_core_py/providers/openai_compat.py
 ```
 
-### 5.2 OpenAICompatConfig（Pydantic BaseModel，对齐 `AnthropicCompatConfig`）
+### 5.2 OpenAICompatConfig（修订 D）
 
 ```python
+from pydantic import BaseModel, Field, SecretStr
+
 class OpenAICompatConfig(BaseModel):
-    api_key: str
-    base_url: str           # 必填——由 factory 从 ProviderDefinition.default_base_url 注入
-    model: str              # 必填——用户输入或 Profile.default_model
+    api_key: SecretStr = Field(repr=False)   # 不进 repr / log
+    base_url: str
+    model: str
     timeout_s: float = 60.0
-    max_tokens: int = 4096
-    temperature: float | None = 0.0
-    extra_headers: dict[str, str] = Field(default_factory=dict)
+    max_tokens: int | None = 4096            # None = 不传给 SDK
+    temperature: float | None = None         # None = 不传给 SDK（默认行为）
 ```
 
-`provider_id` 不在 Config 内——由 `OpenAICompatibleProvider` 子类化或构造参数覆盖（Qwen / Kimi 共用同一 Adapter，但 `provider_id` 不同）。
+**删除字段**：`extra_headers`（M1 不暴露给用户；若需固定 header 在 Adapter 内部硬编码）。
 
-### 5.3 OpenAICompatibleProvider 类
+**关键变化**：
+- `api_key` 改为 `SecretStr`——Pydantic 序列化 / repr 时不暴露明文
+- `max_tokens` / `temperature` 允许 `None`——不传给 SDK（让 SDK 用默认）
+- 不保存 `provider_id`（决策 3）——由 `OpenAICompatibleProvider` 构造参数传入
+
+### 5.3 OpenAICompatibleProvider 类（决策 3）
 
 ```python
 class OpenAICompatibleProvider(ProviderAdapter):
@@ -296,68 +292,217 @@ class OpenAICompatibleProvider(ProviderAdapter):
         self,
         config: OpenAICompatConfig,
         *,
-        provider_id: str,                # "qwen" / "kimi"
-        client: AsyncOpenAI | None = None,   # 测试注入
-    ) -> None: ...
+        provider_id: str,                       # "qwen" / "kimi"
+        client: AsyncOpenAI | None = None,      # 测试注入
+    ) -> None:
+        if not config.api_key:
+            raise ProviderConfigError("OpenAICompatConfig.api_key 不能为空")
+        if not config.model:
+            raise ProviderConfigError("OpenAICompatConfig.model 不能为空")
+        if not provider_id:
+            raise ProviderConfigError("provider_id 必须传入")
 
-    async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamEvent]: ...
-    async def aclose(self) -> None: ...
+        self.config = config
+        # 实例属性覆盖类属性——区分 Qwen / Kimi
+        self.provider_id = provider_id
+        self.model = config.model
+
+        self._client = client or AsyncOpenAI(
+            api_key=config.api_key.get_secret_value(),
+            base_url=config.base_url,
+            timeout=config.timeout_s,
+        )
+        self._closed: bool = False
 ```
+
+**Qwen / Kimi 共用 Config 和 Adapter 类**——区别仅在构造参数 `provider_id` 和 `config.base_url`（由 Factory 从 ProviderDefinition 注入）。
 
 用 `openai.AsyncOpenAI` SDK（M1 新增依赖；非 web optional）。
 
-### 5.4 stream() 实现要点
+### 5.4 LLMMessage → OpenAI message 转换表（修订 H）
 
-1. 构造 OpenAI Chat Completions 请求（`messages` / `tools` / `model` / `temperature` / `max_tokens` / `stream=True`）
-2. `LLMMessage → OpenAI messages` 转换（参考 `to_anthropic_messages`）
-3. `ToolDef → OpenAI tools` 转换（参考 `to_anthropic_tools`，schema 用 JSON Schema）
-4. 调 `await self._client.chat.completions.create(..., stream=True)`
-5. 遍历 SSE chunks：
-   - `choices[0].delta.content` → `TextDeltaEvent`
-   - `choices[0].delta.tool_calls[].function.arguments` 增量累积 → `ToolCallEvent`（chunk 完成时一次 yield）
-   - `choices[0].finish_reason` → 决定 `DoneEvent.stop_reason`（`stop` / `length` / `tool_calls` → `tool_use`）
-6. 末态 `usage`（OpenAI `stream_options={"include_usage": True}`）→ `DoneEvent.usage`
-7. `signal.is_set()` 时 yield `DoneEvent(stop_reason="aborted")`
+| LLMMessage 类型 | OpenAI message |
+|---|---|
+| `LLMUserMessage`（text content） | `{"role": "user", "content": <text>}` |
+| `LLMAssistantMessage`（仅 text） | `{"role": "assistant", "content": <text>}` |
+| `LLMAssistantMessage`（含 tool_calls） | `{"role": "assistant", "content": <text or None>, "tool_calls": [{"id", "type": "function", "function": {"name", "arguments": <json str>}}]}` |
+| `LLMToolResultMessage` | `{"role": "tool", "tool_call_id": <id>, "content": <text>}` |
+| `system_prompt` | `{"role": "system", "content": <system_prompt>}`（**作为 messages[0]**，不用 `system` 参数） |
 
-### 5.5 tool_call 增量解析
+转换函数 `to_openai_messages(messages, system_prompt) -> list[dict]`：
 
-OpenAI tool_calls 是分片返回的（`function.arguments` 是 partial JSON string），需要：
+- 先放 system message（即使 `system_prompt` 为空字符串也跳过——空 system 不发）
+- 遍历 `LLMMessage` 列表，按上表转换
+- `LLMAssistantMessage` 的 `tool_calls` 必须序列化为 JSON string（OpenAI 协议要求）
+- `LLMToolResultMessage` 的 `tool_call_id` 必须与对应 assistant `tool_calls[i].id` 配对
+
+转换函数 `to_openai_tools(tools) -> list[dict]`：
+
+- `ToolDef` → `{"type": "function", "function": {"name", "description", "parameters": <json schema or {"type": "object", "properties": {}}>}}`
+- 空 tools 返回 `None`（不传 `tools` 参数）
+
+### 5.5 stream() 实现要点（修订 E + F + I）
 
 ```python
-tool_call_buffers: dict[int, {id, name, args_parts: list[str]}] = {}
+async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamEvent]:
+    kwargs = self._build_kwargs(request)
+    final_stop: Literal["stop", "length", "tool_use"] = "stop"
+    final_usage = Usage()
+    tool_buffers: dict[int, dict] = {}
 
-for chunk in stream:
-    for tc in chunk.choices[0].delta.tool_calls or []:
-        buf = tool_call_buffers.setdefault(tc.index, {...})
-        if tc.id: buf["id"] = tc.id
-        if tc.function.name: buf["name"] = tc.function.name
-        if tc.function.arguments: buf["args_parts"].append(tc.function.arguments)
+    signal = request.signal
+    raw_stream = None
+    try:
+        raw_stream = await self._client.chat.completions.create(
+            **kwargs, stream=True,
+            stream_options={"include_usage": True},
+        )
+        async for chunk in raw_stream:
+            # 1. 先读 usage（OpenAI 末态 chunk 可能只有 usage）
+            if chunk.usage is not None:
+                final_usage = Usage(
+                    input=getattr(chunk.usage, "prompt_tokens", 0) or 0,
+                    output=getattr(chunk.usage, "completion_tokens", 0) or 0,
+                    total_tokens=(
+                        (getattr(chunk.usage, "prompt_tokens", 0) or 0)
+                        + (getattr(chunk.usage, "completion_tokens", 0) or 0)
+                    ),
+                )
 
-# finish_reason == "tool_calls" 时：
-for buf in tool_call_buffers.values():
-    args = json.loads("".join(buf["args_parts"])) if buf["args_parts"] else {}
-    yield ToolCallEvent(tool_call=ToolCall(id=buf["id"], name=buf["name"], arguments=args, raw=...))
+            # 2. choices 为空时 continue（usage-only chunk）
+            if not chunk.choices:
+                continue
+
+            # 3. signal 检查（协作式中止）
+            if signal is not None and _is_set(signal):
+                yield DoneEvent(stop_reason="aborted", usage=final_usage)
+                return
+
+            choice = chunk.choices[0]
+            delta = choice.delta
+
+            # 4. text delta
+            text = getattr(delta, "content", None)
+            if text:
+                yield TextDeltaEvent(delta=text)
+
+            # 5. tool_call 增量累积（不立即 yield；stream 结束或 finish_reason 时 flush）
+            tcs = getattr(delta, "tool_calls", None)
+            if tcs:
+                for tc in tcs:
+                    buf = tool_buffers.setdefault(tc.index, {
+                        "id": "", "name": "", "args_parts": [],
+                    })
+                    if getattr(tc, "id", None):
+                        buf["id"] = tc.id
+                    fn = getattr(tc, "function", None)
+                    if fn is not None:
+                        if getattr(fn, "name", None):
+                            buf["name"] = fn.name
+                        if getattr(fn, "arguments", None):
+                            buf["args_parts"].append(fn.arguments)
+
+            # 6. finish_reason
+            fr = getattr(choice, "finish_reason", None)
+            if fr == "stop":
+                final_stop = "stop"
+            elif fr == "length":
+                final_stop = "length"
+            elif fr == "tool_calls":
+                final_stop = "tool_use"
+
+            # 7. reasoning_content 忽略（修订 I）——不 yield TextDeltaEvent，不写 Message
+
+        # 8. stream 正常结束：flush tool_calls（按 index 排序）
+        for idx in sorted(tool_buffers.keys()):
+            buf = tool_buffers[idx]
+            raw_json = "".join(buf["args_parts"])
+            try:
+                args = json.loads(raw_json) if raw_json else {}
+            except Exception as e:
+                raise ProviderProtocolError(
+                    "tool_use input JSON parse failed",
+                ) from None   # 修订 G：固定短文本，不带原始异常链
+            if not isinstance(args, dict):
+                raise ProviderProtocolError(
+                    "tool_use input must be JSON object",
+                ) from None
+            yield ToolCallEvent(tool_call=ToolCall(
+                id=buf["id"], name=buf["name"], arguments=args,
+                raw={"id": buf["id"], "name": buf["name"], "input": args},
+            ))
+
+        yield DoneEvent(stop_reason=final_stop, usage=final_usage)
+
+    except asyncio.CancelledError:
+        # Cancellation 原样传播（修订 E）
+        raise
+    except ProviderError:
+        # 已知 Provider 错误——向上抛，ModelClient 转 ErrorEvent
+        raise
+    except Exception as e:
+        # 未知异常——映射为 ProviderError 子类（修订 G：固定文本）
+        raise _map_unknown_exception(e) from None
+    finally:
+        # 修订 F：raw stream 必须 close
+        if raw_stream is not None:
+            try:
+                await raw_stream.close()
+            except Exception:
+                pass
 ```
 
-### 5.6 错误映射（关键安全约束）
+**修订 E 落地清单**：
+- ✅ 先读 `chunk.usage`（OpenAI 末态 chunk 只有 usage）
+- ✅ `chunk.choices` 为空时 `continue`（不假设 `choices[0]` 存在）
+- ✅ usage 缺失不是错误（保持默认 `Usage()`）
+- ✅ ToolCall buffers 按 `index` 排序后 flush
+- ✅ stream 正常结束时也 flush 已完成的 tool_calls
+- ✅ signal abort 后关闭 stream（`return` 触发 finally close）
+- ✅ cancellation 原样传播（`asyncio.CancelledError` 不映射为 ProviderError）
 
-| HTTP / SDK 异常 | 抛 |
+### 5.6 错误映射（修订 G：固定短文本）
+
+`_map_unknown_exception(e)` ——**只看异常类型**，不看 `str(e)` / `repr(e)` / `response.text` / `request body`：
+
+| 异常类型（`openai.*`） | 抛 |
 |---|---|
-| 401 / 403（`AuthenticationError`） | `ProviderAuthenticationError` |
-| 429（`RateLimitError`） | `ProviderRateLimitError` |
-| 网络异常 / 连接断（`APIConnectionError` / `APITimeoutError`） | `ProviderStreamError` |
-| 解析失败 / 非法 tool input JSON | `ProviderProtocolError` |
-| Config 缺 api_key / model 空 | `ProviderConfigError`（构造阶段抛） |
+| `openai.AuthenticationError`（401） | `ProviderAuthenticationError("authentication failed")` |
+| `openai.PermissionDeniedError`（403） | `ProviderAuthenticationError("permission denied")` |
+| `openai.RateLimitError`（429） | `ProviderRateLimitError("rate limited")` |
+| `openai.APIConnectionError` | `ProviderStreamError("connection error")` |
+| `openai.APITimeoutError` | `ProviderStreamError("request timeout")` |
+| `openai.BadRequestError` | `ProviderProtocolError("bad request")` |
+| `openai.NotFoundError` | `ProviderProtocolError("resource not found")` |
+| 其它 | `ProviderStreamError("stream error")` |
 
-**错误信息必须**：
-- ✅ 只含 `type(e).__name__: 简短描述`（如 `ProviderAuthenticationError: 401 Unauthorized`）
-- ❌ 不含 `Authorization` header / 完整 `api_key`
-- ❌ 不含 request body 原文（可能含 system_prompt / 用户消息——按现有 GLM Adapter 一致，不进 ErrorEvent.message）
-- ❌ 不含完整 endpoint URL（最多 scheme+host）
+**严格禁止**：
+- ❌ `str(exc)` / `repr(exc)`（OpenAI SDK 异常文本可能含 endpoint / request id）
+- ❌ `getattr(exc, "response", None).text`（HTTP body 可能含 echo 回显的 request）
+- ❌ 任何 request body / `messages` / `system_prompt`（用户内容敏感）
+- ❌ `Authorization` header / `api_key` / `base_url`
+- ❌ `from e` 保留 `__cause__` 链（避免 traceback 打印敏感上下文）
 
-`ModelClient.stream` 已吞掉异常文本 → `ErrorEvent`；revision `error_summary` 截断 500 chars（D2-3 既有约束）。
+所有映射都用 `from None`（中断 cause 链）。
 
-### 5.7 aclose() 生命周期
+`ModelClient.stream` 已吞掉 `ProviderError` → `ErrorEvent`；revision `error_summary` 截断 500 chars（D2-3 既有约束）。
+
+### 5.7 reasoning_content（修订 I：明确忽略）
+
+某些 OpenAI-compatible 服务（如 DeepSeek / Qwen reasoning 模型）会在 delta 中返回 `reasoning_content` 字段。M1-1 **明确忽略**：
+
+- ❌ 不生成 `TextDeltaEvent`
+- ❌ 不写 `Message` / `Event` / `Revision`
+- ❌ 不出现在 `usage.output_tokens` 之外的任何位置
+
+实现：`getattr(delta, "reasoning_content", None)` 检测到时直接跳过——不抛错。
+
+理由：
+- M1 不实现 reasoning trace UI
+- reasoning_content 与最终回答是分离的——保留它需要新事件类型（破坏 §1.3 contract）
+- 用户看到的最终文本不应包含 reasoning
+
+### 5.8 aclose() 生命周期（修订 F）
 
 ```python
 async def aclose(self) -> None:
@@ -365,12 +510,19 @@ async def aclose(self) -> None:
     self._closed = True
     try:
         await self._client.close()
-    except Exception: pass
+    except Exception:
+        pass
 ```
 
 幂等；与 `AnthropicCompatAdapter.aclose` 行为对齐。
 
-## 6. M1-3 `ProviderFactory` 设计
+**Stream 生命周期（修订 F）**：
+- raw stream（`self._client.chat.completions.create(stream=True)` 返回值）**必须**在 finally 中 `close()`
+- 或者使用 `async with` stream context manager（若 SDK 提供）
+- Adapter `aclose()` 关闭 SDK client（连接池级别）
+- 两者职责分离：`stream()` 内部 close raw stream；`aclose()` 关 SDK client
+
+## 6. M1-3 `ProviderFactory` 设计（决策 4）
 
 ### 6.1 模块位置
 
@@ -378,7 +530,7 @@ async def aclose(self) -> None:
 src/pi_agent_core_py/providers/factory.py
 ```
 
-### 6.2 签名
+### 6.2 签名（决策 4：返回 `ProviderAdapter`）
 
 ```python
 def create_provider(
@@ -389,6 +541,8 @@ def create_provider(
 ) -> ProviderAdapter: ...
 ```
 
+**返回 `ProviderAdapter`**（不返回 `ModelClient`）。`RequestProviderRuntime` 负责包装成 `ModelClient`——保持 factory 简单，runtime 控制生命周期。
+
 ### 6.3 路由逻辑（唯一知道 Adapter 映射的位置）
 
 ```python
@@ -396,29 +550,41 @@ def create_provider(*, provider_definition, api_key, model_id) -> ProviderAdapte
     pid = provider_definition.id
 
     if pid == "glm":
-        config = GLMConfig(api_key=api_key, base_url=provider_definition.default_base_url, model=model_id)
+        config = GLMConfig(
+            api_key=api_key,
+            base_url=provider_definition.default_base_url,
+            model=model_id,
+        )
         return GLMProviderAdapter(config)
 
     if pid == "anthropic":
-        config = AnthropicCompatConfig(api_key=api_key, base_url=provider_definition.default_base_url, model=model_id)
+        config = AnthropicCompatConfig(
+            api_key=api_key,
+            base_url=provider_definition.default_base_url,
+            model=model_id,
+        )
         return AnthropicCompatAdapter(config)
 
     if provider_definition.api_style == "openai_compatible":
-        config = OpenAICompatConfig(api_key=api_key, base_url=provider_definition.default_base_url, model=model_id)
+        config = OpenAICompatConfig(
+            api_key=api_key,                       # SecretStr 在 Pydantic 校验时转换
+            base_url=provider_definition.default_base_url,
+            model=model_id,
+        )
         return OpenAICompatibleProvider(config, provider_id=pid)
 
-    raise UnsupportedProviderError(f"unknown provider: {pid}") from None
+    raise UnsupportedProviderError("unknown provider") from None   # 修订 G：固定文本
 ```
 
 ### 6.4 错误隔离
 
-- `api_key` 为空 → `ProviderConfigError`（构造阶段抛，不进 stream）
-- `model_id` 为空 → `ProviderConfigError`
-- Provider 未知 → `UnsupportedProviderError`
+- `api_key` 为空 → `ProviderConfigError("missing api_key")`（构造阶段抛，不进 stream）
+- `model_id` 为空 → `ProviderConfigError("missing model_id")`
+- Provider 未知 → `UnsupportedProviderError("unknown provider")`
 
-**所有异常 `from None`**（中断 `__cause__` 链，避免 Strategy 异常文本含 secret 泄漏——见 `feedback_service_wrap_strategy_exc_from_none.md` memory）。
+**所有异常 `from None`**（修订 G；中断 `__cause__` 链，避免 Strategy 异常文本含 secret 泄漏——见 `feedback_service_wrap_strategy_exc_from_none.md` memory）。
 
-## 7. M1-4 `web/provider_runtime.py` 设计
+## 7. M1-4 `RequestProviderRuntime` 设计
 
 ### 7.1 模块位置
 
@@ -426,20 +592,57 @@ def create_provider(*, provider_definition, api_key, model_id) -> ProviderAdapte
 src/pi_agent_core_py/web/provider_runtime.py
 ```
 
-### 7.2 RequestProviderSelection（不可变快照）
+### 7.2 RequestProviderSelection（修订 C）
 
 ```python
+from dataclasses import dataclass, field
+
 @dataclass(frozen=True)
 class RequestProviderSelection:
     profile_id: str
     provider_id: str
     model_id: str
-    selection_source: Literal["default", "explicit"]   # Session Binding source
+    credential_id: str = field(repr=False)   # 不进 repr（敏感）
+    selection_source: Literal["default", "explicit"]
 ```
 
-请求启动时创建，**整个请求生命周期不变**。
+**修订 C 落地**：
+- 增加 `credential_id`（`repr=False`——不进日志 / print / traceback）
+- `resolve_selection` 一次性冻结 Binding + Profile + Credential ID
+- `build_adapter` **不再次读取 Profile**——只通过 `credential_id` 调 `CredentialService.resolve_secret_for_request()`
 
-### 7.3 RequestProviderRuntime 类
+理由：减少 SQLite 读次数；保证请求生命周期内 Binding/Profile/Credential 不被并发修改污染。
+
+### 7.3 CredentialService 窄接口（决策 5）
+
+`RequestProviderRuntime` **不直接依赖 `SecretStoreRouter`**。给 `CredentialService`（E1 已存在）增加一个窄内部接口：
+
+```python
+class CredentialService:
+    # ... E1 既有方法 ...
+
+    async def resolve_secret_for_request(
+        self,
+        credential_id: str,
+    ) -> str:
+        """读 CredentialRecord + 通过 SecretStoreRouter 解析 Secret。
+
+        内部职责：
+        - credential 不存在 → CredentialNotFoundError（固定短文本）
+        - SecretStore backend 不可用 → raise（固定短文本）
+        - 解析失败 / secret 已撤销 → raise（固定短文本）
+        - 返回 plaintext api_key（仅请求内存内有效）
+
+        错误信息固定短文本——不暴露 secret_ref / endpoint / 原始异常。
+        """
+```
+
+**为什么不让 RequestProviderRuntime 直接依赖 SecretStoreRouter**：
+- 集中 Credential 安全错误映射（一处实现，多处复用）
+- 避免 web 层直接持有 Secret 引用（缩小攻击面）
+- E1 CredentialService 已有完整的 Record + Router + Store 解析逻辑——扩展窄接口比新建依赖更安全
+
+### 7.4 RequestProviderRuntime 类
 
 ```python
 class RequestProviderRuntime:
@@ -449,46 +652,75 @@ class RequestProviderRuntime:
         self,
         *,
         provider_config_service: ProviderConfigService,
-        credential_service: CredentialService,   # E1 安全接口
-        secret_router: SecretStoreRouter,        # E1
-        provider_registry: ProviderRegistry,     # 内置 + M1-2 扩展
+        credential_service: CredentialService,        # E1 + 决策 5 窄接口
+        provider_registry: ProviderRegistry,          # 内置 + M1-2 扩展
     ) -> None: ...
 
     async def resolve_selection(
         self, session_id: str
-    ) -> RequestProviderSelection:
-        """读 SessionModelBinding → Profile → Credential → ProviderDefinition。
-        不读 Secret；返回 selection（含 profile_id / provider_id / model_id / source）。
-        """
+    ) -> RequestProviderSelection | None:
+        """读 SessionModelBinding → Profile → 返回 selection。
+        不读 Secret；返回 None 表示 Session 无 Binding。"""
 
     async def build_adapter(
         self, selection: RequestProviderSelection
     ) -> ProviderAdapter:
-        """读 Secret（仅此时）→ Factory.create_provider → 返回 adapter。"""
+        """调 credential_service.resolve_secret_for_request(selection.credential_id)
+        → api_key → factory.create_provider(...) → 返回 adapter。
+        不再次读取 Profile。"""
 
     @asynccontextmanager
     async def bind_to_harness(
         self,
         harness: AgentHarness,
         selection: RequestProviderSelection,
-    ):
-        """临时替换 harness.agent.client；finally 还原 + close request client。"""
+    ): ...
 ```
 
-### 7.4 接入点
-
-`provider_runtime.bind_to_harness` 在 `_execute_prompt` 调用**之前**激活，覆盖整个 LLM 执行窗口：
+### 7.5 resolve_selection：一次性冻结
 
 ```python
-# _execute_prompt 改造（伪代码）
-async def _execute_prompt(validated, **kwargs):
-    selection = await provider_runtime.resolve_selection(validated.session_id)
-    async with provider_runtime.bind_to_harness(harness, selection):
-        # 原有 _execute_prompt 主体（调 harness.run_prompt / run_continue）
-        ...
+async def resolve_selection(self, session_id: str) -> RequestProviderSelection | None:
+    binding = await self.provider_config_service.get_session_binding(session_id)
+    if binding is None:
+        return None   # 修订 B：Session 无 Binding → caller 使用 original client
+
+    profile = await self.provider_config_service.get_profile(binding.profile_id)
+    if profile is None:
+        raise ProviderSelectionError("profile not found")   # 修订 B + G
+
+    if profile.status != "ready":
+        raise ProviderSelectionError(f"profile status: {profile.status}")   # 修订 B：固定错误，不 fallback
+
+    return RequestProviderSelection(
+        profile_id=profile.id,
+        provider_id=profile.provider_id,
+        model_id=binding.model_id,
+        credential_id=profile.credential_id,   # repr=False
+        selection_source=binding.source,
+    )
 ```
 
-### 7.5 finally 恢复 + close 语义
+### 7.6 build_adapter：不再次读取 Profile
+
+```python
+async def build_adapter(self, selection: RequestProviderSelection) -> ProviderAdapter:
+    provider_def = self.provider_registry.get(selection.provider_id)
+    if provider_def is None:
+        raise ProviderSelectionError("unknown provider") from None   # 修订 G
+
+    api_key = await self.credential_service.resolve_secret_for_request(
+        selection.credential_id,
+    )
+
+    return create_provider(
+        provider_definition=provider_def,
+        api_key=api_key,
+        model_id=selection.model_id,
+    )
+```
+
+### 7.7 bind_to_harness async context manager
 
 ```python
 @asynccontextmanager
@@ -508,62 +740,90 @@ async def bind_to_harness(self, harness, selection):
 ```
 
 **关键约束**：
-- `original_client` 引用始终保留——请求结束后 harness 恢复到原 client（通常是 default GLM client）
+- `original_client` 引用始终保留——请求结束后 harness 恢复到原 client
 - request client 关闭失败不影响 request 已完成的返回值
 - 与 `Harness.close()` 不冲突——`Harness.close()` 仍关 `original_client`
 
-### 7.6 单 active request lock 复用
+### 7.8 接入点：`_execute_prompt`（修订 A）
 
-`POST /api/prompt/async` 已有单 active request lock（P1-B1）。`provider_runtime` 不引入第二把锁——`bind_to_harness` 的生命周期**严格小于** active request lock。
-
-## 8. M1-5 / M1-6 Prompt + Regenerate 接线
-
-### 8.1 `_run_prompt_core` 接入
-
-在 `_execute_prompt` 内 wrap：
+`bind_to_harness` 在 `_execute_prompt` 内激活一次，覆盖整个 LLM 执行窗口：
 
 ```python
 async def _execute_prompt(validated, **kwargs):
     selection = await provider_runtime.resolve_selection(validated.session_id)
-    async with provider_runtime.bind_to_harness(harness, selection):
-        # 原有 _execute_prompt 主体
+    if selection is None:
+        # 修订 B：Session 无 Binding → 不 swap，用 original/legacy client
         return await _execute_prompt_inner(validated, **kwargs)
+
+    try:
+        async with provider_runtime.bind_to_harness(harness, selection):
+            return await _execute_prompt_inner(validated, **kwargs)
+    except ProviderSelectionError as e:
+        # 修订 B：显式 Binding 但 Profile/Credential/Adapter 无效 → 固定错误，禁止 fallback
+        raise PromptRuntimeError(...) from None   # 修订 G
 ```
 
-### 8.2 `_run_regeneration_core` 接入
+### 7.9 Session 无 Binding 行为（修订 B）
 
-同样在 `_execute_prompt` 之前 wrap——regenerate 用当前 Session Binding（不动 D2 不变量）：
+**两种情况**：
 
-```python
-# _run_regeneration_core 改造（伪代码）
-selection = await provider_runtime.resolve_selection(validated.session_id)
-async with provider_runtime.bind_to_harness(harness, selection):
-    execution = await _execute_prompt(
-        validated,
-        override_initial_messages=regeneration_history,
-        suppress_user_append=True,
-    )
-```
+| 情况 | 行为 |
+|---|---|
+| Session 无 Binding（`binding is None`） | **不 swap**，用现有 `original/legacy client`（通常是 default GLM client）。这是向后兼容路径——保留 E2 之前的行为 |
+| 显式 Binding 存在，但 Profile/Credential/Adapter 无效（profile deleted / credential missing / provider unknown / profile.status != "ready"） | **固定错误**——抛 `ProviderSelectionError`（短文本）；**禁止自动 fallback** 到其他 Provider |
 
-revision `content_json` 自带 `provider` / `model` 字段——D2 已冻结，无需改 schema。
+理由：
+- 自动 fallback 会破坏请求级不可变约束（用户选了 Qwen，结果系统悄悄用 GLM，无法调试）
+- 显式 Binding 失败应该让用户看到错误，而不是掩盖
+- Session 无 Binding 是合法状态（用户从未配置）——保留 legacy client 是平滑迁移路径
 
-### 8.3 request metadata 记录（不含 secret）
+### 7.10 单 active request lock 复用
 
-写入 `context.metadata["provider_selection"]`：
+`POST /api/prompt/async` 已有单 active request lock（P1-B1）。`provider_runtime` 不引入第二把锁——`bind_to_harness` 的生命周期**严格小于** active request lock。
 
-```python
-{
-    "profile_id": "...",
-    "provider_id": "qwen",
-    "model_id": "qwen-plus",
-    "selection_source": "explicit",
-}
-```
+### 7.11 修订决策 6：不写 context.metadata
 
-**不记**：
-- `credential_id`（敏感）
-- `api_key` / `secret_ref` / Authorization
-- 内部 endpoint URL
+**删除** `context.metadata["provider_selection"]`（原 M1-0 草稿中有此设计）。
+
+理由：
+- `RequestProviderSelection` 只存在于**请求内存**——不进 snapshot / session / SQLite / log
+- 持久化 `provider` / `model` / `usage` 已有路径：`AssistantMessage.model_dump()` 写入 `web_message_revisions.content_json`（D2 冻结）
+- 避免敏感字段（`credential_id` 即使 `repr=False`，进 metadata 仍有泄漏风险）
+- 减少 snapshot metadata 膨胀
+
+**唯一持久化路径**：`AssistantMessage` 的 `provider` / `model` / `usage` 字段（由 loop 在执行中自动填，不需要 provider_runtime 额外注入）。
+
+## 8. M1-5 / M1-6 接线
+
+### 8.1 M1-5：`_execute_prompt` wrap（唯一接入点）
+
+按 §7.8 实现。`_run_prompt_core` 和 `_run_regeneration_core` 都通过 `_execute_prompt` 走到 wrap 路径。
+
+### 8.2 M1-6：Regenerate 行为测试（不再 wrap）
+
+M1-6 **不修改** `_run_regeneration_core` 源码（修订 A）。只加端到端行为测试：
+
+- Regenerate 用当前 Session Binding 的 Provider/Model
+- Regenerate 后 revision `content_json` 含正确的 `provider` / `model` / `usage`（来自 `AssistantMessage.model_dump()`）
+- Regenerate 失败（如 401）→ revision.status="error"，不影响下个请求
+- Regenerate 期间切换 Binding → 当前 regenerate 不变；下一次 regenerate 用新 Binding
+
+### 8.3 不动 D2 不变量
+
+D2 schema / revision / finalize 流程**完全不修改**。`web_message_revisions.content_json` 自带 `provider` / `model` / `usage`——这是 D2 既有的冻结决策（边界 A）。
+
+### 8.4 不记 provider_selection metadata（决策 6）
+
+`context.metadata["provider_selection"]` **不写**。详见 §7.11。
+
+### 8.5 运行中切换不 abort（决策 7）
+
+用户在请求运行中切换 Binding（`PUT /api/sessions/{sid}/model-binding`）：
+- ✅ 当前请求继续用旧 Provider（`RequestProviderSelection` 已冻结）
+- ❌ **不**主动 abort 当前请求
+- ✅ 下一次 Prompt / Regenerate 用新 Binding
+
+实现：`bind_to_harness` 内不监听 Binding 变更事件；`PUT /api/sessions/{sid}/model-binding` 不发送 abort 信号给 active request。
 
 ## 9. M1-7 测试策略
 
@@ -573,6 +833,7 @@ revision `content_json` 自带 `provider` / `model` 字段——D2 已冻结，�
 - 用 SDK 的 `MockTransport` / 自定义 httpx transport 拦截请求
 - 验证 `stream()` 返回的 StreamEvent 序列符合契约
 - 验证 `aclose()` 幂等
+- 验证 raw stream 在所有路径（正常 / 异常 / abort）都被 close（修订 F）
 
 ### 9.2 行为契约（4 个 Provider 共测）
 
@@ -585,8 +846,20 @@ revision `content_json` 自带 `provider` / `model` 字段——D2 已冻结，�
 | 429 | ProviderRateLimitError → ErrorEvent |
 | 网络断开 | ProviderStreamError → ErrorEvent |
 | 非法 tool input JSON | ProviderProtocolError → ErrorEvent |
+| usage-only chunk（choices=[]） | continue；不抛错（修订 E） |
+| chunk.usage 缺失 | 用默认 `Usage()`；不抛错（修订 E） |
+| reasoning_content 出现 | 忽略；不生成 TextDeltaEvent（修订 I） |
+| asyncio.CancelledError | 原样传播；不映射为 ProviderError（修订 E） |
 
-### 9.3 切换只影响下次请求
+### 9.3 错误信息固定短文本（修订 G）
+
+测试断言：
+- `ProviderAuthenticationError.message` 不含 `api_key` / `Authorization` / endpoint URL
+- `ProviderError` 子类的 `__cause__` 是 None（`from None` 生效）
+- ErrorEvent.message 不含原始异常的 `str()` / `repr()`
+- request body / response body 不出现在任何 ErrorEvent
+
+### 9.4 切换只影响下次请求（决策 7）
 
 ```
 Session A 绑定 GLM → 启动 Prompt → 运行中
@@ -597,23 +870,27 @@ Session A 绑定 GLM → 启动 Prompt → 运行中
 
 通过 `RequestProviderSelection` 不可变快照验证。
 
-### 9.4 失败不污染下一请求
+### 9.5 失败不污染下一请求（修订 B）
 
 ```
 Session A 绑定 Qwen → Qwen 401（invalid key） → ErrorEvent
-下一次 Prompt 用 GLM（用户切换后）→ 正常执行
+用户切换到 GLM → PUT /api/sessions/A/model-binding → 200
+下一次 Prompt 用 GLM → 正常执行
 ```
 
 `bind_to_harness` 的 finally 必须保证 `harness.agent.client` 还原到 original_client。
 
-### 9.5 Core Runtime diff = 0
+**显式 Binding 失败不 fallback**：若 Qwen Profile 失效（status != "ready"），直接抛 `ProviderSelectionError`——不偷偷用 GLM。
+
+### 9.6 Core Runtime diff = 0
 
 - `loop.py` / `agent.py` / `context.py` / `events.py` / `stream_events.py` / `messages.py`：**不修改**
 - `providers/base.py` / `providers/glm.py` / `providers/anthropic_compat.py`：**不修改**
-- `providers/registry.py`：**新增 qwen / kimi presets**（M1-2 允许）
+- `providers/registry.py`：**新增 qwen / kimi presets**（M1-2 允许；不动既有 _GLM / _ANTHROPIC）
 - `providers/factory.py` / `providers/openai_compat.py`：**新增**
 - `model_client.py`：**不修改**（thin wrapper 已通用）
-- `web/app.py`：**仅 _execute_prompt 加 wrap**（不大规模重构）
+- `web/app.py`：**仅 `_execute_prompt` 加 wrap + lifespan 装配 provider_runtime**（不大规模重构）
+- `web/credentials_service.py`（或 E1 既有 service 模块）：**新增 `resolve_secret_for_request` 方法**（决策 5）
 
 ## 10. 显式不包含（M1 范围之外）
 
@@ -621,35 +898,130 @@ Session A 绑定 Qwen → Qwen 401（invalid key） → ErrorEvent
 - ❌ 远程模型目录（`/v1/models`）调用
 - ❌ Provider health / 限流状态 / 成本统计
 - ❌ 自动 provider fallback / 负载均衡
+- ❌ Qwen 海外区域 / Workspace 专属 endpoint（仅华北 2 北京共享）
 - ❌ 前端切换 UI（M2）
 - ❌ 最终 security freeze（M3）
 - ❌ 多 Key / 同 Provider 多 Profile 管理 UI（M2 之后）
+- ❌ reasoning trace UI / 持久化（修订 I）
+- ❌ `_run_regeneration_core` 源码修改（修订 A——M1-6 仅加测试）
 
-## 11. 待 user 审核的关键决策点
+## 11. 冻结决策（11 项）
 
-1. **Qwen / Kimi 的 `default_base_url`** —— 用阿里 DashScope 和 Moonshot 官方 endpoint（§4.3）；若 user 有其他偏好请指明。
-2. **`OpenAICompatConfig` 是否需要 `provider_id` 字段** —— 当前建议由构造参数传入（Qwen / Kimi 共用 Config）；若 user 希望放 Config 内请说明。
-3. **`ProviderFactory.create_provider` 返回类型** —— 当前建议返回 `ProviderAdapter`，由 `provider_runtime` 包装成 `ModelClient`；若 user 希望直接返回 `ModelClient` 请说明。
-4. **`provider_runtime` 是否复用 `ProviderConfigService` 的 Credential 安全接口** —— 当前建议复用 E1 接口（不绕过 SecretStoreRouter）；若 user 希望直接读 Credential row 请说明（不推荐，破坏 E1 安全边界）。
-5. **request metadata 字段名** —— 当前建议 `context.metadata["provider_selection"]`；可调整为 `context.metadata["provider"]` 或其他。
-6. **abort 期间的 provider 切换** —— 当前 `bind_to_harness` 期间切换只更新 Binding（不立即生效）；若 user 希望切换时主动 abort 当前请求请说明（不推荐，破坏请求级不可变约束）。
+| # | 决策 | 实现 |
+|---|---|---|
+| 1 | Qwen `default_base_url = https://dashscope.aliyuncs.com/compatible-mode/v1`；仅华北 2 北京共享 endpoint | `registry.py` M1-2 |
+| 2 | Kimi `default_base_url = https://api.moonshot.cn/v1` | `registry.py` M1-2 |
+| 3 | `OpenAICompatConfig` 不保存 `provider_id`；`OpenAICompatibleProvider` 构造参数传入，设实例属性 | `openai_compat.py` M1-1 |
+| 4 | `ProviderFactory.create_provider` 返回 `ProviderAdapter`；`RequestProviderRuntime` 包装 `ModelClient` | `factory.py` M1-3 + `provider_runtime.py` M1-4 |
+| 5 | `RequestProviderRuntime` 不直接依赖 `SecretStoreRouter`；`CredentialService.resolve_secret_for_request(credential_id) -> str` 窄接口 | `credentials_service.py` M1-4 扩展 + `provider_runtime.py` |
+| 6 | **删除** `context.metadata["provider_selection"]`；`RequestProviderSelection` 只存在于请求内存；持久化走 `AssistantMessage` | `provider_runtime.py` M1-4 |
+| 7 | 运行中切换 Binding 不 abort 当前请求，只影响下次 Prompt / Regenerate | `provider_runtime.py` M1-4 + `provider_profiles_api.py` 不改 |
 
-## 12. M1 实施顺序（user 审核通过后）
+## 12. 修订缺口（A-I）
+
+### 12.1 修订 A：`_execute_prompt` 是唯一接入点
+
+`bind_to_harness` 只在 `_execute_prompt` 内激活一次。`_run_regeneration_core` **不**再次 wrap。M1-6 只增加 Regenerate 行为测试，不改源码。
+
+详见 §3 + §8.2。
+
+### 12.2 修订 B：Session 无 Binding 用 legacy client；显式 Binding 失败固定错误
+
+| 情况 | 行为 |
+|---|---|
+| Session 无 Binding | 不 swap，用 `original/legacy client` |
+| 显式 Binding 但 Profile/Credential/Adapter 无效 | 抛 `ProviderSelectionError`（短文本）；**禁止自动 fallback** |
+
+详见 §7.8 + §7.9 + §9.5。
+
+### 12.3 修订 C：`RequestProviderSelection` 含 `credential_id`
+
+```python
+@dataclass(frozen=True)
+class RequestProviderSelection:
+    profile_id: str
+    provider_id: str
+    model_id: str
+    credential_id: str = field(repr=False)   # 不进 repr
+    selection_source: Literal["default", "explicit"]
+```
+
+`resolve_selection` 一次性冻结 Binding + Profile + Credential ID；`build_adapter` 不再读 Profile。
+
+详见 §7.2 + §7.5 + §7.6。
+
+### 12.4 修订 D：`OpenAICompatConfig` 精简
+
+```python
+class OpenAICompatConfig(BaseModel):
+    api_key: SecretStr = Field(repr=False)
+    base_url: str
+    model: str
+    timeout_s: float = 60.0
+    max_tokens: int | None = 4096
+    temperature: float | None = None
+```
+
+删除 `extra_headers`；`api_key` 用 `SecretStr`；`max_tokens` / `temperature` 允许 `None`。
+
+详见 §5.2。
+
+### 12.5 修订 E：Stream parsing 7 项
+
+- 先读 `chunk.usage`
+- `choices` 为空时 `continue`
+- 不假设 `choices[0]` 永远存在
+- usage 缺失不是错误
+- ToolCall buffers 按 `index` 排序
+- stream 正常结束时也 flush 已完成 tool calls
+- signal abort 后关闭 stream
+- `asyncio.CancelledError` 原样传播
+
+详见 §5.5。
+
+### 12.6 修订 F：Stream 生命周期
+
+- raw stream 必须 `try/finally close` 或用 `async with`
+- Adapter `aclose()` 继续幂等关闭 SDK client
+
+详见 §5.5（finally 段）+ §5.8。
+
+### 12.7 修订 G：固定安全错误
+
+- 不使用 `str(exc)` / `repr(exc)` / `response.text` / request body
+- `ProviderError` message 使用固定短文本
+- 所有映射用 `from None`
+
+详见 §5.5（异常映射段）+ §5.6 + §6.4。
+
+### 12.8 修订 H：LLMMessage → OpenAI 转换表
+
+5 种转换：user text / assistant text / assistant tool_calls / tool result + tool_call_id / system prompt。
+
+详见 §5.4。
+
+### 12.9 修订 I：`reasoning_content` 明确忽略
+
+不生成 `TextDeltaEvent`，不写 `Message` / `Event` / `Revision`。
+
+详见 §5.7。
+
+## 13. M1 实施顺序（user 审核已通过）
 
 ```
-M1-0 Provider Contract Audit（本文档） ✅
-        ↓ user 审核
-M1-1 providers/openai_compat.py + 测试
+M1-0 Provider Contract Audit（本文档） ✅ DESIGN FROZEN
+        ↓
+M1-1 providers/openai_compat.py + 测试（含 §5 全部约束）
         ↓
 M1-2 registry.py 加 qwen / kimi presets + 测试
         ↓
 M1-3 providers/factory.py + 测试
         ↓
-M1-4 web/provider_runtime.py + 测试
+M1-4 web/provider_runtime.py + credentials_service.resolve_secret_for_request + 测试
         ↓
-M1-5 _execute_prompt wrap（Prompt integration）+ 测试
+M1-5 _execute_prompt wrap（唯一接入点）+ 测试
         ↓
-M1-6 _run_regeneration_core wrap（Regenerate integration）+ 测试
+M1-6 Regenerate 行为测试（不改 _run_regeneration_core 源码）
         ↓
 M1-7 端到端 Runtime tests + Core Runtime diff 校验
         ↓
@@ -664,10 +1036,10 @@ feat(providers): add qwen and kimi provider presets
 feat(providers): add provider factory
 feat(web): add request-scoped provider runtime
 feat(web): bind prompt execution to session provider
-feat(web): bind regenerate execution to session provider
+test(web): cover regenerate provider switching behavior
 test(providers): validate multi-provider runtime
 ```
 
 ---
 
-**审核完成后**：标注本文档 DESIGN FROZEN @ `<date>`，进入 M1-1 编码。
+**DESIGN FROZEN @ 2026-07-19** — 进入 M1-1 `providers/openai_compat.py` 编码。
