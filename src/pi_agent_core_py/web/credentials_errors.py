@@ -91,6 +91,23 @@ class CredentialCompensationError(CredentialServiceError):
         return self._cleanup_succeeded
 
 
+class CredentialRequestSecretUnavailableError(CredentialServiceError):
+    """请求级 Secret 解析失败——Credential 缺失 / secret 为空 / backend 返回 None.
+
+    由 ``CredentialService.resolve_secret_for_request`` 抛出. 固定安全消息
+    "provider credential is unavailable"——不含 credential_id / secret_ref /
+    storage_mode / 环境变量名 / Keyring service/account / API Key.
+    """
+
+
+class CredentialRequestSecretBackendError(CredentialServiceError):
+    """请求级 Secret 解析失败——backend 不可用（keyring 缺失 / fail / 未注册）.
+
+    由 ``CredentialService.resolve_secret_for_request`` 抛出. 固定安全消息
+    "provider credential backend is unavailable".
+    """
+
+
 __all__ = [
     "CredentialServiceError",
     "CredentialInputError",
@@ -100,4 +117,6 @@ __all__ = [
     "CredentialSecretWriteError",
     "CredentialSecretDeleteError",
     "CredentialCompensationError",
+    "CredentialRequestSecretUnavailableError",
+    "CredentialRequestSecretBackendError",
 ]

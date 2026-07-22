@@ -50,6 +50,8 @@ from .credentials_errors import (
     CredentialCompensationError,
     CredentialInputError,
     CredentialOperationConflictError,
+    CredentialRequestSecretBackendError,
+    CredentialRequestSecretUnavailableError,
     CredentialSecretDeleteError,
     CredentialSecretWriteError,
     CredentialServiceError,
@@ -723,6 +725,74 @@ class CredentialService:
             status = await self._compute_storage_status(r)
             views.append(CredentialView.from_record(r, status))
         return views
+
+    # ========================================================================
+    # resolve_secret_for_request（P1-E M1-4 窄接口）
+    # ========================================================================
+
+    async def resolve_secret_for_request(
+        self,
+        credential_id: str,
+    ) -> str:
+        """Return the current plaintext secret for a request.
+
+        M1-4 ``RequestProviderRuntime.build_adapter`` 的唯一 secret 入口.
+        每次调用都重新走完整解析路径——不缓存明文 secret，不触发远程 validation，
+        不访问网络.
+
+        Semantics（保留 E1 存储语义）:
+            - ``session_only``  : 进程内 dict——重启后 raise unavailable
+            - ``env``           : 每次调用读 ``os.environ`` 当前值
+            - ``keyring``       : 每次调用通过对应 backend 读
+
+        Raises (固定安全消息，from None 中断 __cause__ 链):
+            - CredentialNotFoundError                    : credential_id 不存在
+            - CredentialRequestSecretBackendError        : backend 不可用
+            - CredentialRequestSecretUnavailableError    : secret 缺失 / 空 /
+                                                            backend 读失败
+
+        返回的明文 secret 由调用方负责生命周期——Service 不缓存引用.
+        """
+        # Step 1: 读 CredentialRecord——不存在时抛 CredentialNotFoundError
+        # （领域错误，不 wrap——让 Runtime 区分 NotFound vs Unavailable）
+        record = await self._repository.get(credential_id)
+
+        # Step 2: SecretStore routing——backend 不可用属于固定安全错误
+        try:
+            store = self._router.resolve(record.storage_mode)
+        except CredentialBackendUnavailableError:
+            raise CredentialRequestSecretBackendError(
+                "provider credential backend is unavailable"
+            ) from None
+        except CredentialInputError:
+            raise CredentialRequestSecretBackendError(
+                "provider credential backend is unavailable"
+            ) from None
+
+        if not await store.is_available():
+            raise CredentialRequestSecretBackendError(
+                "provider credential backend is unavailable"
+            ) from None
+
+        # Step 3: 读 Secret——None / 空字符串映射为 unavailable；
+        # 其它 SecretStore 异常 wrap 为同一固定消息（不暴露 backend 文本）
+        try:
+            secret = await store.get(record.secret_ref)
+        except SecretStoreError:
+            raise CredentialRequestSecretUnavailableError(
+                "provider credential is unavailable"
+            ) from None
+        except Exception:
+            raise CredentialRequestSecretUnavailableError(
+                "provider credential is unavailable"
+            ) from None
+
+        if secret is None or secret == "" or not secret.strip():
+            raise CredentialRequestSecretUnavailableError(
+                "provider credential is unavailable"
+            ) from None
+
+        return secret
 
     # ========================================================================
     # validate（P1-E1-3B2）
