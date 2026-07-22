@@ -1,7 +1,9 @@
 # P1-E M1 — Multi-Provider Runtime Design
 
 > **状态**：✅ IMPLEMENTATION COMPLETE — M1-0 ~ M1-7 FROZEN
-> **基线**：master `c796a01`（M1-0 audit committed @ `3a1e011` pivot）
+> **M1 final HEAD**：`6bdc3ec` — docs: mark P1-E M1 runtime complete
+> **M1 runtime freeze tests**：`d4a7bef` — test(web): freeze multi-provider runtime
+> **Backend Foundation base**：`cad7ca7` — feat(web): bind default provider profile on session creation（P1-E2 ✅ FROZEN）
 > **日期**：2026-07-19（design frozen）/ 2026-07-23（M1 implementation complete）
 > **前置**：[p1-e2-provider-profiles.md §19 Pivot 附录](p1-e2-provider-profiles.md)
 > **范围**：M1-0 Provider Contract Audit + M1-1 ~ M1-7 实施记录；M1 冻结后归档
@@ -212,24 +214,24 @@ ProviderAPIStyle = Literal["anthropic_compatible", "openai_compatible"]
 ```python
 _QWEN_DEFINITION = ProviderDefinition(
     id="qwen",
-    display_name="Alibaba Qwen (OpenAI-compatible)",
+    display_name="Qwen",
     api_style="openai_compatible",
     default_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
     credential_validation_strategy="unsupported",   # M1 不做远端 Key validation
     credential_validation_endpoint=None,
     supports_model_listing=False,
-    key_prefix_hints=("sk-",),   # 弱提示，confidence=unknown
+    key_prefix_hints=(),   # 决策：sk- 无法区分 Qwen / Kimi / 其它 OpenAI-compat 供应商
 )
 
 _KIMI_DEFINITION = ProviderDefinition(
     id="kimi",
-    display_name="Moonshot Kimi (OpenAI-compatible)",
+    display_name="Kimi",
     api_style="openai_compatible",
     default_base_url="https://api.moonshot.cn/v1",
     credential_validation_strategy="unsupported",
     credential_validation_endpoint=None,
     supports_model_listing=False,
-    key_prefix_hints=("sk-",),
+    key_prefix_hints=(),
 )
 
 _DEFAULT_REGISTRY = ProviderRegistry(
@@ -677,7 +679,12 @@ class RequestProviderRuntime:
     ): ...
 ```
 
-### 7.5 resolve_selection：一次性冻结
+### 7.5 resolve_selection：一次性冻结（与实现 `8827bd1` 对齐）
+
+实际生产代码（`src/pi_agent_core_py/web/provider_runtime.py:184-231`）只检查
+`profile.enabled`——**不**检查 `profile.status`。Credential 状态在 `build_adapter`
+阶段由 `CredentialService.resolve_secret_for_request` 单独判定，给出精确错误
+（`provider_credential_unavailable`），不会被错误映射为 Profile 错误。
 
 ```python
 async def resolve_selection(self, session_id: str) -> RequestProviderSelection | None:
@@ -685,21 +692,36 @@ async def resolve_selection(self, session_id: str) -> RequestProviderSelection |
     if binding is None:
         return None   # 修订 B：Session 无 Binding → caller 使用 original client
 
-    profile = await self.provider_config_service.get_profile(binding.profile_id)
-    if profile is None:
-        raise ProviderSelectionError("profile not found")   # 修订 B + G
+    try:
+        profile = await self.provider_config_service.get_profile(binding.profile_id)
+    except ProviderProfileNotFoundError:
+        raise ProviderSelectionNotFoundError(_MSG_PROFILE_UNAVAILABLE) from None
 
-    if profile.status != "ready":
-        raise ProviderSelectionError(f"profile status: {profile.status}")   # 修订 B：固定错误，不 fallback
+    # 仅检查 enabled——disabled Profile 拒绝，不 fallback 到 default Profile
+    if not profile.enabled:
+        raise ProviderSelectionDisabledError(_MSG_PROFILE_DISABLED) from None
+
+    # 确认 ProviderDefinition 仍在 registry（同步操作，不读 Secret）
+    definition = self.provider_registry.get(profile.provider_id)
+    if definition is None:
+        raise ProviderInitializationError(_MSG_INITIALIZATION_FAILED) from None
 
     return RequestProviderSelection(
         profile_id=profile.id,
         provider_id=profile.provider_id,
-        model_id=binding.model_id,
-        credential_id=profile.credential_id,   # repr=False
+        model_id=binding.model_id,   # 来自 Binding，不从 Profile.default_model 投影
+        credential_id=profile.credential_id,   # field(repr=False)
         selection_source=binding.source,
     )
 ```
+
+**阶段划分（与修订 B 一致）**：
+- `resolve_selection`（本阶段）：Profile 存在 / `enabled` / ProviderDefinition 在 registry
+- `build_adapter`（下一阶段）：Credential 存在 / Secret 可读 / Factory 构造成功
+
+Credential `needs_key` / `backend_unavailable` / Secret 为空等错误**只**在
+`build_adapter` 阶段以 `ProviderSelectionUnavailableError`（固定消息："session
+provider credential is unavailable"）暴露，不进入 Profile 阶段错误码。
 
 ### 7.6 build_adapter：不再次读取 Profile
 
@@ -770,7 +792,7 @@ async def _execute_prompt(validated, **kwargs):
 | 情况 | 行为 |
 |---|---|
 | Session 无 Binding（`binding is None`） | **不 swap**，用现有 `original/legacy client`（通常是 default GLM client）。这是向后兼容路径——保留 E2 之前的行为 |
-| 显式 Binding 存在，但 Profile/Credential/Adapter 无效（profile deleted / credential missing / provider unknown / profile.status != "ready"） | **固定错误**——抛 `ProviderSelectionError`（短文本）；**禁止自动 fallback** 到其他 Provider |
+| 显式 Binding 存在，但 Profile/Credential/Adapter 无效（profile deleted / profile disabled / provider unknown / credential missing / secret backend unavailable / factory failure） | **固定错误**——`resolve_selection` 阶段抛 `ProviderSelectionNotFoundError` / `ProviderSelectionDisabledError` / `ProviderInitializationError`；`build_adapter` 阶段抛 `ProviderSelectionUnavailableError` / `ProviderInitializationError`（4 条固定安全消息）；**禁止自动 fallback** 到其他 Provider |
 
 理由：
 - 自动 fallback 会破坏请求级不可变约束（用户选了 Qwen，结果系统悄悄用 GLM，无法调试）
@@ -905,7 +927,7 @@ Session A 绑定 Qwen → Qwen 401（invalid key） → ErrorEvent
 - ❌ reasoning trace UI / 持久化（修订 I）
 - ❌ `_run_regeneration_core` 源码修改（修订 A——M1-6 仅加测试）
 
-## 11. 冻结决策（11 项）
+## 11. 冻结决策（7 项）
 
 | # | 决策 | 实现 |
 |---|---|---|
@@ -1023,7 +1045,9 @@ M1-5 _execute_prompt wrap（唯一接入点）+ 测试 ✅ FROZEN @ f116ddd（47
         ↓
 M1-6 Regenerate 行为测试（不改 _run_regeneration_core 源码） ✅ FROZEN @ 06ecb80（67 tests / 5 files；validation-only，0 production diff）
         ↓
-M1-7 端到端 Runtime tests + Core Runtime diff 校验 ✅ COMPLETE / FROZEN（76 tests / 4 files；M1 production diff = 0）
+M1-7 端到端 Runtime tests + Core Runtime diff 校验 ✅ FROZEN @ d4a7bef（76 tests / 4 files；M1-7 production diff = 0）
+        ↓
+docs finalize ✅ @ 6bdc3ec — docs: mark P1-E M1 runtime complete
         ↓
 停止并审核，进入 M2 Frontend Switching
 ```
@@ -1037,7 +1061,8 @@ feat(providers): add provider factory                            # a35a4ad (M1-3
 feat(web): add request-scoped provider runtime                   # 8827bd1 (M1-4)
 feat(web): bind prompt execution to session provider             # f116ddd (M1-5)
 test(web): validate regenerate provider selection                # 06ecb80 (M1-6)
-test(web): freeze multi-provider runtime                         # (本提交, M1-7)
+test(web): freeze multi-provider runtime                         # d4a7bef (M1-7 tests)
+docs: mark P1-E M1 runtime complete                              # 6bdc3ec (M1-7 docs)
 ```
 
 ## 14. M1 最终实施记录
@@ -1059,15 +1084,31 @@ test(web): freeze multi-provider runtime                         # (本提交, M
 
 **M1-6 关键架构结论**：`_execute_prompt` 是 Provider Runtime 唯一接入点；`_run_regeneration_core` 经 `override_initial_messages + suppress_user_append=True` 复用同一执行函数；M1-6 无需第二次接线。M1-7 AST 静态约束锁定 lexical body 内 `resolve_selection/bind_to_harness/build_adapter` 只出现在 `_execute_prompt`，且 `RequestProviderRuntime` 仅在 `create_app` / `_lifespan` 构造。
 
-**M1 最终测试基线**：2585 full pytest + 1 skipped（keyring API path 不在本副本验证）+ ruff clean + frontend prod build clean（142.91 KB JS / 40.15 KB CSS @ 823ms）+ 0 Core Runtime diff + 0 providers/* diff（除前述新增）+ 0 network + 0 secret reads。Playwright E2E 由主仓库 `D:\LLMTutorial\pi\pi-py` 验证（本精简副本无 e2e/）。
+**M1 最终测试基线**（post-`6bdc3ec`）：
+- 完整离线 pytest：**2585 passed + 1 skipped**（keyring API path 不在本副本验证）+ 14 deselected
+- ruff clean + frontend prod build clean（142.91 KB JS / 40.15 KB CSS @ 823ms）
+- Core Runtime diff = 0（AST 静态约束验证）
+- providers/\* diff：仅新增 `openai_compat.py` / `factory.py`；`base.py` / `glm.py` / `anthropic_compat.py` 未修改
+
+**安全不变量（实测）**：
+- 真实外部网络调用：**0**（所有 Provider 走 fake / mock adapter）
+- Secret 明文泄漏：**0**（marker 跨 HTTP / SQLite main+WAL+SHM / log / exception chain / Selection repr / Adapter repr 全扫零命中）
+- 非执行路径意外 Secret read：**0**（factory / registry / ProviderDefinition 构造阶段不读 Secret）
+- 每个有 Binding 的执行请求：**按设计读取 Secret 1 次**（`CredentialService.resolve_secret_for_request`）——这是 Runtime 的核心功能，不是泄漏
+
+Playwright E2E 由主仓库 `D:\LLMTutorial\pi\pi-py` 验证（本精简副本 CLAUDE.md 明确不含 `tests/e2e/`）。
+
+**M1-7 production diff = 0**：M1-7 阶段仅新增测试文件（`tests/test_multi_provider_runtime_*.py` 共 4 个），未修改任何生产代码。M1-1～M1-5 阶段的生产代码修改清单见本节上方表格。
 
 **M1 未实现范围（明确排除）**：
 - 前端 Provider/Model 选择器 UI（M2 范围）
 - 最终 security freeze（M3 范围）
 - Custom Base URL / Custom Provider / 远程模型目录 / 多 Key 复杂管理
-- Anthropic Provider 接入 Provider Runtime（保留 `anthropic_compat.py` 现状；anthropic ProviderDefinition 保留但 ProviderFactory 仅在 `provider_id=="anthropic"` 时构造 `AnthropicCompatAdapter`，不走 M1-4 RequestProviderRuntime 路径）
+- **Anthropic Provider 在后端 Runtime 的状态**：技术上**仍可执行**——`provider_id == "anthropic"` 的 Profile 若被 Session Binding 选中，`resolve_selection` / `build_adapter` / `bind_to_harness` 通用路径会照常工作；`factory.py` 在 `provider_id == "anthropic"` 分支构造 `AnthropicCompatAdapter`。**M2 产品入口（ProviderSelector / ProviderSettingsModal）只展示 GLM / Qwen / Kimi**——不在前端暴露 Anthropic 选项，但后端 Runtime 无显式阻止逻辑。
 - 真实 Provider smoke test（需要真实 API key；M1 冻结不依赖真实远端调用）
 
 ---
 
-**DESIGN FROZEN @ 2026-07-19** — 进入 M1-1 `providers/openai_compat.py` 编码。
+**M1 IMPLEMENTATION COMPLETE / FROZEN @ 2026-07-23**（HEAD `6bdc3ec`）
+
+**Next**：M2-0 Frontend Integration Audit——审计现有前端 store / ws mapper / `chatStore` / `SessionSidebar` / ChatPanel header 布局，冻结最简 `providerStore` + `ProviderSelector` + `ProviderSettingsModal` 接口后再进入 M2 production coding。
