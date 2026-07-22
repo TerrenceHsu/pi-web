@@ -30,7 +30,7 @@ import logging
 import time
 from collections import deque
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -56,6 +56,13 @@ from fastapi.responses import (
 
 from ..harness import AgentHarness
 from ..skills import SkillSelection
+from .provider_runtime import (
+    ProviderInitializationError,
+    ProviderSelectionDisabledError,
+    ProviderSelectionNotFoundError,
+    ProviderSelectionUnavailableError,
+    RequestProviderSelection,
+)
 from .serializers import (
     serialize_event,
     serialize_mcp_server_state,
@@ -490,19 +497,36 @@ def create_app(
                     _app.state.provider_config_runtime = (
                         await pc_runtime_cm.__aenter__()
                     )
+                    # M1-5: 构造 RequestProviderRuntime——仅在 Credential + Provider
+                    # Config 两个 runtime 都启动时. 无独立 lifespan——纯 Python 对象
+                    # 无长期网络资源. Prompt 路径通过 app.state.request_provider_runtime
+                    # 读取；为 None 时 _execute_prompt 走 legacy client 兼容路径.
+                    from ..providers.factory import create_provider
+                    from ..providers.registry import _DEFAULT_REGISTRY
+                    from .provider_runtime import RequestProviderRuntime
+
+                    _app.state.request_provider_runtime = RequestProviderRuntime(
+                        provider_config_service=_app.state.provider_config_runtime.service,
+                        credential_service=_app.state.credential_runtime.service,
+                        provider_registry=_DEFAULT_REGISTRY,
+                        provider_factory=create_provider,
+                    )
                     try:
                         yield
                     finally:
                         _app.state.provider_config_runtime = None
+                        _app.state.request_provider_runtime = None
                         try:
                             await pc_runtime_cm.__aexit__(None, None, None)
                         except Exception:
                             pass
                 else:
                     _app.state.provider_config_runtime = None
+                    _app.state.request_provider_runtime = None
                     yield
             finally:
                 _app.state.credential_runtime = None
+                _app.state.request_provider_runtime = None
                 try:
                     await cred_runtime_cm.__aexit__(None, None, None)
                 except Exception:
@@ -510,6 +534,7 @@ def create_app(
         else:
             _app.state.credential_runtime = None
             _app.state.provider_config_runtime = None
+            _app.state.request_provider_runtime = None
             yield
 
         # ====================================================================
@@ -609,6 +634,8 @@ def create_app(
     app.state.credential_runtime = None
     # P1-E2-3B1: provider_config_runtime placeholder——lifespan 启动时填入
     app.state.provider_config_runtime = None
+    # M1-5: request_provider_runtime placeholder——仅 cred + pc runtime 都启用时填入
+    app.state.request_provider_runtime = None
 
     # P1-E1-4A / B3: TrustedHost middleware（resolve 后的 flag 决定）
     # 默认 False 保留所有既有 create_app 调用点不变；启用 Credentials API
@@ -1498,29 +1525,69 @@ def create_app(
         else:
             messages_before = list(harness.agent.state.messages)
 
-        try:
-            if suppress_user_append:
-                # Regenerate 路径——caller 已设置 harness.agent.state.messages
-                messages = await harness.run_continue(
-                    skill_selection=validated.skill_selection
-                )
-            elif validated.attached_blocks:
-                from ..messages import TextContent, UserMessage
+        # M1-5: 解析 Session Provider selection——一次解析，整个请求不可变快照.
+        # runtime 为 None（Credential 或 Provider Config runtime 未启用）→ 走
+        # legacy client 兼容路径，不读 Secret / 不调 Factory / 不替换 client.
+        # selection 为 None（Session 无 Binding）→ 同样走 legacy client.
+        runtime = app.state.request_provider_runtime
+        selection: RequestProviderSelection | None = None
 
-                user_msg = UserMessage(
-                    content=[
-                        TextContent(text=validated.text),
-                        *validated.attached_blocks,
-                    ]
-                )
-                harness.agent.state.messages.append(user_msg)
-                messages = await harness.run_continue(
-                    skill_selection=validated.skill_selection
-                )
-            else:
-                messages = await harness.run_prompt(
-                    validated.text, skill_selection=validated.skill_selection
-                )
+        try:
+            if runtime is not None:
+                selection = await runtime.resolve_selection(validated.session_id)
+
+            # M1-5: bind_to_harness 在 active-request ownership 内部；
+            # AsyncExitStack 让 selection=None 时跳过绑定（legacy path）.
+            async with AsyncExitStack() as stack:
+                if runtime is not None and selection is not None:
+                    await stack.enter_async_context(
+                        runtime.bind_to_harness(
+                            harness=harness, selection=selection
+                        )
+                    )
+
+                if suppress_user_append:
+                    # Regenerate 路径——caller 已设置 harness.agent.state.messages
+                    messages = await harness.run_continue(
+                        skill_selection=validated.skill_selection
+                    )
+                elif validated.attached_blocks:
+                    from ..messages import TextContent, UserMessage
+
+                    user_msg = UserMessage(
+                        content=[
+                            TextContent(text=validated.text),
+                            *validated.attached_blocks,
+                        ]
+                    )
+                    harness.agent.state.messages.append(user_msg)
+                    messages = await harness.run_continue(
+                        skill_selection=validated.skill_selection
+                    )
+                else:
+                    messages = await harness.run_prompt(
+                        validated.text, skill_selection=validated.skill_selection
+                    )
+        except ProviderSelectionNotFoundError:
+            state.last_error = "Selected provider profile is unavailable."
+            raise PromptRuntimeError(
+                500, state.last_error, "provider_profile_unavailable"
+            ) from None
+        except ProviderSelectionDisabledError:
+            state.last_error = "Selected provider profile is disabled."
+            raise PromptRuntimeError(
+                500, state.last_error, "provider_profile_disabled"
+            ) from None
+        except ProviderSelectionUnavailableError:
+            state.last_error = "Selected provider credential is unavailable."
+            raise PromptRuntimeError(
+                500, state.last_error, "provider_credential_unavailable"
+            ) from None
+        except ProviderInitializationError:
+            state.last_error = "Selected provider could not be initialized."
+            raise PromptRuntimeError(
+                500, state.last_error, "provider_initialization_failed"
+            ) from None
         except RuntimeError as e:
             msg = str(e)
             state.last_error = f"{type(e).__name__}: {msg}"
