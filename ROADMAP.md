@@ -48,9 +48,24 @@ P1-E M1 之前的配置后端已 frozen，不再扩展。
 
 **E2-4 独立 Security Freeze cancelled**——并入 M3 Unified Freeze。
 
-### M1 — Multi-Provider Runtime
+### M1 — Multi-Provider Runtime（✅ COMPLETE / FROZEN）
 
 把 Backend Foundation 接到真实 Prompt/Regenerate 执行。Core Runtime 继续冻结（GLM 包装现有，Qwen/Kimi 共用 OpenAI-compatible Adapter）。
+
+| 子阶段 | 状态 | Commit | Tests |
+|---|---|---|---|
+| M1-0 Provider Contract Audit | ✅ FROZEN | `be13a1f` | — |
+| M1-1 OpenAI-compatible Adapter | ✅ FROZEN | `8daaa90` | 124 |
+| M1-2 Qwen / Kimi Presets | ✅ FROZEN | `4d89c82` | 64 |
+| M1-3 ProviderFactory | ✅ FROZEN | `a35a4ad` | 64 |
+| M1-4 RequestProviderRuntime | ✅ FROZEN | `8827bd1` | 80 |
+| M1-5 Prompt Integration | ✅ FROZEN | `f116ddd` | 47 |
+| M1-6 Regenerate Validation | ✅ FROZEN | `06ecb80` | 67（validation-only） |
+| M1-7 Runtime Final Validation | ✅ COMPLETE / FROZEN | (本提交) | 76 / 4 files |
+
+**M1 测试基线（post-M1-7）**：2585 full pytest + 1 skipped + ruff clean + 0 Core Runtime diff + 0 providers/* diff（仅新增 `openai_compat.py` / `factory.py`）+ 0 network + 0 secret reads + frontend build clean。E2E 由主仓库 `pi-py` 验证（本精简副本无 e2e/）。
+
+**关键架构结论**（M1-5/M1-6 测试证明）：`_execute_prompt` 是 Provider Runtime 的唯一接入点；`_run_regeneration_core` 经 `override_initial_messages + suppress_user_append=True` 复用同一执行函数；无需第二次接线。M1-7 AST 静态约束锁定此架构（lexical body 内 `resolve_selection/bind_to_harness/build_adapter` 只出现在 `_execute_prompt`）。
 
 **M1-0 Provider Contract Audit**（设计文档，无生产代码）：
 
@@ -66,17 +81,17 @@ P1-E M1 之前的配置后端已 frozen，不再扩展。
 
 **M1-4 `web/provider_runtime.py`**：`RequestProviderRuntime` + `bind_to_harness` async context manager。Session Binding → Profile → Credential → Secret → Factory → 临时绑定 `harness.agent.<provider>` → 执行 → finally 恢复 + close。复用现有单 active request lock。
 
-**M1-5 Prompt integration**：`_run_prompt_core` 接入 `provider_runtime.bind_to_harness`。
+**M1-5 Prompt integration**：`_execute_prompt` 接入 `provider_runtime.bind_to_harness`（唯一接入点）。
 
-**M1-6 Regenerate integration**：`_run_regeneration_core` 接入；Regenerate 用当前 Session 当前模型（不动 D2 不变量；revision `content_json` 自带 model 信息）。
+**M1-6 Regenerate validation**：validation-only——`_run_regeneration_core` 通过 `_execute_prompt` 间接复用 M1-5 接线点；AST 静态约束 + 67 测试覆盖。无生产代码修改。
 
-**M1-7 Runtime tests**：GLM / Qwen / Kimi 真实流式回答 + 工具调用 + 切换只影响下次请求 + 失败不污染下请求；Core Runtime diff = 0。
+**M1-7 Runtime final validation**：跨模块组合 validation-only——3-provider E2E 矩阵 + 跨 Session 隔离 + 默认/显式切换全链路 + app restart + 安全出口全审计 + 静态架构约束。M1 production diff = 0。
 
 **M1 显式不包含**：前端切换 UI（M2）；最终 security freeze（M3）；Custom Base URL；Custom Provider；远程模型目录；多 Key 复杂管理。
 
 **请求级不可变快照**（边界 C 落地）：请求开始时记录 `RequestProviderSelection(profile_id, provider_id, model_id, selection_source)`；运行中切换只影响下次请求；Regenerate 用当前 Session 当前模型。
 
-### M2 — Frontend Switching
+### M2 — Frontend Switching（🟡 NEXT，M1 ✅ COMPLETE）
 
 最简前端：两个组件 + 一个 store。
 

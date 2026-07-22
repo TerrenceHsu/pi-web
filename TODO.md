@@ -6,10 +6,10 @@
 
 ## Current phase
 
-**P1-E Multi-Provider Switching — M1 Multi-Provider Runtime**（PIVOT @ 2026-07-19）。
+**P1-E Multi-Provider Switching — M2 Frontend Switching**（待启动；M1 Runtime ✅ COMPLETE）。
 
 - 路线：[ROADMAP.md](ROADMAP.md) § P1-E（M1 / M2 / M3 milestone）
-- 状态：[STATUS.md](STATUS.md) — Backend Foundation ✅ FROZEN，当前 M1-0 审计待启动
+- 状态：[STATUS.md](STATUS.md) — M1-0 ~ M1-7 ✅ COMPLETE / FROZEN，当前 M2 待启动
 - Pivot 决策：原 P1-E2/E3/E4/E5 拆分过细，E2-4 独立 Security Freeze cancelled——改为 M1 Runtime / M2 Frontend / M3 Unified Freeze 单一 milestone
 - Pivot 附录：[docs/design/p1-e2-provider-profiles.md](docs/design/p1-e2-provider-profiles.md) §19
 
@@ -48,73 +48,86 @@ P1-E2 配置后端已 frozen，作为 M1/M2/M3 的持久化基础。**不再扩�
 
 ## M1 deliverables — Multi-Provider Runtime
 
-### M1-0：Provider Contract Audit（审计门，无生产代码）
+### M1-0：Provider Contract Audit（审计门，无生产代码）✅ FROZEN @ `be13a1f`
 
-- [ ] 审计 `providers/base.py` Adapter contract（stream / close / events）
-- [ ] 审计 `providers/glm.py` 流式事件格式 / tool_call 增量 / usage / finish_reason / client close 生命周期
-- [ ] 审计 `providers/anthropic_compat.py`（参考；不重写）
-- [ ] 审计 `providers/registry.py` ProviderDefinition 结构
-- [ ] 审计 Agent 如何持有 Provider（`harness.agent.<provider field>` 引用结构）
-- [ ] 审计 `_run_prompt_core` / `_run_regeneration_core` 调用入口
-- [ ] 输出 `docs/design/p1-e-m1-provider-runtime.md`：冻结统一 Adapter 接口
-- [ ] 审计完成后 **停止并审核**，再启动 M1-1
+- [x] 审计 `providers/base.py` Adapter contract（stream / close / events）
+- [x] 审计 `providers/glm.py` 流式事件格式 / tool_call 增量 / usage / finish_reason / client close 生命周期
+- [x] 审计 `providers/anthropic_compat.py`（参考；不重写）
+- [x] 审计 `providers/registry.py` ProviderDefinition 结构
+- [x] 审计 Agent 如何持有 Provider（`harness.agent.<provider field>` 引用结构）
+- [x] 审计 `_run_prompt_core` / `_run_regeneration_core` 调用入口
+- [x] 输出 `docs/design/p1-e-m1-provider-runtime.md`：冻结统一 Adapter 接口
 
-### M1-1：OpenAI-compatible Provider
+### M1-1：OpenAI-compatible Provider ✅ FROZEN @ `8daaa90`（124 tests）
 
-- [ ] `providers/openai_compat.py`：Qwen / Kimi 共用 Adapter
-- [ ] request / SSE stream / assistant text delta / tool calls / finish reason / usage
-- [ ] safe error mapping（错误信息不含 Authorization / 完整 endpoint）
-- [ ] client close 生命周期
-- [ ] 围绕现有 Provider contract 实现，不发明第二套事件模型
-- [ ] `feat(providers): add openai-compatible provider adapter`
+- [x] `providers/openai_compat.py`：Qwen / Kimi 共用 Adapter
+- [x] request / SSE stream / assistant text delta / tool calls / finish reason / usage
+- [x] safe error mapping（错误信息不含 Authorization / 完整 endpoint）
+- [x] client close 生命周期
+- [x] 围绕现有 Provider contract 实现，不发明第二套事件模型
+- [x] `feat(providers): add openai-compatible provider adapter`
 
-### M1-2：Qwen / Kimi ProviderDefinition presets
+### M1-2：Qwen / Kimi ProviderDefinition presets ✅ FROZEN @ `4d89c82`（64 tests）
 
-- [ ] `registry.py` 加 `qwen` preset（protocol=`openai_compatible` / `default_base_url`）
-- [ ] `registry.py` 加 `kimi` preset（同上）
-- [ ] `GET /api/provider-definitions` 返回 glm / qwen / kimi + anthropic（safe display fields only）
-- [ ] `feat(providers): add qwen and kimi provider presets`
+- [x] `registry.py` 加 `qwen` preset（protocol=`openai_compatible` / `default_base_url`）
+- [x] `registry.py` 加 `kimi` preset（同上）
+- [x] `GET /api/provider-definitions` 返回 glm / qwen / kimi + anthropic（safe display fields only）
+- [x] `feat(providers): add qwen and kimi provider presets`
 
-### M1-3：Provider Factory
+### M1-3：Provider Factory ✅ FROZEN @ `a35a4ad`（64 tests）
 
-- [ ] `providers/factory.py`：唯一知道「哪个 Provider 用哪个 Adapter」的位置
-- [ ] GLM → 包装现有 GLMProvider
-- [ ] Qwen / Kimi → `OpenAICompatibleProvider`
-- [ ] Anthropic → 包装现有（保留兼容）
-- [ ] 输入 ProviderDefinition + api_key + model_id；输出 RequestProvider
-- [ ] `feat(providers): add provider factory`
+- [x] `providers/factory.py`：唯一知道「哪个 Provider 用哪个 Adapter」的位置
+- [x] GLM → 包装现有 GLMProvider
+- [x] Qwen / Kimi → `OpenAICompatibleProvider`
+- [x] Anthropic → 包装现有（保留兼容）
+- [x] 输入 ProviderDefinition + api_key + model_id；输出 RequestProvider
+- [x] `feat(providers): add provider factory`
 
-### M1-4：Request Provider Runtime
+### M1-4：Request Provider Runtime ✅ FROZEN @ `8827bd1`（80 tests / 6 files）
 
-- [ ] `web/provider_runtime.py`：`RequestProviderRuntime` + `bind_to_harness` async context manager
-- [ ] Session Binding → Profile → Credential → Secret → ProviderFactory → 临时绑定 `harness.agent.<provider>`
-- [ ] finally 恢复旧 Provider + close request client
-- [ ] 复用现有单 active request lock
-- [ ] `RequestProviderSelection(profile_id, provider_id, model_id, selection_source)` 不可变快照
-- [ ] `feat(web): add request-scoped provider runtime`
+- [x] `web/provider_runtime.py`：`RequestProviderRuntime` + `bind_to_harness` async context manager
+- [x] Session Binding → Profile → Credential → Secret → ProviderFactory → 临时绑定 `harness.agent.<provider>`
+- [x] finally 恢复旧 Provider + close request client
+- [x] 复用现有单 active request lock（不创建第二把锁）
+- [x] `RequestProviderSelection(profile_id, provider_id, model_id, selection_source)` 不可变快照（`credential_id repr=False`）
+- [x] `feat(web): add request-scoped provider runtime`
 
-### M1-5：Prompt Integration
+### M1-5：Prompt Integration ✅ FROZEN @ `f116ddd`（47 tests / 5 files）
 
-- [ ] `_run_prompt_core` 接入 `provider_runtime.bind_to_harness`
-- [ ] request metadata 记录 `provider_profile_id` / `provider_id` / `model_id` / `selection_source`
-- [ ] 不记 credential_id / api_key / Authorization
-- [ ] 错误隔离（provider 创建失败 → Agent 不执行；不污染下一请求）
-- [ ] `feat(web): bind prompt execution to session provider`
+- [x] Composition root：`credential_runtime + provider_config_runtime` 都启动时构造 `RequestProviderRuntime`
+- [x] `_execute_prompt` 唯一接入点：`AsyncExitStack` + `bind_to_harness`
+- [x] 无 Binding → `selection=None` → legacy client 兼容路径
+- [x] 4 固定错误码：`provider_profile_{unavailable,disabled}` / `provider_credential_unavailable` / `provider_initialization_failed`
+- [x] `CancelledError`（BaseException）原样传播——不被 `except Exception` 捕获
+- [x] 不写 `context.metadata["provider_selection"]`
+- [x] 2×37/37 Playwright E2E
+- [x] `feat(web): bind prompt execution to session provider`
 
-### M1-6：Regenerate Integration
+### M1-6：Regenerate Validation ✅ FROZEN @ `06ecb80`（67 tests / 5 files）
 
-- [ ] `_run_regeneration_core` 接入
-- [ ] Regenerate 用当前 Session 当前模型（不动 D2 schema；revision `content_json` 自带 model 信息）
-- [ ] `feat(web): bind regenerate execution to session provider`
+- [x] 验证 Regenerate 通过 `_execute_prompt` 走同一 `bind_to_harness` 路径（M1-5 唯一接入点已覆盖）
+- [x] Regenerate 用当前 Session 当前模型（不动 D2 schema；revision `content_json` 自带 model 信息）
+- [x] 验证 revision `message_id` 不变（in-place）
+- [x] 原历史模型不决定本次 Regenerate
+- [x] 失败恢复 revision 状态
+- [x] 无双重 bind（Regenerate 不与 Prompt 嵌套）
+- [x] validation-only——0 production diff（AST 测试锁定 lexical-body 接线只在 `_execute_prompt`）
+- [x] `test(web): validate regenerate provider selection`
 
-### M1-7：Runtime Tests
+### M1-7：Runtime Final Validation ✅ COMPLETE / FROZEN（本提交）
 
-- [ ] GLM / Qwen / Kimi 真实流式回答（mock contract）
-- [ ] 工具调用保持正常
-- [ ] 切换只影响下次请求（请求级不可变快照）
-- [ ] 失败不污染下一请求（错误隔离）
-- [ ] Core Runtime diff = 0（GLM 包装，不重写）
-- [ ] `test(providers): validate multi-provider runtime`
+- [x] GLM / Qwen / Kimi 真实流式回答（mock contract）
+- [x] 工具调用保持正常（Tool loop 不变量：resolve / secret / factory / adapter 各一次）
+- [x] 切换只影响下次请求（请求级不可变快照）
+- [x] 失败不污染下一请求（错误隔离）
+- [x] Core Runtime diff = 0（GLM 包装，不重写；AST 静态约束）
+- [x] 跨 Session 隔离（single harness，顺序执行不污染）
+- [x] 默认 Profile 全链路 + 显式切换全链路
+- [x] app restart（env / keyring / session-only Credential）
+- [x] Credential 删除 / 替换 / env 值变化
+- [x] 安全出口全审计（HTTP / SQLite main+WAL+SHM / log / exception chain / Selection repr / Adapter repr）
+- [x] 静态架构约束（Core Runtime M1 diff=0；Provider Runtime 接线只在 `_execute_prompt`；模块依赖方向）
+- [x] `test(web): freeze multi-provider runtime`（M1-7 production diff = 0；E2E 由主仓库 `pi-py` 验证）
 
 ## M2 deliverables — Frontend Switching
 
@@ -151,7 +164,8 @@ P1-E2 配置后端已 frozen，作为 M1/M2/M3 的持久化基础。**不再扩�
 
 ## Next after M1
 
-- M2 Frontend Switching（`providerStore` + `ProviderSelector` + `ProviderSettingsModal`）
+- **M2-0 Frontend Integration Audit**：审计现有前端 store / ws mapper 与后端 Provider Profile / Binding API 对接点；设计 `ProviderSelector.vue` + `ProviderSettingsModal.vue`；评估 `chatStore` 对 binding 切换的响应
+- M2 Frontend Switching 实施（`providerStore.ts` + 选择器组件 + session binding restore）
 - M3 Unified Freeze（security + E2E + merge + tag）
 
 ## Deferred

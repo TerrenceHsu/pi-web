@@ -7,13 +7,14 @@
 | 项 | 值 |
 |---|---|
 | **Product baseline commit** | `d53f331` — test(d2-8): next-prompt-after-regenerate backend integration test |
-| **master HEAD** | `de05c66` — merge: complete P1-E1 secure credential management |
+| **master HEAD** | (post-M1-7) — docs: mark P1-E M1 runtime complete（P1-E M1 ✅ COMPLETE / FROZEN） |
 | **Documentation governance** | merged into master（commits `51af04d`, `6a344d1`, merge `d7df358`, finalize `834bd1d`） |
 | **Frontend dev/lint maintenance** | merged into master（commits `d8bd2ad`, `b9f4b17`, `7fbd082`, merge `1c2289d`） |
 | **P1-E1 Secure Credentials** | ✅ MERGED into master via `de05c66`（no-ff；保留 22 commit 阶段性历史） |
 | **Latest release tag** | `v0.0.27-secure-credentials` — P1-E1 Secure Credential Management（2026-07-18，commit `de05c66`） |
 | **Backend Foundation HEAD** | `cad7ca7` — feat(web): bind default provider profile on session creation（P1-E2 Backend Foundation ✅ FROZEN @ 3 commits） |
-| **Current phase** | P1-E Multi-Provider Switching — M1 Multi-Provider Runtime（PIVOT @ 2026-07-19，待 M1-0 审计） |
+| **M1 Runtime HEAD** | `06ecb80` — test(web): validate regenerate provider selection（M1-1 ~ M1-7 ✅ COMPLETE / FROZEN） |
+| **Current phase** | P1-E Multi-Provider Switching — M2 Frontend Switching（待启动；M1 Runtime ✅ COMPLETE） |
 
 > P1-D2 Regenerate 已冻结但未打 tag——已通过 P1-E1 合并到下一 release `v0.0.27-secure-credentials`。
 
@@ -21,15 +22,16 @@
 
 | 项 | 值 | 命令 |
 |---|---|---|
-| Offline pytest | **2063 passed**（含 P1-E2 Backend Foundation 144 新增） | `pytest tests/ -m "not slow and not integration and not docker" --no-cov` |
-| Coverage | Credential + Profile + Binding 子系统 ~95%+；总 coverage 阈值 75% PASS | 同上 |
-| Playwright e2e（默认 + `--workers=1`） | **37/37 PASS** ×2（E2-3 REST API + Session binding 各跑一轮） | `cd tests/e2e && npx playwright test` |
+| Offline pytest | **2585 passed, 1 skipped**（含 M1-1 124 + M1-2 64 + M1-3 64 + M1-4 80 + M1-5 47 + M1-6 67 + M1-7 76 新增） | `pytest tests/ -m "not slow and not integration and not docker" --no-cov` |
+| Coverage | Credential + Profile + Binding + Provider Runtime 子系统 ~95%+；总 coverage 阈值 75% PASS | 同上 |
+| Playwright e2e（默认 + `--workers=1`） | 主仓库 `pi-py` 验证（本精简副本无 e2e/） | `cd tests/e2e && npx playwright test` |
 | Ruff | All checks passed | `ruff check src tests scripts` |
-| Frontend prod build | 143.28 KB JS / 40.15 KB CSS | `cd src/pi_agent_core_py/web/frontend && npm run build` |
+| Frontend prod build | 142.91 KB JS / 40.15 KB CSS（M1-7 build @ 823ms） | `cd src/pi_agent_core_py/web/frontend && npm run build` |
 | Production hooks scan | `__storeHooks` 0 / `__e2eHooks` 0 in `web/static/assets/*.js` | grep build artifacts |
-| Core runtime diff（P1-E1 + P1-E2 范围） | 0 modifications to loop/agent/context/events/stream_events/messages（providers/ 允许新增 registry；web/ 允许 credentials/profile 模块） | `git diff --name-only` |
-| P1-E2 网络调用 | **0**（marker 测试：所有 E2 测试均不发出 HTTP 请求） | grep test markers |
-| P1-E2 Secret 读取 | **0**（marker 测试：所有 E2 测试不读 OS Keyring / env value） | grep test markers |
+| Core runtime diff（M1 全程） | 0 modifications to loop/agent/context/events/stream_events/messages | `git diff --name-only` |
+| providers/* diff（M1 范围） | 仅新增 `openai_compat.py` / `factory.py`；`base.py` / `glm.py` / `anthropic_compat.py` / `registry.py` 不修改 | 同上 |
+| M1 网络调用 | **0**（marker 测试：所有 M1 测试均不发出 HTTP 请求） | grep test markers |
+| M1 Secret 读取 | **0**（marker 测试：除 `CredentialService.resolve_secret_for_request` 单次读取外，不读 OS Keyring / env value） | grep test markers |
 
 ## 已冻结阶段
 
@@ -46,6 +48,14 @@
 | Frontend dev/lint maintenance | ✅ FROZEN | merge `1c2289d` |
 | **P1-E1 Secure Credentials** | **✅ PASS / FROZEN / MERGED / TAGGED** | **`v0.0.27-secure-credentials` @ `de05c66`**（2026-07-18） |
 | **P1-E2 Backend Foundation**（Schema+Store / Service+ModelOptions / Session Creation Audit / REST API + Session binding） | ✅ FROZEN @ `89fabfd` / `a2c7932` / `9878ef9` / `17c843d` / `9bbd0f2` / `cad7ca7` | 不单独 merge / tag；M1+M2+M3 统一交付 |
+| **M1-0 Provider Contract Audit** | ✅ FROZEN | `be13a1f` |
+| **M1-1 OpenAI-compatible Adapter** | ✅ FROZEN | `8daaa90`（124 tests） |
+| **M1-2 Qwen / Kimi Presets** | ✅ FROZEN | `4d89c82`（64 tests） |
+| **M1-3 ProviderFactory** | ✅ FROZEN | `a35a4ad`（64 tests） |
+| **M1-4 RequestProviderRuntime** | ✅ FROZEN | `8827bd1`（80 tests / 6 files） |
+| **M1-5 Prompt Integration** | ✅ FROZEN | `f116ddd`（47 tests / 5 files） |
+| **M1-6 Regenerate Validation** | ✅ FROZEN | `06ecb80`（67 tests / 5 files；validation-only，0 production diff） |
+| **M1-7 Runtime Final Validation** | ✅ COMPLETE / FROZEN | (本提交) test(web): freeze multi-provider runtime（76 tests / 4 files；E2E 由主仓库验证） |
 
 ### P1-E1 子阶段终态
 
@@ -71,26 +81,41 @@
   - `cad7ca7` Session binding（`initialize_new_session_binding` on Service + `asyncio.shield` 补偿 + 5 错误码 + CancelledError 处理）
 - ~~P1-E2-4 Restart + Security + Freeze~~ → **cancelled**：合并到 M3 Unified Freeze
 
-测试基线（HEAD `cad7ca7`）：2063 full pytest + 2×37/37 E2E + ruff clean + 0 Core Runtime diff + 0 network + 0 secret reads。
+### M1 Multi-Provider Runtime 子阶段终态
+
+- **M1-0 Provider Contract Audit** ✅ FROZEN @ `be13a1f`（只读审计，无生产代码；冻结统一 Adapter 接口）
+- **M1-1 OpenAI-compatible Adapter** ✅ FROZEN @ `8daaa90`（`providers/openai_compat.py`；124 tests；max_retries=0；async with stream helper；固定短文本错误 from None；SecretStr api_key；reasoning_content 忽略；CancelledError 原样传播）
+- **M1-2 Qwen / Kimi Presets** ✅ FROZEN @ `4d89c82`（registry 加 qwen=dashscope beijing shared / kimi=moonshot；key_prefix_hints=()；`/models` 返回 `[]`；64 tests）
+- **M1-3 ProviderFactory** ✅ FROZEN @ `a35a4ad`（`providers/factory.py`；`create_provider` 无状态同步工厂；glm/anthropic 精确 + openai_compatible 通用分支；未知 anthropic_compatible 拒绝；from None；AST + socket guard 零跨层 / 零网络；64 tests）
+- **M1-4 RequestProviderRuntime** ✅ FROZEN @ `8827bd1`（`web/provider_runtime.py`；`RequestProviderSelection` frozen dataclass + `credential_id repr=False`；resolve/build/bind 三方法；CredentialService 新增 `resolve_secret_for_request` 窄接口 + 2 新错误 `CredentialRequestSecret{Unavailable,Backend}Error`；`asyncio.shield` cancellation-safe close；no second lock；80 tests / 6 files）
+- **M1-5 Prompt Integration** ✅ FROZEN @ `f116ddd`（`web/app.py` 两处接线：composition root + `_execute_prompt` 唯一接入点；`AsyncExitStack` + `bind_to_harness`；4 固定错误码 `provider_profile_{unavailable,disabled}` / `provider_credential_unavailable` / `provider_initialization_failed`；`CancelledError` 原样传播；47 tests / 5 files；2×37/37 E2E）
+- **M1-6 Regenerate Validation** ✅ FROZEN @ `06ecb80`（validation-only——`_execute_prompt` 是唯一 Provider Runtime 接入点，`_run_regeneration_core` 经 `override_initial_messages + suppress_user_append=True` 复用同一执行函数，无需第二次接线；2 个 AST 测试锁定 lexical-body 内 `resolve_selection/bind_to_harness/build_adapter` 只出现在 `_execute_prompt`；67 tests / 5 files）
+- **M1-7 Runtime Final Validation** ✅ COMPLETE / FROZEN（本提交）——跨模块组合 validation-only：3-provider E2E 矩阵（GLM/Qwen/Kimi）+ 跨 Session 隔离 + 默认/显式切换全链路 + app restart（env/keyring/session-only Credential）+ Credential 删除/替换 + Tool loop 不变量 + 安全出口全审计（HTTP/SQLite main/WAL/SHM/log/exception chain/Selection repr/Adapter repr）+ 静态架构约束（Core Runtime M1 diff=0；Provider Runtime 接线只在 `_execute_prompt`；`provider_runtime.py` 不导入 `SecretStoreRouter`/SDK；`factory.py` 不导入 Web；`openai_compat.py` 不导入 Registry/Web）；76 tests / 4 files；M1 production diff = 0；M1 全程 0 网络调用 / 0 secret 泄漏；E2E 由主仓库 `pi-py` 验证）
+
+测试基线（post-M1-7）：2585 full pytest + 1 skipped（keyring API path 不在本副本验证）+ ruff clean + 0 Core Runtime diff + 0 providers/* diff（仅新增 `openai_compat.py` / `factory.py`）+ 0 network + 0 secret reads + frontend build clean（142.91 KB JS / 40.15 KB CSS）。
 
 ## 当前阶段
 
-**P1-E Multi-Provider Switching — M1 Multi-Provider Runtime**（PIVOT @ 2026-07-19）。
+**P1-E Multi-Provider Switching — M2 Frontend Switching**（待启动；M1 Runtime ✅ COMPLETE）。
 
 - 路线：[ROADMAP.md](ROADMAP.md) § P1-E（M1 / M2 / M3 milestone）
 - Pivot 决策：原 P1-E2/E3/E4/E5 拆分过细，E2-4 独立 Security Freeze 会冻结一个用户无法直接使用的配置后端——改为 M1 Runtime / M2 Frontend / M3 Unified Freeze 单一 milestone
 - Pivot 附录：[docs/design/p1-e2-provider-profiles.md](docs/design/p1-e2-provider-profiles.md) §19
-- M1 子阶段：M1-0 Provider Contract Audit → M1-1 `OpenAICompatibleProvider` → M1-2 Qwen/Kimi presets → M1-3 `ProviderFactory` → M1-4 `web/provider_runtime.py` → M1-5 Prompt integration → M1-6 Regenerate integration → M1-7 Runtime tests
+- M1 子阶段终态：M1-0 ✅ → M1-1 ✅ → M1-2 ✅ → M1-3 ✅ → M1-4 ✅ → M1-5 ✅ → M1-6 ✅ → **M1-7 ✅ COMPLETE / FROZEN** → M2-0 Frontend Integration Audit（待启动）
 
 P1-D3 PDF Text Extraction ⏸ **DEFERRED**（2026-07-16 决策，转出主路线）。PDF / Vector RAG ⏸ **DEFERRED**（同上）。
 
 ## 当前阻塞项
 
-无 M1-0 实施阻塞。8 个跨阶段设计边界已冻结（详见 ROADMAP.md P1-E 段；Custom URL 安全 M1/M2/M3 全程排除）。
+无 M2 启动阻塞。M1 Runtime 已冻结；M2 开始前端 Provider/Model 选择器集成（审计现有 `chatStore` / `SessionSidebar` / settings panel 接入点）。
 
 ## 下一步
 
-**M1-0 Provider Contract Audit**（设计文档，无生产代码）：只读审计 `providers/base.py` / `glm.py` / `anthropic_compat.py` / `registry.py` + Agent Provider 持有 + Prompt/Regenerate 入口；产出 `docs/design/p1-e-m1-provider-runtime.md`，冻结统一 Adapter 接口（`stream()` / `close()` / tool_call 增量 / usage / finish_reason）。审计完成后停止审核，再启动 M1-1 `openai_compat.py`。
+**M2-0 Frontend Integration Audit**：
+- 审计现有前端 store 与后端 Provider Profile / Binding API 的对接点
+- 设计 Provider/Model 选择器 UI（`ProviderModelSelector.vue` 组件位置、binding 切换流程、错误展示）
+- 评估 ws event mapper 对 binding 变更的响应
+- 不进入 M2 实施前需 user approve 设计
 
 ## 已知限制
 

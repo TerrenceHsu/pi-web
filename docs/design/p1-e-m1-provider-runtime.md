@@ -1,10 +1,10 @@
 # P1-E M1 — Multi-Provider Runtime Design
 
-> **状态**：DESIGN FROZEN — APPROVED FOR M1-1
+> **状态**：✅ IMPLEMENTATION COMPLETE — M1-0 ~ M1-7 FROZEN
 > **基线**：master `c796a01`（M1-0 audit committed @ `3a1e011` pivot）
-> **日期**：2026-07-19
+> **日期**：2026-07-19（design frozen）/ 2026-07-23（M1 implementation complete）
 > **前置**：[p1-e2-provider-profiles.md §19 Pivot 附录](p1-e2-provider-profiles.md)
-> **范围**：M1-0 Provider Contract Audit + 冻结决策 + 修订缺口；M1-1 实施前不再变更
+> **范围**：M1-0 Provider Contract Audit + M1-1 ~ M1-7 实施记录；M1 冻结后归档
 
 ## 0. M1 目标
 
@@ -1006,39 +1006,67 @@ class OpenAICompatConfig(BaseModel):
 
 详见 §5.7。
 
-## 13. M1 实施顺序（user 审核已通过）
+## 13. M1 实施顺序（✅ COMPLETE / FROZEN）
 
 ```
-M1-0 Provider Contract Audit（本文档） ✅ DESIGN FROZEN
+M1-0 Provider Contract Audit（本文档） ✅ FROZEN @ be13a1f
         ↓
-M1-1 providers/openai_compat.py + 测试（含 §5 全部约束）
+M1-1 providers/openai_compat.py + 测试（含 §5 全部约束） ✅ FROZEN @ 8daaa90（124 tests）
         ↓
-M1-2 registry.py 加 qwen / kimi presets + 测试
+M1-2 registry.py 加 qwen / kimi presets + 测试 ✅ FROZEN @ 4d89c82（64 tests）
         ↓
-M1-3 providers/factory.py + 测试
+M1-3 providers/factory.py + 测试 ✅ FROZEN @ a35a4ad（64 tests）
         ↓
-M1-4 web/provider_runtime.py + credentials_service.resolve_secret_for_request + 测试
+M1-4 web/provider_runtime.py + credentials_service.resolve_secret_for_request + 测试 ✅ FROZEN @ 8827bd1（80 tests / 6 files）
         ↓
-M1-5 _execute_prompt wrap（唯一接入点）+ 测试
+M1-5 _execute_prompt wrap（唯一接入点）+ 测试 ✅ FROZEN @ f116ddd（47 tests / 5 files）
         ↓
-M1-6 Regenerate 行为测试（不改 _run_regeneration_core 源码）
+M1-6 Regenerate 行为测试（不改 _run_regeneration_core 源码） ✅ FROZEN @ 06ecb80（67 tests / 5 files；validation-only，0 production diff）
         ↓
-M1-7 端到端 Runtime tests + Core Runtime diff 校验
+M1-7 端到端 Runtime tests + Core Runtime diff 校验 ✅ COMPLETE / FROZEN（76 tests / 4 files；M1 production diff = 0）
         ↓
 停止并审核，进入 M2 Frontend Switching
 ```
 
-每个子阶段一个原子 commit，commit message 格式：
+每个子阶段一个原子 commit，commit message 实际记录：
 
 ```
-feat(providers): add openai-compatible provider adapter
-feat(providers): add qwen and kimi provider presets
-feat(providers): add provider factory
-feat(web): add request-scoped provider runtime
-feat(web): bind prompt execution to session provider
-test(web): cover regenerate provider switching behavior
-test(providers): validate multi-provider runtime
+feat(providers): add openai-compatible provider adapter          # 8daaa90 (M1-1)
+feat(providers): add qwen and kimi provider presets              # 4d89c82 (M1-2)
+feat(providers): add provider factory                            # a35a4ad (M1-3)
+feat(web): add request-scoped provider runtime                   # 8827bd1 (M1-4)
+feat(web): bind prompt execution to session provider             # f116ddd (M1-5)
+test(web): validate regenerate provider selection                # 06ecb80 (M1-6)
+test(web): freeze multi-provider runtime                         # (本提交, M1-7)
 ```
+
+## 14. M1 最终实施记录
+
+**生产代码修改清单（M1-0 ~ M1-7 全程）**：
+
+| 模块 | 操作 | 阶段 |
+|---|---|---|
+| `src/pi_agent_core_py/providers/openai_compat.py` | 新增 | M1-1 |
+| `src/pi_agent_core_py/providers/registry.py` | 扩展（qwen / kimi preset） | M1-2 |
+| `src/pi_agent_core_py/providers/factory.py` | 新增 | M1-3 |
+| `src/pi_agent_core_py/web/provider_runtime.py` | 新增 | M1-4 |
+| `src/pi_agent_core_py/web/credentials_service.py` | 扩展（`resolve_secret_for_request` 窄接口 + 2 新错误） | M1-4 |
+| `src/pi_agent_core_py/web/credentials_errors.py` | 扩展（2 新错误类） | M1-4 |
+| `src/pi_agent_core_py/web/app.py` | 扩展（composition root + `_execute_prompt` 唯一接入点；未修改 `_run_regeneration_core` / `_run_regeneration_background` / Prompt / Regenerate HTTP handler） | M1-5 |
+| `src/pi_agent_core_py/providers/__init__.py` | 扩展（导出 `OpenAICompatibleProvider`） | M1-1 |
+
+**Core Runtime 不变（M1 全程 diff = 0）**：`loop.py` / `agent.py` / `context.py` / `events.py` / `stream_events.py` / `messages.py`；`providers/base.py` / `glm.py` / `anthropic_compat.py` 不修改。
+
+**M1-6 关键架构结论**：`_execute_prompt` 是 Provider Runtime 唯一接入点；`_run_regeneration_core` 经 `override_initial_messages + suppress_user_append=True` 复用同一执行函数；M1-6 无需第二次接线。M1-7 AST 静态约束锁定 lexical body 内 `resolve_selection/bind_to_harness/build_adapter` 只出现在 `_execute_prompt`，且 `RequestProviderRuntime` 仅在 `create_app` / `_lifespan` 构造。
+
+**M1 最终测试基线**：2585 full pytest + 1 skipped（keyring API path 不在本副本验证）+ ruff clean + frontend prod build clean（142.91 KB JS / 40.15 KB CSS @ 823ms）+ 0 Core Runtime diff + 0 providers/* diff（除前述新增）+ 0 network + 0 secret reads。Playwright E2E 由主仓库 `D:\LLMTutorial\pi\pi-py` 验证（本精简副本无 e2e/）。
+
+**M1 未实现范围（明确排除）**：
+- 前端 Provider/Model 选择器 UI（M2 范围）
+- 最终 security freeze（M3 范围）
+- Custom Base URL / Custom Provider / 远程模型目录 / 多 Key 复杂管理
+- Anthropic Provider 接入 Provider Runtime（保留 `anthropic_compat.py` 现状；anthropic ProviderDefinition 保留但 ProviderFactory 仅在 `provider_id=="anthropic"` 时构造 `AnthropicCompatAdapter`，不走 M1-4 RequestProviderRuntime 路径）
+- 真实 Provider smoke test（需要真实 API key；M1 冻结不依赖真实远端调用）
 
 ---
 
