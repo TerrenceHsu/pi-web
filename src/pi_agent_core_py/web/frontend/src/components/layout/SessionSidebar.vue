@@ -6,6 +6,7 @@ import { useFileStore } from "../../stores/fileStore"
 import { useSessionStore } from "../../stores/sessionStore"
 import LoadingSpinner from "../common/LoadingSpinner.vue"
 import MCPManagerModal from "../mcp/MCPManagerModal.vue"
+import ProviderSettingsModal from "../providers/ProviderSettingsModal.vue"
 import SkillManagerModal from "../skills/SkillManagerModal.vue"
 
 const sessionStore = useSessionStore()
@@ -17,6 +18,20 @@ const activeId = computed(() => sessionStore.activeSessionId)
 
 const skillsOpen = ref(false)
 const mcpOpen = ref(false)
+const providerOpen = ref(false)
+
+// 请求运行中（sending/streaming/active request）禁用 Provider Settings 入口
+const requestRunning = computed(
+  () => chatStore.sending || chatStore.streaming || !!chatStore.currentRequestId,
+)
+
+const providerEntryDisabled = computed(() => !activeId.value || requestRunning.value)
+
+const providerEntryTitle = computed(() => {
+  if (!activeId.value) return "Select a session first"
+  if (requestRunning.value) return "当前回答完成后可修改 Provider 设置"
+  return "Provider settings"
+})
 
 function formatTime(ts?: number): string {
   if (!ts) return ""
@@ -37,10 +52,7 @@ async function activateSession(id: string) {
   chatStore.resetForSession()
   // D2-7: 清当前 session 的 regeneration draft（不串流到新 session）
   chatStore.clearRegenerationForSessionSwitch()
-  await Promise.all([
-    chatStore.loadMessages(id),
-    fileStore.loadFiles(id),
-  ])
+  await Promise.all([chatStore.loadMessages(id), fileStore.loadFiles(id)])
   fileStore.resetForSession()
 }
 
@@ -52,10 +64,7 @@ async function newChat() {
       chatStore.setActiveSession(s.id)
       chatStore.resetForSession()
       fileStore.resetForSession()
-      await Promise.all([
-        chatStore.loadMessages(s.id),
-        fileStore.loadFiles(s.id),
-      ])
+      await Promise.all([chatStore.loadMessages(s.id), fileStore.loadFiles(s.id)])
     }
   } catch (e) {
     console.error("newChat failed", e)
@@ -150,21 +159,27 @@ async function exportSession(id: string) {
             title="Export Markdown"
             aria-label="Export Markdown"
             @click="exportSession(s.id)"
-          >⤓</button>
+          >
+            ⤓
+          </button>
           <button
             class="icon-btn"
             data-testid="session-rename-btn"
             title="Rename"
             aria-label="Rename"
             @click="renameSession(s.id, s.title || '')"
-          >✎</button>
+          >
+            ✎
+          </button>
           <button
             class="icon-btn danger"
             data-testid="session-delete-btn"
             title="Delete"
             aria-label="Delete"
             @click="deleteSession(s.id)"
-          >×</button>
+          >
+            ×
+          </button>
         </div>
       </div>
       <div v-if="!sessionStore.loading && sessions.length === 0" class="empty-row">
@@ -180,17 +195,35 @@ async function exportSession(id: string) {
         data-testid="skills-button"
         title="Skills manager"
         @click="skillsOpen = true"
-      >Skills</button>
+      >
+        Skills
+      </button>
       <button
         class="footer-btn"
         data-testid="mcp-button"
         title="MCP manager"
         @click="mcpOpen = true"
-      >MCP</button>
+      >
+        MCP
+      </button>
+      <button
+        class="footer-btn"
+        data-testid="provider-settings-button"
+        :disabled="providerEntryDisabled"
+        :title="providerEntryTitle"
+        @click="providerOpen = true"
+      >
+        Providers
+      </button>
     </div>
 
     <SkillManagerModal :open="skillsOpen" @close="skillsOpen = false" />
     <MCPManagerModal :open="mcpOpen" @close="mcpOpen = false" />
+    <ProviderSettingsModal
+      :open="providerOpen"
+      :session-id="activeId"
+      @close="providerOpen = false"
+    />
   </div>
 </template>
 
@@ -345,8 +378,12 @@ async function exportSession(id: string) {
   font-size: 12px;
   color: var(--muted);
 }
-.footer-btn:hover {
+.footer-btn:hover:not(:disabled) {
   background: var(--border);
   color: var(--fg);
+}
+.footer-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>
