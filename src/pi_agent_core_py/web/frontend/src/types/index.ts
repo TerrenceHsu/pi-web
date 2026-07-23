@@ -8,6 +8,7 @@ export * from "./files"
 export * from "./skills"
 export * from "./mcp"
 export * from "./events"
+export * from "./providers"
 
 // 旧 SkillsResponse 别名——保留向后兼容（types.ts 中曾用此名）
 export type { SkillListResponse as SkillsResponse } from "./skills"

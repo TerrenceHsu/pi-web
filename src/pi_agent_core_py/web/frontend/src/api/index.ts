@@ -30,6 +30,7 @@ export * from "./mcp"
 export * from "./websocket"
 export * from "./state"
 export * from "./regenerate"
+export * from "./providers"
 
 // ----- 旧 api.ts 兼容签名（让 9 个 .vue 不改一行） -----
 // 注意：旧 .vue 直接 import * as api 然后 api.getState() / api.sendPrompt(text, sel)
@@ -79,15 +80,7 @@ export function getSkills(includePrompt = false) {
 // ----- 直接 re-export 模块本身（让 import * as api 拿到所有函数）-----
 // 上面的具名 re-export 已覆盖旧用法；这里再 export default 一次模块组合，
 // 便于新代码 `import { listSessions, sendPrompt as sendPromptNew } from "../api"`
-export {
-  client,
-  sessionsApi,
-  messagesApi,
-  filesApi,
-  skillsApi,
-  mcpApi,
-  stateApi,
-}
+export { client, sessionsApi, messagesApi, filesApi, skillsApi, mcpApi, stateApi }
 
 // 标记 ApiError / requestJson / uploadForm 也通过 barrel 暴露——
 // store 层 `import { ApiError } from "../api"` 也能工作
