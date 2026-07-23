@@ -1,13 +1,14 @@
 # P1-E M2 — Frontend Integration Audit
 
-> **状态**：M2-0 FRONTEND INTEGRATION AUDIT — DESIGN DRAFT (REVISION 1)
+> **状态**：✅ M2-0 FRONTEND INTEGRATION — DESIGN FROZEN (REVISION 2)
 > **基线**：master `8b0fb13` — P1-E M1 Runtime ✅ COMPLETE / FROZEN
 > **初稿 commit**：`62f1366`（2026-07-23）
-> **本修订 commit**：（本次提交）
+> **修订 1 commit**：`068a548`（2026-07-23）
+> **冻结 commit**：（本次提交，hash 由 git 在 commit 后生成；不在文档内自引用）
 > **日期**：2026-07-23
 > **前置**：[p1-e-m1-provider-runtime.md](p1-e-m1-provider-runtime.md) § 14
 > **范围**：M2 前端集成纯审计；不写生产代码、不写测试、不进入 M2-1 编码
-> **审核状态**：**待 user 审核**——M2 production coding ⛔ BLOCKED BY 本文档冻结
+> **审核状态**：**✅ DESIGN FROZEN** —— 12 决策点全部 APPROVED（§15）；M2-1 ✅ APPROVED TO START
 
 ---
 
@@ -19,27 +20,30 @@
 - 修改任何生产代码（前端 / 后端 / API / schema）
 - 修改 `package.json` / lockfile（**例外**：M2-1 经 user 批准引入测试框架时；见 §15.12）
 - 新增 npm 依赖（同上例外）
-- 进入 M2-1 编码
+- 进入 M2-1 编码（**冻结前**）
 - merge / tag / push
 
-**完成后只允许**：修订本文档 + 一个原子 commit（`docs: revise P1-E M2 frontend integration audit`）。
+**本次提交**：文档冻结，commit message 为 `docs: freeze P1-E M2 frontend integration contract`。
 
-### 0.1 本修订相对初稿（`62f1366`）的变更
+### 0.1 变更历史
 
-初稿经 user 审核发现 10 类阻塞问题，本修订全部解决：
+| Revision | Commit | 解决的问题 |
+|---|---|---|
+| 初稿 | `62f1366` | 首次审计输出（10 类问题未发现） |
+| Revision 1 | `068a548` | 解决初稿 10 类阻塞：storage_mode 缺失 / canSendPrompt 破坏 Legacy / Store 依赖冲突 / default_model vs Binding.model_id / Modal 结构与方案 B 矛盾 / API Key 浏览器事实 / Toast 不存在 / 保存非原子 / 测试框架与 lockfile 冲突 / api_style 错值 + cascade 误断 |
+| **Revision 2（本次冻结）** | 本提交 | 解决 Revision 1 剩余 4 阻塞 + 术语统一 + 小修正 + 12 决策 APPROVED。详见下表。 |
+
+### 0.2 Revision 2 相对 Revision 1（`068a548`）的变更
 
 | # | 问题 | 本修订的修复 |
 |---|---|---|
-| 1 | Credential `storage_mode` 完全缺失 | 新增 §15.11 决策点 + §10 表单结构 + §10.3 保存流程 |
-| 2 | `canSendPrompt` 破坏 Legacy 路径 | §8.2 重定义：null binding 允许发送（legacy client） |
-| 3 | Store 依赖方向三处冲突 | §4.4 + §8 + §20.1 统一：`App.vue` `watch` 协调，无 cross-store import |
-| 4 | `Profile.default_model` vs `Binding.model_id` 混淆 | §9.2 + §10.6 拆分；新增"应用到当前 Session"动作 |
-| 5 | 方案 B 与 Modal 结构矛盾 | §10.1 重构：`ProviderSection × N ProfileForm` |
-| 6 | API Key 安全表述不符合浏览器事实 | §16 重写：区分"输入期短暂存在" vs "持久泄漏" |
-| 7 | 引用不存在的 Toast 系统 | §10 + §14 全部改用 ErrorBanner / 局部状态 |
-| 8 | 保存流程非原子 | §10.3 重写：`is_default` 入 Profile mutation；分"保存配置"和"应用到 Session"两动作 |
-| 9 | 测试框架与 lockfile 冲突 | §15.12 新决策点：M2-1 引入 Vitest |
-| 10 | `api_style` 值错 + cascade 误断 | §6.1 修正为 `anthropic_compatible`/`openai_compatible`；§5.4 改为"后端职责" |
+| 1 | Binding 加载状态未显式建模 | §8.1 新增 `bindingLoadState: "idle"\|"loading"\|"loaded"\|"error"`；§8.2 `canSendPrompt` 改用 state 而非 `bindingResolved`；§8.3 `refreshForSession` 显式重置 state |
+| 2 | `canSendPrompt` 未接入真实发送路径 | §9.7 新增 "ChatInput 接线"；§18.2 添加 `ChatInput.vue` 最小扩展；§19 M2-3 任务加 "wire canSendPrompt"；§17.2 加相关测试 |
+| 3 | Env Credential 的 `env_var_name` 不可恢复 | §10.2 + §10.4 明确：envVarName 局部输入默认空；placeholder 用 `masked_value`；空值不调 rotate；不得解析 `masked_value`；新建/切换到 env 时 envVarName 必填 |
+| 4 | Credential 生命周期描述错误 | §10.6 删除"Credential 通过 Profile 删除或 cascade"；§10.7 新增"未使用 Credential 折叠区"；§15.2 冻结：Profile 删除 ≠ Credential 删除；引用计数为 0 才能删；二次确认；不自动删共享 |
+| 5 | "原子提交"术语不准 | §10.3 + 全文统一改为"Credential + Profile 分阶段保存流程"；明确 3 独立阶段（Credential mutation / Profile mutation / 可选 Binding mutation）；保留部分成功补偿语义 |
+| 6 | 小修正 | `profilesByProvider[provider_id]`（原误写 `gateway_id`）；Revision commit 在后续 freeze commit 中记录为 `068a548`（不在当前文档自引用 hash） |
+| 7 | 决策状态 | §15 所有 12 决策转为 APPROVED 表，标注 user 审核结论 |
 
 ---
 
@@ -600,7 +604,7 @@ App.vue onMounted:
 
 ### 7.3 推荐 stale-response 方案（最小且匹配现有架构）
 
-**方案：请求级 `bindingLoadToken` + 应用响应前校验 `sessionId`**
+**方案：请求级 `bindingLoadToken` + 应用响应前校验 `bindingSessionId` + 显式 `bindingLoadState`**
 
 ```typescript
 // providerStore.ts (草案——非生产代码)
@@ -608,16 +612,29 @@ let bindingLoadToken = 0
 
 async function loadBinding(sessionId: string) {
   const token = ++bindingLoadToken
-  const resp = await api.getSessionBinding(sessionId)
-  // 应用响应前校验：token 未被取代
-  if (token !== bindingLoadToken) return
-  // bindingSessionId 是 providerStore 自己的 state（不读 sessionStore）
-  if (sessionId !== bindingSessionId.value) return
-  currentBinding.value = resp.binding
+  try {
+    const resp = await api.getSessionBinding(sessionId)
+    // 应用响应前校验：token 未被取代 + sessionId 未变
+    if (token !== bindingLoadToken) return
+    if (sessionId !== bindingSessionId.value) return
+    currentBinding.value = resp.binding
+    bindingLoadState.value = "loaded"           // 只有成功才进 loaded
+    bindingLoadError.value = null
+  } catch (err) {
+    if (token !== bindingLoadToken) return
+    if (sessionId !== bindingSessionId.value) return
+    currentBinding.value = null
+    bindingLoadState.value = "error"
+    bindingLoadError.value = safeError(err)
+  }
 }
 
 function refreshForSession(sessionId: string) {
+  // 原子重置（§8.3 冻结顺序）
+  currentBinding.value = null
   bindingSessionId.value = sessionId
+  bindingLoadState.value = "loading"
+  bindingLoadError.value = null
   return loadBinding(sessionId)
 }
 ```
@@ -629,13 +646,13 @@ function refreshForSession(sessionId: string) {
 - 保存前 Modal 自己读 `sessionStore.activeSessionId` 校验（组件层跨 store，允许）
 - 不一致时 Modal 内 `ErrorBanner` 提示 "Session has changed" 并自动关闭
 
-**默认 binding race**：`canSendPrompt` getter 要求 `bindingResolved === true`（§8.2）。
+**默认 binding race**：`canSendPrompt` getter 要求 `bindingLoadState === "loaded"`（§8.2）。只有 GET binding 成功后才允许发送 Prompt。
 
 ---
 
 ## 8. providerStore 最小契约（草案）
 
-### 8.1 State
+### 8.1 State（含 `bindingLoadState` 显式状态机）
 
 ```typescript
 // 全局缓存（与 session 无关）
@@ -643,30 +660,64 @@ definitions: Ref<ProviderDefinitionView[]>
 profiles: Ref<ProviderProfileView[]>
 credentials: Ref<CredentialView[]>
 
-// Per-session
+// Per-session binding——三字段必须同步变更（§8.3 refreshForSession）
 currentBinding: Ref<SessionBindingView | null>
-bindingSessionId: Ref<string | null>                // 守护：binding 属于哪个 session
+bindingSessionId: Ref<string | null>
+bindingLoadState: Ref<"idle" | "loading" | "loaded" | "error">
 
-// 加载 flag（分维度）
+// 全局加载 flag（分维度）
 definitionsLoading: Ref<boolean>
 profilesLoading: Ref<boolean>
 credentialsLoading: Ref<boolean>
-bindingLoading: Ref<boolean>
 
-// 保存 flag
+// 保存 flag（分维度）
 savingCredential: Ref<boolean>
 savingProfile: Ref<boolean>
 savingBinding: Ref<boolean>
 
 // 错误（分维度）
-loadError: Ref<string | null>
+loadError: Ref<string | null>                       // 定义/Profile/Credential 加载错误
+bindingLoadError: Ref<string | null>                // binding 加载错误（对应 state=error）
 mutationError: Ref<string | null>
 
 // 初始化标志
 initialized: Ref<boolean>
 ```
 
-### 8.2 Getters（含 `canSendPrompt` 正确语义）
+**`bindingLoadState` 状态机**（冻结）：
+
+```
+        ┌──────────────────────────────────────────────────┐
+        │                                                  │
+        ▼                                                  │
+┌───── idle ─────┐  refreshForSession(sid)   ┌──── loading ────┐
+│  初始状态       │ ─────────────────────────▶ │ currentBinding=null│
+│  binding=null  │                            │ bindingSessionId=sid│
+│  sessionId=null│                            │ state="loading"    │
+│  state="idle"  │                            │ token++             │
+└────────────────┘                            └─────┬──────────────┘
+                                                    │
+                              GET /api/sessions/{sid}/model-binding
+                                                    │
+                                  ┌─────────────────┴─────────────────┐
+                                  │                                   │
+                              成功 200                             失败（非 404）
+                                  │                                   │
+                                  ▼                                   ▼
+                          ┌─── loaded ────┐                   ┌─── error ────┐
+                          │ state="loaded"│                   │ state="error"│
+                          │ binding=resp  │                   │ bindingLoadError
+                          │   .binding    │                   │ ChatPanel ErrorBanner
+                          └───────────────┘                   └──────────────┘
+```
+
+**不变量**：
+- 只能从 `loading` 进入 `loaded`（必须成功 GET 才算 loaded）
+- `loaded` 时 `currentBinding` 可能为 `null`（合法——legacy 路径）或 `SessionBindingView`
+- `error` 时 `currentBinding` 保持 `null`；`canSendPrompt` 返回 false；显示 `bindingLoadError`
+- 切换 session 永远从 `loaded/error → loading`（不回到 idle，除非 `clearSessionState`）
+
+### 8.2 Getters（`canSendPrompt` 基于 `bindingLoadState`）
 
 ```typescript
 // 只展示 GLM/Qwen/Kimi（过滤 Anthropic）
@@ -678,27 +729,28 @@ usableProfiles: ComputedRef<ProviderProfileView[]>
 // 所有 Profile（含 disabled/needs_key）——Settings Modal 展示
 allProfilesGroupedByProvider: ComputedRef<Record<string, ProviderProfileView[]>>
 
+// profilesByProvider[provider_id]（修正：原 gateway_id 笔误）
+profilesByProvider: ComputedRef<Record<provider_id, ProviderProfileView[]>>
+
+// 未使用 Credential（无 Profile 引用）——Settings Modal 折叠区展示
+unusedCredentials: ComputedRef<CredentialView[]>
+
 // 当前 binding 投影
 selectedProfile: ComputedRef<ProviderProfileView | null>
 selectedProvider: ComputedRef<ProviderDefinitionView | null>
 selectedModel: ComputedRef<string | null>           // = currentBinding?.model_id
 
-// 当前 Profile 状态（可能 null/ready/disabled/needs_credential/...）
+// 当前 Profile 状态
 currentProfileStatus: ComputedRef<string | null>
 
-// bindingResolved：binding 加载完成且属于当前 session
-bindingResolved: ComputedRef<boolean> = computed(() =>
-  !bindingLoading.value &&
-  bindingSessionId.value !== null
-)
-
-// canSendPrompt 正确语义（修复初稿错误）：
-//   binding 必须已读（避免 default binding race）
-//   binding === null 允许发送（走 legacy client，M1 语义）
-//   binding 指向 ready Profile 允许发送
-//   binding 指向失效 Profile 禁止发送并引导配置
+// canSendPrompt 基于 bindingLoadState（Revision 2 修复）：
+//   state != "loaded" → false（避免 default binding race）
+//   loaded + binding=null → true（Legacy client 路径）
+//   loaded + Profile ready → true
+//   loaded + Profile 失效 → false（引导配置）
+//   state="error" → false（显示 bindingLoadError）
 canSendPrompt: ComputedRef<boolean> = computed(() => {
-  if (!bindingResolved.value) return false
+  if (bindingLoadState.value !== "loaded") return false
   if (currentBinding.value === null) return true        // legacy path
   return selectedProfile.value?.status === "ready"
 })
@@ -718,14 +770,31 @@ loadCredentials(): Promise<void>
 loadProfiles(): Promise<void>
 
 // Per-session（由 App.vue watch 触发，不读 sessionStore）
-loadBinding(sessionId: string): Promise<void>
+// refreshForSession 必须按以下顺序原子重置（Revision 2 冻结）：
+//   1. currentBinding.value = null
+//   2. bindingSessionId.value = sessionId
+//   3. bindingLoadState.value = "loading"
+//   4. bindingLoadToken++（使旧的 in-flight 响应失效）
+//   5. 清 bindingLoadError
+//   6. await GET /api/sessions/{sessionId}/model-binding
+//   7. token 校验 + sessionId 校验通过 →
+//        成功：currentBinding = resp.binding; state = "loaded"
+//        失败：bindingLoadError = safe msg; state = "error"
 refreshForSession(sessionId: string): Promise<void>
+
+// Per-session 直接加载（与 refreshForSession 共用 token；用于首次加载）
+loadBinding(sessionId: string): Promise<void>
+
+// 完全清空（登出 / 无 active session）
+//   currentBinding = null; bindingSessionId = null;
+//   bindingLoadState = "idle"; bindingLoadError = null
 clearSessionState(): void
 
 // Mutations（参数草案；实际签名 M2-1 决定）
-// storage_mode 切换语义见 §15.6、§15.11
+// storage_mode 切换语义见 §15.6、§15.11；env_var_name 不可恢复见 §10.2
 createCredential(payload: {label, storage_mode, secret_value?, env_var_name?}): Promise<string>
 rotateCredentialSecret(credentialId: string, payload: {secret_value?, env_var_name?}): Promise<void>
+deleteCredential(credentialId: string): Promise<void>     // 仅未使用；§10.7
 createProfile(payload: {name, provider_id, credential_id, default_model, enabled?, is_default?}): Promise<string>
 updateProfile(profileId: string, patch: {...}): Promise<void>
 deleteProfile(profileId: string): Promise<void>
@@ -733,6 +802,7 @@ setSessionBinding(sessionId: string, profileId: string, modelId: string): Promis
 
 // 错误管理
 resetError(): void
+resetBindingLoadError(): void
 ```
 
 ### 8.4 安全不变量（冻结）
@@ -830,6 +900,42 @@ async function onSelectorSelect(newProfile: ProfileView) {
 
 **Profile 列表**：若 DB 中存在 Anthropic Profile（legacy），M2 也从 `usableProfiles` 排除（但保留在 `profiles` 数组中——不删数据；Settings 也不展示）。
 
+### 9.7 ChatInput / Prompt submit 接线（**Revision 2 新增**）
+
+**事实**（已核实 `ChatInput.vue:1-46`）：组件**没有** `disabled` prop；内部 `canSend` computed 只检查 `props.sending + text/pendingAttachments`。因此 `providerStore.canSendPrompt` 必须显式接线到发送路径，不能只创建 getter。
+
+**M2-3 接线方案**（按优先级）：
+
+1. **首选——最小扩展 ChatInput.vue**（§18.2 允许修改文件）：
+   - 新增 prop：`providerReady?: boolean`（默认 `true`，向后兼容）
+   - `canSend` computed 增加判断：`if (!props.providerReady) return false`
+   - `submit()` 函数不变（已用 `canSend.value` 守护）
+   - 发送按钮 `:disabled="!canSend"`（已存在）自动生效
+   - **不需要**新增 emit / slot / 其它破坏性改动
+
+2. **调用方 ChatPanel.vue**（M2-3 允许修改，§18.2）：
+   ```vue
+   <ChatInput
+     :sending="chatStore.sending"
+     :provider-ready="providerStore.canSendPrompt"
+     ...
+   />
+   ```
+
+3. **Regenerate 路径**（`MessageBubble.vue` regenerate button）：
+   - 当前用模块级 `_regenerateInFlight` 防双击
+   - M2-3 追加：按钮 disabled 也基于 `providerStore.canSendPrompt`
+   - 不允许在 `bindingLoadState !== "loaded"` 时启动 regenerate
+
+**组件测试**（§17.2 扩展）：
+- `providerReady=false` 时 send 按钮 disabled
+- `providerReady=true + text="hi"` 时按钮启用
+- `providerReady=false + text="hi"` 时 `submit()` 不 emit
+
+**禁止**：
+- 不在 `chatStore` 内 import `providerStore`（§4.4 + §20.1）
+- 不在 `ChatInput.vue` 内直接 import `providerStore`——通过 prop 传入
+
 ---
 
 ## 10. ProviderSettingsModal UX 草案（结构重构）
@@ -880,12 +986,16 @@ ProviderSettingsModal
 ├── ErrorBanner
 ├── LoadingSpinner
 └── ProviderSection × 3 (GLM, Qwen, Kimi——硬编码这三个)
-    ├── ProfileForm × N (来自 providerStore.profilesByProvider[gateway_id])
+    ├── ProfileForm × N (来自 providerStore.profilesByProvider[provider_id])
     │   ├── name / model_id / storage_mode / api_key / env_var_name / is_default
-    │   ├── [Save configuration]   ← Credential + Profile 原子保存
+    │   ├── [Save configuration]   ← Credential + Profile 分阶段保存（§10.3）
     │   ├── [Apply to current session]  ← 独立 PUT Binding
     │   └── [Delete profile]       ← DELETE；409 时 ErrorBanner
     └── [+ Add {Provider} profile]  ← 空白 ProfileForm
+
+UnusedCredentialsSection（折叠区，§10.7）
+├── Credential × N（引用计数 = 0）
+└── 每个：masked_value + storage_mode + [Delete] (二次确认)
 ```
 
 **展示规则**：
@@ -893,7 +1003,9 @@ ProviderSettingsModal
 - Selector（§9）只展示 `status === "ready"` 的 Profile——可执行
 - Anthropic Section **不展示**（§15.9）
 
-### 10.2 每个 ProfileForm 字段
+### 10.2 每个 ProfileForm 字段（**Revision 2：env_var_name 不可恢复**）
+
+**已核实**（`credentials_api.py:624-643`）：`CredentialView` serializer **不返回** `env_var_name`，只返回 `masked_value`（env 模式格式为 `"ENV[VAR_NAME]"`）。前端**不能**从 API 读回原 `env_var_name`，用户必须重新输入。
 
 | 字段 | 来源 | 编辑 | 说明 |
 |---|---|---|---|
@@ -903,15 +1015,28 @@ ProviderSettingsModal
 | Credential（只读显示） | `masked_value` + `storage_mode` | 不可改 | 显示当前状态 |
 | Storage（单选） | `storage_mode`（决策点 §15.11） | radio | keyring（默认）/ session_only / env |
 | API Key（仅 keyring/session_only） | 空（write-only） | `<input type="password">` | placeholder `masked_value` 或 "Enter new key" |
-| Env var name（仅 env） | `env_var_name` | 文本输入 | 不显示 API Key 输入框 |
-| Set as default | Profile.is_default | 复选框 | 与 Profile mutation 同一次提交 |
-| Status | Profile.status | 只读 | ready / disabled / needs_credential / ... |
+| Env var name（仅 env） | **局部输入，默认空** | 文本输入 | placeholder `masked_value`（如 `"ENV[MY_KEY]"`）；**不得解析** `masked_value` 提取变量名 |
 
-### 10.3 保存流程（原子性 + 阶段性失败保留）
+**env 模式交互规则**（冻结）：
+- 已有 env Credential：`envVarName` 局部输入**默认空**；placeholder = `masked_value`
+- 用户不填写 → 不调 Credential mutation（保留原 env var）
+- 用户填写新 env var → PUT secret（同 storage_mode）rotate
+- 新建 env Credential 或从其它 storage_mode 切换到 env → `envVarName` **必填**，否则按钮 disabled
+- **禁止**：前端解析 `masked_value` 字符串提取 `VAR_NAME`—— masked_value 仅为展示，格式可能变化
 
-**修复初稿非原子问题**：
+### 10.3 分阶段保存流程（**Revision 2：术语改为"分阶段"**）
 
-**动作 1：[Save configuration]**——Credential + Profile 原子提交
+**修复初稿"原子提交"术语错误**：实际是 3 个独立 HTTP 请求，分阶段提交，保留部分成功补偿。
+
+**3 个独立阶段**：
+
+```
+阶段 A: Credential mutation（条件性）
+阶段 B: Profile mutation（POST 或 PATCH，含 is_default）
+阶段 C（可选，独立动作 [Apply to current session]）: Session Binding mutation（PUT）
+```
+
+**动作 1：[Save configuration]**——阶段 A + 阶段 B
 
 ```
 1. capture openedSessionId = props.sessionId（Modal 打开时的值）
@@ -919,35 +1044,42 @@ ProviderSettingsModal
    - 不一致 → ErrorBanner "Session has changed"；关闭 Modal；终止
 3. 读 form 局部状态（apiKey / modelInput / profileName / storageMode / isDefault / envVarName）
 
-4. Credential 阶段：
-   a. 若 storage_mode === keyring/session_only 且 apiKey 非空：
-      - 若已有 credential_id（同 storage_mode）→ PUT /credentials/{id}/secret (原地 rotate)
-      - 若无 credential_id 或切换了 storage_mode           → POST /credentials (新建) → 取新 credential_id
-   b. 若 storage_mode === env 且 envVarName 非空：
-      - 同上判定逻辑（同 storage_mode → PUT secret；否则 POST 新建）
-   c. 若 apiKey 与 envVarName 都空 → 跳过 Credential mutation
+阶段 A——Credential mutation（条件性）：
+   a. 若 storage_mode === keyring/session_only:
+      - apiKey 非空 → mutation 必要
+        * 已有 credential_id 且 storage_mode 未变 → PUT /credentials/{id}/secret (原地 rotate)
+        * 无 credential_id 或切换了 storage_mode  → POST /credentials (新建) → 取新 credential_id
+      - apiKey 空 → 跳过（不删旧 Key）
+   b. 若 storage_mode === env:
+      - envVarName 非空 → mutation 必要
+        * 已有 credential_id 且 storage_mode === env → PUT /credentials/{id}/secret (原地 rotate)
+        * 无 credential_id 或切换了 storage_mode       → POST /credentials (新建) → 取新 credential_id
+      - envVarName 空 + 已有 credential_id (storage_mode === env) → 跳过（不调 rotate；保留原 env var）
+      - envVarName 空 + 新建或切换到 env               → 按钮 disabled（必填校验）
+   c. 保留阶段 A 返回的 credential_id 到 ProfileForm 局部状态（用于阶段 B + 失败重试）
 
-5. Profile 阶段（同一次 POST/PATCH，含 is_default）：
-   - 若 profile_id 存在 → PATCH /provider-profiles/{id}（含 name / default_model / credential_id / is_default / enabled）
-   - 若 profile_id 不存在 → POST /provider-profiles（同字段 + provider_id）
+阶段 B——Profile mutation（POST 或 PATCH，含 is_default）：
+   - 若 profile_id 存在 → PATCH /provider-profiles/{id}
+     body: {name, default_model, credential_id, is_default, enabled}（不含 provider_id——immutable）
+   - 若 profile_id 不存在 → POST /provider-profiles
+     body: {name, provider_id, credential_id, default_model, enabled, is_default}
 
-6. 成功：
-   - 清 apiKey.value = ""
+成功：
+   - 清 apiKey.value = "" + envVarName.value = ""
    - 刷新 credentials / profiles（loadCredentials + loadProfiles）
-   - ErrorBanner 显示成功（绿色变体）或按钮短暂 "Saved"
+   - 按钮短暂显示 "Saved"（非 Toast）
    - 保留 ProfileForm 显示（用户可继续编辑或 Apply）
 
-7. 失败处理（阶段性保留）：
-   - Credential 创建成功但 Profile 失败：
+阶段性失败补偿（保留）：
+   - 阶段 A 成功但阶段 B 失败：
      * 保留返回的 credential_id 到 ProfileForm 局部状态
      * ErrorBanner "Credential saved, but profile failed: {safe error}"
-     * 刷新 credentials（侧栏看到新 credential）
-     * 用户重试时**不再**创建 Credential（用保留的 credential_id）
-   - Profile 创建成功但 is_default 失败（理论不应发生——is_default 在同一次 PATCH）：
-     * 视为成功（is_default 是 Profile 字段）
+     * 刷新 credentials（侧栏看到新 credential，可在 §10.7 未使用区看到）
+     * 用户重试时阶段 A **跳过**（用保留的 credential_id）；只重试阶段 B
+   - 阶段 B 中 is_default 字段失败：不可能单独失败（is_default 是 PATCH 同一次提交的一部分）
 ```
 
-**动作 2：[Apply to current session]**——独立 PUT Binding（仅在配置已保存后启用）
+**动作 2：[Apply to current session]**——阶段 C（独立）
 
 ```
 1. 校验 openedSessionId === sessionStore.activeSessionId
@@ -955,25 +1087,33 @@ ProviderSettingsModal
 3. PUT /api/sessions/{openedSessionId}/model-binding
    body: {profile_id, model_id: Profile.default_model}    // §9.2 语义
 4. 成功：
-   - 刷新 currentBinding（loadBinding(openedSessionId)）
+   - 刷新 currentBinding（refreshForSession(openedSessionId) 触发 loadBinding）
    - 按钮短暂显示 "Applied"
 5. 失败：
-   - **不**回滚已保存 Profile（Profile 是独立保存的）
+   - **不**回滚阶段 A/B（Profile 已独立保存）
    - ErrorBanner "Configuration saved, but current session binding failed: {safe error}"
 ```
 
-### 10.4 API Key write-only 规则（决策点 §15.5）
+### 10.4 API Key / Env var write-only 规则（**Revision 2：含 env 清空**）
 
-| 事件 | 行为 |
-|---|---|
-| Modal 打开 | `apiKey.value = ""`（永远空） |
-| Placeholder | `masked_value` 或 "Enter new key" |
-| 用户不填写 Key 直接 Save | **不**调 Credential mutation；只改 Profile/Model |
-| 用户填写新 Key 并 Save | 调 mutation；**成功后** `apiKey.value = ""` |
-| Mutation 失败 | **保留** `apiKey.value` 以便重试（仅在 Modal 仍打开期间；决策点 §15.5） |
-| Modal 关闭（任何方式） | `apiKey.value = ""` |
-| Modal unmount | 同上（`watch(open)` 触发清理） |
-| 切 Session（`openedSessionId !== activeSessionId`） | `apiKey.value = ""`；关闭 Modal |
+**冻结规则**（决策点 §15.5）：
+
+| 事件 | `apiKey.value` | `envVarName.value` |
+|---|---|---|
+| Modal 打开 | `""`（永远空） | `""`（**默认空**——env 不可恢复，见 §10.2） |
+| Placeholder | `masked_value` 或 "Enter new key" | `masked_value`（如 `"ENV[MY_KEY]"`）或 "Enter env var name" |
+| 用户不填写 Key 直接 Save（keyring/session_only） | 不调 Credential mutation | 不适用 |
+| 用户不填写 env var 直接 Save（已有 env cred） | 不适用 | 不调 rotate；保留原 env var |
+| 用户填写新 Key/envVar 并 Save 成功 | `""` 立即清空 | `""` 立即清空 |
+| Mutation 失败（Modal 仍开） | **保留** `apiKey.value`（方便重试） | **保留** `envVarName.value` |
+| Modal 关闭（任何方式） | `""` | `""` |
+| Modal unmount | `""`（`watch(open)` 触发） | `""` |
+| 切 Session（`openedSessionId !== activeSessionId`） | `""`；关闭 Modal | `""`；关闭 Modal |
+
+**关键约束**：
+- `envVarName.value` 默认空——**不得**用 `masked_value` 解析回填
+- 新建/切换到 env 时 `envVarName` 必填，否则 [Save configuration] disabled
+- 已有 env Credential 且用户不改 env var → 跳过阶段 A（§10.3）
 
 ### 10.5 Model ID 输入策略
 
@@ -989,12 +1129,44 @@ ProviderSettingsModal
 - 远程模型搜索
 - 远程 Key validation（后端有 `/validate` endpoint，M2 不调用）
 - Provider health / cost dashboard
-- 多 Key 批量管理
 - 复杂 Profile 表格
 - Profile 排序
 - import/export credentials
 - 自动 fallback
 - Anthropic UI
+- reasoning UI
+- Toast / Notification 系统（用 ErrorBanner 替代）
+- **Credential 自动删除**（Profile 删除不联动删 Credential；§10.7）
+- **Credential 共享自动去重**（同 Key 不同 Profile 保留独立 Credential）
+
+### 10.7 未使用 Credential 折叠区（**Revision 2 新增**）
+
+**事实**：
+- `DELETE /api/provider-profiles/{id}` 不联动删 Credential
+- 跨 `storage_mode` 切换会 POST 新 Credential；旧 Credential 保留
+- 因此 DB 可能积累无 Profile 引用的 Credential（"未使用"）
+
+**UI 结构**（Modal 底部折叠区）：
+
+```
+▼ Unused credentials (3)
+    [sk-****5678]  keyring     [Delete]
+    [ENV[MY_KEY]]  env         [Delete]
+    [sk-****abcd]  session_only [Delete]
+▲ Collapse
+```
+
+**删除规则**（冻结，决策点 §15.2）：
+- 只展示 `providerStore.unusedCredentials`（引用计数 = 0 的 Credential；getter 见 §8.2）
+- 删除前必须**二次确认**（`window.confirm` 或自定义 ConfirmDialog——M2 用 `window.confirm` 复用现有模式）
+- 删除调 `DELETE /api/credentials/{id}`；失败时 ErrorBanner 显示安全错误
+- **禁止**：自动删除共享 Credential（即使看起来"重复"）
+- **禁止**：在 ProfileForm 内提供 Credential 删除入口（避免误删正在使用的 Credential）
+
+**未使用区不展示**：
+- Anthropic 关联的 Credential（前端不展示 Anthropic；即使 `provider_hint === "anthropic"` 也不在此区展示——但**允许删除**避免数据积累；通过 `unusedCredentials` getter 包含所有引用计数 = 0 的 Credential，但 UI 折叠区可按 `provider_hint` 过滤）
+
+**决策**：M2-0 冻结为"折叠区展示所有未使用 Credential（含 legacy Anthropic 关联）"——透明，让用户决定。
 - reasoning UI
 - **Toast / Notification 系统**（用 ErrorBanner 替代）
 
@@ -1048,7 +1220,7 @@ ProviderSettingsModal
 | Binding API pending → 切 session | `bindingLoadToken` + 应用前校验 `sessionId === bindingSessionId` |
 | Settings Modal 开着 → 切 session | Modal `watch(sessionStore.activeSessionId)` 自动关闭 + 提示 |
 | 保存中切 session | Modal 保存前 capture `openedSessionId`；校验一致才执行 |
-| 默认 binding race（新建 session） | `canSendPrompt` 要求 `bindingResolved === true`（§8.2） |
+| 默认 binding race（新建 session） | `canSendPrompt` 要求 `bindingLoadState === "loaded"`（§8.2） |
 | 快速切换多个 session | `bindingLoadToken` 自增，旧响应自动失效 |
 
 ### 12.2 WS 事件与 binding 的交互
@@ -1129,110 +1301,99 @@ const selectorDisabled = computed(() =>
 
 ---
 
-## 15. 待 user 审核的关键决策点（12 项）
+## 15. 决策表（✅ 12 项 APPROVED——user 审核已完成）
 
-> 本文档不自行决定以下 12 项；每项给推荐方案但需 user 确认。
+> ** Revision 2 状态**：所有 12 决策已 user-approve；本文档冻结为 M2 实施契约。
 
-### 15.1 多 Profile UI（§11）
+### 15.1 多 Profile UI
 
-- **可选**：A 固定单 Profile / B 所有 enabled Profiles + Section×N ProfileForm / C 两级选择
-- **推荐**：**B**（受限版，Modal 结构已在 §10.1 重构）
-- **需 user 确认**：是否接受 UI 可能有多个同 Provider Profile
+| 项 | 值 |
+|---|---|
+| **决策** | ✅ **方案 B 受限版** |
+| **含义** | Selector 列出所有 enabled Profiles；Modal 用 `ProviderSection × N ProfileForm`（§10.1） |
+| **允许** | 创建同 Provider 第二个 Profile；允许删除 Profile（409 时显示） |
+| **不实现** | Profile 排序、批量操作 |
 
 ### 15.2 Settings Modal 操作范围
 
-- **推荐**：创建 + 编辑 + **允许删除** Profile（409 时显示错误）；**不**暴露 Credential 独立删除（Credential 通过 Profile 删除或 cascade）
-- **需 user 确认**：是否允许删除被使用 Profile（推荐显示 409）
+| 项 | 值 |
+|---|---|
+| **决策** | ✅ **Profile CRUD + 未使用 Credential 清理** |
+| **Profile** | 创建 / 编辑 / 删除（被 Session 引用时 409 ErrorBanner） |
+| **Credential** | 通过 ProfileForm 间接管理（创建/rotate）；独立删除入口在 §10.7 未使用区 |
+| **不实现** | Credential 独立创建（必须经 Profile）；Credential 共享去重；cascade 自动删 |
 
-### 15.3 无 Binding 显示文案（**修订**）
+### 15.3 无 Binding 显示文案
 
-- **推荐**：**"默认模型"** + tooltip "当前 Session 未绑定配置，使用应用默认模型"
-- **理由**：用户研究视角——"Legacy" 是技术黑话；"默认模型" 表达"系统会 fallback"
-- **备选**："Not configured"
-- **需 user 确认**：文案选择
+| 项 | 值 |
+|---|---|
+| **决策** | ✅ **"默认模型"** + tooltip "当前 Session 未绑定配置，使用应用默认模型" |
 
 ### 15.4 active request 期间 Selector 行为
 
-- **推荐**：**完全 disabled**
-- **需 user 确认**：是否接受不能在运行中切换
+| 项 | 值 |
+|---|---|
+| **决策** | ✅ **完全 disabled** |
+| **触发** | `chatStore.sending \|\| streaming \|\| currentRequestId`（§13） |
 
-### 15.5 API Key 保存失败时是否保留输入（**修订**）
+### 15.5 API Key 保存失败时是否保留输入
 
-- **推荐**：**仅在 Modal 仍打开期间保留**——方便重试
-- **关闭 Modal / 切 Session / 保存成功**：立即清空
-- **理由**：Key 仍在 Modal 局部 ref（不入 store）；泄漏窗口仅限 Modal 打开期间
-- **需 user 确认**：安全 vs 可用性权衡
+| 项 | 值 |
+|---|---|
+| **决策** | ✅ **仅在 Modal 仍打开期间保留** |
+| **清空时机** | Modal 关闭 / 切 Session / 保存成功 |
+| **env_var_name** | 同规则（§10.4） |
 
-### 15.6 Credential 更新策略（**修订**）
+### 15.6 Credential 更新策略
 
-- **事实**：同 `storage_mode` → PUT secret 是原地 CAS rotate（不新建 ID）
-- **事实**：切换 `storage_mode`（keyring → env 等）→ 必须 POST 新建 Credential + PATCH Profile.credential_id
-- **需 user 确认**：理解此语义；M2 Settings Modal Storage radio 切换时自动选择正确路径
+| 项 | 值 |
+|---|---|
+| **决策** | ✅ **同 storage_mode = PUT secret 原地 rotate；跨 storage_mode = 新建 Credential + PATCH Profile.credential_id** |
+| **不删旧** | 跨 storage_mode 新建后，旧 Credential 保留（进入 §10.7 未使用区） |
 
-### 15.7 model_id 切换入口（**修订**）
+### 15.7 model_id 切换入口
 
-- **推荐**：**Selector 只切 Profile**（整体）；Settings 修改 `Profile.default_model`
-- **新增**：Settings 提供 **[Apply to current session]** 按钮——独立 PUT 当前 Session Binding 用新 `default_model`
-- **理由**：不能让用户修改 Model 后误以为当前 Session 已立即切换
-- **需 user 确认**：是否接受"修改默认模型需手动应用到当前 Session"
+| 项 | 值 |
+|---|---|
+| **决策** | ✅ **Selector 只切 Profile；Settings 修改 default_model；提供 [Apply to current session] 独立按钮** |
+| **语义** | 修改 `Profile.default_model` 不影响已有 Binding；需手动 Apply（§9.2） |
 
 ### 15.8 default Profile 修改
 
-- **推荐**：**允许在 Settings 改 is_default**——后端 PATCH 语义
-- **实施**：`is_default` 字段与 Profile POST/PATCH 同一次提交（不单独 PATCH）
-- **需 user 确认**：是否暴露全局 default 切换
+| 项 | 值 |
+|---|---|
+| **决策** | ✅ **允许在 Settings 改 is_default** |
+| **实施** | `is_default` 与 Profile POST/PATCH 同一次提交 |
 
 ### 15.9 Anthropic 隐藏
 
-- **推荐**：**前端 Store 过滤**——`visibleDefinitions` getter 排除 `id === "anthropic"`；Selector 和 Settings 均不展示
-- **不删后端数据**：legacy Anthropic Profile 保留在 `profiles` 数组但不展示
-- **需 user 确认**：是否接受 Anthropic 在前端完全隐藏
+| 项 | 值 |
+|---|---|
+| **决策** | ✅ **前端 Store 过滤** |
+| **过滤点** | `visibleDefinitions` + `usableProfiles` + Settings 不展示 |
+| **不删后端数据** | legacy Anthropic Profile/Credential 保留；未使用 Credential 仍可在 §10.7 区删除 |
 
 ### 15.10 Selector 放置位置
 
-- **推荐**：**ChatPanel header**（紧邻 status pill）
-- **需 user 确认**：位置选择
+| 项 | 值 |
+|---|---|
+| **决策** | ✅ **ChatPanel header**（紧邻 status pill） |
 
-### 15.11 Credential storage_mode（**新增**）
+### 15.11 Credential storage_mode
 
-- **推荐**：
-  - **默认**：`keyring`（持久化，重启后可用）
-  - **备选**：`session_only`（输入 API Key；提示"重启后失效"）
-  - **展开项**：`env`（输入环境变量名；不显示 API Key 输入框）
-- **UI 语义**：
+| 项 | 值 |
+|---|---|
+| **决策** | ✅ **keyring 默认 / session_only 可选 / env 展开** |
+| **UI** | keyring → API Key 密码输入；session_only → 警告"重启失效"；env → env var name 输入 |
+| **env 不可恢复** | `envVarName` 局部输入默认空；不解析 `masked_value`（§10.2） |
 
-  | 模式 | 表单 |
-  |---|---|
-  | keyring | API Key 密码输入；placeholder "Enter new key" |
-  | session_only | API Key 密码输入 + 警告 "Key will be lost on server restart" |
-  | env | 环境变量名输入；不显示 API Key 输入框 |
+### 15.12 前端测试基础设施
 
-- **切换规则**（与 §15.6 一致）：
-  - 同 storage_mode 修改 Key → PUT secret 原地 rotate
-  - 切换 storage_mode → 新建 Credential + PATCH Profile.credential_id
-- **需 user 确认**：3 个选项是否都暴露；env 是否作为高级展开项（默认折叠）
-
-### 15.12 前端测试基础设施（**新增**）
-
-- **推荐**：M2-1 引入最小测试栈：
-
-  | 依赖 | 用途 |
-  |---|---|
-  | `vitest` | 测试运行器 |
-  | `@vue/test-utils` | Vue 组件挂载 |
-  | `jsdom` | DOM 模拟 |
-
-- **允许修改**：
-  - `package.json`（新增 3 devDeps + `test` / `test:watch` scripts）
-  - 现有唯一 npm lockfile（`package-lock.json`）
-  - `vite.config.ts`（添加 vitest 配置）或新建 `vitest.config.ts`
-
-- **禁止**：
-  - 创建第二个 lockfile（不引入 pnpm/yarn）
-  - 增加真实 Provider 网络测试
-  - 引入 Playwright（本副本无 tests/e2e/，由主仓库负责）
-
-- **需 user 确认**：批准引入 Vitest；若无批准则 M2-1～M2-3 的单元/组件测试降级为"手动验证"（非冻结门）
+| 项 | 值 |
+|---|---|
+| **决策** | ✅ **M2-1 引入 Vitest + @vue/test-utils + jsdom** |
+| **允许改** | `package.json` + `package-lock.json`（一次性例外）+ `vite.config.ts` 或新建 `vitest.config.ts` |
+| **禁止** | 第二 lockfile；真实 Provider 网络测试；Playwright（主仓库负责） |
 
 ---
 
@@ -1346,20 +1507,36 @@ backend REST API
 | Mutation error | 写入 `mutationError`；不抛到 caller |
 | `clearSessionState()` | 清 `currentBinding / bindingSessionId` |
 | Secret 不入 state | `apiKey` 不在 store 定义中；spy `console.log` 无 Key |
-| `canSendPrompt` 语义 | null binding + `bindingResolved` → true；指向 ready → true；指向失效 → false；未读完 → false |
+| `canSendPrompt` 语义 | `state="idle/loading/error"` → false；`state="loaded"+binding=null` → true（Legacy）；`loaded+ready` → true；`loaded+失效` → false |
+| `bindingLoadState` 状态机 | idle→loading→loaded（成功）；loading→error（失败）；切 session 从 loaded/error→loading |
+| `refreshForSession` 顺序 | currentBinding=null → sessionId=sid → state=loading → token++ → 清 error → GET |
 
-### 17.2 ProviderSelector 组件测试
+### 17.2 ProviderSelector 组件测试 + ChatInput 接线测试
+
+**ProviderSelector**：
 
 | 场景 | 验证点 |
 |---|---|
 | GLM/Qwen/Kimi 展示 | Anthropic 不出现 |
-| 无 binding | 显示"默认模型"（决策文案） |
+| 无 binding（`state="loaded"+binding=null`） | 显示"默认模型"（决策文案） |
+| `state="loading"` | skeleton 灰条 |
+| `state="error"` | 红条 + bindingLoadError 文本 |
 | 已选 Profile | 高亮；显示 `currentBinding.model_id` |
 | active request | Selector disabled |
 | `needs_credential` 红点 | 点击引导打开 Settings |
 | 当前 binding 指向失效 Profile | 仍显示该 Profile 作为当前项（disabled） |
 | 长 model_id | ellipsis + tooltip |
 | 切换触发 `setSessionBinding(sid, profile.id, profile.default_model)` | 用 Profile.default_model，非旧 binding.model_id |
+
+**ChatInput 接线**（Revision 2 新增；§9.7）：
+
+| 场景 | 验证点 |
+|---|---|
+| `providerReady=false` + text="hi" | send 按钮 disabled |
+| `providerReady=true` + text="hi" | send 按钮 enabled；submit 正常 emit |
+| `providerReady=false` + text="hi" + 回车 | submit 不 emit |
+| `providerReady` 从 false→true（binding 加载完成） | send 按钮自动 enabled（text 非空时） |
+| 不传 `providerReady`（默认 true） | 向后兼容；现有行为不变 |
 
 ### 17.3 ProviderSettingsModal 组件测试
 
@@ -1377,9 +1554,14 @@ backend REST API
 | 保存失败（Modal 仍开） | `apiKey.value` 保留（§15.5） |
 | 切 Session（Modal 开着） | Modal 自动关闭；`apiKey.value === ""` |
 | `/models` 返回 `[]` | datalist 空；可手动输入 |
+| env 已有 Credential + 不填 envVar | 不调 rotate；Profile 单独 PATCH 成功 |
+| env 新建 + envVar 空 | [Save] 按钮 disabled（必填校验） |
+| 不解析 masked_value 回填 envVar | 即使 `masked_value="ENV[MY_KEY]"`，`envVarName.value` 默认空 |
 | Credential 创建成功但 Profile 失败 | 保留 credential_id；重试不新建 Credential |
 | [Apply to current session] | 独立 PUT Binding；用 Profile.default_model |
 | [Apply] 失败 | 不回滚 Profile；ErrorBanner 显示绑定失败 |
+| 未使用 Credential 区 | 展示引用计数=0 的 Credential；含 legacy Anthropic 关联 |
+| [Delete Credential] | 二次确认；DELETE 成功后从 unusedCredentials 移除 |
 
 ### 17.4 Session 集成测试
 
@@ -1437,8 +1619,10 @@ backend REST API
 |---|---|---|
 | `src/api/index.ts` | barrel re-export `providers` | M2-1 |
 | `src/types/index.ts` | barrel re-export `providers` | M2-1 |
-| `src/App.vue` | onMounted 调 `providerStore.initialize()`；`watch(activeSessionId)` 协调 | M2-1 |
-| `src/components/chat/ChatPanel.vue` | header 插入 `<ProviderSelector>` | M2-3 |
+| `src/App.vue` | onMounted 调 `providerStore.initialize()`；`watch(activeSessionId)` 协调（§4.4） | M2-1 |
+| `src/components/chat/ChatPanel.vue` | header 插入 `<ProviderSelector>`；传 `:provider-ready` 到 ChatInput | M2-3 |
+| `src/components/chat/ChatInput.vue` | 新增 `providerReady?: boolean` prop（默认 true）；`canSend` computed 增加判断（§9.7） | M2-3 |
+| `src/components/chat/MessageBubble.vue` | regenerate button disabled 也基于 `providerStore.canSendPrompt` | M2-3 |
 | `src/components/layout/SessionSidebar.vue` | footer 加 "Provider Settings" 按钮 | M2-2 |
 | `package.json` | 新增 vitest + @vue/test-utils + jsdom devDeps；新增 `test` script | M2-1 |
 | `package-lock.json` | 同步 lockfile（**仅此一次例外**，§15.12） | M2-1 |
@@ -1475,19 +1659,22 @@ M2-1 Frontend API types + providerStore + 测试基础设施
     ↓
 M2-2 ProviderSettingsModal（ProviderSection × ProfileForm）
     - ProviderSection.vue / ProfileForm.vue
-    - ProviderSettingsModal.vue
+    - ProviderSettingsModal.vue（含 UnusedCredentialsSection §10.7）
     - SessionSidebar.vue footer 按钮
-    - API Key write-only flow + storage_mode 选择
-    - 原子保存 + Apply to current session 独立动作
+    - API Key / envVarName write-only + storage_mode 选择（§10.4）
+    - 分阶段保存 + Apply to current session 独立动作（§10.3）
+    - 未使用 Credential 二次确认删除
     - 组件测试
     ↓
     ✋ user review
     ↓
-M2-3 ProviderSelector
+M2-3 ProviderSelector + ChatInput 接线
     - ProviderSelector.vue
     - ChatPanel.vue header 插入
+    - **ChatInput.vue 最小扩展**（新增 `providerReady` prop；§9.7）
+    - **MessageBubble.vue regenerate button** disabled 接 `canSendPrompt`
     - active request disabled
-    - 组件 + 集成测试
+    - 组件 + 集成测试（含 ChatInput 接线测试 §17.2）
     ↓
     ✋ user review
     ↓
@@ -1586,22 +1773,29 @@ stores/providerStore (refreshForSession / clearSessionState)
 
 ## 23. 状态收口
 
-**本文档状态**：M2-0 FRONTEND INTEGRATION AUDIT — DESIGN DRAFT (REVISION 1)
+**本文档状态**：✅ **M2-0 FRONTEND INTEGRATION — DESIGN FROZEN (REVISION 2)**
 
-**本修订相对初稿（`62f1366`）已解决**：§0.1 列出的 10 类阻塞问题。
+**变更历史**：
+- 初稿 `62f1366` → Revision 1 `068a548`（解决 10 类阻塞）→ **Revision 2 本次冻结**（解决剩余 4 阻塞 + 术语统一 + 12 决策 APPROVED）
+- 后续 freeze commit 在 STATUS.md / TODO.md / ROADMAP.md 中引用本文档时应记录为当前 commit hash（由 git 生成；不在文档内自引用）
 
-**待 user 操作**：
-1. 审核 §15.1～§15.12 的 **12 个决策点**（含新增 §15.11 storage_mode、§15.12 测试基础设施）
-2. 审核 §11.3 多 Profile 推荐方案（方案 B + Modal 结构重构）
-3. 审核 §16 API Key 浏览器事实与测试 marker 正确语义
-4. 冻结本文档（user 给出 "M2-0 FROZEN" 指令）
+**12 决策状态**：✅ **ALL APPROVED**（§15.1～§15.12）
 
-**冻结后允许**：M2-1 启动（API types + providerStore + 测试基础设施）
+**M2-1 启动条件**：
+- ✅ 本文档 DESIGN FROZEN
+- ✅ 12 决策全部 APPROVED
+- ✅ 测试基础设施引入范围已锁定（§15.12）
+- ✅ `canSendPrompt` 接线方案已锁定（§9.7）
+- ✅ env_var_name 不可恢复语义已锁定（§10.2）
+- ✅ Credential 生命周期规则已锁定（§10.6, §10.7, §15.2, §15.6）
 
-**禁止**（直到本文档冻结）：
-- 任何 M2 production coding
+**M2-1 允许启动**。
+
+**仍禁止**（M2 全程）：
 - merge / tag / push
+- 修改本文档已冻结的决策（若发现新决策点，需 user approve 修订本文档）
+- 跨阶段提前实施（如 M2-1 不能改 ChatInput.vue——属于 M2-3）
 
 ---
 
-**M2-0 DESIGN DRAFT REVISION 1 @ 2026-07-23**——等待 user 审核。
+**M2-0 DESIGN FROZEN REVISION 2 @ 2026-07-23**——M2-1 ✅ APPROVED TO START。
