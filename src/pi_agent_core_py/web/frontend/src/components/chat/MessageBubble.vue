@@ -3,6 +3,7 @@ import { computed } from "vue"
 
 import type { ChatStreamItem, FileRef } from "../../types"
 import { useChatStore } from "../../stores/chatStore"
+import { useProviderStore } from "../../stores/providerStore"
 import ErrorCard from "./ErrorCard.vue"
 import FileChip from "./FileChip.vue"
 import FileReadCard from "./FileReadCard.vue"
@@ -22,6 +23,7 @@ const props = withDefaults(
 )
 
 const chatStore = useChatStore()
+const providerStore = useProviderStore()
 
 const kind = computed(() => props.item.kind)
 const text = computed(() => {
@@ -47,6 +49,9 @@ const userFiles = computed<FileRef[]>(() => {
  * - 是当前 session 最新 persisted assistant（与 chatStore computed 比对）
  * - 无 active request（sending/streaming/aborting 都 false）
  * - 不是临时 draft（streaming-only 或 isRegenerationDraft）
+ *
+ * 注意：Provider 就绪状态（canSendPrompt）通过 :disabled 而非 v-if 控制——
+ * 让按钮可见但不可点击，使用户能感知"修复 Provider 后可重新生成"。
  */
 const canRegenerate = computed(() => {
   const it: any = props.item
@@ -68,9 +73,14 @@ const canRegenerate = computed(() => {
   return true
 })
 
+/** M2-3: 综合禁用条件——in-flight race 或 Provider 未就绪。 */
+const regenDisabled = computed(() => regenInFlight.value || !providerStore.canSendPrompt)
+
 async function onRegenerate() {
   if (!canRegenerate.value) return
   if (regenInFlight.value) return
+  // M2-3: 二次 guard——handler 层不依赖 computed 时序
+  if (!providerStore.canSendPrompt) return
   const it: any = props.item
   if (!it.messageId || !props.sessionId) return
   // 立即同步标记——防止 click 事件 race
@@ -163,8 +173,14 @@ _watch(
           class="regen-btn"
           data-testid="message-regenerate-btn"
           aria-label="Regenerate response"
-          :disabled="regenInFlight"
+          :disabled="regenDisabled"
           :data-in-flight="regenInFlight ? 'true' : 'false'"
+          :data-provider-unavailable="!providerStore.canSendPrompt ? 'true' : 'false'"
+          :title="
+            !providerStore.canSendPrompt
+              ? '当前 Provider 配置不可用，请在侧栏 Provider Settings 中修复。'
+              : 'Regenerate response'
+          "
           @click="onRegenerate"
         >
           Regenerate
@@ -292,8 +308,14 @@ _watch(
   animation: blink 0.8s infinite;
 }
 @keyframes blink {
-  0%, 50% { opacity: 1; }
-  51%, 100% { opacity: 0; }
+  0%,
+  50% {
+    opacity: 1;
+  }
+  51%,
+  100% {
+    opacity: 0;
+  }
 }
 .typing {
   display: inline-flex;
@@ -307,11 +329,23 @@ _watch(
   border-radius: 50%;
   animation: typing-bounce 1.2s infinite ease-in-out;
 }
-.typing span:nth-child(2) { animation-delay: 0.15s; }
-.typing span:nth-child(3) { animation-delay: 0.3s; }
+.typing span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.typing span:nth-child(3) {
+  animation-delay: 0.3s;
+}
 @keyframes typing-bounce {
-  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
-  30% { transform: translateY(-4px); opacity: 1; }
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  30% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
 }
 
 .row-card {
@@ -370,7 +404,9 @@ _watch(
   background: var(--code-bg);
   color: var(--muted);
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition:
+    background 0.15s,
+    color 0.15s;
 }
 .regen-btn:hover {
   background: var(--border);

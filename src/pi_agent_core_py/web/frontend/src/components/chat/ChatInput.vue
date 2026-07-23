@@ -12,12 +12,16 @@ const props = withDefaults(
     pendingAttachments?: FileRef[]
     sessionId?: string | null
     wsConnected?: boolean
+    /** Provider 是否就绪——由父组件从 providerStore.canSendPrompt 传入。
+     * 默认 true 保持向后兼容（不传则不阻止发送）。 */
+    providerReady?: boolean
   }>(),
   {
     uploading: false,
     pendingAttachments: () => [],
     sessionId: null,
     wsConnected: false,
+    providerReady: true,
   },
 )
 
@@ -32,6 +36,8 @@ const text = ref("")
 const fileInput = ref<HTMLInputElement | null>(null)
 
 const canSend = computed(() => {
+  // Provider 未就绪——阻止所有发送路径（按钮 / Enter / submit / 附件 send）
+  if (!props.providerReady) return false
   if (props.sending) return false
   if (text.value.trim()) return true
   return props.pendingAttachments.length > 0
@@ -88,12 +94,7 @@ function onDragOver(e: DragEvent) {
 </script>
 
 <template>
-  <div
-    class="chat-input"
-    data-testid="chat-input"
-    @drop="onDrop"
-    @dragover="onDragOver"
-  >
+  <div class="chat-input" data-testid="chat-input" @drop="onDrop" @dragover="onDragOver">
     <AttachmentBar
       v-if="pendingAttachments.length > 0"
       :files="pendingAttachments"
@@ -129,11 +130,7 @@ function onDragOver(e: DragEvent) {
         class="input-field"
         rows="1"
         data-testid="chat-input-field"
-        :placeholder="
-          sending
-            ? 'Running…'
-            : 'Message…  (Enter to send, Shift+Enter for newline)'
-        "
+        :placeholder="sending ? 'Running…' : 'Message…  (Enter to send, Shift+Enter for newline)'"
         :disabled="sending"
         @keydown="onKey"
       ></textarea>
@@ -145,21 +142,29 @@ function onDragOver(e: DragEvent) {
         :disabled="!canSend"
         title="Send (Enter)"
         @click="submit"
-      >Send</button>
+      >
+        Send
+      </button>
       <button
         v-else
         class="send-btn danger"
         data-testid="stop-button"
         title="Stop generation"
         @click="emit('abort')"
-      >Stop</button>
+      >
+        Stop
+      </button>
     </div>
 
     <div class="input-hint">
       <span v-if="uploading">● uploading…</span>
       <span v-else-if="sending">● agent is running</span>
-      <span v-else-if="!wsConnected" class="muted">○ disconnected · supports md / html / csv / parquet / text</span>
-      <span v-else class="muted">connected · supports md / html / csv / parquet / text · images & PDF not parsed</span>
+      <span v-else-if="!wsConnected" class="muted"
+        >○ disconnected · supports md / html / csv / parquet / text</span
+      >
+      <span v-else class="muted"
+        >connected · supports md / html / csv / parquet / text · images & PDF not parsed</span
+      >
     </div>
   </div>
 </template>

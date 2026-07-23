@@ -4,10 +4,12 @@ import { computed, ref } from "vue"
 import { abortRun } from "../../api"
 import { useChatStore } from "../../stores/chatStore"
 import { useFileStore } from "../../stores/fileStore"
+import { useProviderStore } from "../../stores/providerStore"
 import { useSessionStore } from "../../stores/sessionStore"
 import { useSkillStore } from "../../stores/skillStore"
 import ChatInput from "./ChatInput.vue"
 import MessageList from "./MessageList.vue"
+import ProviderSelector from "../providers/ProviderSelector.vue"
 import EmptyState from "../common/EmptyState.vue"
 import ErrorBanner from "../common/ErrorBanner.vue"
 
@@ -15,6 +17,7 @@ const sessionStore = useSessionStore()
 const chatStore = useChatStore()
 const fileStore = useFileStore()
 const skillStore = useSkillStore()
+const providerStore = useProviderStore()
 
 const activeSessionId = computed(() => sessionStore.activeSessionId)
 const hasSession = computed(() => !!activeSessionId.value)
@@ -64,9 +67,9 @@ async function onSubmit(text: string) {
     // 成功：清空 pending；reload session files（让侧栏其它视图也同步）
     fileStore.clearPendingAttachments()
     if (activeSessionId.value) {
-      fileStore.loadFiles(activeSessionId.value).catch((e) =>
-        console.error("reload files failed", e),
-      )
+      fileStore
+        .loadFiles(activeSessionId.value)
+        .catch((e) => console.error("reload files failed", e))
     }
   } catch {
     // 失败：还原输入文本；不清空 pending attachments
@@ -92,19 +95,15 @@ function dismissError() {
   <div class="chat-panel">
     <header v-if="hasSession" class="chat-header">
       <span class="header-title">
-        {{ sessionStore.sessions.find(s => s.id === activeSessionId)?.title || "Conversation" }}
+        {{ sessionStore.sessions.find((s) => s.id === activeSessionId)?.title || "Conversation" }}
       </span>
+      <ProviderSelector />
       <span v-if="chatStore.sending" class="header-status running">running</span>
       <span v-else-if="chatStore.wsConnected" class="header-status online">online</span>
       <span v-else class="header-status offline">offline</span>
     </header>
 
-    <ErrorBanner
-      v-if="errorMessage"
-      :message="errorMessage"
-      dismissible
-      @dismiss="dismissError"
-    />
+    <ErrorBanner v-if="errorMessage" :message="errorMessage" dismissible @dismiss="dismissError" />
 
     <MessageList
       v-if="hasSession"
@@ -112,11 +111,7 @@ function dismissError() {
       :sending="chatStore.sending"
       :session-id="activeSessionId"
     />
-    <EmptyState
-      v-else
-      title="No session"
-      hint="Click 'New chat' in the sidebar to start."
-    />
+    <EmptyState v-else title="No session" hint="Click 'New chat' in the sidebar to start." />
 
     <ChatInput
       v-if="hasSession"
@@ -126,6 +121,7 @@ function dismissError() {
       :pending-attachments="pendingAttachments"
       :session-id="activeSessionId"
       :ws-connected="chatStore.wsConnected"
+      :provider-ready="providerStore.canSendPrompt"
       @submit="onSubmit"
       @abort="onAbort"
       @upload-files="onUploadFiles"
