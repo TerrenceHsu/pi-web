@@ -3,11 +3,73 @@
 // - 2xx 返回 JSON；204 返回 null
 // - 非 2xx 抛 ApiError，含 status / detail / payload
 // - detail 优先从 response JSON 的 detail 字段读
+// - P1-E M2-F1：所有同源 UI Backend 请求强制注入 X-PI-Agent-UI header（caller 无法覆盖）
 //
 // 不在这里做 retry / cache——store 层决定如何处理错误。
 
 /** API_BASE 默认空——前端同源 FastAPI 托管，不需要 baseURL。 */
 export const API_BASE = ""
+
+/**
+ * P1-E M2-F1：Trusted UI Header。
+ *
+ * 后端 Credential / Provider Profile / Session Binding / Provider Definitions
+ * 路由强制要求 `X-PI-Agent-UI: 1` header，否则返回 400 missing_ui_header。
+ * 该 header 是 "前端来自我们自己的 UI" 的轻量标记——非 auth——但缺失会让所有
+ * Provider 相关 endpoint 在产品环境永久失败。
+ *
+ * 约束（M2-F1 冻结）：
+ * - 仅注入同源 UI Backend 请求（本文件三个 helper：requestJson / uploadForm / requestBlob）
+ * - 调用方不能覆盖或删除——`createUiHeaders` 总是 `set` 该 header
+ * - 调用方已有 header 保留
+ * - 不用于外部 Provider URL（前端永远不直连外部 Provider）
+ */
+export const UI_HEADER_NAME = "X-PI-Agent-UI"
+export const UI_HEADER_VALUE = "1"
+
+/**
+ * 构造 Headers——始终注入 UI Header，强制覆盖调用方传入了的同名 header。
+ *
+ * 用 Headers API（而非 plain object）以便调用方传入 HeadersInit 多形态
+ * （Record / Headers / array）。
+ */
+function createUiHeaders(initial?: HeadersInit): Headers {
+  const headers = new Headers(initial)
+  headers.set(UI_HEADER_NAME, UI_HEADER_VALUE)
+  return headers
+}
+
+/**
+ * 把 backend 非 2xx 响应体转为安全可展示的 detail 字符串。
+ *
+ * 安全约束（M2-F1 冻结）：
+ * - 优先 backend 已脱敏的 `message` 字段（FastAPI 中间件安全格式：`{error: {code, message}}`）
+ * - 次选 `detail` 字符串（FastAPI HTTPException(detail=str) 模式）
+ * - 次选 plain string payload
+ * - **不**渲染 `detail` 数组（FastAPI validation 列表，可能含输入回显）
+ * - **不**渲染 `error.code`（debug 字段，可能含内部信息）
+ * - **不**用 `String(obj)` 兜底——会让对象变成 "[object Object]"
+ * - 兜底用 statusText 或 fallback 固定文案
+ */
+function safeErrorDetail(payload: unknown, statusText: string, fallback: string): string {
+  if (typeof payload === "string" && payload.length > 0) return payload
+  if (payload && typeof payload === "object") {
+    const obj = payload as Record<string, unknown>
+    // 中间件安全格式：{error: {code, message}}
+    const err = obj.error
+    if (err && typeof err === "object") {
+      const errMsg = (err as Record<string, unknown>).message
+      if (typeof errMsg === "string" && errMsg.length > 0) return errMsg
+    }
+    // 顶层 message（部分自定义 handler 用此模式）
+    if (typeof obj.message === "string" && obj.message.length > 0) return obj.message
+    // FastAPI HTTPException(detail="...") 模式
+    if (typeof obj.detail === "string" && obj.detail.length > 0) return obj.detail
+    // detail 数组（FastAPI validation 列表）——故意不渲染
+  }
+  if (typeof statusText === "string" && statusText.length > 0) return statusText
+  return fallback
+}
 
 /** 统一错误类型——store 用 instanceof ApiError 区分网络错误 vs 业务错误。 */
 export class ApiError extends Error {
@@ -30,7 +92,8 @@ export class ApiError extends Error {
  * - method 默认 GET
  * - body 不为 undefined / null 时按 JSON 序列化并加 Content-Type
  * - 204 No Content → 返回 null
- * - 非 2xx → 抛 ApiError（detail 从 body.detail 或 body.error 或 stringify）
+ * - P1-E M2-F1：强制注入 X-PI-Agent-UI header（caller 无法覆盖）
+ * - 非 2xx → 抛 ApiError（detail 由 safeErrorDetail 解析）
  */
 export async function requestJson<T>(
   path: string,
@@ -42,10 +105,10 @@ export async function requestJson<T>(
   } = {},
 ): Promise<T> {
   const url = buildUrl(path, options.query)
-  const headers: Record<string, string> = { Accept: "application/json" }
+  const headers = createUiHeaders({ Accept: "application/json" })
   let bodyStr: string | undefined
   if (options.body !== undefined && options.body !== null) {
-    headers["Content-Type"] = "application/json"
+    headers.set("Content-Type", "application/json")
     bodyStr = JSON.stringify(options.body)
   }
 
@@ -78,12 +141,8 @@ export async function requestJson<T>(
   }
 
   if (!resp.ok) {
-    const detail =
-      (payload && typeof payload === "object" && (payload.detail || payload.error)) ||
-      (typeof payload === "string" && payload) ||
-      resp.statusText ||
-      `request failed`
-    throw new ApiError(resp.status, String(detail), payload)
+    const detail = safeErrorDetail(payload, resp.statusText, "request failed")
+    throw new ApiError(resp.status, detail, payload)
   }
 
   return payload as T
@@ -94,6 +153,7 @@ export async function requestJson<T>(
  *
  * - formData 由调用方构造（含字段名 files 等）
  * - 不设 Content-Type——浏览器自动加 boundary
+ * - P1-E M2-F1：强制注入 X-PI-Agent-UI header；caller 无法覆盖
  * - 非 2xx → 抛 ApiError
  */
 export async function uploadForm<T>(
@@ -105,11 +165,13 @@ export async function uploadForm<T>(
   } = {},
 ): Promise<T> {
   const url = API_BASE + path
+  // 注意：不传 Content-Type——浏览器需要为 multipart 自动生成 boundary
+  const headers = createUiHeaders({ Accept: "application/json" })
   let resp: Response
   try {
     resp = await fetch(url, {
       method: options.method ?? "POST",
-      headers: { Accept: "application/json" },
+      headers,
       body: formData,
       signal: options.signal,
     })
@@ -129,12 +191,8 @@ export async function uploadForm<T>(
   }
 
   if (!resp.ok) {
-    const detail =
-      (payload && typeof payload === "object" && (payload.detail || payload.error)) ||
-      (typeof payload === "string" && payload) ||
-      resp.statusText ||
-      `upload failed`
-    throw new ApiError(resp.status, String(detail), payload)
+    const detail = safeErrorDetail(payload, resp.statusText, "upload failed")
+    throw new ApiError(resp.status, detail, payload)
   }
 
   return payload as T
@@ -157,17 +215,17 @@ function buildUrl(path: string, query?: Record<string, any>): string {
  *
  * - GET 请求，Accept: application/octet-stream
  * - 返回 { blob, filename }——filename 从 Content-Disposition 提取
+ * - P1-E M2-F1：强制注入 X-PI-Agent-UI header
  * - 非 2xx → 抛 ApiError
  */
-export async function requestBlob(
-  path: string,
-): Promise<{ blob: Blob; filename: string | null }> {
+export async function requestBlob(path: string): Promise<{ blob: Blob; filename: string | null }> {
   const url = API_BASE + path
+  const headers = createUiHeaders({ Accept: "*/*" })
   let resp: Response
   try {
     resp = await fetch(url, {
       method: "GET",
-      headers: { Accept: "*/*" },
+      headers,
     })
   } catch (e: any) {
     if (e?.name === "AbortError") throw e
@@ -182,11 +240,8 @@ export async function requestBlob(
     } catch {
       // 非 JSON——保留原文
     }
-    const detail =
-      (payload && typeof payload === "object" && (payload.detail || payload.error)) ||
-      resp.statusText ||
-      "download failed"
-    throw new ApiError(resp.status, String(detail), payload)
+    const detail = safeErrorDetail(payload, resp.statusText, "download failed")
+    throw new ApiError(resp.status, detail, payload)
   }
 
   const blob = await resp.blob()
