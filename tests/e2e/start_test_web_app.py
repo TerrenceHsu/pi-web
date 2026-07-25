@@ -130,12 +130,19 @@ def main() -> None:
     # P1-B3-4: E2E 可通过环境变量调整 buffer size——Test 6 buffer gap fallback 用
     # E2E_EVENT_BUFFER_MAX_SIZE=2 让 buffer 快速满，触发 gap=true
     buffer_max_size = int(os.environ.get("E2E_EVENT_BUFFER_MAX_SIZE", "1000"))
+    # P1-E M2-4: 启用 TrustedHost——让 Credential / Provider Profile /
+    # Session Binding API 自动启用（resolver 的 conservative auto 要求
+    # runtime + api + TrustedHost + file DB 四个前置条件）。
+    # 不开则 /api/sessions/{sid}/model-binding 返回 404，前端
+    # bindingLoadState=error，ChatInput.providerReady 永远 false，
+    # 依赖 send-button 的 E2E 都会 timeout。
     app = create_app(
         harness,
         db_path=str(db_path),
         uploads_dir=str(uploads_dir),
         allow_prompt_preview=True,
         event_buffer_max_size=buffer_max_size,
+        enable_trusted_host=True,
     )
 
     # uvicorn 日志降到 warning——避免淹没 Playwright webServer 输出
