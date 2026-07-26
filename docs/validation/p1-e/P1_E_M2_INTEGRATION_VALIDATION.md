@@ -1,190 +1,138 @@
 # P1-E M2 Frontend Integration Validation
 
-> **状态**：⛔ M2-4 BLOCKED — 生产缺陷阻断完整 E2E 验证
+> **状态**：✅ M2-4 COMPLETE / FROZEN
 > **基线 commit**：master `c0792e1`（P1-E M2-3 FROZEN）
+> **M2-F1 修复 commit**：master `dcf45ce`（fix(web): attach trusted UI header to frontend requests）
+> **本归档 commit**：M2-4 archive（commit C）
 > **验证日期**：2026-07-26
-> **范围**：M2-1～M2-3 集成验证（unit + backend + E2E）
+> **范围**：M2-1～M2-3 集成验证（unit + backend + E2E）+ M2-F1 defect 修复确认
 
 ---
 
 ## 0. 最终判定
 
 ```
-M2-4 Integration Validation
-⛔ BLOCKED
+P1-E M2 Frontend Provider Switching
+✅ COMPLETE / FROZEN @ <archive commit>
 
-阻塞项：
-  P1-E-DEFECT-001（CRITICAL）：前端 requestJson 从不设置 X-PI-Agent-UI header，
-                                导致所有 Provider API 调用在产品环境返回 400
-                                missing_ui_header，binding 永远进入 error 状态，
-                                ChatInput.providerReady 永远 false，发送按钮永久禁用。
-
-  P1-E-DEFECT-002（HIGH）：前端 requestJson 错误转换对结构化后端错误体（含
-                            `error` 字段为对象的情况）直接 String() 化，UI
-                            展示为 "[object Object]"。影响所有 400/409/503
-                            带结构化 error 体的响应，不止 missing_ui_header。
-                            见 §1.7。
-
-  阻断的核心场景：
-    - 场景 A：App 启动后 binding 加载——前端能 GET 但被后端拒绝
-    - 场景 H：reload 后 binding 恢复——同上
-    - 场景 I：Settings → Apply——同上（PUT binding 也被拒绝）
-    - 场景 F：Prompt 实际归属——ChatInput 发送按钮无法点击
-    - 场景 E：请求运行期间 Selector/Settings 门控——前置条件无法满足
-    - 场景 G：invalid binding 无 fallback——同上
-
- 仍 PASS 的部分：
-    - Frontend unit/integration：247 tests PASS（含 15 新增跨组件集成）
-    - Backend regression：2585 passed + 1 skipped + 14 deselected
-    - Backend 定向测试：144 passed（Provider runtime + Prompt + Regenerate + Revision）
-    - typecheck / lint / build / prettier（新文件）：PASS
-    - Production bundle：168.90 KB JS / 56.44 KB gzip / 46.11 KB CSS（与 M2-3 一致）
-    - Production diff：0（仅 test + test fixture + 验证文档变更）
+M3 Unified Freeze
+✅ APPROVED TO START
 ```
 
-### 0.1 修复路径决议（user 2026-07-26）
+### 0.1 阶段链路
 
 ```
-P1-E Backend Foundation       ✅ FROZEN @ cad7ca7
-P1-E M1 Runtime               ✅ FROZEN @ 8b0fb13
-M2-0 Frontend Integration     ✅ FROZEN @ 87d7a8e
+P1-E Backend Foundation        ✅ FROZEN @ cad7ca7
+P1-E M1 Runtime                ✅ FROZEN @ 8b0fb13
+M2-0 Frontend Integration      ✅ FROZEN @ 87d7a8e
 M2-1 API Types + providerStore ✅ FROZEN @ 313f28b
-M2-2 Provider Settings Modal  ✅ FROZEN @ 0626ac4
-M2-3 Provider Selector        ✅ FROZEN @ c0792e1
+M2-2 Provider Settings Modal   ✅ FROZEN @ 0626ac4
+M2-3 Provider Selector         ✅ FROZEN @ c0792e1
 
-M2-4 Integration Validation   ⛔ BLOCKED — P1-E-DEFECT-001 / 002
-M2-F1 Trusted UI Header Repair ✅ APPROVED TO START
-M2-4 Re-validation            ⛔ BLOCKED BY M2-F1
-M3 Unified Freeze             ⛔ BLOCKED BY M2-4
+M2-4 Integration Validation (Commit A, BLOCKED evidence) @ 926011f
+  → 登记 P1-E-DEFECT-001 / 002，保留 BLOCKED 报告
+M2-F1 Trusted UI Header Repair (Commit B) @ dcf45ce
+  → fix(web): attach trusted UI header to frontend requests
+M2-4 Re-validation (Commit C, this archive)
+  → BLOCKED → PASS
+
+M3 Unified Freeze              ✅ APPROVED TO START（仍未进入实施）
 ```
 
-不解冻 M2-3。缺陷位于共享传输层 `src/api/client.ts`，不属于 Selector。新增独立纠错阶段 M2-F1，审计链更清晰。
+### 0.2 通过摘要
+
+| 项 | 结果 |
+|---|---|
+| Frontend vitest | ✅ 261 passed（247 + 14 new client.spec） |
+| Frontend typecheck / lint / build | ✅ PASS |
+| Frontend prettier（新文件） | ✅ PASS |
+| Frontend production bundle | ✅ 169.23 KB JS / 46.11 KB CSS / 56.49 KB gzip |
+| Backend regression | ✅ 2585 passed + 1 skipped + 14 deselected |
+| Backend Provider/Binding/Prompt/Regenerate/Revision 定向 | ✅ 144 passed |
+| Playwright E2E baseline run 1 | ✅ 37 / 37 passed |
+| Playwright E2E baseline run 2 | ✅ 37 / 37 passed（连续两次） |
+| Secret marker 六类扫描 | ✅ production 0 / runtime 0 / DOM 0 / storage 0 / artifact 0 / test-fixture 1（预期） |
+| 外部 Provider 网络审计 | ✅ 0 host 命中（api.anthropic.com / open.bigmodel.cn / dashscope.aliyuncs.com / api.moonshot.cn） |
+| Anthropic UI 边界 | ✅ E2E 未渲染 Anthropic Provider（design §15.9） |
+| Production diff | ✅ 仅 M2-F1 client.ts（已 Commit B 记录） |
 
 ---
 
-## 1. 缺陷详情：P1-E-DEFECT-001
+## 1. M2-F1 Defect 修复确认
 
-### 1.1 缺陷位置
+### 1.1 P1-E-DEFECT-001（CRITICAL）：UI Header 缺失
 
-| 文件 | 行 | 问题 |
-|---|---|---|
-| `src/pi_agent_core_py/web/frontend/src/api/client.ts` | 45 | `requestJson` 的 headers 初始化为 `{ Accept: "application/json" }`——从不添加 `X-PI-Agent-UI: 1` |
-| `src/pi_agent_core_py/web/frontend/src/api/client.ts` | 112 | `uploadForm` 同样无 UI header |
-| `src/pi_agent_core_py/web/frontend/src/api/client.ts` | 170 | `requestBlob` 同样无 UI header |
-| `src/pi_agent_core_py/web/frontend/src/stores/chatStore.ts` | 572 | 内嵌 fetch 也没添加 UI header |
+**状态**：✅ RESOLVED in M2-F1 Commit B (`dcf45ce`)
 
-Grep 验证：`grep -rn "X-PI-Agent-UI" src/pi_agent_core_py/web/frontend/` → **0 命中**。
+**原缺陷**：`src/pi_agent_core_py/web/frontend/src/api/client.ts` 的 `requestJson` / `uploadForm` / `requestBlob` 三个 helper 从不设置 `X-PI-Agent-UI: 1` header；后端 Credential / Provider Profile / Session Binding / Provider Definitions 路由强制要求该 header，缺失返回 400 `missing_ui_header`。
 
-### 1.2 复现步骤
+**修复**：新增 `createUiHeaders()` helper，强制 `set(UI_HEADER_NAME, UI_HEADER_VALUE)`；三个 helper 统一使用。`chatStore.ts:570` 的 `/api/abort` endpoint 注册在 main app、未挂 `require_ui_header_dep`，按"只修真需要的地方"原则未改动。
 
-1. 启动测试 web app（已配置 `enable_trusted_host=True`，见 §6 修改清单）：
+**vitest 覆盖**（`tests/unit/client.spec.ts` 14 tests）：
 
-   ```bash
-   cd tests/e2e
-   /d/miniconda/envs/pipy/python.exe start_test_web_app.py
-   ```
+- requestJson / uploadForm / requestBlob 自动注入 UI Header
+- 调用方已有 Header 保留
+- 调用方无法覆盖 `X-PI-Agent-UI`（强制 set）
+- FormData 不被手动设置 Content-Type（让浏览器生成 multipart boundary）
+- 结构化错误 `{error: {code, message}}` 渲染 backend message
+- FastAPI HTTPException `detail="..."` 渲染
+- FastAPI validation detail 数组不渲染为 `"[object Object]"`
+- 顶层 `message` 字段支持
+- uploadForm / requestBlob 共用 safeErrorDetail
+- 回归契约（GET 默认 method、204 返回 null、network error → status=0）
 
-2. 应用启动后，浏览器访问 `http://127.0.0.1:8000/`
+**E2E 修复验证**：4 个原失败用例（web-claude-smoke Smoke 2/3/6/8）已恢复通过——`send-button` 不再永久 disabled，`providerStore.bindingLoadState` 进入 `loaded` 而非 `error`。
 
-3. 观察 ProviderSelector 区域显示错误 `[object Object]`（来自 400 响应）。
+### 1.2 P1-E-DEFECT-002（HIGH）：结构化错误渲染为 "[object Object]"
 
-4. 直接 curl 验证（不带 header）：
+**状态**：✅ RESOLVED in M2-F1 Commit B (`dcf45ce`)
 
-   ```bash
-   curl -i http://127.0.0.1:8000/api/sessions/sess-XXX/model-binding
-   HTTP/1.1 400 Bad Request
-   {"error":{"code":"missing_ui_header","message":"X-PI-Agent-UI header is required."}}
-   ```
+**原缺陷**：`requestJson` 错误转换 `String(payload.detail || payload.error)`——`payload.error` 为对象时 `String(obj)` 变 "[object Object]"。影响所有 400/409/503 使用结构化 error 体的响应。
 
-5. curl 验证（带 header）：
+**修复**：新增 `safeErrorDetail(payload, statusText, fallback)` helper，按优先级读取：
 
-   ```bash
-   curl -i -H "X-PI-Agent-UI: 1" \
-     http://127.0.0.1:8000/api/sessions/sess-XXX/model-binding
-   HTTP/1.1 200 OK
-   {"binding":null}
-   ```
+1. `payload.error.message`（中间件安全格式）
+2. `payload.message`（自定义 handler 模式）
+3. `payload.detail` 字符串（FastAPI HTTPException）
+4. plain string payload
+5. `statusText`
+6. 固定 fallback
 
-6. 浏览器 DevTools Network 面板：前端 GET `/api/sessions/{sid}/model-binding` 的 Request Headers 无 `X-PI-Agent-UI`。
+**安全约束**：
 
-### 1.3 预期 vs 实际
+- 不渲染 FastAPI validation `detail: [...]` 数组（可能含输入回显）
+- 不渲染 `error.code` debug 字段
+- 不使用 `String(obj)` 兜底
 
-| 项 | 预期 | 实际 |
-|---|---|---|
-| Frontend `requestJson` 行为 | 自动添加 `X-PI-Agent-UI: 1` 到所有 Provider endpoint 请求 | 从不添加该 header |
-| GET `/api/sessions/{sid}/model-binding` 返回 | 200 + `{binding: null}` 或 `{binding: {...}}` | 400 + `{error: {code: "missing_ui_header", ...}}` |
-| `providerStore.bindingLoadState` | 启动后进入 `loaded` | 启动后进入 `error` |
-| `providerStore.bindingLoadError` | null | `[object Object]`（来自 ApiError.detail 被 String() 化） |
-| `providerStore.canSendPrompt` | true（null binding → Legacy 允许） | false（state=error → 永久 false） |
-| ChatInput 发送按钮 | 启用 | 永久 disabled |
-| ProviderSelector 渲染 | 显示当前 Profile 或 Legacy hint | 显示 alert 错误文案 |
+vitest 覆盖（同 §1.1 列表）。
 
-### 1.4 设计契约 vs 实现
+### 1.3 Defect 处理流程
 
-`docs/design/p1-e-m2-frontend-integration.md` §6.5（"关键 API 行为事实"）明确：
-
-> Auth header？必须要有 `X-PI-Agent-UI: 1`，否则 400 `missing_ui_header`
-
-但 §16（"安全边界"）和 §18.2（"允许修改文件清单"）未指定前端在何处添加此 header——M2-1 实施 `api/providers.ts` + `api/client.ts` 时遗漏了。
-
-### 1.5 影响范围（仅生产环境）
-
-- M2-1（API types + providerStore）：所有调用 `getX()` 的 store action 都受影响
-- M2-2（Provider Settings Modal）：所有 GET / POST / PATCH / PUT / DELETE 都被拒绝
-- M2-3（ProviderSelector + ChatInput 门控）：binding 永久 error，发送按钮永久 disabled
-
-Vitest 测试不受影响：它们 `vi.mock("../api/providers")`，从不调真实 backend，所以 vitest 247 个测试无法发现此缺陷。Backend pytest 不受影响：用 TestClient 显式设 headers。
-
-### 1.6 阻断 M2-4 的原因
-
-E2E 测试基础设施已就绪（6 spec / 37 测试基线），但 4 个依赖 `send-button` 的测试在 M2-3 之后开始 timeout（send-button 永久 disabled）。这 4 个测试本身就是缺陷的最小失败证据：
-
-- `web-claude-smoke.spec.ts:63` — Smoke 2: chat（New chat → Send）
-- `web-claude-smoke.spec.ts:102` — Smoke 3: file upload（Send 后保留 chip）
-- `web-claude-smoke.spec.ts:245` — Smoke 6: skill upload + Use this turn → Send
-- `web-claude-smoke.spec.ts:350` — Smoke 8: Stop button（Send 后变 Stop）
-
-Per §25 验收条件 #25（"Playwright 两次连续通过"）和 #22（"外部 Provider 请求为 0"）无法满足。
-
-### 1.7 缺陷详情：P1-E-DEFECT-002
-
-#### 缺陷位置
-
-| 文件 | 行 | 问题 |
-|---|---|---|
-| `src/pi_agent_core_py/web/frontend/src/api/client.ts` | 81-86 | `requestJson` 错误转换：`(payload.detail \|\| payload.error)` 在 `payload.error` 为对象时返回对象；`String(detail)` 得 "[object Object]" |
-| `src/pi_agent_core_py/web/frontend/src/api/client.ts` | 132-137 | `uploadForm` 同模式 |
-| `src/pi_agent_core_py/web/frontend/src/api/client.ts` | 185-189 | `requestBlob` 同模式（无 string fallback 路径） |
-
-#### 复现步骤
-
-1. 任何返回结构化 `error` 体的 backend 错误（含 `missing_ui_header` / `invalid_origin` / `credential_conflict` / `profile_in_use` / `provider_config_unavailable` 等）。
-2. 前端 `requestJson` 解析 payload，`payload.error` 是 `{code, message}` 对象。
-3. `(payload.detail || payload.error)` 短路返回该对象。
-4. `String(obj)` 在 `ApiError` ctor 中变成 `"[object Object]"`。
-5. `providerStore.toSafeProviderError` 见 `typeof detail === "string"` → 返回该字符串。
-6. UI 渲染 `bindingLoadError` 或 `mutationError` 显示 `"[object Object]"`。
-
-#### 预期 vs 实际
-
-| 项 | 预期 | 实际 |
-|---|---|---|
-| 结构化错误（`{error: {code, message}}`）展示 | backend `message` 字段（安全固定文案） | "[object Object]" |
-| 400 `missing_ui_header` 的 UI 文案 | "X-PI-Agent-UI header is required." | "[object Object]" |
-| 409 `profile_in_use` 的 UI 文案 | "Profile is in use—unbind sessions first" | "[object Object]" |
-
-#### 安全约束（M2-F1 必须遵守）
-
-- 使用 backend `error.message` 字段（已是安全固定文案）或安全 fallback
-- 不渲染完整 response body
-- 不使用任意 `String(obj)`
-- 不暴露 `error.code` 内部字段（debug 用，不进 UI）
-
-#### 与 DEFECT-001 的关系
-
-DEFECT-001（header 缺失）的 UI 表现之所以是 "[object Object]"，正是因为 DEFECT-002（错误转换）。两个缺陷独立存在——修复 DEFECT-001 后，若其它结构化错误路径未被覆盖，DEFECT-002 仍会暴露。
-
-M2-F1 应一并修复 DEFECT-001 + DEFECT-002，但需独立测试。
+```
+M2-4 阶段发现 defect
+  ↓
+保留最小失败 E2E（4 个 send-button 用例）
+输出缺陷位置 + 复现 + 预期/实际
+标记 M2-4 BLOCKED（不提交伪 PASS）
+  ↓
+Commit A：test(web): record blocked M2 integration validation @ 926011f
+  ↓
+M2-F1 独立纠错阶段
+  ↓ 审计 chatStore fetch（确认 /api/abort 无需 header）
+  ↓ 设计 createUiHeaders + safeErrorDetail
+  ↓ 14 vitest 覆盖契约
+  ↓ Backend regression 2585 零回归
+  ↓
+Commit B：fix(web): attach trusted UI header to frontend requests @ dcf45ce
+  ↓
+M2-4 Re-validation
+  ↓ build:e2e + 跑 E2E baseline 两次（37/37 × 2）
+  ↓ marker 六类扫描 0
+  ↓ 外部 host 0
+  ↓ production diff 仅 client.ts
+  ↓
+Commit C：docs: archive P1-E M2 integration validation（本归档）
+```
 
 ---
 
@@ -194,32 +142,35 @@ M2-F1 应一并修复 DEFECT-001 + DEFECT-002，但需独立测试。
 
 | 项 | 结果 |
 |---|---|
-| Frontend vitest（含 15 新增） | ✅ 247 passed / 9 files |
+| Frontend vitest（含 14 个新 client.spec + 15 个跨组件集成） | ✅ 261 passed / 10 files |
 | Frontend typecheck | ✅ PASS（vue-tsc --noEmit） |
 | Frontend lint | ✅ PASS（max-warnings=0） |
-| Frontend build | ✅ PASS（168.90 KB JS / 46.11 KB CSS / 56.44 KB gzip） |
+| Frontend build | ✅ PASS（169.23 KB JS / 46.11 KB CSS / 56.49 KB gzip） |
+| Frontend build:e2e | ✅ PASS（169.60 KB JS / 46.11 KB CSS / 56.60 KB gzip；__storeHooks 暴露） |
 | Frontend prettier（新文件） | ✅ PASS |
 | Backend pytest 全量 | ✅ 2585 passed + 1 skipped + 14 deselected |
-| Backend 定向：Provider runtime + binding + Prompt async + Regenerate + Revision 持久化 | ✅ 144 passed |
-| Production diff 审计 | ✅ 0（仅 test + test fixture + 验证文档） |
-| Secret marker（vitest 层面） | ✅ 0 持久泄漏（DOM / Pinia / storage / 跨 unmount） |
-| 外部 Provider 网络请求（vitest 层面） | ✅ 0（window.fetch 未被调用） |
+| Backend 定向（Provider runtime + Prompt + Regenerate + Revision） | ✅ 144 passed |
+| Backend ruff | ✅ All checks passed |
+| Production diff 审计 | ✅ 仅 M2-F1 client.ts（已 Commit B 记录） |
+| Playwright E2E baseline run 1 | ✅ 37 / 37 |
+| Playwright E2E baseline run 2 | ✅ 37 / 37（连续两次稳定） |
+| Secret marker 六类扫描 | ✅ 见 §8 |
+| 外部 Provider 网络审计 | ✅ 见 §9 |
+| Anthropic UI 边界 | ✅ 见 §10 |
 
-### 2.2 BLOCKED（无法验证）
+### 2.2 排除范围
 
-| 项 | 原因 |
-|---|---|
-| E2E baseline 37 测试连续两次通过 | 4 个依赖 send-button 的测试因 P1-E-DEFECT-001 timeout |
-| E2E 场景 A：App 启动 binding 加载 | 同上 |
-| E2E 场景 H：reload 后 binding 恢复 | 同上 |
-| E2E 场景 I：Settings → Apply → ChatInput 重新启用 | Provider API 全部 400 |
-| E2E 场景 F：Prompt 实际归属（Qwen / Kimi） | 发送按钮无法点击 |
-| E2E Provider 切换 Provider routing | FakeClient 不模拟 Provider 路由（这是设计预期） |
+- 真实外部 Provider 网络验证：禁止（design §15.12 约束）
+- 真实 API Key：禁止使用
 
-### 2.3 排除范围（如设计文档 §15.12 所述）
+### 2.3 仍由 backend 测试覆盖（不需 E2E 重复）
 
-- E2E 在主仓库 `pi-py` 执行：本副本 E2E 基线存在，但无法跑 Provider 完整链路
-- 真实外部 Provider 网络验证：禁止（设计约束）
+- Provider routing 决策（RequestProviderRuntime.resolve_selection）
+- Prompt 实际归属（prompt_provider_runtime_switching）
+- Regenerate 当前 binding 使用（regenerate_provider_runtime_switching）
+- AssistantMessage / Revision provider/model 持久化（extension_store_message_revisions）
+
+`FakeClient` 不模拟 Provider 路由，E2E 无法验证"Prompt 实际使用当前 binding 的 Provider"。这部分由 backend 144 个定向测试覆盖。
 
 ---
 
@@ -234,6 +185,7 @@ M2-F1 应一并修复 DEFECT-001 + DEFECT-002，但需独立测试。
 | 测试 DB | 临时 sqlite（start_test_web_app.py mkdtemp） |
 | FakeClient | delayed（每 delta 75-150ms，至少 4 delta） |
 | Build mode | `npm run build:e2e`（暴露 `__storeHooks`） |
+| Test server | `start_test_web_app.py`（已 enable_trusted_host=True） |
 
 ---
 
@@ -242,8 +194,9 @@ M2-F1 应一并修复 DEFECT-001 + DEFECT-002，但需独立测试。
 ### 4.1 全套结果
 
 ```
-Test Files  9 passed (9)
-     Tests  247 passed (247)
+Test Files  10 passed (10)
+     Tests  261 passed (261)
+   Duration  3.65s
 ```
 
 ### 4.2 现有 232 测试零回归
@@ -260,7 +213,7 @@ Test Files  9 passed (9)
 | providersApi.spec.ts | 28 | ✅ |
 | **小计** | **232** | **PASS** |
 
-### 4.3 新增跨组件集成测试
+### 4.3 M2-4 新增跨组件集成测试（Commit A）
 
 **文件**：`src/pi_agent_core_py/web/frontend/tests/unit/ProviderFrontendIntegration.spec.ts`
 
@@ -279,7 +232,13 @@ Test Files  9 passed (9)
 
 **Mock 边界**：仅 mock `api/providers` + `api/client`；ChatPanel / SessionSidebar / ProviderSettingsModal 全部用真实实现。
 
-**为什么这 15 个测试不暴露 P1-E-DEFECT-001**：它们 mock 了 API client，从不调真实 backend，因此无法发现 header 缺失。这是 vitest 局限性——必须靠 E2E 才能发现。
+### 4.4 M2-F1 新增 client.spec（Commit B）
+
+**文件**：`src/pi_agent_core_py/web/frontend/tests/unit/client.spec.ts`
+
+**用例数**：14
+
+覆盖 UI Header 自动注入（3 helper 各一）、调用方 Header 保留、调用方无法覆盖 UI Header、FormData multipart boundary、结构化错误安全转换（5 子用例）、回归契约（3 子用例）。
 
 ---
 
@@ -289,12 +248,12 @@ Test Files  9 passed (9)
 
 ```
 pytest tests/ -m "not slow and not integration and not docker" --no-cov -q
-→ 2585 passed, 1 skipped, 14 deselected, 57 warnings in 180.76s
+→ 2585 passed, 1 skipped, 14 deselected, 57 warnings in 174.33s
 ```
 
-与 M1 / M2-1 / M2-2 / M2-3 baseline 完全一致。
+与 M1 / M2-1 / M2-2 / M2-3 baseline 完全一致。M2-F1 修复未触及任何后端代码。
 
-### 5.2 定向测试（覆盖 Provider runtime + Prompt + Regenerate + Revision）
+### 5.2 定向测试（Provider runtime + Prompt + Regenerate + Revision）
 
 ```
 pytest tests/test_provider_runtime_binding.py \
@@ -311,7 +270,7 @@ pytest tests/test_provider_runtime_binding.py \
 → 144 passed
 ```
 
-**覆盖语义**：
+覆盖语义：
 
 - Provider runtime selection（disabled / needs_credential / needs_key / legacy None 路径）
 - Prompt async provider switching（binding 改变后下次 Prompt 用新 Provider）
@@ -321,60 +280,72 @@ pytest tests/test_provider_runtime_binding.py \
 - Default binding 初始化（POST /api/sessions 时按 is_default profile 自动物化 binding）
 - Default binding 补偿（profile 改 is_default 后已有 binding 不被静默改）
 
-### 5.3 为什么 backend 测试不暴露 P1-E-DEFECT-001
-
-backend pytest 用 TestClient + 显式 headers：
-
-```python
-def _ui() -> dict:
-    return {"X-PI-Agent-UI": "1"}
-```
-
-所以 backend 层面 UI header 检查工作正常。问题只在 frontend→backend 真实链路。
-
 ---
 
-## 6. 修改文件清单（仅 test + test fixture + 验证文档）
+## 6. 修改文件清单
+
+### 6.1 Commit A @ 926011f（BLOCKED 证据）
 
 | 文件 | 类型 | 说明 |
 |---|---|---|
 | `src/pi_agent_core_py/web/frontend/tests/unit/ProviderFrontendIntegration.spec.ts` | 新增 | 15 个跨组件集成测试 |
-| `tests/e2e/start_test_web_app.py` | 修改 | 加 `enable_trusted_host=True`——让 Provider API 在 E2E 环境自动启用（resolver 的 conservative auto 要求 4 个前置条件之一）；不加则所有 Provider endpoint 404 |
-| `docs/validation/p1-e/P1_E_M2_INTEGRATION_VALIDATION.md` | 新增 | 本 BLOCKED 报告 |
+| `tests/e2e/start_test_web_app.py` | 修改 | 加 `enable_trusted_host=True`——让 Provider API 在 E2E 环境自动启用 |
+| `docs/validation/p1-e/P1_E_M2_INTEGRATION_VALIDATION.md` | 新增 | BLOCKED 报告（已被 Commit C 更新为 PASS） |
 
-**Production 文件 diff**：0
-- `src/pi_agent_core_py/web/frontend/src/**`：未修改
-- `src/pi_agent_core_py/**/*.py`（backend 生产代码）：未修改
-- `package.json` / `package-lock.json`：未修改
-- `vitest.config.ts`：未修改
-- DB schema / API schema：未修改
+### 6.2 Commit B @ dcf45ce（M2-F1 修复）
+
+| 文件 | 类型 | 说明 |
+|---|---|---|
+| `src/pi_agent_core_py/web/frontend/src/api/client.ts` | 修改 | `createUiHeaders` + `safeErrorDetail` helper + 注入到三个 fetch helper |
+| `src/pi_agent_core_py/web/frontend/tests/unit/client.spec.ts` | 新增 | 14 个 client 单测覆盖 UI Header / 错误转换契约 |
+
+### 6.3 Commit C（本次 archive）
+
+| 文件 | 类型 | 说明 |
+|---|---|---|
+| `docs/validation/p1-e/P1_E_M2_INTEGRATION_VALIDATION.md` | 修改 | BLOCKED → COMPLETE / PASS |
+| `docs/design/p1-e-m2-frontend-integration.md` | 修改 | 修正 §6.1 `/api/provider-definitions` envelope → 裸数组偏差 |
+
+### 6.4 Production diff 总览（vs M2-3 baseline `c0792e1`）
+
+```bash
+$ git diff c0792e1 --stat -- 'src/pi_agent_core_py/**'
+ src/pi_agent_core_py/web/frontend/src/api/client.ts | 105 ++++++++++++++++-----
+ 1 file changed, 80 insertions(+), 25 deletions(-)
+```
+
+唯一 production 文件改动：`src/api/client.ts`（M2-F1 修复，Commit B 已记录）。其它 production 路径（backend Python / package.json / lockfile / DB schema / API schema）零改动。
 
 ---
 
 ## 7. 静态 diff 审计
 
 ```bash
-git diff c0792e1 -- src/pi_agent_core_py/web/frontend/src src/pi_agent_core_py package.json package-lock.json
-# 输出：空（0 production diff）
+$ git diff c0792e1 --stat -- src/pi_agent_core_py/web/frontend/src src/pi_agent_core_py/**/*.py \
+                            src/pi_agent_core_py/web/frontend/package.json \
+                            src/pi_agent_core_py/web/frontend/package-lock.json
+ src/pi_agent_core_py/web/frontend/src/api/client.ts | 105 ++++++++++++++++-----
+ 1 file changed, 80 insertions(+), 25 deletions(-)
 
-git diff --check
-# 输出：空
+$ git diff --check
+# 空
 
-git status --short
-# M tests/e2e/start_test_web_app.py
-# ?? src/pi_agent_core_py/web/frontend/tests/unit/ProviderFrontendIntegration.spec.ts
-# ?? docs/validation/p1-e/P1_E_M2_INTEGRATION_VALIDATION.md
+$ /d/miniconda/envs/pipy/python.exe -m ruff check src tests scripts
+# All checks passed!
+
+$ git status --short
+# 仅 docs/ 修改（Commit C）
 ```
 
 ---
 
 ## 8. Secret marker 六类扫描
 
-Marker：`<M2-4 test secret marker>`（仅用于 vitest Secret 测试；不在文档内展开具体值，避免文档成为命中源）
+Marker：`<M2-4 test secret marker>`（仅用于 vitest Secret 测试；不在文档内展开具体值）
 
 | 类别 | 结果 |
 |---|---|
-| Production source marker | 0（`grep -r M2-4-SECRET src/pi_agent_core_py/web/frontend/src/`） |
+| Production source marker | 0 |
 | Runtime Pinia state marker | 0（vitest 断言 JSON.stringify(state) 不含） |
 | DOM after Modal close marker | 0（vitest 断言 document.body.innerHTML 不含） |
 | Storage marker（localStorage + sessionStorage） | 0（vitest 断言） |
@@ -384,16 +355,37 @@ Marker：`<M2-4 test secret marker>`（仅用于 vitest Secret 测试；不在�
 **全工作树重扫（marker 字面值）**：
 
 ```bash
-$ grep -rln "M2-4-SECRET-MARKER-DO-NOT-PERSIST" .
+$ grep -rln "<M2-4 marker literal>" .
 src/pi_agent_core_py/web/frontend/tests/unit/ProviderFrontendIntegration.spec.ts
 # 仅 1 命中——预期 test fixture；docs / tests/e2e / artifact 均 0
 ```
 
-**E2E marker 扫描**：BLOCKED（无法跑 Provider Modal E2E）。
+文档内不展开 marker 字面值，避免文档成为命中源。
+
+**E2E artifact marker 扫描**：
+
+```bash
+$ find tests/e2e/test-results -type f
+tests/e2e/test-results/.last-run.json
+# 37 测试全 pass → 无 failure artifacts（trace / video / screenshot）
+$ grep -rln "<M2-4 marker literal>" tests/e2e/test-results/
+# 0 命中
+```
+
+E2E 全 pass 后无 trace / video artifact 生成。Provider Settings Modal E2E 未单独写（设计决策：FakeClient 不模拟 Provider routing，UI 层验证已由 vitest ProviderFrontendIntegration 覆盖）。
 
 ---
 
-## 9. 外部网络审计
+## 9. 外部 Provider 网络审计
+
+允许 host：localhost / 127.0.0.1 / ::1 / testserver
+
+禁止 host：
+- `api.anthropic.com`
+- `open.bigmodel.cn`
+- `dashscope.aliyuncs.com`（Qwen）
+- `api.moonshot.cn`（Kimi）
+- 其它公网 Provider host
 
 ### 9.1 vitest 层面
 
@@ -409,119 +401,187 @@ expect(fetchSpy).not.toHaveBeenCalled()
 
 ### 9.2 E2E 层面
 
-BLOCKED——E2E 无法跑通，无法审计 trace / HAR 中的外部 host。但根据 vitest 层面 + backend FakeClient 不发外部网络的事实，可以推断：
+```bash
+$ grep -rln "api.anthropic.com\|open.bigmodel.cn\|dashscope.aliyuncs.com\|api.moonshot.cn" \
+           tests/e2e/test-results/ tests/e2e/*.ts src/pi_agent_core_py/web/frontend/src/
+# 0 命中
+```
 
-- External Provider requests（生产路径）：0
-- Localhost backend 请求：N（正常）
-- 外部 host（api.anthropic.com / open.bigmodel.cn / dashscope.aliyuncs.com / api.moonshot.cn）：0
+E2E 全 pass → 无 trace / video / screenshot artifact 可审计。但 spec + 前端 source 均无外部 host 引用，且 backend 使用 FakeClient（不发外部网络）。
 
----
+**最终报告**：
 
-## 10. 已知限制
-
-1. **P1-E-DEFECT-001 + DEFECT-002 未修复**——M2-3 production 冻结，不在 M2-4 内修复；M2-F1 独立处理。
-2. **E2E Provider 链路未验证**——依赖 M2-F1 修复后才能完整跑通。
-3. **FakeClient 不模拟 Provider 路由**——E2E 即使修复 header 也无法验证"Prompt 实际使用当前 binding 的 Provider"。这部分由 backend 144 个定向测试覆盖。
-4. **reload 恢复 E2E 未跑**——同 #2。
-5. **`/api/provider-definitions` 裸数组偏差归档未做**——归档修正属于 Commit C（M2-4 Re-validation PASS 后）。
+```
+External Provider requests: 0
+```
 
 ---
 
-## 11. 给 M2-F1 的修复范围建议（非 BLOCKED 报告部分）
+## 10. Anthropic UI 边界
 
-仅供 M2-F1 实施 reference。**未在 M2-4 BLOCKED 阶段执行**。
+Design §15.9：前端 `visibleDefinitions` getter 过滤 `id === "anthropic"`；`usableProfiles` 也排除。
 
-### 11.1 修复范围
+**验证**：
 
-- `src/pi_agent_core_py/web/frontend/src/api/client.ts`：UI header helper + 注入 + 错误转换
-- 必要的 vitest 单元测试覆盖
-- `chatStore.ts:572` 内嵌 fetch 路径需先审计 endpoint；若访问要求 UI Header 的同源 API，最小补充
+- vitest `ProviderFrontendIntegration.spec.ts` 场景 A：mock definitions 含 4 个 provider（含 anthropic）；测试中 Selector 只展示 GLM/Qwen/Kimi optgroup，Anthropic 不出现。
+- vitest `ProviderSelector.spec.ts` / `providerStore.spec.ts`：已覆盖 232 测试中含 Anthropic 过滤断言。
+- E2E：未单独写 Anthropic 边界 spec——Selector 在 binding=null 时不渲染 optgroup，Anthropic 自然不出现。
 
-### 11.2 Header helper 设计建议
+---
 
-```typescript
-const UI_HEADER_NAME = "X-PI-Agent-UI"
-const UI_HEADER_VALUE = "1"
+## 11. Playwright E2E 两次连续通过
 
-function createUiHeaders(initial?: HeadersInit): Headers {
-  const headers = new Headers(initial)
-  headers.set(UI_HEADER_NAME, UI_HEADER_VALUE)
-  return headers
+### 11.1 Run 1
+
+```
+37 passed (1.6m)
+```
+
+覆盖：
+
+- async-stream-reconnect (7)
+- event-dedup (4)
+- extension-persistence (5)
+- mcp-tool-lifecycle (2)
+- regenerate (9)
+- web-claude-smoke (10)
+
+### 11.2 Run 2
+
+```
+37 passed (1.7m)
+```
+
+同一组 37 测试连续两次全部通过。无 flaky、无 retry、无 trace / video artifact 生成（无失败）。
+
+### 11.3 E2E 基线稳定性证据
+
+| 检查 | Run 1 | Run 2 |
+|---|---|---|
+| 总测试数 | 37 | 37 |
+| 通过数 | 37 | 37 |
+| 失败数 | 0 | 0 |
+| flaky retry 数 | 0 | 0 |
+| timeout 数 | 0 | 0 |
+| 总耗时 | 1.6 min | 1.7 min |
+
+E2E 测试隔离：webServer 共享 SQLite，每个 spec 在 `beforeEach` 清理状态（设计已固化）；session 创建后由后端 `initialize_new_session_binding` 自动物化 default binding 或返回 null，前端 `bindingLoadState` 进入 `loaded`。
+
+---
+
+## 12. 已知限制
+
+1. **`/api/provider-definitions` 裸数组 vs envelope 偏差**：design doc §6.1 历史描述为 envelope `{providers: [...]}`，实际 handler 返回 `list[dict]` 裸数组。Commit C 已修正 design doc。详见 §13。
+2. **FakeClient 不模拟 Provider 路由**：E2E 无法直接验证"Prompt 实际使用当前 binding 的 Provider"。这部分由 backend 144 个定向测试覆盖。
+3. **Provider Settings Modal E2E 未单独写**：UI 层验证已由 vitest ProviderFrontendIntegration 场景 I 覆盖（含 Secret marker safety）。
+4. **chatStore.ts:570 `/api/abort` 路径未注入 UI Header**：审计确认此 endpoint 注册在 main app、未挂 `require_ui_header_dep`，按"只修真需要的地方"原则未改动。如有未来 endpoint 上移到 credential router，需追加注入。
+
+---
+
+## 13. `/api/provider-definitions` 归档偏差修正
+
+### 13.1 偏差描述
+
+Design doc `docs/design/p1-e-m2-frontend-integration.md` §6.1 历史描述：
+
+```json
+{
+  "providers": [
+    {"id": "anthropic", ...},
+    ...
+  ]
 }
 ```
 
-约束：
-- 只注入同源 UI Backend 请求（外部 Provider URL 不走此 helper）
-- Header 值不能被 caller 覆盖或删除（`headers.set` 强制覆盖）
-- 保留调用方已有 Header
-- `uploadForm` 不手动设置 Content-Type（让浏览器生成 multipart boundary）
-- 不新增真实网络调用
+实际 backend handler（`src/pi_agent_core_py/web/credentials_api.py:690`）：
 
-### 11.3 错误转换修复建议
-
-```typescript
-function safeErrorDetail(payload: unknown, statusText: string): string {
-  if (typeof payload === "string" && payload.length > 0) return payload
-  if (payload && typeof payload === "object") {
-    const obj = payload as Record<string, unknown>
-    // 优先用 backend 固定 message（已脱敏）
-    const msg = obj.message
-    if (typeof msg === "string" && msg.length > 0) return msg
-    // error.message（FastAPI middleware 模式）
-    const err = obj.error
-    if (err && typeof err === "object") {
-      const errMsg = (err as Record<string, unknown>).message
-      if (typeof errMsg === "string" && errMsg.length > 0) return errMsg
-    }
-    // detail 字符串（FastAPI validation：detail 是 string）
-    if (typeof obj.detail === "string" && obj.detail.length > 0) return obj.detail
-    // detail array（FastAPI validation：detail 是 [{loc, msg, type}]）——不渲染
-  }
-  return statusText || "request failed"
-}
+```python
+@router.get("/api/provider-definitions")
+async def get_provider_definitions() -> list[dict]:
+    """Return built-in provider definitions (no internal endpoint info)."""
+    return [...]
 ```
 
-约束：
-- 不使用 `String(obj)` 兜底
-- 不渲染 detail array（FastAPI validation 列表，可能含输入回显）
-- 不暴露 error.code（debug 字段）
+FastAPI 直接序列化 `list[dict]` → 裸 JSON 数组，无 envelope。
 
-### 11.4 推荐测试覆盖
+### 13.2 修正内容（Commit C）
 
-- `requestJson` 自动注入 UI Header
-- `uploadForm` 自动注入 UI Header
-- `requestBlob` 自动注入 UI Header
-- 调用方 Header 仍然保留
-- 调用方无法覆盖 `X-PI-Agent-UI`（强制 set）
-- FormData 不被手动设置 Content-Type
-- 结构化 API 错误（`{error: {code, message}}`）显示 backend message 而非 "[object Object]"
-- detail array 不被渲染
+仅修改 design doc：
 
-### 11.5 推荐提交策略
+- §6.1 JSON 示例：`{providers: [...]}` → `[...]`
+- §6.1 Response 类型说明：envelope → `ProviderDefinitionView[]`（裸数组）
+- API Contract 表条目同步
+- 涉及 envelope 的文字描述
 
-- **Commit A**（M2-4 BLOCKED）：测试侧文件 + BLOCKED 报告——本文档所属
-- **Commit B**（M2-F1）：`fix(web): attach trusted UI header to frontend requests`——生产修复 + 单测
-- **Commit C**（M2-4 Re-validation PASS）：恢复运行 E2E + 更新本文档为 PASS + 归档 `/api/provider-definitions` 偏差
+不修改：
+
+- Provider 字段定义
+- Anthropic 过滤决策（§15.9）
+- 其它 12 项冻结决策
+- M2 阶段划分
+- 安全边界
+
+### 13.3 归档注记
+
+- 事实记录修正，非产品决策变更
+- M2-1 已按真实裸数组实现（`api/providers.ts:34` + `types/providers.ts:172`）
+- 归档于 M2-4 验证阶段
 
 ---
 
-## 12. 阶段判定
+## 14. M2-4 验收条件对账
+
+| # | 验收条件 | 结果 |
+|---|---|---|
+| 1 | M2-1～M2-3 production 代码不变 | ✅ M2-3 FROZEN；M2-F1 仅修复 client.ts |
+| 2 | Frontend 现有 232 tests 零回归 | ✅ 232 / 232 |
+| 3 | 新增跨组件集成测试全部通过 | ✅ 15 / 15（Commit A） |
+| 4 | Backend 2585 基线零回归 | ✅ 2585 + 1 skipped + 14 deselected |
+| 5 | Provider Runtime 定向测试通过 | ✅ 144 passed |
+| 6 | Prompt async 定向测试通过 | ✅ 包含在 144 |
+| 7 | Regenerate 定向测试通过 | ✅ 包含在 144 |
+| 8 | Revision provider/model 持久化验证通过 | ✅ extension_store_message_revisions |
+| 9 | Session A/B Binding 隔离通过 | ✅ vitest 场景 B + backend test_provider_runtime_binding |
+| 10 | stale Binding response 验证通过 | ✅ vitest 场景 B deferred promise |
+| 11 | new Session default Binding 通过 | ✅ backend test_provider_default_binding_integration |
+| 12 | default_model 快照语义通过 | ✅ vitest 场景 G + backend default_binding_compensation |
+| 13 | Apply 当前 Session 语义通过 | ✅ vitest 场景 I |
+| 14 | null Binding/Legacy 通过 | ✅ vitest 场景 A + backend legacy 路径 |
+| 15 | invalid Binding/no fallback 通过 | ✅ vitest 场景 G + ProviderSelector spec |
+| 16 | Selector 请求运行时禁用通过 | ✅ vitest 场景 E |
+| 17 | Settings 请求运行时禁用通过 | ✅ vitest 场景 E（SessionSidebar 入口） |
+| 18 | Prompt 切换 Qwen→Kimi 通过 | ✅ backend prompt_provider_runtime_switching（FakeClient 不模拟 UI 路由） |
+| 19 | Regenerate 使用当前 Binding 通过 | ✅ backend regenerate_provider_runtime_switching |
+| 20 | reload Binding 恢复通过 | ✅ vitest 场景 H + E2E regenerate spec Test 5（reload during regen） |
+| 21 | Anthropic UI 为 0 | ✅ §10 |
+| 22 | 外部 Provider 请求为 0 | ✅ §9 |
+| 23 | Secret 持久化泄漏为 0 | ✅ §8 |
+| 24 | trace/HAR 不含 Secret | ✅ E2E 全 pass → 无 trace artifact |
+| 25 | Playwright 两次连续通过 | ✅ §11（37/37 × 2） |
+| 26 | production bundle 与 M2-3 一致 | ⚠️ bundle 因 M2-F1 增 0.33 KB JS（client.ts 加 helper），允许范围内 |
+| 27 | production diff 为 0 | ⚠️ client.ts 1 文件改动（M2-F1 已记录） |
+| 28 | provider-definitions 归档偏差已修正 | ✅ §13（Commit C） |
+| 29 | 验证报告完成 | ✅ 本文档 |
+| 30 | Working tree clean | ✅ Commit C 后 clean |
+
+**注**：#26 / #27 标 ⚠️ 是因为 M2-F1 修复必然引入 client.ts 改动。该改动经 user 决议授权（独立 M2-F1 阶段），不属于 M2-3 production diff 范围。若严格按"M2-3 production 代码不变"理解，M2-F1 视为新阶段而非 M2-3 修改——审计链清晰。
+
+---
+
+## 15. 最终判定
 
 ```
-M2-4 Integration Validation
-⛔ BLOCKED — P1-E-DEFECT-001 / 002
+P1-E M2 Frontend Provider Switching
+✅ COMPLETE / FROZEN @ <archive commit>
 
-仍未进入：
-  M3 Unified Freeze
+  Commit A @ 926011f  test(web): record blocked M2 integration validation
+  Commit B @ dcf45ce  fix(web): attach trusted UI header to frontend requests
+  Commit C @ <this>   docs: archive P1-E M2 integration validation
 
-下一步（已 user-approved）：
-  M2-F1 Trusted UI Header Repair
-    → 修 DEFECT-001 + DEFECT-002
-    → 重跑 M2-4 验证
-    → PASS 后归档 + Commit C
-    → 开放 M3
+M3 Unified Freeze
+✅ APPROVED TO START
 ```
 
 ---
 
-**M2-4 BLOCKED @ 2026-07-26**——P1-E-DEFECT-001 / 002 待 M2-F1 修复。
+**M2-4 COMPLETE @ 2026-07-26**——M3 ✅ APPROVED TO START。

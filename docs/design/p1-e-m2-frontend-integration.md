@@ -31,7 +31,8 @@
 |---|---|---|
 | 初稿 | `62f1366` | 首次审计输出（10 类问题未发现） |
 | Revision 1 | `068a548` | 解决初稿 10 类阻塞：storage_mode 缺失 / canSendPrompt 破坏 Legacy / Store 依赖冲突 / default_model vs Binding.model_id / Modal 结构与方案 B 矛盾 / API Key 浏览器事实 / Toast 不存在 / 保存非原子 / 测试框架与 lockfile 冲突 / api_style 错值 + cascade 误断 |
-| **Revision 2（本次冻结）** | 本提交 | 解决 Revision 1 剩余 4 阻塞 + 术语统一 + 小修正 + 12 决策 APPROVED。详见下表。 |
+| Revision 2（冻结） | `87d7a8e` | 解决 Revision 1 剩余 4 阻塞 + 术语统一 + 小修正 + 12 决策 APPROVED。详见下表。 |
+| **M2-4 归档修正（事实记录）** | 本次归档 commit（C） | §6.1 `/api/provider-definitions` 响应类型由 envelope `{providers: [...]}` 修正为裸数组 `ProviderDefinitionView[]`。M2-1 实现已按裸数组；M2-4 验证阶段确认 backend `list[dict]` 契约。非产品决策变更。 |
 
 ### 0.2 Revision 2 相对 Revision 1（`068a548`）的变更
 
@@ -372,34 +373,35 @@ App.vue onMounted:
 #### `GET /api/provider-definitions`
 
 - Body：无
-- 200 响应（已核实，源：`credentials_api.py:661-669 + 690-696`）：
+- 200 响应（已核实，源：`credentials_api.py:690`——`async def get_provider_definitions() -> list[dict]`，FastAPI 直接序列化裸数组）：
 
 ```json
-{
-  "providers": [
-    {"id": "anthropic", "display_name": "Anthropic",
-     "api_style": "anthropic_compatible",
-     "validation_supported": true,
-     "supports_model_listing": true},
-    {"id": "glm", "display_name": "Zhipu GLM (Anthropic-compatible)",
-     "api_style": "anthropic_compatible",
-     "validation_supported": false,
-     "supports_model_listing": false},
-    {"id": "qwen", "display_name": "Qwen",
-     "api_style": "openai_compatible",
-     "validation_supported": false,
-     "supports_model_listing": false},
-    {"id": "kimi", "display_name": "Kimi",
-     "api_style": "openai_compatible",
-     "validation_supported": false,
-     "supports_model_listing": false}
-  ]
-}
+[
+  {"id": "anthropic", "display_name": "Anthropic",
+   "api_style": "anthropic_compatible",
+   "validation_supported": true,
+   "supports_model_listing": true},
+  {"id": "glm", "display_name": "Zhipu GLM (Anthropic-compatible)",
+   "api_style": "anthropic_compatible",
+   "validation_supported": false,
+   "supports_model_listing": false},
+  {"id": "qwen", "display_name": "Qwen",
+   "api_style": "openai_compatible",
+   "validation_supported": false,
+   "supports_model_listing": false},
+  {"id": "kimi", "display_name": "Kimi",
+   "api_style": "openai_compatible",
+   "validation_supported": false,
+   "supports_model_listing": false}
+]
 ```
+
+> **M2-4 归档修正（2026-07-26）**：初稿与 Revision 1/2 误将响应描述为 envelope `{providers: [...]}`。真实 handler 返回 `list[dict]`——FastAPI 直接序列化为裸 JSON 数组。M2-1 实现已按真实裸数组（`api/providers.ts:34` + `types/providers.ts:172`）。本节事实记录修正，非产品决策变更。
 
 **已核实的契约事实**：
 - `api_style` 枚举值是 **`anthropic_compatible`** 和 **`openai_compatible`**（`registry.py:52-53`），**不是** `"anthropic"` / `"openai"`（初稿错误已修正）
 - 响应**仅 5 字段**：`id` / `display_name` / `api_style` / `validation_supported` / `supports_model_listing`
+- **响应类型**：`ProviderDefinitionView[]` 裸数组（**不是** envelope `{providers: [...]}`）
 - **不返回** `key_prefix_hints`、`default_base_url`、`credential_validation_strategy`（serializer 安全投影）
 - **返回 Anthropic**（M2 前端需过滤；见决策点 §15.9）
 - 不读 Secret；不发网络
