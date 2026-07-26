@@ -13,8 +13,9 @@
 | **P1-E1 Secure Credentials** | ✅ MERGED into master via `de05c66`（no-ff；保留 22 commit 阶段性历史） |
 | **Latest release tag** | `v0.0.27-secure-credentials` — P1-E1 Secure Credential Management（2026-07-18，commit `de05c66`） |
 | **Backend Foundation HEAD** | `cad7ca7` — feat(web): bind default provider profile on session creation（P1-E2 Backend Foundation ✅ FROZEN @ 3 commits） |
-| **M1 Runtime HEAD** | `06ecb80` — test(web): validate regenerate provider selection（M1-1 ~ M1-7 ✅ COMPLETE / FROZEN） |
-| **Current phase** | P1-E Multi-Provider Switching — M2 Frontend Switching（待启动；M1 Runtime ✅ COMPLETE） |
+| **M1 Runtime HEAD** | `8b0fb13` — docs: reconcile P1-E M1 runtime implementation record（M1-1 ~ M1-7 ✅ COMPLETE / FROZEN） |
+| **M2 Frontend Switching HEAD** | `f9dfc1c` — docs: archive P1-E M2 integration validation（M2-0 ~ M2-4 ✅ COMPLETE / FROZEN；含 M2-F1 hotfix） |
+| **Current phase** | P1-E Multi-Provider Switching — ✅ COMPLETE / FROZEN（M1 + M2 + M3 Unified Freeze；等待用户授权 merge / tag / push） |
 
 > P1-D2 Regenerate 已冻结但未打 tag——已通过 P1-E1 合并到下一 release `v0.0.27-secure-credentials`。
 
@@ -56,6 +57,14 @@
 | **M1-5 Prompt Integration** | ✅ FROZEN | `f116ddd`（47 tests / 5 files） |
 | **M1-6 Regenerate Validation** | ✅ FROZEN | `06ecb80`（67 tests / 5 files；validation-only，0 production diff） |
 | **M1-7 Runtime Final Validation** | ✅ COMPLETE / FROZEN | (本提交) test(web): freeze multi-provider runtime（76 tests / 4 files；E2E 由主仓库验证） |
+| **M2-0 Frontend Integration Audit** | ✅ FROZEN | `87d7a8e` |
+| **M2-1 API Types + providerStore** | ✅ FROZEN | `313f28b`（86 vitest） |
+| **M2-2 Provider Settings Modal** | ✅ FROZEN | `0626ac4`（74 vitest 累计 160） |
+| **M2-3 Provider Selector** | ✅ FROZEN | `c0792e1`（72 vitest 累计 232） |
+| **M2-4 Commit A（BLOCKED 证据）** | ✅ FROZEN | `926011f`（登记 P1-E-DEFECT-001 / 002） |
+| **M2-F1 Trusted UI Header Repair** | ✅ FROZEN | `dcf45ce`（DEFECT-001 / 002 RESOLVED） |
+| **M2-4 Commit C（最终 archive）** | ✅ COMPLETE / FROZEN | `f9dfc1c`（BLOCKED → PASS） |
+| **M3 Unified Freeze** | ✅ COMPLETE / FROZEN | docs-only（本提交）—— P1-E Multi-Provider Switching 全链路统一收口 |
 
 ### P1-E1 子阶段终态
 
@@ -96,26 +105,25 @@
 
 ## 当前阶段
 
-**P1-E Multi-Provider Switching — M2 Frontend Switching**（待启动；M1 Runtime ✅ COMPLETE）。
+**P1-E Multi-Provider Switching — ✅ COMPLETE / FROZEN**（M1 Runtime + M2 Frontend + M3 Unified Freeze）。
 
-- 路线：[ROADMAP.md](ROADMAP.md) § P1-E（M1 / M2 / M3 milestone）
-- Pivot 决策：原 P1-E2/E3/E4/E5 拆分过细，E2-4 独立 Security Freeze 会冻结一个用户无法直接使用的配置后端——改为 M1 Runtime / M2 Frontend / M3 Unified Freeze 单一 milestone
-- Pivot 附录：[docs/design/p1-e2-provider-profiles.md](docs/design/p1-e2-provider-profiles.md) §19
-- M1 子阶段终态：M1-0 ✅ → M1-1 ✅ → M1-2 ✅ → M1-3 ✅ → M1-4 ✅ → M1-5 ✅ → M1-6 ✅ → **M1-7 ✅ COMPLETE / FROZEN** → M2-0 Frontend Integration Audit（待启动）
+- 路线：[ROADMAP.md](ROADMAP.md) § P1-E
+- 阶段终态：M1-0 ~ M1-7 ✅ → M2-0 ~ M2-4 ✅（含 M2-F1 hotfix）→ M3 Unified Freeze ✅
+- 最终归档：[docs/validation/p1-e/P1_E_M3_UNIFIED_FREEZE.md](docs/validation/p1-e/P1_E_M3_UNIFIED_FREEZE.md)
+- M2 集成验证归档：[docs/validation/p1-e/P1_E_M2_INTEGRATION_VALIDATION.md](docs/validation/p1-e/P1_E_M2_INTEGRATION_VALIDATION.md)
+- Release Candidate：✅ READY FOR USER REVIEW（merge / tag / push 仍需独立授权）
 
 P1-D3 PDF Text Extraction ⏸ **DEFERRED**（2026-07-16 决策，转出主路线）。PDF / Vector RAG ⏸ **DEFERRED**（同上）。
 
 ## 当前阻塞项
 
-无 M2 启动阻塞。M1 Runtime 已冻结；M2 开始前端 Provider/Model 选择器集成（审计现有 `chatStore` / `SessionSidebar` / settings panel 接入点）。
+无技术阻塞。**等待用户授权** merge / tag / push 流程——M3 是 docs-only 阶段，未自动进入发布。
 
 ## 下一步
 
-**M2-0 Frontend Integration Audit**：
-- 审计现有前端 store 与后端 Provider Profile / Binding API 的对接点
-- 设计 Provider/Model 选择器 UI（`ProviderModelSelector.vue` 组件位置、binding 切换流程、错误展示）
-- 评估 ws event mapper 对 binding 变更的响应
-- 不进入 M2 实施前需 user approve 设计
+- 用户审核 P1-E 最终状态（M3 freeze 文档 + M2-4 validation 文档）
+- 用户决定是否 merge 到 master / 打 release tag / push 到远端
+- 用户决定后续阶段（P1-F Markdown Workspace Panel / P2 Web Agent Enhancements）
 
 ## 已知限制
 

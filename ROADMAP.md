@@ -4,11 +4,13 @@
 
 ---
 
-## P1-E — Multi-Provider Switching（M1 / M2 / M3 milestone，PIVOT @ 2026-07-19）
+## P1-E — Multi-Provider Switching（✅ COMPLETE / FROZEN；M1 / M2 / M3 milestone，PIVOT @ 2026-07-19）
 
+> **状态（2026-07-26）**：M1 Runtime ✅ + M2 Frontend ✅ + M3 Unified Freeze ✅ —— 全链路 COMPLETE / FROZEN。最终归档见 [docs/validation/p1-e/P1_E_M3_UNIFIED_FREEZE.md](docs/validation/p1-e/P1_E_M3_UNIFIED_FREEZE.md)。Release Candidate ✅ READY FOR USER REVIEW（merge / tag / push 仍需独立授权）。
+>
 > **Pivot 决策（2026-07-19）**：原 P1-E2 / E3 / E4 / E5 拆分过细，且 E2-4 独立 Security Freeze 会冻结一个用户无法直接使用的配置后端。改为单一 milestone——**M1 Runtime / M2 Frontend / M3 Unified Freeze**，最终统一 security + E2E freeze。详细 Pivot 见 [docs/design/p1-e2-provider-profiles.md](docs/design/p1-e2-provider-profiles.md) §19。
 
-**产品目标（M1~M3 完成时达成）**：用户配置 GLM / Qwen / Kimi Key → 每个 Provider 选择模型 → 聊天顶部切换 Provider/Model → 每个 Session 独立保存 → Regenerate 使用当前选择 → 重启后恢复——且 Key 不进入 SQLite 明文 / 日志 / 消息 / 事件 / 导出。
+**产品目标（已达成）**：用户配置 GLM / Qwen / Kimi Key → 每个 Provider 选择模型 → 聊天顶部切换 Provider/Model → 每个 Session 独立保存 → Regenerate 使用当前选择 → 重启后恢复——且 Key 不进入 SQLite 明文 / 日志 / 消息 / 事件 / 导出。
 
 ### 跨阶段冻结决策（7 边界 + Custom URL 安全，M1/M2/M3 全程有效）
 
@@ -91,46 +93,58 @@ P1-E M1 之前的配置后端已 frozen，不再扩展。
 
 **请求级不可变快照**（边界 C 落地）：请求开始时记录 `RequestProviderSelection(profile_id, provider_id, model_id, selection_source)`；运行中切换只影响下次请求；Regenerate 用当前 Session 当前模型。
 
-### M2 — Frontend Switching（🟡 NEXT，M1 ✅ COMPLETE）
+### M2 — Frontend Switching（✅ COMPLETE / FROZEN）
 
 最简前端：两个组件 + 一个 store。
 
-- `stores/providerStore.ts`（不膨胀 chatStore）
-- `components/provider/ProviderSelector.vue`（顶部切换器；运行时禁用并提示 `Generating...`）
-- `components/provider/ProviderSettingsModal.vue`（每个 Provider 一张卡：API Key + Model ID + status；支持 GLM / Qwen / Kimi）
-- Session binding restore（刷新后保留选择）
-- Prompt 运行时禁用 selector
+- `stores/providerStore.ts`（不膨胀 chatStore）— ✅ FROZEN @ `313f28b`
+- `components/provider/ProviderSelector.vue`（顶部切换器；运行时禁用并提示 `Generating...`）— ✅ FROZEN @ `c0792e1`
+- `components/provider/ProviderSettingsModal.vue`（每个 Provider 一张卡：API Key + Model ID + status；支持 GLM / Qwen / Kimi）— ✅ FROZEN @ `0626ac4`
+- Session binding restore（刷新后保留选择）— ✅ FROZEN @ `c0792e1`
+- Prompt 运行时禁用 selector — ✅ FROZEN @ `c0792e1`
+
+**M2-4 Integration Validation**：✅ COMPLETE / FROZEN @ `f9dfc1c`（Commit A `926011f` BLOCKED 证据 → M2-F1 `dcf45ce` UI Header 修复 → Commit C `f9dfc1c` archive；P1-E-DEFECT-001 / 002 RESOLVED）。
 
 **M2 显式不包含**：`ProviderProfileList` / `CredentialForm` / `ModelPicker` / `ProviderStatusBadge` / `ProviderHealthPanel` / `ModelCatalogModal`（全部并入 Settings Modal）；Custom Provider / Custom Base URL 入口；远程模型搜索；模型能力展示。
 
 **模型输入策略**：少量静态建议 + 自由填写 `model_id`（不调用 `/v1/models`）。
 
-### M3 — Unified Freeze
+### M3 — Unified Freeze（✅ COMPLETE / FROZEN，docs-only）
 
-最终验收 + 安全 + merge + tag（合并原 P1-E5 + E2-4）。
+最终验收 + 安全 + 归档（合并原 P1-E5 + E2-4）。
 
-**验收清单（至少 18 项）**：
+**M3 实际范围**：docs-only 阶段。不重新实现、不重新设计、不扩展。仅做：
 
-1. 添加 GLM / Qwen / Kimi Profile
-2. Key 不出现在任何 API response（含 list / get / WS event / export markdown）
-3. 一键切换 Profile / Model
-4. Session A/B 使用不同 Provider
-5. **server restart** 后 Profile + Binding 恢复
-6. session-only Key restart 后 → `needs_key`
-7. env reference Key restart 后 → 重新解析
-8. 模型切换只影响下一请求（active request 中途切换不污染当前）
-9. Regenerate 使用当前 Session 当前模型（in-place `message_id` 不变）
-10. 删除 Key 后 Profile → `needs_key`
-11. invalid Key 安全报错（错误信息不含 Key / Authorization）
-12. GLM / Qwen / Kimi 真实流式回答 + tool_use 正常
-13. 切换 Provider 后失败不污染下一请求
-14. Request 启动后 provider/model 不可变（请求快照生效）
-15. Core Runtime diff = 0
-16. API / SQLite / log / WS / export 无 Key（含 marker 测试）
-17. 错误信息不含 Authorization / 内部 endpoint
-18. Playwright E2E 全 PASS
+- 统一收口 Credential → ProviderProfile → SessionModelBinding → RequestProviderSelection → ProviderAdapter → Prompt / Regenerate → AssistantMessage / Revision → Frontend Settings / Selector / Reload 为正式冻结版本
+- 同步 STATUS / TODO / ROADMAP / CHANGELOG / memory 状态文档
+- 新增最终冻结文档 `docs/validation/p1-e/P1_E_M3_UNIFIED_FREEZE.md`
 
-**M3 提交**：`feat(providers): deliver multi-provider switching`（M1+M2+M3 统一 merge）+ tag。
+**验收清单（M1/M2 已交付，M3 仅归档）**：
+
+1. ✅ GLM / Qwen / Kimi Profile 配置（M1-2 + M2-2）
+2. ✅ Key 不出现在 API response / WS event / export markdown（M2-4 §8 marker 扫描 0 leak）
+3. ✅ 一键切换 Profile / Model（M2-3）
+4. ✅ Session A/B 使用不同 Provider（M2-4 §4.3 场景 B + backend test_provider_runtime_binding）
+5. ✅ **server restart** 后 Profile + Binding 恢复（M1-7 + backend restart tests）
+6. ✅ session-only Key restart 后 → `needs_key`（M1-7 + backend Credential lifecycle）
+7. ✅ env reference Key restart 后 → 重新解析（M1-7 + backend env resolution）
+8. ✅ 模型切换只影响下一请求（M1-4 RequestProviderSelection 快照）
+9. ✅ Regenerate 使用当前 Session 当前模型（M1-6 + backend regenerate_provider_runtime_switching）
+10. ✅ 删除 Key 后 Profile → `needs_key`（backend profile status 派生）
+11. ✅ invalid Key 安全报错（M2-F1 safeErrorDetail；错误信息不含 Key / Authorization）
+12. ✅ GLM / Qwen / Kimi 真实流式回答 + tool_use 正常（M1-1 ~ M1-7 + backend 144 定向）
+13. ✅ 切换 Provider 后失败不污染下一请求（M1-4 finally close + 恢复旧 Provider）
+14. ✅ Request 启动后 provider/model 不可变（M1-4 frozen dataclass）
+15. ✅ Core Runtime diff = 0（M1-7 AST 静态约束）
+16. ✅ API / SQLite / log / WS / export 无 Key（M2-4 §8 + §9）
+17. ✅ 错误信息不含 Authorization / 内部 endpoint（M2-F1 + M1-1 safe error mapping）
+18. ✅ Playwright E2E 全 PASS（M2-4 §11 连续两次 37/37）
+
+**最终基线**：261 vitest + 2585 pytest（+ 1 skipped + 14 deselected）+ 144 backend 定向 + 37/37 E2E × 2 + 0 marker leak + 0 external host + 0 Anthropic UI + bundle 169.23 KB JS / 56.49 KB gzip / 46.11 KB CSS + ruff clean。
+
+**M3 提交**：`docs: freeze P1-E multi-provider switching`（docs-only，production / test / dependency / schema diff = 0）。
+
+**merge / tag**：⛔ NOT AUTHORED（M3 不自动执行；等待用户独立授权）。
 
 ### P1-E 显式不包含（M1 / M2 / M3 全程排除）
 

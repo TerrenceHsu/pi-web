@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### P1-E Multi-Provider Switching（✅ COMPLETE / FROZEN；待 merge / tag 授权）
+
+- **Multi-provider profile / settings / session switching**——GLM / Qwen / Kimi 三家 Provider 完整支持：用户在 Settings Modal 配置 API Key + Model ID → 顶部 Provider Selector 切换 → 每个 Session 独立保存 Binding → 浏览器 reload 后恢复
+- **Secure credentials**——SecretStore Protocol（OSKeyring / InMemory / Env 三种 backend）；API Key 不进入 SQLite 明文 / 日志 / WS event / Markdown export / Pinia state / 浏览器 storage
+- **Prompt / Regenerate runtime binding**——请求开始时冻结 `RequestProviderSelection`（profile_id / provider_id / model_id / selection_source 不可变快照）；运行中切换只影响下一次请求；Regenerate 使用当前 Session 当前 Binding
+- **Frontend integration validation**——261 vitest + 2585 backend pytest + 144 定向测试 + 连续两次 37/37 Playwright E2E；0 marker leak / 0 external Provider host / 0 Anthropic product UI
+- **Trusted UI Header hotfix（M2-F1）**——`api/client.ts` 三个 fetch helper 强制注入 `X-PI-Agent-UI: 1`；结构化错误（`{error: {code, message}}` / FastAPI HTTPException / validation detail）安全转换为用户可读文案，不再渲染为 `[object Object]`
+- 最终归档：[docs/validation/p1-e/P1_E_M3_UNIFIED_FREEZE.md](docs/validation/p1-e/P1_E_M3_UNIFIED_FREEZE.md)
+- M2 集成验证：[docs/validation/p1-e/P1_E_M2_INTEGRATION_VALIDATION.md](docs/validation/p1-e/P1_E_M2_INTEGRATION_VALIDATION.md)
+
 ### 路线调整（2026-07-16）
 
 - **P1-D3 PDF Text Extraction**：⏸ DEFERRED——转出主路线

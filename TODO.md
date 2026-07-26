@@ -6,12 +6,12 @@
 
 ## Current phase
 
-**P1-E Multi-Provider Switching — M2 Frontend Switching**（待启动；M1 Runtime ✅ COMPLETE）。
+**P1-E Multi-Provider Switching — ✅ COMPLETE / FROZEN**（M1 Runtime + M2 Frontend + M3 Unified Freeze）。
 
-- 路线：[ROADMAP.md](ROADMAP.md) § P1-E（M1 / M2 / M3 milestone）
-- 状态：[STATUS.md](STATUS.md) — M1-0 ~ M1-7 ✅ COMPLETE / FROZEN，当前 M2 待启动
-- Pivot 决策：原 P1-E2/E3/E4/E5 拆分过细，E2-4 独立 Security Freeze cancelled——改为 M1 Runtime / M2 Frontend / M3 Unified Freeze 单一 milestone
-- Pivot 附录：[docs/design/p1-e2-provider-profiles.md](docs/design/p1-e2-provider-profiles.md) §19
+- 路线：[ROADMAP.md](ROADMAP.md) § P1-E
+- 状态：[STATUS.md](STATUS.md) — P1-E 全链路 ✅ COMPLETE / FROZEN；等待用户授权 merge / tag / push
+- 最终归档：[docs/validation/p1-e/P1_E_M3_UNIFIED_FREEZE.md](docs/validation/p1-e/P1_E_M3_UNIFIED_FREEZE.md)
+- M3 是 docs-only 阶段——production / test / dependency / schema diff = 0
 
 ## P1-E1 ✅ COMPLETE（MERGED + TAGGED）
 
@@ -129,21 +129,21 @@ P1-E2 配置后端已 frozen，作为 M1/M2/M3 的持久化基础。**不再扩�
 - [x] 静态架构约束（Core Runtime M1 diff=0；Provider Runtime 接线只在 `_execute_prompt`；模块依赖方向）
 - [x] `test(web): freeze multi-provider runtime`（M1-7 production diff = 0；E2E 由主仓库 `pi-py` 验证）
 
-## M2 deliverables — Frontend Switching
+## M2 deliverables — Frontend Switching（✅ COMPLETE / FROZEN）
 
-- [ ] `stores/providerStore.ts`
-- [ ] `components/provider/ProviderSelector.vue`（顶部切换器；运行时禁用并提示 `Generating...`）
-- [ ] `components/provider/ProviderSettingsModal.vue`（每个 Provider 一张卡：API Key + Model ID + status）
-- [ ] Session binding restore（刷新后保留选择）
-- [ ] `feat(web): add provider switching frontend`
+- [x] `stores/providerStore.ts` — ✅ FROZEN @ `313f28b`
+- [x] `components/provider/ProviderSelector.vue`（顶部切换器；运行时禁用并提示 `Generating...`）— ✅ FROZEN @ `c0792e1`
+- [x] `components/provider/ProviderSettingsModal.vue`（每个 Provider 一张卡：API Key + Model ID + status）— ✅ FROZEN @ `0626ac4`
+- [x] Session binding restore（刷新后保留选择）— ✅ FROZEN @ `c0792e1`
+- [x] M2-4 Integration Validation — ✅ COMPLETE / FROZEN @ `f9dfc1c`（含 M2-F1 hotfix @ `dcf45ce`）
 
-## M3 deliverables — Unified Freeze
+## M3 deliverables — Unified Freeze（✅ COMPLETE / FROZEN，docs-only）
 
-- [ ] Secret leak audit（API / SQLite / log / WS / export / marker）
-- [ ] GLM / Qwen / Kimi contract tests
-- [ ] Prompt / Regenerate / tool / streaming / Session A/B / restart
-- [ ] Playwright E2E
-- [ ] merge / tag：`feat(providers): deliver multi-provider switching`
+- [x] Secret leak audit（API / SQLite / log / WS / export / marker）— ✅ 0 leak（M2-4 §8）
+- [x] GLM / Qwen / Kimi contract tests — ✅ 包含于 144 backend 定向测试
+- [x] Prompt / Regenerate / tool / streaming / Session A/B / restart — ✅ backend 144 + vitest 261
+- [x] Playwright E2E（连续两次）— ✅ 37/37 × 2（M2-4 §11）
+- [ ] merge / tag：`feat(providers): deliver multi-provider switching` — ⛔ NOT AUTHORED（等待用户授权；M3 不自动 merge / tag / push）
 
 ## Cross-stage frozen constraints（M1 / M2 / M3 全程约束）
 
@@ -162,11 +162,16 @@ P1-E2 配置后端已 frozen，作为 M1/M2/M3 的持久化基础。**不再扩�
 - ✅ 请求启动后 provider/model 不可变（运行中切换只影响下次请求）
 - ✅ Regenerate 使用当前 session 当前模型（不动 D2 不变量）
 
-## Next after M1
+## Next after P1-E
 
-- **M2-0 Frontend Integration Audit**：审计现有前端 store / ws mapper 与后端 Provider Profile / Binding API 对接点；设计 `ProviderSelector.vue` + `ProviderSettingsModal.vue`；评估 `chatStore` 对 binding 切换的响应
-- M2 Frontend Switching 实施（`providerStore.ts` + 选择器组件 + session binding restore）
-- M3 Unified Freeze（security + E2E + merge + tag）
+P1-E Multi-Provider Switching 已 ✅ COMPLETE / FROZEN。**等待用户决定**：
+
+- 是否 merge P1-E 全链路到 master
+- 是否打 release tag（如 `v0.0.28-multi-provider-switching`）
+- 是否 push 到远端
+- 是否进入下一阶段（P1-F Markdown Workspace Panel / P2 Web Agent Enhancements）
+
+M3 是 docs-only 归档阶段，未自动执行上述任一动作。
 
 ## Deferred
 
