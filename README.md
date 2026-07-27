@@ -62,7 +62,8 @@
 
 下面这些是整个项目当前阶段**明确不做**的，无论组合哪个模块都拿不到：
 
-- **RAG / Vector Memory / Long-term Memory**——只做对话级 messages + Session 级 snapshots，不接 embedding / 向量检索
+- **RAG**——P2-R 系列引入（marker + heading-aware chunk + SQLite FTS5 + Session-scoped Library ACL）；不引入外部 vector DB。详见 [ROADMAP §P2-R](ROADMAP.md)
+- **Long-term user memory / 跨 Session 用户记忆**——仍不做（区别于 RAG）
 - **多用户 / 认证 / RBAC / OAuth**——Web 仅本地调试，policy 仅单进程决策
 - **公网部署 / 横向扩展**——FastAPI 状态在内存，SSE 单机广播
 - **CLI**——只做 Web UI（Step 20）
@@ -110,7 +111,7 @@
 - `convert_to_llm`：去摘要、合并连续 UserMessage、组装 `LLMMessage` 列表
 - `TransformContextFn`：自定义转换 hook
 
-**边界**：只做"消息形状变换"，不读取外部知识（无 RAG / Vector Memory）；`CustomMessage` 在转换时被丢弃（不会发给 LLM）。
+**边界**：只做"消息形状变换"——不直接读取外部知识；RAG 的检索由 `search_knowledge` Tool 在 loop 层注入（P2-R 系列），不在 context 层做向量召回。`CustomMessage` 在转换时被丢弃（不会发给 LLM）。
 
 ### 5. Tool Hooks `hooks.py`
 
@@ -171,7 +172,7 @@
 - 序列化 / 反序列化 helper：`serialize_message(s)` / `deserialize_message(s)_snapshot`
 - Session tree：fork / restore（Step 12）
 
-**边界**：**不**含 Skills / Compaction / Vector Memory / Long-term user memory；存储后端只有内存和 JSONL（无 DB / Redis）；只支持单 session 实例（多 session 由上层 session store 管理）。
+**边界**：**不**含 Skills / Compaction / Long-term user memory；存储后端只有内存和 JSONL（无 DB / Redis）；只支持单 session 实例（多 session 由上层 session store 管理）。**向量召回不在此模块**——RAG 检索属于 Knowledge 子系统（P2-R 系列，独立 `knowledge.db`），与 SessionMemory 解耦。
 
 ### 11. Session Sync `session_sync.py`
 
@@ -189,7 +190,7 @@
 - `SkillInjectionConfig`：渲染到 system prompt 的格式 / 顺序
 - `render_skill_block()`：单个 skill 渲染为 markdown block
 
-**边界**：Skill 是**提示组织层**——不改变 Agent 执行内核；`tool_names` 仅 metadata（**不**自动注册工具到 registry）；PromptTemplate 用 Python `str.format()`，**不**引入 Jinja2；Step 14 **不做** Compaction / Branch Summary / Vector Memory / 自动摘要。
+**边界**：Skill 是**提示组织层**——不改变 Agent 执行内核；`tool_names` 仅 metadata（**不**自动注册工具到 registry）；PromptTemplate 用 Python `str.format()`，**不**引入 Jinja2；Step 14 **不做** Compaction / Branch Summary / 向量召回 / 自动摘要。
 
 ### 13. Compaction / Branch Summary `compaction.py`
 
@@ -198,7 +199,7 @@
 - `BranchSummary` / `BranchSummaryConfig`：fork 出分支时生成摘要
 - `SummaryGenerator` / `default_summary_generator`：可替换的摘要器（未来接真 LLM）
 
-**边界**：**只压缩 messages**——不删 snapshots、不动 events；Step 15 **不做** Vector Memory / RAG / Long-term Memory / 自动后台压缩 / 数据库；`default_summary_generator` 是规则式（不调真 LLM）。
+**边界**：**只压缩 messages**——不删 snapshots、不动 events；Step 15 **不做** RAG / Long-term user memory / 自动后台压缩 / 数据库；`default_summary_generator` 是规则式（不调真 LLM）。向量召回属于 Knowledge 子系统（P2-R 系列），不在此模块。
 
 ### 14. Tools 子包 `tools/`
 

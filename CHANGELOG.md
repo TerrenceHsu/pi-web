@@ -20,11 +20,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### 路线调整（2026-07-16）
 
-- **P1-D3 PDF Text Extraction**：⏸ DEFERRED——转出主路线
-- **PDF / Vector RAG**：⏸ DEFERRED——转出主路线
+- **P1-D3 PDF Text Extraction**：⏸ DEFERRED——转出主路线（**2026-07-27 重启**：通过 P2-R 系列吸收并扩展，见 [docs/design/p2-r0-rag-contract.md](docs/design/p2-r0-rag-contract.md)）
+- **PDF / Vector RAG**：⏸ DEFERRED——转出主路线（**2026-07-27 重启**：P2-R 系列正式引入本地知识库 RAG，见 [ROADMAP §P2-R](ROADMAP.md)）
 - **P1-E Multi-Provider / Model Profiles**：✅ DESIGN FROZEN——7 个跨阶段边界 + Custom URL 安全已冻结，详见 [ROADMAP.md](ROADMAP.md#p1-e--multi-provider--model-profiles-design-frozen-2026-07-16)
 - **P1-F Markdown Workspace Panel**：⚪ PLANNED
 - **P2 Web Agent Enhancements**：⚪ PLANNED（P2-A URL Routing / P2-B Human Approval / P2-C Context Budget）
+
+### 路线 Pivot（2026-07-27）
+
+- **P2-R Knowledge / RAG Subsystem**：🟡 IN PROGRESS——P2-R0 RAG Contract Audit 启动。第一版范围：marker（PDF→MD）+ heading-aware chunk + SQLite FTS5 + Session-scoped Library ACL + `search_knowledge` AgentTool。详见 [ROADMAP §P2-R](ROADMAP.md) + [docs/design/p2-r0-rag-contract.md](docs/design/p2-r0-rag-contract.md)。
+- 旧 "PDF / Vector RAG ⏸ DEFERRED" 与"不做列表中的 RAG / Vector Memory / Long-term Memory" 标记**已正式解除**——审计记录见 [docs/design/p2-r0-legacy-limit-audit.md](docs/design/p2-r0-legacy-limit-audit.md)。
+- **Long-term user memory / 跨 Session 用户偏好**仍不做（区别于 RAG）。
 
 ### Added（已 merge 到 master）
 

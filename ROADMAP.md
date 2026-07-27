@@ -203,6 +203,40 @@ P1-E M1 之前的配置后端已 frozen，不再扩展。
 
 ---
 
+## P2-R — Knowledge / RAG Subsystem（🟡 IN PROGRESS）
+
+本地知识库 RAG 系统：PDF → Canonical Markdown → heading-aware chunk → SQLite FTS5 → Session-scoped Library ACL → `search_knowledge` AgentTool。
+
+主设计冻结文档：[docs/design/p2-r0-rag-contract.md](docs/design/p2-r0-rag-contract.md) · 决策表：[docs/design/p2-r0-decisions-log.md](docs/design/p2-r0-decisions-log.md) · 旧边界解除：[docs/design/p2-r0-legacy-limit-audit.md](docs/design/p2-r0-legacy-limit-audit.md)。
+
+| Milestone | 状态 | 依赖 | 产出 | 验证 |
+|---|---|---|---|---|
+| **R0 Contract Audit** | 🟡 IN PROGRESS | — | 4 docs + 7 处旧标记解除 | [docs/validation/p2-r0/P2_R0_CONTRACT_AUDIT.md](docs/validation/p2-r0/P2_R0_CONTRACT_AUDIT.md) 7 条 checklist |
+| **R1 Schema + Store** | ⛔ BLOCKED BY R0 | R0 | 5 表 DDL + migration + `KnowledgeFileStore` + marker 集成（含 AGPL 兼容性确认） | 表存在 / migration 幂等 / 数字 PDF→MD smoke / 扫描 PDF→needs_ocr |
+| **R2 Ingestion Pipeline** | ⛔ BLOCKED BY R1 | R1 | Canonical MD writer + heading-aware chunker + Job 状态机 + 30s 阈值同步处理 | 已知样本 chunk 数稳定 / Job 状态全路径 / 30s 超时分支 |
+| **R3 Retrieval** | ⛔ BLOCKED BY R2 | R2 | `search_knowledge` tool + FTS5 + top_k 排序 + 引用 evidence | query 召回 / tool 不暴露 session_id（AST 校验） |
+| **R4 Session Library ACL** | ⛔ BLOCKED BY R3 | R3 | `session_knowledge_libraries` CRUD + 后端 allowlist 过滤 | 未授权 library 不出现 / A/B session 越权测试 |
+| **R5 Web API + UI** | ⛔ BLOCKED BY R4 | R4 | library / document / search REST + 前端管理面板 | E2E upload→ingest→search 全链路 |
+| **R6 Freeze + Validation** | ⛔ BLOCKED BY R5 | R5 | validation report + security freeze + tag `v0.0.XX-knowledge-rag` | 全 pytest + E2E + ruff + 0 Core Runtime 回归 |
+
+**关键冻结决策**（详见 decisions-log）：
+
+- **PDF parser = marker**（AGPL-3.0；force_ocr=False 保持数字 PDF only 边界；R1 集成前需法务确认 license 兼容性，fallback = pypdf）
+- **SQLite = 独立 `knowledge.db`** + 独立 aiosqlite 连接；library_id 作逻辑外键
+- **第一版同步处理** upload，30s 阈值 + PDF ≤ 20 页强制限制；R2 引入 BackgroundTask 时不改 schema
+- **Chunk 默认 max_chars=1200 / overlap=150**，heading-aware 切分
+- **`search_knowledge(query, top_k=5)`** 不接受 library_id / session_id / file_path；后端从 session_id_getter 求 allowlist
+
+**显式不包含（P2-R 全程）**：
+
+- OCR / 主动开启 marker OCR（扫描 PDF 进 `status=needs_ocr` 终态，不自动重试）
+- Long-term user memory / 跨 Session 用户偏好 / 用户画像
+- Embedding provider / Vector DB / Reranker（推迟到 R3+ 评估）
+- 多用户 RBAC / OAuth（Session Library ACL 是单进程内访问隔离，不是用户级权限）
+- 长期后台任务调度（与 ROADMAP "不做" 列表一致）
+
+---
+
 ## P2 — Web Agent Product Enhancements（⚪ PLANNED）
 
 按优先级排序——独立设计、独立测试、独立冻结。**不**要求按字母顺序执行。
@@ -260,24 +294,33 @@ P1-E M1 之前的配置后端已 frozen，不再扩展。
 
 ## 已 DEFERRED（转出主路线，非永久放弃）
 
-### P1-D3 — PDF Text Extraction ⏸ DEFERRED（2026-07-16）
+### P1-D3 — PDF Text Extraction ✅ RESTARTED via P2-R（2026-07-27）
 
-3 个边界冲突曾经阻塞——边界 A-G 冻结后已可重启，但相对 P1-E/F 优先级更低。重启条件：
-- P1-E / P1-F 完成
-- PDF adapter 边界重新评估（是否仍需 `tools/view_file.py` 修改）
-- FileRef metadata 字段是否已被 P1-E/F 引入
+P1-D3 的原始范围（PDF adapter 边界 + FileRef metadata 字段）已被 P2-R 系列吸收并扩展：
 
-### PDF / Vector RAG ⏸ DEFERRED
+- PDF parser 改用 **marker**（替代原计划的 `tools/view_file.py` 改造路径）
+- 存储改用独立 **`KnowledgeFileStore`**（不复用 FileRef / VirtualFileStore）
+- 边界从 Tool 层上移到 Ingestion Pipeline 层
 
-明确延后到 P2 候选完成之后。不引入向量存储、不实现长文档检索。
+详见上方 §P2-R 章节 + [docs/design/p2-r0-rag-contract.md](docs/design/p2-r0-rag-contract.md)。
+
+原重启条件（保留作历史记录）：
+
+- ✅ P1-E 已完成（FROZEN）；P1-F 不再是前置——P2-R 自带 Canonical Markdown 处理
+- ✅ PDF adapter 边界已重评——从 Tool 层上移到 Ingestion Pipeline 层
+- ✅ 不复用 FileRef；新建 `KnowledgeFileStore` + `knowledge_documents` 表
+
+### PDF / Vector RAG ✅ RESTARTED via P2-R
+
+PDF / Vector RAG 已在 P2-R 系列正式重启——见上方 §P2-R 章节。第一版范围：marker + heading-aware chunk + SQLite FTS5 + Session-scoped Library ACL + `search_knowledge` AgentTool。
 
 ---
 
 ## 明确不做（长期）
 
-- OCR / Image understanding / 视觉理解
+- OCR / Image understanding / 视觉理解（marker 配置 `force_ocr=False`；扫描 PDF 进 `status=needs_ocr` 终态，不自动重试）
 - PDF 表单 / 注释 / 嵌入对象
-- RAG / Vector Memory / Long-term Memory
+- Long-term user memory / 跨 Session 用户偏好 / 用户画像（区别于 RAG——RAG 已在 P2-R 系列重启）
 - Multi-Agent 编排
 - CLI / RPC mode
 - 多用户账号 / OAuth / RBAC / 企业 secret vault

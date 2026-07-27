@@ -175,16 +175,21 @@ M3 是 docs-only 归档阶段，未自动执行上述任一动作。
 
 ## Deferred
 
-- P1-D3 PDF Text Extraction（转出主路线，重启条件见 ROADMAP）
-- PDF / Vector RAG
+- P1-D3 PDF Text Extraction ✅ RESTARTED via P2-R（2026-07-27；见 [ROADMAP §P2-R](ROADMAP.md) + [docs/design/p2-r0-rag-contract.md](docs/design/p2-r0-rag-contract.md)）
 - P2-A URL Routing + Full Reload Recovery
 - P2-B Human Approval UI
 - P2-C Context Budget + Compaction UI
 
+## P2-R — Knowledge / RAG Subsystem（🟡 IN PROGRESS）
+
+路线 Pivot（2026-07-27）：P2-R 系列取代原 P2 候选成为下一阶段主线。详见 [ROADMAP §P2-R](ROADMAP.md)。
+
+- [ ] **P2-R0 Contract Audit**（docs-only）—— 解除 7 处旧 deferred / out-of-scope 标记；冻结数据模型 / 目录布局 / PDF 边界 / Chunk 格式 / Tool 接口 / Session ACL / 同步策略；产出 4 份 docs。基线 commit `ee62732`。
+
 ## Explicitly out of scope (long-term)
 
-- OCR / Image understanding
-- RAG / Vector Memory / Long-term Memory
+- OCR / Image understanding（marker 配置 `force_ocr=False`；扫描 PDF 进 `status=needs_ocr` 终态）
+- Long-term user memory / 跨 Session 用户偏好（区别于 RAG——RAG 已在 P2-R 系列重启）
 - Multi-Agent / 多用户 / RBAC / OAuth
 - 公网部署 / 横向扩展
 - CLI（仅 Web UI 入口）
