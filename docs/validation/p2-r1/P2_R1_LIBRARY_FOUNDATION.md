@@ -78,6 +78,23 @@ R1 显式 NOT 实现:
 
 ## 4. 模块清单
 
+### 4.1 Per-commit 文件统计（精确）
+
+| Commit | 类型 | 新文件 | 修改文件 | 总文件数 |
+|---|---|---|---|---|
+| `f411ad7` P2-R0 Amendment 1 | docs-only | 1 (`p2-r0-amendment-1.md`) | 5 (contract / decisions-log / R0 validation / ROADMAP / TODO) | **6** |
+| `4397c3f` R1-A Schema + Store | feat | 4 (knowledge/__init__, models, store, test_knowledge_store) | 0 | **4** |
+| `1e764e9` R1-B FileStore + Service | feat | 3 (files.py, service.py, test_knowledge_files_and_service) | 0 | **3** |
+| `0973b79` R1-C REST API + Composition | feat | 3 (api.py, test_knowledge_api, ...) | 2 (app.py, state.py; store.py 排序修正) | **5** |
+| `3bca5fd` R1-D Validation + Freeze | test/docs | 1 (P2_R1_LIBRARY_FOUNDATION.md) | 3 (ROADMAP, STATUS, TODO) | **4** |
+| **Total across 5 commits** | | **12 new** | **10 modified (含跨 commit 重复同一文件)** | **22 file instances** |
+
+> 注：之前报告草稿写"11 个 (4 src + 3 tests + 1 validation + 3 状态文档 + 6 amendment)" 不准确——把 amendment 6 files 与 R1 implementation files 混算导致前后矛盾。本表按 commit 分组避免歧义。后续 P2-R2 / R6 归档沿用此模式。
+
+### 4.2 P2-R1 implementation/freeze 文件（R1-A → R1-D，不含 amendment）
+
+**新 src 模块**（4 个）:
+
 | 模块 | 行数 | 职责 |
 |---|---|---|
 | `src/pi_agent_core_py/web/knowledge/__init__.py` | 21 | package marker + R1 scope 说明 |
@@ -88,21 +105,29 @@ R1 显式 NOT 实现:
 | `src/pi_agent_core_py/web/knowledge/api.py` | 470 | FastAPI router factories + DTOs + 10 endpoints |
 | **新模块总计** | **~2,580** | |
 
-### Composition root 改动
+**新 test 文件**（3 个，118 tests）:
+
+| 文件 | 测试数 |
+|---|---|
+| `tests/test_knowledge_store.py` | 54 |
+| `tests/test_knowledge_files_and_service.py` | 38 (37 pass + 1 skipped POSIX-only — 见 §8.2) |
+| `tests/test_knowledge_api.py` | 26 |
+
+### 4.3 Composition root 改动（修改文件，非新文件）
 
 | 文件 | 改动 | 行数 |
 |---|---|---|
 | `src/pi_agent_core_py/web/state.py` | WebAppState + 3 字段 (knowledge_service / store / file_store) | +5 |
 | `src/pi_agent_core_py/web/app.py` | create_app 新增 `knowledge_root` + `enable_knowledge_api` 参数；lifespan init+close KnowledgeStore；delete_session 调用 `service.on_session_deleted`；mount knowledge router | +60 / -0 |
+| `src/pi_agent_core_py/web/knowledge/store.py` (R1-C 排序修正) | `list_libraries` / `list_documents` 改用 ROWID 保证插入顺序稳定 | +6 / -4 |
 
-### 测试文件
+### 4.4 状态文档（R1-D freeze 阶段修改）
 
-| 文件 | 测试数 |
+| 文件 | 改动 |
 |---|---|
-| `tests/test_knowledge_store.py` | 54 |
-| `tests/test_knowledge_files_and_service.py` | 38 (37 pass + 1 skipped POSIX-only) |
-| `tests/test_knowledge_api.py` | 26 |
-| **新增测试总计** | **118** |
+| `STATUS.md` | Current phase → P2-R1 Library Foundation FROZEN |
+| `TODO.md` | P2-R1 checkbox → [x] + commit hash refs |
+| `ROADMAP.md` | R1 row → ✅ FROZEN + validation link |
 
 ---
 
@@ -248,6 +273,27 @@ G1 stash 未变化（与 R1 启动前一致）。
 - PDF 页数硬上限（D8，待 R2 marker 集成后实测）
 - marker AGPL 兼容性确认（D6，R2 入口条件）
 
+### 8.2 Windows symlink 测试覆盖缺口（已知平台限制）
+
+R1-B 的 `test_symlink_escape_rejected` 在 POSIX 上 PASS，但在 Windows 上 skipped
+（`@pytest.mark.skipif(os.name == "nt", ...)`，原因：创建 symlink 需管理员权限或
+Developer Mode）。这不阻塞 R1（生产代码的路径 containment 逻辑独立于测试环境能否
+创建 symlink），但 Windows 上的实际防护未在 CI 内验证。
+
+后续 P2-R2 / R6 应至少实现以下之一（**不阻塞 R2 启动**，但建议在 R6 freeze 前完成）：
+
+1. **Windows Developer Mode 下运行 symlink/junction 测试**——CI 配置启用 Developer
+   Mode，重新启用 `test_symlink_escape_rejected` 在 Windows 上的覆盖
+2. **增加无需管理员权限的 junction / reparse-point 测试**——`os.symlink` 在 Windows
+   上对 directory 需要 admin，但 junction（`mklink /J`）不需要，可用 subprocess
+   包装或第三方库创建
+3. **明确 Windows 平台的生产路径检查不依赖测试环境能否创建 symlink**——
+   `KnowledgeFileStore._check_containment` 用 `os.path.realpath` + parent-walk
+   防御，应额外加 unit test 直接用 monkey-patched path 对象验证 containment 逻辑，
+   不依赖真实文件系统创建 symlink
+
+跟踪位置：本节作为 R6 Integration Freeze 的入口检查项之一。
+
 ---
 
 ## 9. R2 入口条件（per amendment-1 §5）
@@ -256,10 +302,37 @@ R2 启动前必须满足：
 
 1. ✅ R1 全部 PASS（本报告 §7）
 2. ✅ R1 commit 已落地
-3. ⛔ **marker AGPL-3.0 license 兼容性确认**（decision D6）—— R2 集成前需法务/用户确认；若不兼容，fallback 到 pypdf（BSD）
-4. ⛔ **R2 启动授权**（用户独立授权）
+3. ⛔ **R2-0 PDF Parser License / Distribution Decision**（前置门）——
+   必须先解决 D6 (marker AGPL-3.0 license 兼容性确认)，**D6 未解决前不得**
+   - 添加 marker 依赖
+   - 修改 `pyproject.toml` 或 lockfile
+   - 复制 marker 源码
+   - 编写与 marker API 强绑定的生产 Pipeline
+   - 视 AGPL 兼容性为已经确认
 
-R2 范围（amendment-1 后）：
+   若最终 marker 不适合项目分发模型，按 P2-R0 §4.1 候选决策改用已批准备选
+   Parser（pypdf, BSD），而不是阻塞整个 R2。
+4. ⛔ **R2 编码授权**（用户独立授权；与 R2-0 解锁可同步或独立）
+
+### 9.1 R2 阶段门状态
+
+```
+P2-R2 PDF → Markdown Pipeline    🟡 CONDITIONALLY APPROVED
+                                    (D6 未解决 = 编码 BLOCKED)
+
+R2-0 PDF Parser License Gate     ✅ APPROVED TO START (docs/audit only)
+R2 Coding (any dep/prod code)    ⛔ BLOCKED UNTIL D6 RESOLVED
+```
+
+### 9.2 D6 未解决前可进行的工作（docs / 设计 / 审计 only）
+
+- 只读 Parser API 审计（marker / pypdf 接口对比，不引入依赖）
+- License / 分发方式 / optional dependency 模式对比
+- PDF fixture 与测试矩阵设计
+- Parser Adapter 接口核实（Protocol 形状冻结）
+- Canonical Markdown 格式 spec 细化（page marker / heading 层级）
+
+### 9.3 R2 范围（amendment-1 后；D6 解决后开始编码）
 
 - marker 集成（或 pypdf fallback）+ Parser Adapter
 - Canonical MD writer（YAML frontmatter + page marker + heading）
