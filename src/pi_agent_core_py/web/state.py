@@ -212,6 +212,11 @@ class WebAppState(BaseModel):
     skill_mutation_lock: Any = None  # asyncio.Lock——在 create_app 内 init
     # P1-C3: MCP mutation lock——覆盖 add/enable/disable/delete server + tool
     mcp_mutation_lock: Any = None
+    # P2-R1: Knowledge subsystem composition (None = disabled).
+    # Service / Store / FileStore 同时存在或同时为 None。
+    knowledge_service: Any = None
+    knowledge_store: Any = None
+    knowledge_file_store: Any = None
 
 
 # ============================================================================

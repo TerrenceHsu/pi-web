@@ -267,6 +267,19 @@ def create_app(
     # True=强制启用（前置条件同 Credential API）
     # False=禁用——不打开 Store、不挂路由、不改 Session 创建
     enable_provider_profiles_api: bool | None = None,
+    # P2-R1: Knowledge Library subsystem root directory.
+    # None = 不启用（默认；保持向后兼容）；传入 Path 时启用：
+    #   - 在 <knowledge_root>/knowledge.db 打开独立 aiosqlite connection
+    #   - <knowledge_root>/libraries/{library_id}/documents/... 物理文件
+    #   - 挂载 Knowledge Library CRUD + Session Binding REST API（仅当
+    #     trusted_host + UI header deps 启用时；否则不挂 router，service
+    #     仍可用于内部 / 测试）
+    knowledge_root: str | Path | None = None,
+    # 显式控制 Knowledge API 是否挂载。
+    # None = auto（仅当 knowledge_root 非 None + trusted_host 启用时挂载）
+    # True = 强制挂载（需 knowledge_root 非 None）
+    # False = 不挂 router，但若 knowledge_root 非 None 仍 init service
+    enable_knowledge_api: bool | None = None,
 ) -> FastAPI:
     """构造一个 FastAPI 实例。
 
@@ -439,6 +452,45 @@ def create_app(
         await _restore_mcp_servers(extension_store)
 
         # ====================================================================
+        # P2-R1: Knowledge Library subsystem composition
+        # 仅在 knowledge_root 非 None 时启用——独立 knowledge.db aiosqlite
+        # connection + 独立文件根目录（P2-R0 §2 + §3 决策 R2 / R5）
+        # ====================================================================
+        knowledge_service = None
+        if knowledge_root is not None:
+            from .knowledge.files import KnowledgeFileStore
+            from .knowledge.service import KnowledgeService
+            from .knowledge.store import KnowledgeStore
+
+            kroot = Path(knowledge_root)
+            await asyncio.to_thread(kroot.mkdir, parents=True, exist_ok=True)
+            k_file_store = KnowledgeFileStore(root=kroot)
+            await asyncio.to_thread(k_file_store.ensure_root)
+            k_store = await KnowledgeStore.open(str(kroot / "knowledge.db"))
+
+            async def _session_exists_for_knowledge(session_id: str) -> bool:
+                if state.session_store is None:
+                    return False
+                try:
+                    sess = await state.session_store.get_session(session_id)
+                except Exception:
+                    return False
+                return sess is not None
+
+            knowledge_service = KnowledgeService(
+                store=k_store,
+                file_store=k_file_store,
+                session_exists=_session_exists_for_knowledge,
+            )
+            state.knowledge_service = knowledge_service
+            state.knowledge_store = k_store
+            state.knowledge_file_store = k_file_store
+        else:
+            state.knowledge_service = None
+            state.knowledge_store = None
+            state.knowledge_file_store = None
+
+        # ====================================================================
         # P1-E1-4A: Credential Runtime Composition Root
         # 仅在文件型 DB 路径 + 显式 / 默认 enable 时启动；独立 connection
         # 与 session/extension store 共享 DB 文件但生命周期独立
@@ -605,6 +657,13 @@ def create_app(
                 await state.extension_store.close()
             except Exception:
                 pass
+        # P2-R1: 关闭 KnowledgeStore（独立 connection）
+        k_store = state.knowledge_store if hasattr(state, "knowledge_store") else None
+        if k_store is not None:
+            try:
+                await k_store.close()
+            except Exception:
+                pass
         # VirtualFileStore 不需要 close（纯文件 IO），保留目录给后续进程用
 
     app = FastAPI(
@@ -715,6 +774,33 @@ def create_app(
                 {"max_bytes": _pc_ws_cfg.max_request_body_bytes},
             ),
         )
+
+    # P2-R1: Knowledge Library REST API（Library CRUD + Document metadata
+    # + Session Binding）. 默认 None = 不启用。显式 knowledge_root + trusted_host
+    # + enable_knowledge_api（或 auto）= 挂载 router，复用 E1 UI/origin deps.
+    if knowledge_root is not None:
+        from .knowledge.api import (
+            build_knowledge_router,
+            build_session_knowledge_router,
+        )
+        from .local_web_security import default_web_security_config as _k_ws
+
+        _k_ws_cfg = _k_ws(
+            extra_hosts=credential_extra_hosts,
+            extra_ui_origins=credential_extra_ui_origins,
+        )
+        _knowledge_api_enabled = (
+            enable_knowledge_api
+            if enable_knowledge_api is not None
+            else _cred_resolved.trusted_host_enabled
+        )
+        if _knowledge_api_enabled:
+            app.include_router(
+                build_knowledge_router(_k_ws_cfg), prefix="/api/knowledge"
+            )
+            app.include_router(
+                build_session_knowledge_router(_k_ws_cfg), prefix="/api/sessions"
+            )
 
     # Flush in list order: each add_middleware does insert(0, ...).
     # After flushing [BodyLimit, TrustedHost] in order:
@@ -2609,6 +2695,17 @@ def create_app(
             return JSONResponse(
                 status_code=404, content={"detail": f"session {sid!r} not found"},
             )
+        # P2-R1: 删除 session 后清理 knowledge library bindings（P2-R0 §7.2 不变量 7）
+        # 只清 binding，不删 library 本身。失败不阻塞 session 删除（记 warning）。
+        k_service = state.knowledge_service if hasattr(state, "knowledge_service") else None
+        if k_service is not None:
+            try:
+                await k_service.on_session_deleted(sid)
+            except Exception as e:
+                state.last_error = (
+                    f"knowledge.on_session_deleted({sid}) failed: "
+                    f"{type(e).__name__}"
+                )
         # 删的是 current session → 自动切到 default（或新建一个）
         if state.current_session_id == sid:
             state.current_session_id = None

@@ -493,12 +493,15 @@ class KnowledgeStore:
         )
 
     async def list_libraries(self) -> list[Library]:
-        """List all libraries ordered by ``created_at`` ascending then ``id``
-        for stable ordering. Returns empty list on fresh DB."""
+        """List all libraries ordered by insertion order (ROWID) for stable
+        ordering. Returns empty list on fresh DB.
+
+        Note: ``created_at`` may collide within the same millisecond across
+        concurrent / rapid inserts, so we cannot rely on it alone. ROWID is
+        SQLite's implicit insertion-order column (monotonic per table)."""
         db = self._require_db()
         async with db.execute(
-            "SELECT * FROM knowledge_libraries "
-            "ORDER BY created_at ASC, id ASC"
+            "SELECT * FROM knowledge_libraries ORDER BY rowid ASC"
         ) as cursor:
             rows = await cursor.fetchall()
         return [_row_to_library(r) for r in rows]
@@ -755,12 +758,12 @@ class KnowledgeStore:
         return await self.get_document(doc_id)
 
     async def list_documents(self, library_id: str) -> list[Document]:
-        """List Documents in a Library, ordered by ``created_at`` then ``id``."""
+        """List Documents in a Library, ordered by insertion order (ROWID)."""
         validate_library_id_or_raise(library_id)
         db = self._require_db()
         async with db.execute(
             "SELECT * FROM knowledge_documents WHERE library_id = ? "
-            "ORDER BY created_at ASC, id ASC",
+            "ORDER BY rowid ASC",
             (library_id,),
         ) as cursor:
             rows = await cursor.fetchall()
