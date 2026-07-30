@@ -45,7 +45,7 @@
 | D3 | Chunk re-embedding 触发策略 | R4+ | 仅在引入 embedding 后才相关；document 重新 ingestion 时如何处理旧 chunk 的 embedding |
 | D4 | 多语言分词 | R1+ | 中文 heading 检测 / CJK 字符级 chunking；R1 看实测质量再决定是否需 jieba |
 | D5 | marker 模型预热策略 | R1 | 首次 upload 触发模型下载（GB 级）；是否启动时预热 / 提示用户 / 提供轻量 parser 选项 |
-| D6 | marker AGPL license 兼容性 | R0 已记录，R1 集成前需法务确认 | 若 AGPL 与项目 MIT 不兼容，降级到 pypdf（BSD）+ heading 正则——这是 contract §4 的 fallback 路径 |
+| D6 | PDF Parser Code, Model, Dependency and Distribution License **`[AMENDED 2026-07-31 — 见 p2-r2-0-pdf-parser-license-gate.md]`** | R0 旧表述"marker AGPL" **判断错误**——marker 2.0.0 代码实际是 Apache-2.0，但模型权重是 modified OpenRAIL-M（$5M revenue/funding cap + 反竞争条款 + 远程限制权），且 surya/torch/transformers 是 hard dep。R2-0 License Gate 选定 **pypdf 6.14.2 (BSD-3-Clause)** 为 R2 MVP parser；marker 与 PyMuPDF 均拒绝（详见 p2-r2-0 §15）。R2 编码已开放 | contract §4.1 + p2-r2-0-pdf-parser-license-gate.md |
 | D7 | Library 容量上限 | R1 | 第一版无显式上限；后续按 `data/knowledge/` 磁盘占用 + chunk 数量评估是否需要 quota |
 | D8 | PDF 页数硬上限 | R1 集成 marker 后实测 | R3 推荐 ≤ 20 页（同步处理 ≤ 30s）；R1 实测后调整 |
 

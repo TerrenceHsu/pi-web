@@ -296,46 +296,30 @@ Developer Mode）。这不阻塞 R1（生产代码的路径 containment 逻辑�
 
 ---
 
-## 9. R2 入口条件（per amendment-1 §5）
+## 9. R2 入口条件（per amendment-1 §5 + R2-0 License Gate）
 
 R2 启动前必须满足：
 
 1. ✅ R1 全部 PASS（本报告 §7）
 2. ✅ R1 commit 已落地
-3. ⛔ **R2-0 PDF Parser License / Distribution Decision**（前置门）——
-   必须先解决 D6 (marker AGPL-3.0 license 兼容性确认)，**D6 未解决前不得**
-   - 添加 marker 依赖
-   - 修改 `pyproject.toml` 或 lockfile
-   - 复制 marker 源码
-   - 编写与 marker API 强绑定的生产 Pipeline
-   - 视 AGPL 兼容性为已经确认
+3. ✅ **R2-0 PDF Parser License / Distribution Gate COMPLETE / FROZEN** — D6 已 resolved：选定 **pypdf 6.14.2 (BSD-3-Clause)** 为 R2 MVP parser；marker 与 PyMuPDF 均被拒绝。详见 [p2-r2-0-pdf-parser-license-gate.md](../../design/p2-r2-0-pdf-parser-license-gate.md)。
+4. ⛔ **R2 编码授权**（用户独立授权；D6 已 resolved 故编码门已开）
 
-   若最终 marker 不适合项目分发模型，按 P2-R0 §4.1 候选决策改用已批准备选
-   Parser（pypdf, BSD），而不是阻塞整个 R2。
-4. ⛔ **R2 编码授权**（用户独立授权；与 R2-0 解锁可同步或独立）
-
-### 9.1 R2 阶段门状态
+### 9.1 R2 阶段门状态（post R2-0）
 
 ```
-P2-R2 PDF → Markdown Pipeline    🟡 CONDITIONALLY APPROVED
-                                    (D6 未解决 = 编码 BLOCKED)
-
-R2-0 PDF Parser License Gate     ✅ APPROVED TO START (docs/audit only)
-R2 Coding (any dep/prod code)    ⛔ BLOCKED UNTIL D6 RESOLVED
+P2-R2-0 PDF Parser License Gate     ✅ COMPLETE / FROZEN
+P2-R2 PDF → Markdown Pipeline       ✅ APPROVED TO START (D6 resolved)
+                                       编码门已开；用户独立授权后可启动 R2-A
 ```
 
-### 9.2 D6 未解决前可进行的工作（docs / 设计 / 审计 only）
+### 9.2 R2 范围（R2-0 后）
 
-- 只读 Parser API 审计（marker / pypdf 接口对比，不引入依赖）
-- License / 分发方式 / optional dependency 模式对比
-- PDF fixture 与测试矩阵设计
-- Parser Adapter 接口核实（Protocol 形状冻结）
-- Canonical Markdown 格式 spec 细化（page marker / heading 层级）
+per `p2-r2-0-pdf-parser-license-gate.md §19.2`：
 
-### 9.3 R2 范围（amendment-1 后；D6 解决后开始编码）
-
-- marker 集成（或 pypdf fallback）+ Parser Adapter
-- Canonical MD writer（YAML frontmatter + page marker + heading）
+- pypdf 集成 via `[project.optional-dependencies] rag = ["pypdf>=6.0,<7"]`
+- `PdfParser` Protocol + `PyPdfParser` Adapter 实现
+- Canonical MD writer（YAML frontmatter + page marker + heading 启发式）
 - heading-aware chunker（max_chars=1200 / overlap=150）
 - Job 状态机实际运行（extract / normalize / chunk / index）
 - 30s 同步阈值 + PDF ≤ 20 页强制限制
@@ -343,3 +327,13 @@ R2 Coding (any dep/prod code)    ⛔ BLOCKED UNTIL D6 RESOLVED
 - 扫描 PDF → `status=needs_ocr` 终态测试
 - PDF upload endpoint + retry endpoint
 - knowledge_chunks 表实际写入（R1 已建表，仅未生产数据）
+
+### 9.3 R2 编码不变量（per `p2-r2-0-pdf-parser-license-gate.md §19`）
+
+```
+External Provider requests = 0
+Model downloads = 0
+OCR = disabled
+Remote LLM = disabled
+pypdf crypto extra = NOT introduced（encrypted PDF → 'encrypted_pdf' 错误码）
+```

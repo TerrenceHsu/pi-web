@@ -36,7 +36,7 @@
 |---|---|---|---|---|
 | **R0 Contract Audit** | 🟡 IN PROGRESS | — | 4 docs + 7 处旧标记解除 | §9 验证 7 条 checklist |
 | **R1 Library Foundation** | ⛔ | R0 | 5 表 DDL + migration + KnowledgeFileStore + Library/Document/Binding metadata Store/Service + Library CRUD REST API + Session Binding REST API + restart 恢复 | 表存在 / migration 幂等 / Session A/B 隔离 / 删除补偿 / 路径安全 / 0 PDF 依赖 |
-| **R2 Ingestion Pipeline** | ⛔ | R1 | marker 集成（或 pypdf fallback）+ Canonical MD writer + heading-aware chunker + Job 状态机 + 30s 阈值同步处理 + PDF upload/retry endpoint | 已知样本 chunk 数稳定 / Job 状态全路径 / 30s 超时分支 / 数字 PDF→MD smoke / 扫描 PDF→needs_ocr / marker AGPL 兼容性确认 |
+| **R2 Ingestion Pipeline** | 🟡 CONDITIONALLY APPROVED → ✅ APPROVED TO START (D6 resolved @ R2-0) | R1 | **pypdf** (BSD-3-Clause) + Canonical MD writer + heading-aware chunker + Job 状态机 + 30s 阈值同步处理 + PDF upload/retry endpoint | 已知样本 chunk 数稳定 / Job 状态全路径 / 30s 超时分支 / 数字 PDF→MD smoke / 扫描 PDF→needs_ocr / D6 已 resolved（per p2-r2-0-pdf-parser-license-gate.md）|
 | **R3 Retrieval** | ⛔ | R2 | `search_knowledge` tool + FTS5 + top_k 排序 + 引用 evidence | query 召回 / tool 不暴露 session_id（AST 校验） |
 | **R4 Session Library ACL** | ⛔ | R3 | session_knowledge_libraries CRUD + 后端 allowlist 过滤 | 未授权 library 不出现 / A/B session 越权测试 |
 | **R5 Web API + UI** | ⛔ | R4 | library / document / search REST + 前端管理面板 | E2E upload→ingest→search 全链路 |
@@ -249,12 +249,23 @@ class KnowledgeFileStore:
 
 ## 4. PDF → Canonical Markdown 边界
 
-### 4.1 Parser 选型（decision R1）
+### 4.1 Parser 选型（[AMENDED 2026-07-31 — 见 p2-r2-0-pdf-parser-license-gate.md]）
 
-**主 parser**：`marker`（datalab.so/marker，AGPL-3.0）
-**Fallback parser**（R1 集成时若 marker 不可用）：`pypdf`（BSD）
+**R2 MVP parser**：`pypdf`（BSD-3-Clause，6.14.2 current stable）
 
-R0 仅冻结选型，R1 集成时必须先解决 marker AGPL 与项目 MIT 的兼容性（decision D6）——若不兼容，降级到 pypdf + heading 正则。
+> **R0 原表述已修正**：旧表述"主 parser = marker (AGPL-3.0), fallback = pypdf"基于错误事实判断——marker 2.0.0 代码实际是 **Apache-2.0**（不是 AGPL），但其**模型权重** modified OpenRAIL-M 含 $5M revenue/funding cap + 反竞争条款 + 远程限制权，且 surya/torch/transformers 是 hard dependency（无法满足 R2 no-model 边界）。
+>
+> R2-0 License Gate（per `p2-r2-0-pdf-parser-license-gate.md`）已选定 **pypdf 6.14.2** 为 R2 MVP，marker 与 PyMuPDF 均被拒绝（详见 `p2-r2-0-pdf-parser-license-gate.md §15`）。D6 已重命名为 "PDF Parser Code, Model, Dependency and Distribution License" 并 RESOLVED。
+
+**Parser Adapter**（per `p2-r2-0-pdf-parser-license-gate.md §16`）：业务层通过 `PdfParser` Protocol 访问，不直接 import pypdf——R3+ 若重新评估 marker / PyMuPDF / 其他候选，新增 Adapter 实现即可，不改业务层。
+
+pypdf 已知技术限制作为 R2 Known Limitations（per `p2-r2-0-pdf-parser-license-gate.md §21`）：
+
+- 复杂多栏顺序可能不理想
+- 表格退化为段落文本
+- 标题层级依赖启发式（字号 / 加粗 / 大写）
+- 公式 / 图片不处理
+- 扫描 PDF 进 `needs_ocr` 终态（不自动 OCR）
 
 ### 4.2 marker 配置（数字 PDF only 边界）
 

@@ -213,8 +213,8 @@ P1-E M1 之前的配置后端已 frozen，不再扩展。
 |---|---|---|---|---|
 | **R0 Contract Audit** | ✅ FROZEN | — | 4 docs + 7 处旧标记解除 + amendment-1（R1 范围重划） | [docs/validation/p2-r0/P2_R0_CONTRACT_AUDIT.md](docs/validation/p2-r0/P2_R0_CONTRACT_AUDIT.md) 7 条 checklist |
 | **R1 Library Foundation** | ✅ FROZEN | R0 | 5 表 DDL + migration + `KnowledgeFileStore`（atomic write + fsync + path containment）+ Library/Document/Binding metadata Store/Service + Library CRUD REST API + Session Binding REST API + restart 恢复 | 表存在 / migration 幂等 / Session A/B 隔离 / 删除补偿 / 路径安全 / **0 PDF 依赖**（详见 [docs/validation/p2-r1/P2_R1_LIBRARY_FOUNDATION.md](docs/validation/p2-r1/P2_R1_LIBRARY_FOUNDATION.md)） |
-| **R2 Ingestion Pipeline** | 🟡 CONDITIONALLY APPROVED | R1 | marker 集成（或 pypdf fallback）+ Canonical MD writer + heading-aware chunker + Job 状态机 + 30s 阈值同步处理 + PDF upload/retry endpoint | 已知样本 chunk 数稳定 / Job 状态全路径 / 30s 超时分支 / 数字 PDF→MD smoke / 扫描 PDF→needs_ocr / marker AGPL 兼容性确认（D6） |
-| **R2-0 PDF Parser License Gate** | ✅ APPROVED TO START (docs/audit only) | R1 | docs-only：Parser API 审计 / License 分发方式对比 / PDF fixture 设计 / Parser Adapter 接口核实 | D6 兼容性结论（marker OR pypdf fallback）|
+| **R2-0 PDF Parser License Gate** | ✅ FROZEN | R1 | docs-only：选定 pypdf 6.14.2 (BSD-3-Clause) 为 R2 MVP；marker (OpenRAIL-M 模型) + PyMuPDF (AGPL) 拒绝；冻结 PdfParser Adapter 接口 | [p2-r2-0-pdf-parser-license-gate.md](docs/design/p2-r2-0-pdf-parser-license-gate.md) 29/29 exit gate PASS |
+| **R2 Ingestion Pipeline** | ✅ APPROVED TO START (D6 resolved) | R1 | **pypdf** (BSD-3-Clause, via `[rag]` extra) + Canonical MD writer + heading-aware chunker + Job 状态机 + 30s 阈值同步处理 + PDF upload/retry endpoint | 已知样本 chunk 数稳定 / Job 状态全路径 / 30s 超时分支 / 数字 PDF→MD smoke / 扫描 PDF→needs_ocr |
 | **R3 Retrieval** | ⛔ BLOCKED BY R2 | R2 | `search_knowledge` tool + FTS5 + top_k 排序 + 引用 evidence | query 召回 / tool 不暴露 session_id（AST 校验） |
 | **R4 Session Library ACL** | ⛔ BLOCKED BY R3 | R3 | `session_knowledge_libraries` CRUD + 后端 allowlist 过滤 | 未授权 library 不出现 / A/B session 越权测试 |
 | **R5 Web API + UI** | ⛔ BLOCKED BY R4 | R4 | library / document / search REST + 前端管理面板 | E2E upload→ingest→search 全链路 |
