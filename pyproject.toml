@@ -53,6 +53,14 @@ web = [
     # InMemorySecretStore（CI / E2E / Docker）。永不 fallback 到 SQLite 明文。
     "keyring>=25",
 ]
+# P2-R2-0 License Gate 选定 pypdf 为 R2 MVP PDF Parser。
+# 范围 pypdf>=6.0,<7（Audited baseline 6.14.2，BSD-3-Clause）。
+# 纯 Python、0 直接依赖、无模型、无 OCR、无外部网络——满足 R2 编码不变量
+# （详见 docs/design/p2-r2-0-pdf-parser-license-gate.md §17 / §19）。
+# 不引入 [crypto] extra（encrypted PDF → 'encrypted_pdf' 错误码）。
+rag = [
+    "pypdf>=6.0,<7",
+]
 
 [build-system]
 requires = ["hatchling"]
