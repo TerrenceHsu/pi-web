@@ -11,7 +11,7 @@
 
 | # | 决策 | 冻结内容 | 落地章节 |
 |---|---|---|---|
-| F1 | 数据模型 | 7 张表：`knowledge_libraries` / `knowledge_documents` / `knowledge_ingestion_jobs` / `knowledge_chunks` / `session_knowledge_libraries`；字段名与 [p2-r0-rag-contract.md §2](p2-r0-rag-contract.md) 完全一致 | contract §2 |
+| F1 | 数据模型 | 7 张表：`knowledge_libraries` / `knowledge_documents` / `knowledge_ingestion_jobs` / `knowledge_chunks` / `session_knowledge_libraries`；字段名与 [p2-r0-rag-contract.md §2](p2-r0-rag-contract.md) 完全一致 **`[AMENDED 2026-07-30 — 见 amendment-1.md]`**（表结构不变；仅 R1/R2 范围归属重划） | contract §2 |
 | F2 | 文件系统布局 | `data/knowledge/libraries/{library_id}/documents/{document_id}/{source.pdf, document.md, manifest.json}`；独立 `KnowledgeFileStore`，**不复用** `uploads/{session_id}/` | contract §3 |
 | F3 | PDF 边界 | 仅支持数字 PDF；扫描 PDF 进 `status=needs_ocr`；不静默生成空 Markdown；不支持表单/批注/嵌入对象/复杂版面完美还原/图片公式表格视觉重建 | contract §4 |
 | F4 | Canonical Markdown | YAML frontmatter（document_id / library_id / source_name / source_sha256 / parser_version / page_count）+ `<!-- page:N -->` page marker + heading 层级；保留页码映射 / heading path / 原文顺序 | contract §4 |
@@ -61,6 +61,34 @@
 4. 跑回归测试确认前置 milestone 未受影响
 
 §3 推迟项可在对应 milestone 实施时直接冻结——更新本表 + contract 对应章节即可，无需 amendment。
+
+---
+
+## 6. Amendment 历史
+
+### Amendment 1（2026-07-30）— R1 范围重划：marker 集成推迟到 R2
+
+**触发**：用户 P2-R1 启动指令 §1 / §5 / §27 / §28 与本表 §1 F1 落地章节（contract §1.3 R1 行 + §7 R1 入口条件）在 R1 是否含 PDF parser 上直接冲突。
+
+**变更内容**：
+
+- R1 范围缩窄为 "Library Foundation only"（5 表 DDL + KnowledgeFileStore + Library/Document/Binding metadata Store/Service + Library CRUD API + Session Binding API + restart 恢复）
+- marker 集成 / 数字 PDF→MD smoke / 扫描 PDF→needs_ocr 测试 / PDF upload endpoint / retry endpoint 从 R1 推迟到 R2
+- marker AGPL 兼容性入口条件从 R1 移到 R2
+- R2 范围对应扩展，吸收原 R1 的 PDF 相关项
+
+**不变的已冻结决策**：F1-F8 表结构 / R1 marker 选型 / R2 独立 knowledge.db / R3 30s 阈值 / R4 chunk 参数 / R5 KnowledgeFileStore——全部保持不变。
+
+**同步修改的文档**：
+
+- 新增 `docs/design/p2-r0-amendment-1.md`
+- `p2-r0-rag-contract.md` §1.3 表 R1/R2 行 + §12 R1 入口条件（新章）
+- `p2-r0-decisions-log.md` §1 F1 行加 `[AMENDED]` 标注 + 本节
+- `docs/validation/p2-r0/P2_R0_CONTRACT_AUDIT.md` §7 R1 范围
+- `ROADMAP.md` 行 215 (R1) + 行 216 (R2)
+- `TODO.md` P2-R 段
+
+**回归验证**：R0 已 PASS 的 7 条 checklist 在 amendment 后仍 PASS（详见 amendment-1.md §4）。
 
 ---
 

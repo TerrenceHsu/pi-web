@@ -211,9 +211,9 @@ P1-E M1 之前的配置后端已 frozen，不再扩展。
 
 | Milestone | 状态 | 依赖 | 产出 | 验证 |
 |---|---|---|---|---|
-| **R0 Contract Audit** | 🟡 IN PROGRESS | — | 4 docs + 7 处旧标记解除 | [docs/validation/p2-r0/P2_R0_CONTRACT_AUDIT.md](docs/validation/p2-r0/P2_R0_CONTRACT_AUDIT.md) 7 条 checklist |
-| **R1 Schema + Store** | ⛔ BLOCKED BY R0 | R0 | 5 表 DDL + migration + `KnowledgeFileStore` + marker 集成（含 AGPL 兼容性确认） | 表存在 / migration 幂等 / 数字 PDF→MD smoke / 扫描 PDF→needs_ocr |
-| **R2 Ingestion Pipeline** | ⛔ BLOCKED BY R1 | R1 | Canonical MD writer + heading-aware chunker + Job 状态机 + 30s 阈值同步处理 | 已知样本 chunk 数稳定 / Job 状态全路径 / 30s 超时分支 |
+| **R0 Contract Audit** | ✅ FROZEN | — | 4 docs + 7 处旧标记解除 + amendment-1（R1 范围重划） | [docs/validation/p2-r0/P2_R0_CONTRACT_AUDIT.md](docs/validation/p2-r0/P2_R0_CONTRACT_AUDIT.md) 7 条 checklist |
+| **R1 Library Foundation** | ⛔ BLOCKED BY R0 | R0 | 5 表 DDL + migration + `KnowledgeFileStore`（atomic write + fsync + path containment）+ Library/Document/Binding metadata Store/Service + Library CRUD REST API + Session Binding REST API + restart 恢复 | 表存在 / migration 幂等 / Session A/B 隔离 / 删除补偿 / 路径安全 / **0 PDF 依赖** |
+| **R2 Ingestion Pipeline** | ⛔ BLOCKED BY R1 | R1 | marker 集成（或 pypdf fallback）+ Canonical MD writer + heading-aware chunker + Job 状态机 + 30s 阈值同步处理 + PDF upload/retry endpoint | 已知样本 chunk 数稳定 / Job 状态全路径 / 30s 超时分支 / 数字 PDF→MD smoke / 扫描 PDF→needs_ocr / marker AGPL 兼容性确认 |
 | **R3 Retrieval** | ⛔ BLOCKED BY R2 | R2 | `search_knowledge` tool + FTS5 + top_k 排序 + 引用 evidence | query 召回 / tool 不暴露 session_id（AST 校验） |
 | **R4 Session Library ACL** | ⛔ BLOCKED BY R3 | R3 | `session_knowledge_libraries` CRUD + 后端 allowlist 过滤 | 未授权 library 不出现 / A/B session 越权测试 |
 | **R5 Web API + UI** | ⛔ BLOCKED BY R4 | R4 | library / document / search REST + 前端管理面板 | E2E upload→ingest→search 全链路 |
@@ -221,7 +221,7 @@ P1-E M1 之前的配置后端已 frozen，不再扩展。
 
 **关键冻结决策**（详见 decisions-log）：
 
-- **PDF parser = marker**（AGPL-3.0；force_ocr=False 保持数字 PDF only 边界；R1 集成前需法务确认 license 兼容性，fallback = pypdf）
+- **PDF parser = marker**（AGPL-3.0；force_ocr=False 保持数字 PDF only 边界；**R2** 集成前需法务确认 license 兼容性，fallback = pypdf）—— **[AMENDED 2026-07-30]** 从 R1 推迟到 R2，详见 [amendment-1](docs/design/p2-r0-amendment-1.md)
 - **SQLite = 独立 `knowledge.db`** + 独立 aiosqlite 连接；library_id 作逻辑外键
 - **第一版同步处理** upload，30s 阈值 + PDF ≤ 20 页强制限制；R2 引入 BackgroundTask 时不改 schema
 - **Chunk 默认 max_chars=1200 / overlap=150**，heading-aware 切分

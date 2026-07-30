@@ -240,24 +240,32 @@ git show ee62732:ROADMAP.md | sed -n '270,272p'
 
 ---
 
-## 7. P2-R1 入口条件
+## 7. P2-R1 入口条件（[AMENDED 2026-07-30]）
 
 R1 启动前必须满足的硬条件：
 
 1. ✅ R0 全部 7 条 checklist PASS（本报告 §5）
 2. ✅ R0 commit 已落地（不在 plan mode / 工作树未提交）
-3. ⛔ **marker AGPL-3.0 与项目 MIT license 兼容性确认**（decision D6）—— R1 集成前需法务/用户确认；若不兼容，fallback 到 pypdf（BSD）
+3. ✅ **amendment-1 已落地**（docs-only commit；详见 [p2-r0-amendment-1.md](../../design/p2-r0-amendment-1.md)）
 4. ⛔ **R1 启动授权**（用户独立授权，R0 不自动启动 R1）
 
-R1 范围（详见 ROADMAP §P2-R / contract §1.3）：
+R1 范围（amendment 后，详见 ROADMAP §P2-R / contract §1.3 + §12）：
 
 - 5 张表 DDL + migration（独立 `knowledge.db`）
-- `KnowledgeFileStore`（含 atomic write + fsync）
-- `marker` 集成（或 pypdf fallback）
-- 数字 PDF → Canonical MD smoke test
-- 扫描 PDF → `status=needs_ocr` 终态测试
+- `KnowledgeFileStore`（含 atomic write + fsync + path containment + symlink 防护）
+- Library 元数据 Store / Service / CRUD API
+- Document 元数据 Store / Service（**仅 metadata**，**不**含 PDF 解析）
+- Session Library Binding Store / Service / API
+- startup schema 初始化 + restart 恢复
 
-**R1 显式不包含**：heading-aware chunker / FTS5 / `search_knowledge` tool / Session binding / Web API（这些进 R2-R5）。
+**R1 显式不包含**（推到 R2-R5）：
+
+- **marker 集成 / PDF parser**（推到 R2，原 R1 入口条件 "marker AGPL 兼容性确认" 同步移到 R2）
+- 数字 PDF → Canonical MD smoke（推到 R2）
+- 扫描 PDF → `status=needs_ocr` 终态测试（推到 R2）
+- heading-aware chunker / FTS5 / `search_knowledge` tool / 前端 UI（R3-R5）
+
+**marker AGPL-3.0 license 兼容性确认**：原 R1 入口条件，amendment 后移到 R2 入口条件（R2 集成 marker 前需法务确认；若不兼容 fallback 到 pypdf，详见 contract §4.1）。
 
 ---
 

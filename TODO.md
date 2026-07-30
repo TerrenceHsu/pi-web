@@ -184,7 +184,10 @@ M3 是 docs-only 归档阶段，未自动执行上述任一动作。
 
 路线 Pivot（2026-07-27）：P2-R 系列取代原 P2 候选成为下一阶段主线。详见 [ROADMAP §P2-R](ROADMAP.md)。
 
-- [ ] **P2-R0 Contract Audit**（docs-only）—— 解除 7 处旧 deferred / out-of-scope 标记；冻结数据模型 / 目录布局 / PDF 边界 / Chunk 格式 / Tool 接口 / Session ACL / 同步策略；产出 4 份 docs。基线 commit `ee62732`。
+- [x] **P2-R0 Contract Audit**（docs-only）—— 解除 7 处旧 deferred / out-of-scope 标记；冻结数据模型 / 目录布局 / PDF 边界 / Chunk 格式 / Tool 接口 / Session ACL / 同步策略；产出 4 份 docs。FROZEN @ `b32e4b4`。
+- [x] **P2-R0 Amendment 1**（docs-only）—— R1 范围重划：marker 集成 / PDF→MD smoke / needs_ocr 测试从 R1 推迟到 R2；R1 缩窄为 Library Foundation only。详见 [docs/design/p2-r0-amendment-1.md](docs/design/p2-r0-amendment-1.md)。
+- [ ] **P2-R1 Library Foundation** —— 5 表 DDL + migration（独立 knowledge.db）+ KnowledgeFileStore + Library/Document/Binding metadata Store/Service + Library CRUD API + Session Binding API + restart 恢复。**显式不含** PDF parser（推到 R2）。
+- [ ] **P2-R2 Ingestion Pipeline** —— marker 集成（或 pypdf fallback）+ Canonical MD writer + heading-aware chunker + Job 状态机 + 30s 阈值 + PDF upload/retry endpoint + marker AGPL 兼容性确认。BLOCKED BY R1。
 
 ## Explicitly out of scope (long-term)
 

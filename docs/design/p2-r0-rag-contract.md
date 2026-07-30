@@ -35,12 +35,14 @@
 | Milestone | 状态 | 依赖 | 产出 | 验证 |
 |---|---|---|---|---|
 | **R0 Contract Audit** | 🟡 IN PROGRESS | — | 4 docs + 7 处旧标记解除 | §9 验证 7 条 checklist |
-| **R1 Schema + Store** | ⛔ | R0 | 7 表 DDL + migration + KnowledgeFileStore + marker 集成 | 表存在 / migration 幂等 / 数字 PDF→MD smoke / 扫描 PDF→needs_ocr |
-| **R2 Ingestion Pipeline** | ⛔ | R1 | Canonical MD writer + heading-aware chunker + Job 状态机 + 30s 阈值同步处理 | 已知样本 chunk 数稳定 / Job 状态全路径 / 30s 超时分支 |
+| **R1 Library Foundation** | ⛔ | R0 | 5 表 DDL + migration + KnowledgeFileStore + Library/Document/Binding metadata Store/Service + Library CRUD REST API + Session Binding REST API + restart 恢复 | 表存在 / migration 幂等 / Session A/B 隔离 / 删除补偿 / 路径安全 / 0 PDF 依赖 |
+| **R2 Ingestion Pipeline** | ⛔ | R1 | marker 集成（或 pypdf fallback）+ Canonical MD writer + heading-aware chunker + Job 状态机 + 30s 阈值同步处理 + PDF upload/retry endpoint | 已知样本 chunk 数稳定 / Job 状态全路径 / 30s 超时分支 / 数字 PDF→MD smoke / 扫描 PDF→needs_ocr / marker AGPL 兼容性确认 |
 | **R3 Retrieval** | ⛔ | R2 | `search_knowledge` tool + FTS5 + top_k 排序 + 引用 evidence | query 召回 / tool 不暴露 session_id（AST 校验） |
 | **R4 Session Library ACL** | ⛔ | R3 | session_knowledge_libraries CRUD + 后端 allowlist 过滤 | 未授权 library 不出现 / A/B session 越权测试 |
 | **R5 Web API + UI** | ⛔ | R4 | library / document / search REST + 前端管理面板 | E2E upload→ingest→search 全链路 |
 | **R6 Freeze + Validation** | ⛔ | R5 | validation report + security freeze + tag `v0.0.XX-knowledge-rag` | 全 pytest + E2E + ruff + 0 Core Runtime 回归 |
+
+> **[AMENDED 2026-07-30]** R1 范围已重划——marker 集成 / 数字 PDF→MD smoke / 扫描 PDF→needs_ocr 测试从 R1 推迟到 R2。详见 [p2-r0-amendment-1.md](p2-r0-amendment-1.md)。
 
 ---
 
@@ -569,3 +571,30 @@ P2-R0 是 docs-only milestone，按以下顺序一次完成：
 - ✅ 1 个新 commit（仅 docs/）
 - ✅ P2-R1 在 ROADMAP 中标 ⚪ PLANNED，等用户授权启动
 - ⛔ 不写生产代码、不引入依赖、不动 src/、不动 git tag / branch、不 merge / push
+
+---
+
+## 12. R1 入口条件（[AMENDED 2026-07-30]）
+
+R1 启动前必须满足的硬条件：
+
+1. ✅ R0 全部 7 条 checklist PASS（[validation 报告 §5](../validation/p2-r0/P2_R0_CONTRACT_AUDIT.md)）
+2. ✅ R0 commit 已落地（不在 plan mode / 工作树未提交）
+3. ✅ **amendment-1 已落地**（docs-only commit；详见 [p2-r0-amendment-1.md](p2-r0-amendment-1.md)）
+4. ⛔ **R1 启动授权**（用户独立授权，R0 不自动启动 R1）
+
+R1 范围（amendment 后，详见 §1.3 表 + ROADMAP §P2-R）：
+
+- 5 张表 DDL + migration（独立 `knowledge.db`）
+- `KnowledgeFileStore`（atomic write + fsync + path containment + symlink 防护）
+- Library 元数据 Store / Service / CRUD API
+- Document 元数据 Store / Service（**仅 metadata**，不含 PDF 解析）
+- Session Library Binding Store / Service / API
+- startup schema 初始化 + restart 恢复
+
+**R1 显式不包含**（推到 R2-R5）：
+
+- **marker 集成 / PDF parser**（推到 R2，原 R1 入口条件 "marker AGPL 兼容性确认" 同步移到 R2）
+- 数字 PDF → Canonical MD smoke（推到 R2）
+- 扫描 PDF → `status=needs_ocr` 终态测试（推到 R2）
+- heading-aware chunker / FTS5 / `search_knowledge` tool / 前端 UI（R3-R5）
