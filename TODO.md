@@ -186,7 +186,7 @@ M3 是 docs-only 归档阶段，未自动执行上述任一动作。
 
 - [x] **P2-R0 Contract Audit**（docs-only）—— 解除 7 处旧 deferred / out-of-scope 标记；冻结数据模型 / 目录布局 / PDF 边界 / Chunk 格式 / Tool 接口 / Session ACL / 同步策略；产出 4 份 docs。FROZEN @ `b32e4b4`。
 - [x] **P2-R0 Amendment 1**（docs-only）—— R1 范围重划：marker 集成 / PDF→MD smoke / needs_ocr 测试从 R1 推迟到 R2；R1 缩窄为 Library Foundation only。详见 [docs/design/p2-r0-amendment-1.md](docs/design/p2-r0-amendment-1.md)。
-- [ ] **P2-R1 Library Foundation** —— 5 表 DDL + migration（独立 knowledge.db）+ KnowledgeFileStore + Library/Document/Binding metadata Store/Service + Library CRUD API + Session Binding API + restart 恢复。**显式不含** PDF parser（推到 R2）。
+- [x] **P2-R1 Library Foundation** —— 5 表 DDL + migration（独立 knowledge.db）+ KnowledgeFileStore + Library/Document/Binding metadata Store/Service + Library CRUD API + Session Binding API + restart 恢复。FROZEN @ `0973b79`（含 R1-A `4397c3f` + R1-B `1e764e9` + R1-C `0973b79` + R1-D validation docs）。**显式不含** PDF parser（推到 R2）。2702 backend tests + 267 frontend tests + 0 PDF 依赖 + 0 回归。详见 [docs/validation/p2-r1/P2_R1_LIBRARY_FOUNDATION.md](docs/validation/p2-r1/P2_R1_LIBRARY_FOUNDATION.md)。
 - [ ] **P2-R2 Ingestion Pipeline** —— marker 集成（或 pypdf fallback）+ Canonical MD writer + heading-aware chunker + Job 状态机 + 30s 阈值 + PDF upload/retry endpoint + marker AGPL 兼容性确认。BLOCKED BY R1。
 
 ## Explicitly out of scope (long-term)

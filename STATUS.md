@@ -15,7 +15,7 @@
 | **Backend Foundation HEAD** | `cad7ca7` — feat(web): bind default provider profile on session creation（P1-E2 Backend Foundation ✅ FROZEN @ 3 commits） |
 | **M1 Runtime HEAD** | `8b0fb13` — docs: reconcile P1-E M1 runtime implementation record（M1-1 ~ M1-7 ✅ COMPLETE / FROZEN） |
 | **M2 Frontend Switching HEAD** | `f9dfc1c` — docs: archive P1-E M2 integration validation（M2-0 ~ M2-4 ✅ COMPLETE / FROZEN；含 M2-F1 hotfix） |
-| **Current phase** | P1-E Multi-Provider Switching — ✅ COMPLETE / FROZEN（M1 + M2 + M3 Unified Freeze；等待用户授权 merge / tag / push） |
+| **Current phase** | P2-R1 Library Foundation — ✅ COMPLETE / FROZEN（5 表 schema + KnowledgeFileStore + Service + Library CRUD + Session Binding API + 0 PDF 依赖；等待用户授权 merge / tag / push） |
 
 > P1-D2 Regenerate 已冻结但未打 tag——已通过 P1-E1 合并到下一 release `v0.0.27-secure-credentials`。
 

@@ -212,7 +212,7 @@ P1-E M1 之前的配置后端已 frozen，不再扩展。
 | Milestone | 状态 | 依赖 | 产出 | 验证 |
 |---|---|---|---|---|
 | **R0 Contract Audit** | ✅ FROZEN | — | 4 docs + 7 处旧标记解除 + amendment-1（R1 范围重划） | [docs/validation/p2-r0/P2_R0_CONTRACT_AUDIT.md](docs/validation/p2-r0/P2_R0_CONTRACT_AUDIT.md) 7 条 checklist |
-| **R1 Library Foundation** | ⛔ BLOCKED BY R0 | R0 | 5 表 DDL + migration + `KnowledgeFileStore`（atomic write + fsync + path containment）+ Library/Document/Binding metadata Store/Service + Library CRUD REST API + Session Binding REST API + restart 恢复 | 表存在 / migration 幂等 / Session A/B 隔离 / 删除补偿 / 路径安全 / **0 PDF 依赖** |
+| **R1 Library Foundation** | ✅ FROZEN | R0 | 5 表 DDL + migration + `KnowledgeFileStore`（atomic write + fsync + path containment）+ Library/Document/Binding metadata Store/Service + Library CRUD REST API + Session Binding REST API + restart 恢复 | 表存在 / migration 幂等 / Session A/B 隔离 / 删除补偿 / 路径安全 / **0 PDF 依赖**（详见 [docs/validation/p2-r1/P2_R1_LIBRARY_FOUNDATION.md](docs/validation/p2-r1/P2_R1_LIBRARY_FOUNDATION.md)） |
 | **R2 Ingestion Pipeline** | ⛔ BLOCKED BY R1 | R1 | marker 集成（或 pypdf fallback）+ Canonical MD writer + heading-aware chunker + Job 状态机 + 30s 阈值同步处理 + PDF upload/retry endpoint | 已知样本 chunk 数稳定 / Job 状态全路径 / 30s 超时分支 / 数字 PDF→MD smoke / 扫描 PDF→needs_ocr / marker AGPL 兼容性确认 |
 | **R3 Retrieval** | ⛔ BLOCKED BY R2 | R2 | `search_knowledge` tool + FTS5 + top_k 排序 + 引用 evidence | query 召回 / tool 不暴露 session_id（AST 校验） |
 | **R4 Session Library ACL** | ⛔ BLOCKED BY R3 | R3 | `session_knowledge_libraries` CRUD + 后端 allowlist 过滤 | 未授权 library 不出现 / A/B session 越权测试 |
