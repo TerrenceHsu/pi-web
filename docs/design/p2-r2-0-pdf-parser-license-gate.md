@@ -22,7 +22,12 @@ D6 PDF Parser Code, Model, Dependency and Distribution License
 ✅ RESOLVED
 
 Selected Parser
-✅ pypdf @ >=6.0,<7 (current PyPI stable: 6.14.2, BSD-3-Clause)
+✅ pypdf
+   Allowed dependency range:  pypdf>=6.0,<7
+   Audited implementation baseline: pypdf 6.14.2 (current PyPI stable @ 2026-07-31)
+   SPDX:                       BSD-3-Clause
+   R2 实现 + 测试报告必须记录实际解析到的安装版本
+   (见 §17.1 "版本范围 vs 严格 pin" 与 §20 升级规则)
 
 P2-R2 PDF → Markdown Coding
 ✅ APPROVED TO START (D6 resolved; encoding gate open)
@@ -124,6 +129,42 @@ per startup directive §6，区分 8 种分发模式：
 **未来可能**：Case 4 (PyPI) / Case 5 (desktop) / Case 6 (Docker)——CLAUDE.md / README 反复强调 "Local-only development UI"、"DO NOT expose publicly"，所以 **Case 7 (SaaS) 显式排除**。Case 8 (proprietary) 不可预期但 license ambiguity（无 LICENSE 文件）让此路径仍有理论可能。
 
 **结论**：项目当前 source-distributed MIT；**未来分发模式未确定**（可能 PyPI / 可能 desktop / 可能 Docker），但 **SaaS 明确不做**。License Gate 必须保守——选择**对商业 / Docker / PyPI / desktop 分发都不冲突**的依赖。
+
+### 3.3 LICENSE 文件发布门（per 阶段验收反馈）
+
+仓库根**无 LICENSE 文件**（仅 pyproject.toml + README 声明 MIT）——这不阻塞 R2-0 决策
+（pypdf 选择基于 BSD-3-Clause，与项目声明 MIT 兼容），但作为**发布门**记录：
+
+| 分发场景 | LICENSE 缺失的影响 | 状态 |
+|---|---|---|
+| Local development | 非阻塞 | ✅ 可继续 |
+| Internal / local installation | 非阻塞 | ✅ 可继续 |
+| Public source distribution（公开 git repo） | **发布前必须解决**（无 LICENSE = 默认 "All Rights Reserved"，下游无法合规使用） | ⛔ RELEASE GATE |
+| PyPI wheel/sdist | **发布前必须解决**（PyPI metadata 期望 license 完整） | ⛔ RELEASE GATE |
+| Docker image distribution | **发布前必须解决** | ⛔ RELEASE GATE |
+| Desktop application | **发布前必须解决** | ⛔ RELEASE GATE |
+
+**R2-0 边界**：
+
+- ❌ R2-0 / R2 不**自动创建** LICENSE 文件（需用户明确授权）
+- ❌ R2-0 / R2 不**修改**项目 license 声明
+- ✅ R2-0 / R2 可继续推进编码（LICENSE 缺失对本地 dev 非阻塞）
+- ⛔ 任何 public 分发动作（PyPI / Docker Hub / GitHub public release）前，**必须**先解决 LICENSE 文件
+
+**Follow-up 路径**（不在 R2-0 范围）：
+
+- 用户明确授权后，新建 LICENSE 文件（按 MIT 标准正文 + 项目持有者署名）
+- 同步更新 README license 段引用 LICENSE 文件
+- 同步更新 pyproject.toml `license` 字段（如改为 `{ file = "LICENSE" }`）
+
+**何时触发 follow-up**：
+
+1. 用户独立授权 LICENSE 创建（任何 milestone）
+2. 准备首次 public source distribution（如 GitHub public release）
+3. 准备首次 PyPI / Docker / desktop 发布
+4. 准备商业化分发
+
+R2 编码不依赖此项，可并行推进。
 
 ---
 
@@ -605,12 +646,18 @@ Remote LLM = disabled
 ## 14. Selected Parser
 
 ```
-Selected Parser: pypdf
-Version pin:     >=6.0,<7  (current PyPI stable 6.14.2)
-SPDX:            BSD-3-Clause
-Source:          https://github.com/py-pdf/pypdf
-Retrieved at:    2026-07-31
+Selected Parser:                pypdf
+Allowed dependency range:       >=6.0,<7   (写入 pyproject [rag] extra)
+Audited implementation baseline: 6.14.2    (current PyPI stable @ 2026-07-31)
+SPDX:                           BSD-3-Clause
+Source:                         https://github.com/py-pdf/pypdf
+Retrieved at:                   2026-07-31
 ```
+
+> **§17.1 术语澄清**：本报告统一使用 **"Allowed dependency range"** 而非 "Version pin"
+> 描述 `>=6.0,<7`。严格 pin（exact pin）= `pypdf==6.14.2`；本 R2 MVP 选择**版本范围**而非
+> exact pin，目的是允许 patch / minor 升级，但**必须**在 R2 实现 / 测试报告中记录每次
+> 安装实际解析到的版本（详见 §17.1 + §20 升级规则）。
 
 **Decision: A — pypdf MVP**（per startup directive §20）
 
@@ -757,7 +804,7 @@ api.py / service.py
 
 per startup directive §22——**只写入设计文档；R2-0 不修改 pyproject.toml**。
 
-### 17.1 Extra 设计
+### 17.1 Extra 设计 + 版本范围澄清
 
 ```toml
 # pyproject.toml（R2 编码阶段添加，R2-0 不动）
@@ -769,6 +816,23 @@ rag = [
     "pypdf>=6.0,<7",
 ]
 ```
+
+**术语澄清**（per 阶段验收反馈）：
+
+| 术语 | 含义 | 本项目选择 |
+|---|---|---|
+| Allowed dependency range | 版本范围（per PEP 440），允许 patch / minor 升级 | ✅ `pypdf>=6.0,<7` |
+| Audited implementation baseline | License Gate 审计事实绑定的具体版本 | ✅ 6.14.2（2026-07-31 retrieval） |
+| Exact pin | 锁定到具体 build，不允许任何升级 | ❌ `pypdf==6.14.2` 不采用 |
+| Lockfile pin | uv.lock 在某次 `uv sync` 后固定到具体 build hash | ✅ 由 `uv.lock` 维护，与 pyproject 范围正交 |
+
+**关键不变量**：
+
+- License Gate 审计结论绑定 **6.14.2 baseline**，不绑定范围上界/下界
+- pyproject 写范围；uv.lock 在某次同步时固定到具体 build
+- R2 实现报告 / 测试报告必须**记录实际解析到的版本**（从 `importlib.metadata.version("pypdf")` 读，写入 parser_version 字段）
+- 6.x 任何升级 → 必须在 License Gate 文档 §5 / §17.7 更新 retrieval timestamp + actual version
+- 6.x 升级不允许跨范围（>=6.0,<7 是硬上界；7.x 触发 License Gate 重新执行，见 §20）
 
 ### 17.2 Extra 命名
 
@@ -805,13 +869,15 @@ R2 编码阶段：`uv.lock` 添加 `pypdf` + `typing_extensions`（后者项目�
 - 项目 README 不需要额外显示（pypdf 是 indirect dependency via extra）
 - 源码分发：`pyproject.toml` 已声明项目 MIT；pypdf 作为 optional extra 自带 BSD-3-Clause
 
-### 17.8 升级审计规则
+### 17.8 升级审计规则（与 §20 一致；细节见 §20）
 
-per startup directive §22：
+per 阶段验收反馈：
 
-- pypdf minor 升级（6.x → 6.y）→ R2 maintainer 自审 API 兼容
-- pypdf major 升级（6.x → 7.0）→ **重新跑 License Gate**（重新验证 BSD-3-Clause + 依赖图 +PyPI metadata）
-- 任何升级 → 更新 `docs/design/p2-r2-0-pdf-parser-license-gate.md` §5 retrieval timestamp + version
+- **6.x patch / minor upgrade** → R2 maintainer 自审 API 兼容 + **至少重新运行 parser contract 测试 + PDF fixture regression**；更新本文档 §5 retrieval timestamp + actual version
+- **7.x major upgrade** → **重新执行 License Gate**（BSD-3-Clause 再验证 + 依赖图 + PyPI metadata + 模型权重检查若引入）+ API compatibility audit
+- **任何升级** → R2 测试报告记录从 `importlib.metadata.version("pypdf")` 读取的实际版本
+
+详细升级触发矩阵见 §20。
 
 ---
 
@@ -907,25 +973,73 @@ pypdf crypto extra = NOT introduced（encrypted PDF → 'encrypted_pdf' 错误�
 
 ## 20. Upgrade / Reaudit Policy
 
-per startup directive §16.20 + §17 + §22——
+per startup directive §16.20 + §17 + §22 + 阶段验收反馈——
 
-### 20.1 触发重新 License Gate 的条件
+### 20.1 升级触发矩阵
 
-| 触发 | 操作 |
-|---|---|
-| pypdf minor 升级 | R2 maintainer 自审 API 兼容 + 跑现有 R2 测试 |
-| pypdf major 升级 | **重新跑 License Gate**（重新验证 BSD + 依赖 + PyPI metadata） |
-| 项目分发模式变更（加入 Docker / PyPI / desktop） | 重新评估所有 optional extra 的分发影响 |
-| 项目自身 license 变更（如正式加入 LICENSE 文件、relicense） | 重新评估所有依赖兼容性 |
-| 引入新 parser 候选（marker 重审 / PyMuPDF 重审 / 新候选） | **必须**新开 License Gate milestone，不得作为 R3+ 编码的子任务 |
+| 升级类型 | 触发操作 | License Gate 重审? | 测试范围 |
+|---|---|---|---|
+| **6.x patch / minor upgrade**（如 6.14.2 → 6.15.0 / 6.14.3） | R2 maintainer 自审 + **至少重跑 parser contract + fixture regression** | ❌ 不需要 | 全部 R2 PDF fixture 测试 |
+| **7.x major upgrade**（如 6.x → 7.0） | **重新执行 License Gate**（BSD-3-Clause + 依赖图 + PyPI metadata + 模型权重检查）+ API compatibility audit | ✅ 必须 | 全套 R2 测试 + License Gate 25 章 |
+| **PyPI license field 变更**（任何升级触发 SPDX 改变） | 立即重审；若不再是 BSD-3-Clause → 重新 License Gate | ✅ 必须 | 取决于新 license |
+| **requires_dist 增加**（任何升级引入新直接依赖） | 重审新依赖的 license + 模型 + 网络行为 | 视情况 | 新依赖 unit test |
+| **项目分发模式变更**（加入 Docker / PyPI / desktop） | 重新评估所有 optional extra 的分发影响（含 marker/PyMuPDF 是否可重新引入） | 视情况 | 分发场景测试 |
+| **项目自身 license 变更**（如正式加入 LICENSE 文件、relicense） | 重新评估所有依赖兼容性 | 视情况 | 无（docs-only） |
+| **引入新 parser 候选**（marker 重审 / PyMuPDF 重审 / 新候选） | **必须**新开 License Gate milestone，不得作为 R3+ 编码的子任务 | ✅ 必须 | 全新审计 |
 
-### 20.2 重新审计的最小检查项
+### 20.2 6.x patch / minor 升级最小检查清单
+
+```
+1. 跑 R2 全部 PDF fixture regression 测试
+2. 跑 parser contract 测试（PdfParser Protocol 兼容性）
+3. 从 importlib.metadata.version("pypdf") 读取实际版本
+4. 更新本文档 §5 retrieval timestamp + actual version
+5. 更新 docs/licenses/pdf-parser/pypdf.md last_verified date
+6. 在 R2 维护日志记录升级 + 测试结果
+```
+
+**不需要**重新跑 License Gate（前提：6.x 升级未改变 license field / requires_dist）。
+
+### 20.3 7.x major 升级最小检查清单
+
+```
+1. 完成 20.2 的全部步骤
+2. 重新 fetch PyPI license field + requires_dist + classifiers
+3. 重新 fetch GitHub LICENSE（确认仍是 BSD-3-Clause）
+4. 重新审计全部新直接依赖的 license + 模型 + 网络行为
+5. 重新跑 License Gate 25 章（§5-§15）
+6. 更新 §3 项目分发模式审计（若 7.x 改变了分发兼容性）
+7. 更新 §19 R2 编码不变量（若 7.x 引入网络/模型/crypto 行为）
+8. 用户授权后才能合并 7.x 升级
+```
+
+### 20.4 重新审计的最小检查项（适用所有升级）
 
 - PyPI license field（确认 SPDX 未变）
 - GitHub LICENSE（确认与 PyPI 一致）
 - PyPI requires_dist（确认依赖图未引入受限 license）
 - 模型权重 license（若适用）
 - 运行时网络行为（确认无新网络请求）
+
+### 20.5 "升级沿用旧审计结论" 反模式
+
+per 阶段验收反馈：
+
+> 当前选择版本范围没有问题，但 R2 实现和测试报告必须记录实际解析到的安装版本，避免未来 6.x 升级后仍沿用旧审计结论。
+
+**禁止的反模式**：
+
+- ❌ R2 报告写 "审计基于 pypdf 6.14.2"，但实际安装 6.20.0 而不重新验证
+- ❌ License Gate 文档 retrieval timestamp 长期未更新
+- ❌ 升级后不跑 fixture regression
+- ❌ 跨 major 版本升级而不重新跑 License Gate
+
+**正确做法**：
+
+- ✅ R2 测试报告每次 CI run 记录 `importlib.metadata.version("pypdf")` 实际版本
+- ✅ License Gate 文档 §5 / §17.7 retrieval timestamp 每次升级更新
+- ✅ 6.x 升级跑 fixture regression
+- ✅ 7.x 升级重新跑 License Gate
 
 ---
 
@@ -943,7 +1057,10 @@ per startup directive §17 + §19——R2 第一版的明确限制：
 
 ### 21.2 项目元数据限制（与 R2-0 决策不冲突）
 
-- 项目 pyproject 声明 MIT 但仓库根无 LICENSE 文件（§3.1）—— **R2-0 不解决**，作为 follow-up
+- 项目 pyproject 声明 MIT 但仓库根无 LICENSE 文件（§3.1）—— **R2-0 不解决**，作为发布门记录（详见 §3.3）
+- R2 编码可继续推进（LICENSE 缺失对本地 dev 非阻塞）
+- Public source / PyPI / Docker / desktop 分发前**必须**先解决 LICENSE 文件
+- 在用户明确授权前，R2 不自动创建或修改 LICENSE
 
 ### 21.3 Windows symlink 测试覆盖缺口（per R1 archive correction）
 
@@ -1038,6 +1155,8 @@ per startup directive §25 + §31 阻塞规则：
 | 27 | Working tree clean（提交后） | ✅（docs-only commit） |
 | 28 | G1 stash 未变化 | ✅ hash d7240268 不变 |
 | 29 | Production / test / dep / schema / frontend diff = 0 | ✅（docs-only） |
+| 30 | Version pin 术语明确（allowed range vs exact pin vs audited baseline） | ✅（§17.1 术语澄清 + §20 升级矩阵） |
+| 31 | LICENSE 文件缺失记录为发布门（不阻塞 R2 编码） | ✅（§3.3 发布门表） |
 
 **29/29 PASS** ✅
 
@@ -1053,7 +1172,10 @@ D6 PDF Parser Code, Model, Dependency and Distribution License
 ✅ RESOLVED
 
 Selected Parser
-✅ pypdf @ >=6.0,<7 (6.14.2 current stable, BSD-3-Clause)
+✅ pypdf
+   Allowed dependency range:       >=6.0,<7  (写入 pyproject [rag] extra)
+   Audited implementation baseline: 6.14.2   (BSD-3-Clause, @ 2026-07-31)
+   严格 pin（exact pin）未采用；R2 实现记录实际安装版本（§17.1 / §20）
 
 Rejected Candidates
 ⛔ marker-pdf 2.0.0  — MODEL_LICENSE OpenRAIL-M $5M cap + 反竞争 + 远程限制；surya/torch hard dep 违反 no-model

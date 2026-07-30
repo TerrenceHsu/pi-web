@@ -15,7 +15,8 @@
 | **Backend Foundation HEAD** | `cad7ca7` — feat(web): bind default provider profile on session creation（P1-E2 Backend Foundation ✅ FROZEN @ 3 commits） |
 | **M1 Runtime HEAD** | `8b0fb13` — docs: reconcile P1-E M1 runtime implementation record（M1-1 ~ M1-7 ✅ COMPLETE / FROZEN） |
 | **M2 Frontend Switching HEAD** | `f9dfc1c` — docs: archive P1-E M2 integration validation（M2-0 ~ M2-4 ✅ COMPLETE / FROZEN；含 M2-F1 hotfix） |
-| **Current phase** | P2-R2-0 PDF Parser License Gate — ✅ COMPLETE / FROZEN（选定 pypdf 6.14.2 BSD-3-Clause 为 R2 MVP；marker/PyMuPDF 拒绝；D6 RESOLVED）；下一阶段 P2-R2 PDF → Markdown Pipeline ✅ APPROVED TO START（编码门已开，等用户授权 R2-A 启动） |
+| **Current phase** | P2-R2-0 PDF Parser License Gate — ✅ COMPLETE / FROZEN（pypdf 6.14.2 BSD-3-Clause 为 R2 MVP；marker/PyMuPDF 拒绝；D6 RESOLVED）；下一阶段 P2-R2 PDF → Markdown Pipeline ✅ APPROVED TO START（编码门已开，等用户授权 R2-A 启动）|
+| **Open follow-ups (non-blocking)** | (1) 仓库根 LICENSE 文件缺失——非阻塞本地开发，但 public source / PyPI / Docker / desktop 发布门 ⛔（详见 `p2-r2-0-pdf-parser-license-gate.md §3.3`）；(2) pypdf `>=6.0,<7` 为版本范围非严格 pin——R2 测试报告需记录实际安装版本（6.x 升级跑 fixture regression；7.x 升级重跑 License Gate，详见同文档 §17.1 / §20）|
 
 > P1-D2 Regenerate 已冻结但未打 tag——已通过 P1-E1 合并到下一 release `v0.0.27-secure-credentials`。
 
