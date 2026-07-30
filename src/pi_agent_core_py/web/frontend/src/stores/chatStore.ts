@@ -685,6 +685,16 @@ export const useChatStore = defineStore("chat", () => {
     })
 
     // 2. 创建本轮 TurnInfoItem placeholder
+    // 新 turn 开始前扫掉上一轮已终结（done/error）的 turn_info 卡——
+    // 避免多次 sendPrompt 后旧 turn 卡堆叠（finalizeTurnInfo 只改 status 不移除）。
+    // 当前正在 running/queued 的 turn_info 不动（理论上不应出现，但防御）。
+    streamItems.value = streamItems.value.filter(
+      (it: any) =>
+        !(
+          it.kind === "turn_info" &&
+          (it.status === "done" || it.status === "error")
+        ),
+    )
     const turnId = genId("t")
     currentTurnInfoId = turnId
     streamItems.value.push({
