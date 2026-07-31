@@ -176,19 +176,29 @@ class TestBaseImportBoundary:
 
     def test_main_package_imports_without_pypdf(self) -> None:
         """Importing the top-level package must succeed regardless of pypdf
-        availability. Since pypdf is installed in this env, we instead verify
-        by scanning for top-level pypdf imports in non-adapter modules."""
-        # Walk all .py files in src except the pypdf adapter (which is allowed
-        # to lazy-import). At R2-A1 the adapter does not exist yet — so this
-        # assertion verifies zero pypdf imports anywhere in src.
+        availability. Verified by scanning for top-level (module-scope)
+        pypdf imports outside the adapter module.
+
+        The adapter (``pypdf_parser.py``) is allowed to lazy-import pypdf
+        *inside* methods (not at module top level). Any other module that
+        imports pypdf at top level would break base package import when
+        [rag] extra is missing.
+        """
+        # Walk all .py files in src; flag top-level (non-indented) pypdf imports
+        # anywhere except the dedicated adapter module.
         src_root = _REPO_ROOT / "src"
+        adapter_rel = "src/pi_agent_core_py/web/knowledge/pypdf_parser.py"
         offenders: list[str] = []
         for py in src_root.rglob("*.py"):
-            rel = py.relative_to(_REPO_ROOT)
+            rel = str(py.relative_to(_REPO_ROOT)).replace("\\", "/")
+            if rel == adapter_rel:
+                continue
             text = py.read_text(encoding="utf-8", errors="ignore")
-            if re.search(r"^\s*(import pypdf|from pypdf)", text, re.MULTILINE):
-                offenders.append(str(rel))
+            # Match only UNINDENTED import statements (column 0) — these run
+            # at module load time and would crash base import if pypdf missing.
+            if re.search(r"^(import pypdf|from pypdf)", text, re.MULTILINE):
+                offenders.append(rel)
         assert offenders == [], (
-            f"pypdf must only be imported inside the parser adapter module; "
-            f"found top-level imports in: {offenders}"
+            f"pypdf must only be imported (lazily, inside methods) in the "
+            f"adapter module; found module-scope imports in: {offenders}"
         )
