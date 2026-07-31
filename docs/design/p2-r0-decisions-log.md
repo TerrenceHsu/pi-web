@@ -14,7 +14,7 @@
 | F1 | 数据模型 | 7 张表：`knowledge_libraries` / `knowledge_documents` / `knowledge_ingestion_jobs` / `knowledge_chunks` / `session_knowledge_libraries`；字段名与 [p2-r0-rag-contract.md §2](p2-r0-rag-contract.md) 完全一致 **`[AMENDED 2026-07-30 — 见 amendment-1.md]`**（表结构不变；仅 R1/R2 范围归属重划） | contract §2 |
 | F2 | 文件系统布局 | `data/knowledge/libraries/{library_id}/documents/{document_id}/{source.pdf, document.md, manifest.json}`；独立 `KnowledgeFileStore`，**不复用** `uploads/{session_id}/` | contract §3 |
 | F3 | PDF 边界 | 仅支持数字 PDF；扫描 PDF 进 `status=needs_ocr`；不静默生成空 Markdown；不支持表单/批注/嵌入对象/复杂版面完美还原/图片公式表格视觉重建 | contract §4 |
-| F4 | Canonical Markdown | YAML frontmatter（document_id / library_id / source_name / source_sha256 / parser_version / page_count）+ `<!-- page:N -->` page marker + heading 层级；保留页码映射 / heading path / 原文顺序 | contract §4 |
+| F4 | Canonical Markdown | YAML frontmatter（**[AMENDED 2026-07-31 — 见 amendment-2]**：`schema` / `document_id` / `source_filename` / `source_sha256` / `parser_id` / `parser_version` / `page_count` / optional `title`）+ `<!-- page:N -->` page marker + heading 层级；保留页码映射 / heading path / 原文顺序 | contract §4 |
 | F5 | Chunk 格式 | 字段冻结：`library_id / document_id / chunk_id / heading_path / page_start / page_end / content / content_hash / token_count`；chunk 必须可回溯 library / document / page | contract §5 |
 | F6 | Session Library ACL | `Session → Library Allowlist`（**非** User → Role → Permission）；前端过滤不是权限控制；删除 Session 只删 binding 不删 library | contract §7 |
 | F7 | Tool 接口 | `search_knowledge(query: str, top_k: int = 5)`；签名**不接受** library_id / session_id / 文件路径；自动用当前 Session binding 求交后检索 | contract §6 |
@@ -89,6 +89,40 @@
 - `TODO.md` P2-R 段
 
 **回归验证**：R0 已 PASS 的 7 条 checklist 在 amendment 后仍 PASS（详见 amendment-1.md §4）。
+
+---
+
+### Amendment 2（2026-07-31）— Canonical Markdown Schema + needs_ocr Threshold Refinement
+
+**触发**：用户 P2-R2-B 启动指令 §11（needs_ocr 判定）+ §15（Canonical Markdown frontmatter 格式）+ §17（frontmatter 字段校验）与本表 §1 F4 + contract §4.2（50/500 阈值）+ §4.3（frontmatter 字段示例）在多处直接冲突。
+
+用户通过 AskUserQuestion 选择"走 P2-R0 amendment 流程"——按本节 §4 协议合规修订 Canonical Markdown schema 与 needs_ocr 阈值冻结。
+
+**变更内容**：
+
+1. **needs_ocr 阈值精化（contract §4.2）**：原"任一页 < 50 字符或整文档 < 500 字符 → needs_ocr"改为"仅 `total_non_whitespace_chars == 0 → needs_ocr`"；低文本密度作为 warning 不改变 usable 决策
+2. **frontmatter 字段集精化（contract §4.3 + 本表 F4）**：
+   - 新增 `schema: "pi-agent-canonical-markdown/v1"`
+   - 重命名 `source_name` → `source_filename`（DB 列名 `source_name` 不变；frontmatter 字段名解耦）
+   - 拆分 `parser_version: marker-v1` → `parser_id: "pypdf"` + `parser_version: "6.14.2"`
+   - 删除 `library_id`（library_id 是 query-time 上下文，不应固化进 evidence artifact）
+   - 删除默认 `generated_at`（Builder 不调用 `datetime.now()`；仅当调用者显式传入时写入）
+   - 新增 optional `title`（来自 PdfMetadata.title 安全 metadata）
+3. **字符串序列化方式**：所有字符串标量使用 `json.dumps(value, ensure_ascii=False)`——避免冒号 / 换行 / `---` / YAML tag 注入
+4. **page marker 格式不变**：`<!-- page:N -->` 1-based 单调递增
+
+**不变的已冻结决策**：F1-F3 / F5-F8 表结构 / R1 pypdf 选型 / R2-R5——全部保持不变。仅 F4 frontmatter 字段集 + needs_ocr 阈值变更。
+
+**同步修改的文档**：
+
+- 新增 `docs/design/p2-r0-amendment-2.md`
+- `p2-r0-rag-contract.md` §4.2（needs_ocr 阈值）+ §4.3（frontmatter 字段示例 + 字段说明）
+- `p2-r0-decisions-log.md` §1 F4 行加 `[AMENDED]` 标注 + 本节
+- `docs/validation/p2-r2/P2_R2_A_PARSER_ADAPTER.md` §28.3 加 amendment-2 引用 + R2-B 编码开始前合同已是新版本说明
+- `ROADMAP.md` R2 行（仅状态同步，不改 R2 整体范围）
+
+**回归验证**：R0 已 PASS 的 7 条 checklist 在 amendment-2 后仍 PASS（详见 amendment-2.md §4）。
+
 
 ---
 

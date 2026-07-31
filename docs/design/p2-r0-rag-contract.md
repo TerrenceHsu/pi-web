@@ -267,48 +267,60 @@ pypdf 已知技术限制作为 R2 Known Limitations（per `p2-r2-0-pdf-parser-li
 - 公式 / 图片不处理
 - 扫描 PDF 进 `needs_ocr` 终态（不自动 OCR）
 
-### 4.2 marker 配置（数字 PDF only 边界）
+### 4.2 PDF Parser 配置 + needs_ocr 判定（[AMENDED 2026-07-31 — 见 p2-r0-amendment-2.md]）
 
-```python
-from marker.converters.pdf import PdfConverter
+**R2 MVP parser = pypdf 6.14.2**（per p2-r2-0-pdf-parser-license-gate.md §14 / R2-A frozen @ `0772324`）。原 marker 配置段已过时——marker 在 R2-0 License Gate 中被拒绝（model license OpenRAIL-M $5M cap + surya/torch hard dep 违反 no-model）。
 
-converter = PdfConverter(
-    # 关键：不主动 OCR——保持"数字 PDF only"边界
-    config={
-        "force_ocr": False,
-        "strip_existing_ocr": False,
-        "format_lines": False,         # 不二次排版
-        "show_toolbar": False,
-    }
-)
-result = converter(source.pdf)
-markdown_text = result.markdown
+**needs_ocr 判定**（pipeline 层，per R2-B `PdfTextQualityEvaluator`）：
+
+```
+page_count == 0                                  → invalid_extraction_result (error)
+total_non_whitespace_chars == 0                  → needs_ocr
+total_non_whitespace_chars > 0                   → usable
+                                                  （低密度文本作为 warning，不改变 usable 决策）
 ```
 
-**needs_ocr 判定**（pipeline 层，非 marker 内部）：
-1. marker 处理后，按 `<!-- page:N -->` marker 拆分 Markdown
-2. 对每页计算字符数（剥离 marker / 空白）
-3. **任一页字符数 < 阈值（建议 50 字符）** → 整文档 status=needs_ocr
-4. **整文档总字符数 < 阈值（建议 500 字符）** → status=needs_ocr
+**变更理由（amendment-2）**：
 
-`needs_ocr` 不写 `document.md`，不进 chunks 表；只写 `knowledge_documents.status` + `error_code='needs_ocr_threshold'`。
+1. digital PDF 可能本身只有少量文本（短文档、参考文献、单页表格）——原 50/500 阈值会误判这些为扫描件
+2. 第一版 `needs_ocr` 应只表示"完全没有可提取文本"——这是确定的、可测试的判定
+3. 低文本密度（短文档、稀疏文本、多空白页）作为 **warning** 不作为 needs_ocr 触发——保留 Markdown 产出，后续检索阶段暴露问题
+4. `page_count == 0` 不是 needs_ocr——是 invalid extraction result（pypdf 解析成功但 0 页属于异常）
 
-### 4.3 Canonical Markdown 格式（decision F4）
+**不变的边界**：
+
+- `needs_ocr` 仍为**终态**——不自动 OCR，需用户手动处理
+- `needs_ocr` 不写 `document.md`，不进 chunks 表
+- `needs_ocr` 不删除 source.pdf
+- 加密 PDF 仍走 `failed` 状态（错误码 `encrypted_pdf`），不走 needs_ocr
+
+**warning 规则**（不改变 usable 决策；具体常量在 R2-B `pdf_quality.py` 中冻结）：
+
+| Warning code | 触发条件（建议阈值） |
+|---|---|
+| `low_non_empty_page_ratio` | `non_empty_page_count / page_count < 0.20` |
+| `low_average_non_ws_chars` | `total_non_whitespace_chars / non_empty_page_count < 20` |
+| `replacement_character_noise` | `U+FFFD count / total_chars > 0.05` |
+| `control_character_noise` | 控制字符（除 `\n` / `\t`）比例异常 |
+| `many_empty_pages` | `empty_page_count > 0 且 page_count > 1` |
+
+`needs_ocr` 不写 `document.md`，不进 chunks 表；只写 `knowledge_documents.status` + `safe_error_code='needs_ocr'`。低质量 usable 文档写 `document.md` + warning（warning 不进入 error_code）。
+
+### 4.3 Canonical Markdown 格式（decision F4，[AMENDED 2026-07-31 — 见 p2-r0-amendment-2.md]）
 
 ```markdown
 ---
-document_id: doc_abc123def456
-library_id: lib_xyz789abc012
-source_name: example.pdf
-source_sha256: 4f3a...e1b9
-parser_version: marker-v1
+schema: "pi-agent-canonical-markdown/v1"
+document_id: "doc_abc123def456"
+source_filename: "example.pdf"
+source_sha256: "4f3a...e1b9"
+parser_id: "pypdf"
+parser_version: "6.14.2"
 page_count: 18
-generated_at: 2026-07-27T10:30:00Z
+title: "Optional PdfMetadata Title"
 ---
 
 <!-- page:1 -->
-
-# Document Title
 
 Page one content...
 
@@ -326,16 +338,65 @@ Page two content with **bold** and `code`.
 | A    | B    |
 ```
 
+**字段集（amendment-2 后）**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `schema` | str | ✅ | 固定 `"pi-agent-canonical-markdown/v1"`（schema versioning） |
+| `document_id` | JSON-quoted str | ✅ | R1 后端 ID（`doc_<body>`，body ∈ `[a-z0-9]{12,32}`） |
+| `source_filename` | JSON-quoted str | ✅ | basename only（不含 `/` `\` `..` NUL 换行）；与 DB 列 `source_name` 同义，frontmatter 字段名解耦 |
+| `source_sha256` | JSON-quoted str | ✅ | 64 lowercase hex |
+| `parser_id` | JSON-quoted str | ✅ | 来自 `PdfExtractionResult.parser_id`（如 `"pypdf"`） |
+| `parser_version` | JSON-quoted str | ✅ | 来自 `PdfExtractionResult.parser_version`（如 `"6.14.2"`） |
+| `page_count` | int | ✅ | 来自 `PdfExtractionResult.pages` 长度 |
+| `title` | JSON-quoted str | ❌ | Optional，来自 `PdfMetadata.title`；为 None 时省略 |
+| `generated_at` | JSON-quoted str | ❌ | Optional UTC ISO 8601；**默认不写**——Builder 不调用 `datetime.now()`；仅当调用者显式传入时写入 |
+
+**字段顺序固定**（确定性 + 注入防护）：
+
+```
+schema
+document_id
+source_filename
+source_sha256
+parser_id
+parser_version
+page_count
+title（可选；为 None 时省略）
+generated_at（可选；为 None 时省略）
+```
+
+**字符串序列化方式**：
+
+- 所有字符串标量使用 `json.dumps(value, ensure_ascii=False)` 序列化
+- JSON 双引号字符串是合法 YAML 标量——可避免冒号注入 / 换行注入 / `---` 注入 / 引号破坏 / YAML tag 注入
+- 不依赖 PyYAML
+- 不引入 YAML dependency
+- int 字段直接 `str(int_value)`
+- 文件以单个 `\n` 结束
+- UTF-8 无 BOM
+
+**已删除字段（amendment-2）**：
+
+- `library_id`：library_id 是 query-time 上下文，不应固化进 evidence artifact
+- 默认 `generated_at`：确定性要求禁止 Builder 内部生成时间戳
+
 **必须保留**：
-- YAML frontmatter（前 3 行 `---`）
-- Page marker（`<!-- page:N -->`，N 从 1 开始，单调递增）
-- Heading 层级（`#` / `##` / `###`，marker 输出原生支持）
-- 原文顺序（marker 输出已是顺序，pipeline 不重排）
+- YAML frontmatter（首字符必须是 `-`；前 3 行 `---`）
+- Page marker（`<!-- page:N -->`，N 从 1 开始，单调递增；空白页也有 marker；marker 独占一行）
+- Heading 层级（`#` / `##` / `###`，pypdf 文本下保守启发式恢复；不生成正文 H1，最高从 `##` 起）
+- 原文顺序（pypdf 提取已是顺序，pipeline 不重排）
 
 **禁止**：
-- 删除 marker 输出的 heading / table / list（即使"看起来格式不好"）
+- 删除 pypdf 提取的 heading / table / list（即使"看起来格式不好"）
 - 在 Markdown 中插入绝对路径
 - 在 Markdown 中插入其他 library / document 的引用
+- 在 frontmatter 中插入任意 metadata dict
+- 在 Builder 内部调用 `datetime.now()` / `time.time()` / `uuid.uuid4()` / 随机数
+
+**源文本 page marker 冲突防护**：
+
+对正文中满足 `^\s*<!--\s*page:\d+\s*-->\s*$` 的行必须转义（建议 `\<!-- page:999 -->`），防止源文本伪造系统 page marker。系统 marker 保持精确格式 `<!-- page:N -->`。
 
 ### 4.4 第一版 PDF 不支持
 

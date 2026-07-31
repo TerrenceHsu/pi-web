@@ -677,6 +677,15 @@ R2-B 启动指令应包含：
 5. ✅ 跑 R2-A 定向测试基线（66 tests）证明 Parser Adapter 仍 PASS
 6. ✅ 跑 R1 定向测试基线（118 tests）证明 Library Foundation 仍 PASS
 7. ⛔ **若 uv.lock 在 R2-B 期间出现 OpenAI 之外的非预期变更**，立即停止并独立解释（不得默认为 R2-B 编码的必要副作用）
+8. ✅ **P2-R0 Amendment 2 已落地**（docs-only commit；详见 [p2-r0-amendment-2.md](../../design/p2-r0-amendment-2.md)）——R2-B 编码开始时合同已是新版本（frontmatter 字段集 + needs_ocr 阈值已精化）
 
 R2-B 不应重新触发 uv.lock specifier 同步——R2-A1 已经把 lockfile 与 pyproject 同步过一次。若 R2-B 触发 `uv lock`，diff 应**完全为空**或仅含 R2-B 显式添加的新依赖（如 heading 启发式所需库，若引入）。
+
+**Amendment 2 解决的冲突**（R2-B 编码无需在"指令 vs 合同"间选择）：
+
+- frontmatter 字段集：按 amendment-2 §2.2 新表（含 `schema` / `parser_id` 拆分 / `source_filename` 重命名 / 删 `library_id` / 删默认 `generated_at` / 加 `title`）
+- needs_ocr 阈值：按 amendment-2 §2.1 新规则（仅 `total_non_whitespace_chars == 0 → needs_ocr`；低密度文本作为 warning）
+- 字段序列化方式：JSON-quoted str（`json.dumps(value, ensure_ascii=False)`）
+- page marker 格式：不变（`<!-- page:N -->` 1-based 单调递增）
+
 
