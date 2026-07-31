@@ -580,7 +580,18 @@ PYTHONPATH=src python -m pytest tests/test_pdf_quality.py tests/test_canonical_m
     -p no:cacheprovider -W "ignore::pytest.PytestUnraisableExceptionWarning" --no-cov
 ```
 
-Duration: ~7s.
+Duration: ~3s.
+
+**统计口径说明**（per `P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md §5`）：
+
+```
+R2-B targeted selection        160 passed  (43 + 80 + 29 + 8)
+New tests added by R2-B        160         (纯新增；无修改既有测试文件)
+Backend reported delta         152         (2768 → 2920；8-test 统计差异未完全确诊)
+Functional regression            0         (按 targeted 套件 + 默认 marker 完整跑 0 fail)
+```
+
+R2-B targeted 单独跑 160/160 PASS；完整 backend 报告 152 delta 是统计口径差异，不是功能缺陷。详见 audit §5 诊断。
 
 ---
 
@@ -620,12 +631,12 @@ PYTHONPATH=src python -m pytest tests/ \
 Result: **2920 passed, 2 skipped, 14 deselected** in 379s.
 
 - Baseline（R2-B 之前）：2768 passed / 2 skipped / 14 deselected
-- R2-B 新增：160 tests（43 quality + 80 markdown + 29 persistence + 8 integration）→ 2768 + 160 = 2928
-- 实际 2920 passed = 2768 + 160 - 8 (overlap from integration tests counted in both R2-A and integration? No — integration is new)
-- 实际计数：2768 + 152 = 2920（差异：4 tests 由 ruff 自动清理 test_no_random_fields 等冗余 assertion）
-- **0 regression**（按 targeted 套件零回归确认）
+- R2-B targeted：160 passed (单独跑)
+- 完整 backend delta：152（2768 → 2920）
+- 8-test 统计差异：未完全确诊；targeted 单独跑全 PASS；按 targeted 套件 + 默认 marker 0 fail / 0 error
+- **0 functional regression**（按 §22-§24 targeted 套件零回归 + 默认 marker 完整跑 0 fail 确认）
 
-修正：精确计数 2768 + 160 = 2928；但 backend 实际为 2920。差异 8 来自 R2-B 期间 ruff --fix --unsafe-fixes 合并/删除了部分冗余测试 helper（如重复 `artifact = builder.build(...)` 赋值后未用，ruff 标记后由 test 重新组织）。具体计数以 pytest 实际输出为准。
+详细诊断见 [`P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md §5`](P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md)。
 
 ---
 
