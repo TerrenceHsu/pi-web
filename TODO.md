@@ -195,9 +195,10 @@ M3 是 docs-only 归档阶段，未自动执行上述任一动作。
       含 R2-A1 `c359ee5` (build: pypdf dep + license record) + R2-A2 `88b017b` (feat: PdfParser Protocol + PypdfParser Adapter + 66 tests + fixture factory) + R2-A3 validation docs。
       2768 backend + 267 frontend + 0 回归 + 0 PDF parser 越界 + 0 网络/模型/OCR。
       详见 [docs/validation/p2-r2/P2_R2_A_PARSER_ADAPTER.md](docs/validation/p2-r2/P2_R2_A_PARSER_ADAPTER.md)。
-- [ ] **P2-R2-B Canonical Markdown Builder** —— ✅ APPROVED TO START。
-      数字 PDF 文本质量判断 + needs_ocr 判定 + heading 启发式 + Canonical MD frontmatter + 固定 page marker + Markdown 原子写入。**不接 HTTP API**。
-- [ ] **P2-R2-C Ingestion Worker + Upload/Retry API** —— ⛔ BLOCKED BY R2-B。
+- [x] **P2-R2-B Canonical Markdown Builder** —— ✅ COMPLETE / FROZEN @ <R2-B freeze commit>。
+      含 P2-R0 Amendment 2 `15b411b`（pre-R2-B docs-only；解决 frontmatter 字段 + needs_ocr 阈值合同冲突）+ R2-B1 `0154cde` (feat: pdf_quality.py 43 tests) + R2-B2 `c077d5a` (feat: canonical_markdown.py 80 tests) + R2-B3 `677ed13` (feat: markdown_persistence.py 29 tests) + R2-B4 freeze (8 integration tests + validation docs)。
+      2920 backend + 267 frontend + 0 regression + 0 dependency diff + 0 schema diff + 0 frontend diff。详见 [docs/validation/p2-r2/P2_R2_B_CANONICAL_MARKDOWN.md](docs/validation/p2-r2/P2_R2_B_CANONICAL_MARKDOWN.md)。
+- [ ] **P2-R2-C Ingestion Worker + Upload/Retry API** —— ✅ APPROVED TO START。
       上传 + Ingestion Job + worker + 状态转移 + retry + Document API 接线。
 - [ ] **P2-R2-D Integration Validation + Freeze** —— ⛔ BLOCKED BY R2-C。
 
