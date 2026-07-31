@@ -191,10 +191,15 @@ M3 是 docs-only 归档阶段，未自动执行上述任一动作。
       选定 **pypdf 6.14.2 (BSD-3-Clause)** 为 R2 MVP；marker (OpenRAIL-M 模型 + surya/torch hard dep) 拒绝；
       PyMuPDF (AGPL/Commercial) 拒绝。D6 已重命名 + RESOLVED。
       详见 [docs/design/p2-r2-0-pdf-parser-license-gate.md](docs/design/p2-r2-0-pdf-parser-license-gate.md)。
-- [ ] **P2-R2 Ingestion Pipeline** —— ✅ APPROVED TO START (D6 resolved)。
-      pypdf via `[rag]` extra + PdfParser Adapter + Canonical MD writer +
-      heading-aware chunker + Job 状态机 + 30s 阈值 + PDF upload/retry endpoint。
-      R2 编码不变量：External Provider=0 / Model downloads=0 / OCR=disabled / Remote LLM=disabled / no pypdf crypto extra。
+- [x] **P2-R2-A pypdf Parser Adapter** —— ✅ COMPLETE / FROZEN @ <R2-A freeze commit>。
+      含 R2-A1 `c359ee5` (build: pypdf dep + license record) + R2-A2 `88b017b` (feat: PdfParser Protocol + PypdfParser Adapter + 66 tests + fixture factory) + R2-A3 validation docs。
+      2768 backend + 267 frontend + 0 回归 + 0 PDF parser 越界 + 0 网络/模型/OCR。
+      详见 [docs/validation/p2-r2/P2_R2_A_PARSER_ADAPTER.md](docs/validation/p2-r2/P2_R2_A_PARSER_ADAPTER.md)。
+- [ ] **P2-R2-B Canonical Markdown Builder** —— ✅ APPROVED TO START。
+      数字 PDF 文本质量判断 + needs_ocr 判定 + heading 启发式 + Canonical MD frontmatter + 固定 page marker + Markdown 原子写入。**不接 HTTP API**。
+- [ ] **P2-R2-C Ingestion Worker + Upload/Retry API** —— ⛔ BLOCKED BY R2-B。
+      上传 + Ingestion Job + worker + 状态转移 + retry + Document API 接线。
+- [ ] **P2-R2-D Integration Validation + Freeze** —— ⛔ BLOCKED BY R2-C。
 
 ## Explicitly out of scope (long-term)
 
