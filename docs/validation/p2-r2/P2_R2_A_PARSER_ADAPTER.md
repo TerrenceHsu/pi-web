@@ -619,3 +619,64 @@ Merge / Tag / Push
 ```
 
 R2-A 完成。R2-B 编码门已开（D6 resolved + Parser Adapter ready），等用户独立授权启动 R2-B。
+
+---
+
+## 28. R2-B 前置审计记录（per acceptance review feedback）
+
+### 28.1 R2-B 实际起始基线
+
+R2-B 启动前必须验证以下 commit 全部是 HEAD 祖先——不止 `533fe48` (R2-0 freeze)，**还包含** `f804fc7` (R2-0 Archive Corrections) + `0772324` (R2-A freeze)：
+
+```bash
+git merge-base --is-ancestor 533fe48 HEAD   # R2-0 freeze
+git merge-base --is-ancestor f804fc7 HEAD   # R2-0 archive corrections
+git merge-base --is-ancestor 0772324 HEAD   # R2-A freeze
+```
+
+**实际验证结果**（2026-07-31）：
+
+```
+533fe48_ANCESTOR ✅
+f804fc7_ANCESTOR ✅
+0772324_ANCESTOR ✅
+```
+
+R2-B 起始基线 = **当前 HEAD = `0772324`**（含 R2-0 + R2-0 archive corrections + R2-A 全部 freeze）。
+
+### 28.2 uv.lock OpenAI specifier sync 解释（per R2-A1 commit `c359ee5`）
+
+R2-A1 的 uv.lock diff 17 行中除 pypdf 相关条目外，还包含一条 OpenAI specifier 同步：
+
+```diff
+-    { name = "openai", specifier = ">=1.40" },
++    { name = "openai", specifier = ">=2.0,<3" },
+```
+
+**审计结论**（per acceptance review feedback）：
+
+| 检查项 | 命令 | 结果 |
+|---|---|---|
+| OpenAI 实际 locked version 未变化 | `git show c359ee5^:uv.lock \| grep -A2 '^name = "openai"'` vs `git show c359ee5:uv.lock \| grep -A2 '^name = "openai"'` | ✅ 两边都是 `version = "2.44.0"` |
+| 没有新增包（除 pypdf） | `git show c359ee5^:uv.lock \| grep -c '^name = '` vs `git show c359ee5:uv.lock \| grep -c '^name = '` | ✅ 72 → 73（差 1 = pypdf；无其他新增） |
+| 没有 Provider 行为变化 | OpenAI stanza `dependencies` / `source` 字段前后完全一致 | ✅ |
+| 只是 lock metadata/specifier 同步 | specifier 从 `>=1.40` 改为 `>=2.0,<3`——后者是 pyproject.toml line 15 已经声明的版本范围 | ✅ uv 在重新解析时把 lockfile specifier 与 pyproject 同步 |
+
+**根因**：R2-A1 之前的 uv.lock 中 OpenAI specifier `>=1.40` 与 pyproject.toml 实际声明的 `>=2.0,<3` 不一致——这是历史 lockfile 漂移（pyproject 更新时未重新跑 `uv lock`）。R2-A1 跑 `uv lock` 时 uv 自动同步 specifier 到 pyproject 当前值，**没有升级 OpenAI 实际版本**（仍 2.44.0，落在 `>=2.0,<3` 范围内）。
+
+**结论**：此变更**不是** pypdf 添加的必要副作用，而是 uv lock 顺带修复历史 specifier 漂移。属于"无害 lockfile metadata 同步"，不影响 Provider Runtime 行为，不引入新依赖。
+
+### 28.3 R2-B 编码启动前的额外检查清单
+
+R2-B 启动指令应包含：
+
+1. ✅ 验证 `f804fc7` + `0772324` + 之前所有 R2-0/R1/R0/E 基线均为 HEAD 祖先
+2. ✅ 验证 G1 stash hash = `d7240268ec8b8e5d9e195c999e56fb6ec130fd55`
+3. ✅ 验证 working tree clean
+4. ✅ 验证 pypdf 实际安装版本仍属 6.x（`python -c "from importlib.metadata import version; print(version('pypdf'))"`）
+5. ✅ 跑 R2-A 定向测试基线（66 tests）证明 Parser Adapter 仍 PASS
+6. ✅ 跑 R1 定向测试基线（118 tests）证明 Library Foundation 仍 PASS
+7. ⛔ **若 uv.lock 在 R2-B 期间出现 OpenAI 之外的非预期变更**，立即停止并独立解释（不得默认为 R2-B 编码的必要副作用）
+
+R2-B 不应重新触发 uv.lock specifier 同步——R2-A1 已经把 lockfile 与 pyproject 同步过一次。若 R2-B 触发 `uv lock`，diff 应**完全为空**或仅含 R2-B 显式添加的新依赖（如 heading 启发式所需库，若引入）。
+
