@@ -223,7 +223,7 @@ P1-E M1 之前的配置后端已 frozen，不再扩展。
 | **R2-C4 Integration Validation + Freeze** | ⛔ BLOCKED BY C3 | R2-C3 | E2E + restart + concurrent retry + delete race + failure injection + freeze | E2E upload→ingest→markdown / 0 regression / tag candidate |
 | **R2-D Integration Validation + Freeze** | ⛔ BLOCKED BY R2-C + MUST RECONCILE 8-test discrepancy | R2-C | 整合 R2-A/B/C 全链路 + 集成测试 + 最终 freeze + 8-test 差异根因诊断（audit §5.5 五项必查） | E2E upload→ingest→markdown 全链路 / 0 regression / tag candidate / 8-test 差异 reconcile |
 | **R2 (整体) Ingestion Pipeline** | 🟡 IN PROGRESS | R2-0 | R2-A / R2-B 完成；R2-C / R2-D 待启动 | — |
-| **R3 Retrieval** | ⛔ BLOCKED BY R2 | R2 | `search_knowledge` tool + FTS5 + top_k 排序 + 引用 evidence | query 召回 / tool 不暴露 session_id（AST 校验） |
+| **R3 Retrieval** | ⛔ BLOCKED BY R2 | R2 | `search_knowledge` tool + **pure FTS5 BM25**（无向量；D1/D2/D3 DECLINED @ 2026-08-03）+ heading-aware chunker + top_k 排序 + 引用 evidence（chunk.page_start / page_end 即 page marker 引用，per R2-B `<!-- page:N -->`） | query 召回 / tool 不暴露 session_id（AST 校验） / 0 vector dependency |
 | **R4 Session Library ACL** | ⛔ BLOCKED BY R3 | R3 | `session_knowledge_libraries` CRUD + 后端 allowlist 过滤 | 未授权 library 不出现 / A/B session 越权测试 |
 | **R5 Web API + UI** | ⛔ BLOCKED BY R4 | R4 | library / document / search REST + 前端管理面板 | E2E upload→ingest→search 全链路 |
 | **R6 Freeze + Validation** | ⛔ BLOCKED BY R5 | R5 | validation report + security freeze + tag `v0.0.XX-knowledge-rag` | 全 pytest + E2E + ruff + 0 Core Runtime 回归 |
@@ -235,12 +235,13 @@ P1-E M1 之前的配置后端已 frozen，不再扩展。
 - **第一版同步处理** upload，30s 阈值 + PDF ≤ 20 页强制限制；R2 引入 BackgroundTask 时不改 schema
 - **Chunk 默认 max_chars=1200 / overlap=150**，heading-aware 切分
 - **`search_knowledge(query, top_k=5)`** 不接受 library_id / session_id / file_path；后端从 session_id_getter 求 allowlist
+- **R3 检索 = pure FTS5 BM25**（per [decisions-log §3.1](docs/design/p2-r0-decisions-log.md) D1/D2/D3 DECLINED @ 2026-08-03）：永久不引入 embedding / vector / reranker / hybrid；evidence 中 chunk.page_start / page_end 即 page marker 引用（R2-B `<!-- page:N -->` 已实现）
 
 **显式不包含（P2-R 全程）**：
 
 - OCR / 主动开启 marker OCR（扫描 PDF 进 `status=needs_ocr` 终态，不自动重试）
 - Long-term user memory / 跨 Session 用户偏好 / 用户画像
-- Embedding provider / Vector DB / Reranker（推迟到 R3+ 评估）
+- **Embedding provider / Vector DB / Reranker / Hybrid retrieval / Re-embedding**（**永久不做 @ 2026-08-03**，per [decisions-log §3.1](docs/design/p2-r0-decisions-log.md)；用户决策"PDF→MD 即可，让 LLM 直读 MD，不再进行向量化"；R3 = pure FTS5 BM25）
 - 多用户 RBAC / OAuth（Session Library ACL 是单进程内访问隔离，不是用户级权限）
 - 长期后台任务调度（与 ROADMAP "不做" 列表一致）
 

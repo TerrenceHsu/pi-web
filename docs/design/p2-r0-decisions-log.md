@@ -40,14 +40,47 @@
 
 | # | 开放项 | 推迟到 | 备注 |
 |---|---|---|---|
-| D1 | Embedding provider 选型 | R3+ | 第一版纯 FTS5（BM25），不引入 embedding。若 FTS5 召回不足，R3+ 评估：(a) 复用现有 LLM provider（如 GLM embedding）/ (b) 加 `jina-embeddings-v3` / (c) 加 `bge-m3` 本地 |
-| D2 | FTS5 vs 向量混合（hybrid） | R3+ | 第一版纯 FTS5；R3+ 评估 BM25 + Dense + RRF reranker |
-| D3 | Chunk re-embedding 触发策略 | R4+ | 仅在引入 embedding 后才相关；document 重新 ingestion 时如何处理旧 chunk 的 embedding |
+| D1 | Embedding provider 选型 **`[DECLINED 2026-08-03]`** | ~~R3+~~ → **永久不做** | 用户 2026-08-03 决策（"PDF→MD 即可，让 LLM 直读 MD，不再进行向量化"）：R3 检索永久采用纯 FTS5（BM25），不引入 embedding。原"R3+ 评估 (a) GLM embedding / (b) jina-embeddings-v3 / (c) bge-m3" 全部取消。R3 evidence 由 FTS5 召回 chunks（chunk 内容来自 Canonical Markdown），LLM 通过 `search_knowledge` tool 看到 MD 内容子段 + page marker 引用。详见 §3.1。 |
+| D2 | FTS5 vs 向量混合（hybrid） **`[DECLINED 2026-08-03]`** | ~~R3+~~ → **永久不做** | 用户 2026-08-03 决策：不做 hybrid retrieval。R3 仅 FTS5（BM25），不做 BM25 + Dense + RRF reranker。详见 §3.1。 |
+| D3 | Chunk re-embedding 触发策略 **`[DECLINED 2026-08-03]`** | ~~R4+~~ → **永久不做** | 用户 2026-08-03 决策：永远不引入 embedding，故不存在 re-embedding 问题。document 重新 ingestion 时仅重建 chunks + FTS5 index（BM25 不依赖模型权重）。详见 §3.1。 |
 | D4 | 多语言分词 | R1+ | 中文 heading 检测 / CJK 字符级 chunking；R1 看实测质量再决定是否需 jieba |
 | D5 | marker 模型预热策略 | R1 | 首次 upload 触发模型下载（GB 级）；是否启动时预热 / 提示用户 / 提供轻量 parser 选项 |
 | D6 | PDF Parser Code, Model, Dependency and Distribution License **`[AMENDED 2026-07-31 — 见 p2-r2-0-pdf-parser-license-gate.md]`** | R0 旧表述"marker AGPL" **判断错误**——marker 2.0.0 代码实际是 Apache-2.0，但模型权重是 modified OpenRAIL-M（$5M revenue/funding cap + 反竞争条款 + 远程限制权），且 surya/torch/transformers 是 hard dep。R2-0 License Gate 选定 **pypdf 6.14.2 (BSD-3-Clause)** 为 R2 MVP parser；marker 与 PyMuPDF 均拒绝（详见 p2-r2-0 §15）。R2 编码已开放 | contract §4.1 + p2-r2-0-pdf-parser-license-gate.md |
 | D7 | Library 容量上限 | R1 | 第一版无显式上限；后续按 `data/knowledge/` 磁盘占用 + chunk 数量评估是否需要 quota |
-| D8 | PDF 页数硬上限 | R1 集成 marker 后实测 | R3 推荐 ≤ 20 页（同步处理 ≤ 30s）；R1 实测后调整 |
+| D8 | PDF 页数硬上限 | R1 集成 marker 后实测 | R3 推荐 ≤ 20 页（同步处理 ≤ 30s）；R1 实测后调整。**注**：R2-C0 已冻结 MAX_PDF_PAGES=20（per `p2-r2-c0-ingestion-runtime-api-contract.md §18.1 step 4`）。 |
+
+### 3.1 D1/D2/D3 DECLINED 决策记录（2026-08-03）
+
+**触发**：用户 2026-08-03 决策——"修改路线：将 pdf 转成 md 即可，让 llm 直接读取 md，不再进行向量化，要求在召回 md 时，同样加入索引链接"。
+
+**用户澄清**（AskUserQuestion 三选项）：
+
+| 维度 | 用户选择 | 含义 |
+|---|---|---|
+| 范围变更幅度 | 保留 chunk + FTS5 | 仅取消向量 / embedding / reranker；chunk 切分 + FTS5 索引保留 |
+| 召回机制 | 新 AgentTool | `search_knowledge(query, top_k)` 保留；后端用 FTS5 BM25 召回 chunks |
+| 索引链接含义 | Page marker 引用 | R2-B 已实现 `<!-- page:N -->`；chunk.page_start / page_end 已含（R0 §5 frozen） |
+
+**决策影响**：
+
+| 已冻结项 | 状态 | 备注 |
+|---|---|---|
+| R0 §5 Chunk 格式 | ✅ 保留 | heading-aware chunker 仍由 R3 实现；chunk 字段（page_start / page_end / heading_path / content_hash）不变 |
+| R0 §2.3 FTS5 | ✅ 保留 | `unicode61` tokenizer；R3 写入 knowledge_chunks_fts |
+| R0 §6 search_knowledge tool | ✅ 保留 | 签名 `(query, top_k=5)` 不变；后端仅用 FTS5 召回（无向量分支） |
+| R0 §6.4 Evidence schema | ✅ 保留 | chunk_id / library_id / document_id / heading_path / page_start / page_end / content / score 不变；page marker 引用即 chunk.page_start / page_end（R0 §5 frozen） |
+| knowledge_chunks 表 | ✅ 保留 | R3 写入；schema 不变 |
+| knowledge_chunks_fts | ✅ 保留 | R3 写入；schema 不变 |
+| R2-C0 Ingestion Contract | ✅ 不受影响 | R2-C 范围仅到 markdown 持久化；chunk / FTS5 是 R3 工作 |
+
+**对 R3 范围的精化**：
+
+- R3 = pure FTS5 BM25 RAG
+- 不做：embedding provider 选型 / 向量索引 / hybrid retrieval / reranker / re-embedding
+- evidence 来源：FTS5 召回 chunks → 拼装 evidence（chunk 内含 page_start / page_end 作为 page marker 引用）
+- LLM 通过 `search_knowledge` tool 看到 chunk 内容（chunks 是 Canonical Markdown 的子段，"直接读 MD" 语义成立）
+
+**协议依据**：R0 §4 决策变更协议明确——"§3 推迟项可在对应 milestone 实施时直接冻结——更新本表 + contract 对应章节即可，无需 amendment"。本节即此协议的直接执行，**不创建 Amendment 3**。
 
 ---
 

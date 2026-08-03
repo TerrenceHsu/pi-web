@@ -1807,7 +1807,7 @@ C0 本身不要求重新跑完整测试。
 ### 32.5 不解决（推到 R3+）
 
 - OCR / Image understanding / 视觉理解
-- Embedding / Vector retrieval / Reranker
+- Embedding / Vector retrieval / Reranker **`[DECLINED 2026-08-03]`** —— 用户决策"PDF→MD 即可，不再向量化"；永久不做（per [`p2-r0-decisions-log.md §3.1`](p2-r0-decisions-log.md)）；R3 = pure FTS5 BM25
 - Multi-Agent / 多用户 / RBAC / OAuth
 - 公网部署 / 横向扩展
 - 长期后台任务调度
