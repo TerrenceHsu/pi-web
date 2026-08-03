@@ -35,6 +35,7 @@ Response contract:
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict
 from typing import Annotated, Any
 
@@ -48,6 +49,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from ..credentials_api import (
@@ -83,6 +85,7 @@ from .service import (
     ServiceValidationError,
     SessionNotFound,
 )
+from .store import KnowledgeStore
 from .upload_service import (
     MAX_UPLOAD_BODY_BYTES,
     DuplicateDocumentExistsError,
@@ -361,6 +364,24 @@ async def get_upload_service(request: Request) -> UploadService:
     )
 
 
+async def _library_has_active_job(
+    store: KnowledgeStore, library_id: str
+) -> bool:
+    """Check if any Document in ``library_id`` has a running Job.
+
+    Per C0 §17.3 — JOIN query via friend access (no new C1 method needed).
+    """
+    db = store._require_db()
+    async with db.execute(
+        "SELECT 1 FROM knowledge_ingestion_jobs j "
+        "JOIN knowledge_documents d ON j.document_id = d.id "
+        "WHERE d.library_id = ? AND j.status = 'running' LIMIT 1",
+        (library_id,),
+    ) as cursor:
+        row = await cursor.fetchone()
+    return row is not None
+
+
 # ============================================================================
 # Safe error → HTTPException translation
 # ============================================================================
@@ -631,11 +652,19 @@ def register_knowledge_endpoints(router: APIRouter) -> None:
     async def delete_library(
         library_id: Annotated[str, Path()],
         service: Annotated[KnowledgeService, Depends(get_knowledge_service)],
+        store: Annotated[KnowledgeStore, Depends(get_knowledge_store)],
     ) -> None:
         try:
             validate_library_id_or_raise(library_id)
         except ValueError:
             raise _safe_error(400, "validation_error", "Invalid library id.") from None
+        # C3 active-Job guard: prevent cascade delete while Worker is
+        # reading any source.pdf in this Library (per C0 §17.3).
+        if await _library_has_active_job(store, library_id):
+            raise _safe_error(
+                409, "library_ingestion_active",
+                "Library has documents with active ingestion jobs; cannot delete.",
+            ) from None
         try:
             await service.delete_library(library_id)
         except KnowledgeServiceError as exc:
@@ -675,9 +704,16 @@ def register_knowledge_endpoints(router: APIRouter) -> None:
     async def delete_document(
         document_id: Annotated[str, Path()],
         service: Annotated[KnowledgeService, Depends(get_knowledge_service)],
+        ingestion_store: Annotated[IngestionStore, Depends(get_ingestion_store)],
     ) -> None:
         if not is_valid_document_id(document_id):
             raise _safe_error(400, "validation_error", "Invalid document id.") from None
+        # C3 active-Job guard: prevent delete while Worker is reading source.pdf
+        if await ingestion_store.has_active_job(document_id):
+            raise _safe_error(
+                409, "document_ingestion_active",
+                "Document has an active ingestion job; cannot delete.",
+            ) from None
         try:
             await service.delete_document(document_id)
         except KnowledgeServiceError as exc:
@@ -773,6 +809,209 @@ def register_knowledge_endpoints(router: APIRouter) -> None:
             ),
             # Per C0 §21.2 — Job is created by worker claim, not at upload time
             job=None,
+        )
+
+    # ========================================================================
+    # P2-R2-C3-B: Status / Retry / Markdown endpoints
+    # ========================================================================
+
+    @router.get(
+        "/documents/{document_id}/ingestion",
+        response_model=IngestionStatusResponse,
+    )
+    async def get_ingestion_status(
+        document_id: Annotated[str, Path()],
+        store: Annotated[KnowledgeStore, Depends(get_knowledge_store)],
+        ingestion_store: Annotated[IngestionStore, Depends(get_ingestion_store)],
+    ) -> IngestionStatusResponse:
+        """Return Document status + latest extract-stage Job.
+
+        Per directive §二十 — only safe fields (no paths / body / traceback).
+        ``latest_job`` is null when no Job has been created yet (Document
+        in 'uploaded' state, not yet claimed by Worker).
+        """
+        if not is_valid_document_id(document_id):
+            raise _safe_error(400, "validation_error", "Invalid document id.") from None
+        try:
+            doc = await store.get_document(document_id)
+        except Exception as exc:
+            # KnowledgeStore raises KnowledgeStoreError; map to 404 if not found
+            from .store import DocumentNotFoundError
+            if isinstance(exc, DocumentNotFoundError):
+                raise _safe_error(404, "document_not_found", "Document not found.") from exc
+            raise _safe_error(
+                500, "internal_knowledge_error",
+                f"document lookup failed: {type(exc).__name__}",
+            ) from exc
+
+        latest_job = await ingestion_store.get_latest_extract_job_for_document(document_id)
+        job_summary: JobSummary | None = None
+        if latest_job is not None:
+            job_summary = JobSummary(
+                id=latest_job.id,
+                document_id=latest_job.document_id,
+                stage=latest_job.stage,
+                status=latest_job.status,
+                attempt=latest_job.attempt,
+                started_at=latest_job.started_at,
+                finished_at=latest_job.finished_at,
+                safe_error_code=(latest_job.safe_error_code or None),
+            )
+        return IngestionStatusResponse(
+            document_id=doc.id,
+            document_status=doc.status,
+            latest_job=job_summary,
+        )
+
+    @router.post(
+        "/documents/{document_id}/retry",
+        status_code=status.HTTP_201_CREATED,
+        response_model=RetryResponse,
+    )
+    async def retry_ingestion(
+        document_id: Annotated[str, Path()],
+        store: Annotated[KnowledgeStore, Depends(get_knowledge_store)],
+        ingestion_store: Annotated[IngestionStore, Depends(get_ingestion_store)],
+        worker_manager: Annotated[IngestionWorkerManager, Depends(get_worker_manager)],
+    ) -> RetryResponse:
+        """Create a new ingestion Job for a failed Document.
+
+        Per C0 §12 + §13.1:
+        - Only ``failed`` Documents can be retried (other states → 409)
+        - Atomic active Job uniqueness check via BEGIN IMMEDIATE
+        - Creates new Job (attempt +1); old Job immutable history
+        - Reuses source.pdf + SHA + Document identity
+        - Notifies Worker (queue full is OK; polling fallback)
+        """
+        if not is_valid_document_id(document_id):
+            raise _safe_error(400, "validation_error", "Invalid document id.") from None
+
+        # Atomic retry Job creation (handles active Job + retry limit + state machine)
+        try:
+            new_job = await ingestion_store.create_retry_job(document_id)
+        except RetryNotAllowedError as exc:
+            raise _translate_ingestion_store_error(exc) from exc
+        except IngestionAlreadyActiveError as exc:
+            raise _translate_ingestion_store_error(exc) from exc
+        except RetryLimitReachedError as exc:
+            raise _translate_ingestion_store_error(exc) from exc
+        except Exception as exc:
+            # Document not found OR Store error
+            from .store import DocumentNotFoundError
+            if isinstance(exc, DocumentNotFoundError):
+                raise _safe_error(404, "document_not_found", "Document not found.") from exc
+            raise _safe_error(
+                500, "internal_knowledge_error",
+                f"retry failed: {type(exc).__name__}",
+            ) from exc
+
+        # Notify Worker (best-effort; queue full → polling fallback)
+        try:
+            worker_manager.notify_pending_job()
+        except RuntimeError:
+            # Manager transitioned out of running during this call.
+            # Job is durable; polling will pick it up if/when manager returns.
+            pass
+
+        return RetryResponse(
+            document_id=document_id,
+            job=JobSummary(
+                id=new_job.id,
+                document_id=new_job.document_id,
+                stage=new_job.stage,
+                status=new_job.status,
+                attempt=new_job.attempt,
+                started_at=new_job.started_at,
+                finished_at=new_job.finished_at,
+                safe_error_code=(new_job.safe_error_code or None),
+            ),
+        )
+
+    @router.get(
+        "/documents/{document_id}/markdown",
+        response_class=Response,
+    )
+    async def get_markdown(
+        document_id: Annotated[str, Path()],
+        store: Annotated[KnowledgeStore, Depends(get_knowledge_store)],
+        service: Annotated[KnowledgeService, Depends(get_knowledge_service)],
+        request: Request,
+    ) -> Response:
+        """Return raw Canonical Markdown bytes for a Document.
+
+        Per C0 §21.5 (corrected) + §27-§29:
+        - Allowed statuses: ``normalizing`` / ``chunking`` / ``indexing`` / ``ready``
+          (Markdown readable != searchable; R2-C terminal is ``normalizing``)
+        - Content-Type: ``text/markdown; charset=utf-8``
+        - Content-Disposition: ``inline; filename="document.md"``
+        - No HTML conversion / no remote image loading / no Markdown renderer
+        - Page markers preserved byte-identical
+        """
+        if not is_valid_document_id(document_id):
+            raise _safe_error(400, "validation_error", "Invalid document id.") from None
+
+        # Load Document + check status
+        try:
+            doc = await store.get_document(document_id)
+        except Exception as exc:
+            from .store import DocumentNotFoundError
+            if isinstance(exc, DocumentNotFoundError):
+                raise _safe_error(404, "document_not_found", "Document not found.") from exc
+            raise _safe_error(
+                500, "internal_knowledge_error",
+                f"document lookup failed: {type(exc).__name__}",
+            ) from exc
+
+        # Per C0 §21.5 corrected — Markdown readable when MD has been built
+        _MARKDOWN_READABLE_STATUSES = frozenset(
+            {"normalizing", "chunking", "indexing", "ready"}
+        )
+        if doc.status not in _MARKDOWN_READABLE_STATUSES:
+            raise _safe_error(
+                409, "markdown_not_available",
+                f"Markdown not available in status {doc.status!r}.",
+            )
+
+        # Read raw document.md via R1 KnowledgeFileStore (containment + symlink-safe)
+        web_state = getattr(request.app.state, "web", None)
+        file_store = web_state.knowledge_file_store if web_state else None
+        if file_store is None:
+            raise _safe_error(
+                503, "knowledge_service_unavailable",
+                "Knowledge subsystem is not initialized.",
+            )
+
+        from .markdown_persistence import (
+            CanonicalMarkdownPersistence,
+        )
+        persistence = CanonicalMarkdownPersistence(file_store)
+        try:
+            md_text = await asyncio.to_thread(
+                persistence.read,
+                library_id=doc.library_id,
+                document_id=doc.id,
+            )
+        except Exception as exc:
+            # File missing OR path safety OR IO
+            from .markdown_persistence import CanonicalMarkdownReadFailed
+            if isinstance(exc, CanonicalMarkdownReadFailed):
+                raise _safe_error(
+                    409, "markdown_file_missing",
+                    "document.md not found or read failed.",
+                ) from exc
+            raise _safe_error(
+                500, "internal_knowledge_error",
+                f"markdown read failed: {type(exc).__name__}",
+            ) from exc
+
+        # Encode UTF-8 + return raw bytes (page markers preserved byte-identical)
+        md_bytes = md_text.encode("utf-8")
+        return Response(
+            content=md_bytes,
+            media_type="text/markdown; charset=utf-8",
+            headers={
+                "Content-Disposition": 'inline; filename="document.md"',
+            },
         )
 
 
