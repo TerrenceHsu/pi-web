@@ -38,7 +38,16 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Request, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Path,
+    Request,
+    UploadFile,
+    status,
+)
 from pydantic import BaseModel, Field
 
 from ..credentials_api import (
@@ -47,6 +56,13 @@ from ..credentials_api import (
     require_ui_header_dep,
 )
 from ..local_web_security import WebSecurityConfig
+from .ingestion_store import (
+    IngestionAlreadyActiveError,
+    IngestionStore,
+    RetryLimitReachedError,
+    RetryNotAllowedError,
+)
+from .ingestion_worker import IngestionWorkerManager
 from .models import (
     MAX_LIBRARY_DESCRIPTION_LENGTH,
     MAX_LIBRARY_NAME_LENGTH,
@@ -66,6 +82,22 @@ from .service import (
     LibraryNotReady,
     ServiceValidationError,
     SessionNotFound,
+)
+from .upload_service import (
+    MAX_UPLOAD_BODY_BYTES,
+    DuplicateDocumentExistsError,
+    InvalidFilenameError,
+    InvalidPdfSignatureError,
+    InvalidUploadError,
+    LibraryNotMutableError,
+    SourceFinalizeFailedError,
+    UploadResult,
+    UploadService,
+    UploadServiceError,
+    UploadServiceInternalError,
+    UploadStagingFailedError,
+    UploadTooLargeError,
+    WorkerUnavailableError,
 )
 
 # ============================================================================
@@ -141,6 +173,68 @@ class ErrorResponse(BaseModel):
 
 
 # ============================================================================
+# P2-R2-C3 DTOs (Upload / Status / Retry / Markdown)
+# ============================================================================
+
+
+class UploadDocumentPart(BaseModel):
+    """Nested ``document`` field of the upload response (per directive §十二)."""
+
+    id: str
+    library_id: str
+    source_name: str
+    source_sha256: str
+    size_bytes: int
+    status: str
+    created_at: int
+    updated_at: int
+
+
+class UploadJobPart(BaseModel):
+    """Nested ``job`` field — ``null`` on upload (Job created by worker claim)."""
+
+    id: str | None = None
+    document_id: str | None = None
+    status: str | None = None  # 'pending' (semantically; no Job row yet)
+    attempt: int | None = None
+
+
+class UploadResponse(BaseModel):
+    """``POST /libraries/{lib}/documents/upload`` success response."""
+
+    document: UploadDocumentPart
+    job: UploadJobPart | None = None
+
+
+class JobSummary(BaseModel):
+    """Nested ``latest_job`` field of the status response."""
+
+    id: str
+    document_id: str
+    stage: str
+    status: str  # 'running' / 'completed' / 'failed'
+    attempt: int
+    started_at: int
+    finished_at: int | None = None
+    safe_error_code: str | None = None  # '' → null on success path
+
+
+class IngestionStatusResponse(BaseModel):
+    """``GET /documents/{doc}/ingestion`` response."""
+
+    document_id: str
+    document_status: str
+    latest_job: JobSummary | None = None
+
+
+class RetryResponse(BaseModel):
+    """``POST /documents/{doc}/retry`` success response."""
+
+    document_id: str
+    job: JobSummary
+
+
+# ============================================================================
 # Service dependency
 # ============================================================================
 
@@ -161,6 +255,110 @@ async def get_knowledge_service(request: Request) -> KnowledgeService:
             },
         )
     return svc
+
+
+# ============================================================================
+# P2-R2-C3 dependencies (Upload / IngestionStore / WorkerManager)
+# ============================================================================
+
+
+async def get_knowledge_store(request: Request):
+    """Read KnowledgeStore; raise 503 if subsystem disabled."""
+    web_state = getattr(request.app.state, "web", None)
+    store = getattr(web_state, "knowledge_store", None) if web_state else None
+    if store is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "knowledge_service_unavailable",
+                "message": "Knowledge subsystem is not initialized.",
+            },
+        )
+    return store
+
+
+async def get_ingestion_store(request: Request) -> IngestionStore:
+    """Read IngestionStore; raise 503 if subsystem disabled."""
+    web_state = getattr(request.app.state, "web", None)
+    store = getattr(web_state, "knowledge_store", None) if web_state else None
+    if store is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "knowledge_service_unavailable",
+                "message": "Knowledge subsystem is not initialized.",
+            },
+        )
+    # IngestionStore is a thin wrapper over KnowledgeStore — construct on demand.
+    return IngestionStore(store)
+
+
+async def get_worker_manager(request: Request) -> IngestionWorkerManager:
+    """Read IngestionWorkerManager; raise 503 if not running."""
+    web_state = getattr(request.app.state, "web", None)
+    mgr = (
+        getattr(web_state, "ingestion_worker_manager", None)
+        if web_state
+        else None
+    )
+    if mgr is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "worker_unavailable",
+                "message": "Ingestion worker is not initialized.",
+            },
+        )
+    if mgr.state != "running":
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "worker_unavailable",
+                "message": f"Ingestion worker state is {mgr.state!r}.",
+            },
+        )
+    return mgr
+
+
+async def get_upload_service(request: Request) -> UploadService:
+    """Construct UploadService from app.state.web dependencies.
+
+    Per directive §三十六 — endpoints reuse app state; no module globals.
+    """
+    web_state = getattr(request.app.state, "web", None)
+    if web_state is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "knowledge_service_unavailable",
+                "message": "Knowledge subsystem is not initialized.",
+            },
+        )
+    store = web_state.knowledge_store
+    file_store = web_state.knowledge_file_store
+    mgr = web_state.ingestion_worker_manager
+    if store is None or file_store is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "knowledge_service_unavailable",
+                "message": "Knowledge subsystem is not initialized.",
+            },
+        )
+    if mgr is None or mgr.state != "running":
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "worker_unavailable",
+                "message": "Ingestion worker is not running.",
+            },
+        )
+    return UploadService(
+        store=store,
+        file_store=file_store,
+        ingestion_store=IngestionStore(store),
+        worker_manager=mgr,
+    )
 
 
 # ============================================================================
@@ -204,6 +402,93 @@ def _translate_service_error(exc: KnowledgeServiceError) -> HTTPException:
                            "File operation failed; retry may be possible.")
     return _safe_error(500, "knowledge_error",
                        f"Unexpected error: {type(exc).__name__}")
+
+
+# ============================================================================
+# P2-R2-C3 error translation (Upload / Retry / Markdown)
+# ============================================================================
+
+
+def _translate_upload_error(exc: UploadServiceError) -> HTTPException:
+    """Map :class:`UploadServiceError` subclasses to safe HTTPException."""
+    if isinstance(exc, WorkerUnavailableError):
+        return _safe_error(503, "worker_unavailable",
+                           "Ingestion worker is not running.")
+    if isinstance(exc, LibraryNotMutableError):
+        # Library not found OR status != active — both 409 with library_not_mutable
+        return _safe_error(409, "library_not_mutable",
+                           "Library not found or not active; mutation rejected.")
+    if isinstance(exc, InvalidFilenameError):
+        return _safe_error(400, "invalid_filename",
+                           "Filename failed safety validation.")
+    if isinstance(exc, InvalidUploadError):
+        return _safe_error(400, "invalid_upload", "Malformed upload request.")
+    if isinstance(exc, UploadTooLargeError):
+        return _safe_error(413, "upload_too_large",
+                           "Upload exceeds maximum allowed size.")
+    if isinstance(exc, InvalidPdfSignatureError):
+        return _safe_error(415, "invalid_pdf_signature",
+                           "Upload is not a valid PDF (missing %PDF- magic).")
+    if isinstance(exc, DuplicateDocumentExistsError):
+        # Per C0 §11.2 — single 409 code with status-specific reason
+        reason = _duplicate_reason_code(exc.existing_status)
+        return HTTPException(
+            status_code=409,
+            detail={
+                "code": "duplicate_document",
+                "reason": reason,
+                "existing_document_id": exc.existing_document_id,
+                "existing_status": exc.existing_status,
+                "message": (
+                    f"Document with same SHA-256 already exists "
+                    f"(status: {exc.existing_status!r})."
+                ),
+            },
+        )
+    if isinstance(exc, UploadStagingFailedError):
+        return _safe_error(500, "upload_staging_failed",
+                           "Staging write failed; retry may succeed.")
+    if isinstance(exc, SourceFinalizeFailedError):
+        return _safe_error(500, "source_finalize_failed",
+                           "Atomic source finalize failed; retry may succeed.")
+    if isinstance(exc, UploadServiceInternalError):
+        return _safe_error(500, "internal_knowledge_error",
+                           "Internal upload error; safe to retry.")
+    return _safe_error(500, "internal_knowledge_error",
+                       f"Unexpected upload error: {type(exc).__name__}")
+
+
+def _duplicate_reason_code(existing_status: str) -> str:
+    """Per C0 §11.2 — single 409 + status-specific reason code."""
+    if existing_status == "ready":
+        return "duplicate_document_ready"
+    if existing_status == "needs_ocr":
+        return "duplicate_document_needs_ocr"
+    if existing_status == "failed":
+        return "duplicate_document_failed"
+    if existing_status in ("uploaded", "extracting", "normalizing",
+                            "chunking", "indexing"):
+        return "duplicate_document_in_progress"
+    return "duplicate_document"
+
+
+def _translate_ingestion_store_error(exc: Exception) -> HTTPException:
+    """Map IngestionStore errors (retry path) to HTTPException."""
+    if isinstance(exc, RetryNotAllowedError):
+        # Map per C0 §8.5
+        if exc.current_status == "uploaded":
+            return _safe_error(409, "retry_not_required",
+                               "Document is already pending; retry not needed.")
+        return _safe_error(409, "retry_not_allowed",
+                           f"Retry not allowed in status {exc.current_status!r}.")
+    if isinstance(exc, IngestionAlreadyActiveError):
+        return _safe_error(409, "ingestion_already_active",
+                           "Document already has a running ingestion job.")
+    if isinstance(exc, RetryLimitReachedError):
+        return _safe_error(409, "retry_limit_reached",
+                           f"Retry limit reached ({exc.attempt_count}/5).")
+    return _safe_error(500, "internal_knowledge_error",
+                       f"Unexpected retry error: {type(exc).__name__}")
 
 
 # ============================================================================
@@ -397,6 +682,98 @@ def register_knowledge_endpoints(router: APIRouter) -> None:
             await service.delete_document(document_id)
         except KnowledgeServiceError as exc:
             raise _translate_service_error(exc) from exc
+
+    # ========================================================================
+    # P2-R2-C3: Upload / Status / Retry / Markdown endpoints
+    # ========================================================================
+
+    @router.post(
+        "/libraries/{library_id}/documents/upload",
+        status_code=status.HTTP_201_CREATED,
+        response_model=UploadResponse,
+    )
+    async def upload_pdf(
+        library_id: Annotated[str, Path()],
+        file: Annotated[UploadFile, File(description="PDF file part")],
+        upload_service: Annotated[UploadService, Depends(get_upload_service)],
+        request: Request,
+    ) -> UploadResponse:
+        """Upload a single PDF to a Library; creates Document + queues ingestion.
+
+        Multipart form-data with a single ``file`` part. Streams to staging,
+        computes SHA-256, validates %PDF- magic, dedup-checks, persists
+        source.pdf atomically, notifies Worker. Returns immediately with
+        ``document.status='uploaded'``; ingestion runs asynchronously.
+
+        Per directive §三十二 — does NOT call Parser / Builder / Orchestrator;
+        does NOT wait for ingestion completion.
+        """
+        # Content-Length pre-check hint (authoritative enforcement via streaming)
+        content_length_hint = None
+        cl_header = request.headers.get("content-length")
+        if cl_header is not None:
+            try:
+                content_length_hint = int(cl_header)
+            except ValueError:
+                content_length_hint = None
+            else:
+                if content_length_hint > MAX_UPLOAD_BODY_BYTES:
+                    raise _safe_error(
+                        413, "upload_too_large",
+                        f"Content-Length {content_length_hint} exceeds body limit.",
+                    ) from None
+
+        # Run the streaming upload pipeline
+        try:
+            result: UploadResult = await upload_service.upload_stream(
+                library_id=library_id,
+                source_name=file.filename,
+                chunk_source=file,
+                content_length_hint=content_length_hint,
+            )
+        except UploadServiceError as exc:
+            raise _translate_upload_error(exc) from exc
+        except Exception as exc:
+            # Last-resort: catch any unclassified exception
+            raise _safe_error(
+                500, "internal_knowledge_error",
+                f"Upload failed unexpectedly: {type(exc).__name__}",
+            ) from None
+
+        # Re-read Document to populate created_at / updated_at
+        try:
+            store = upload_service._store
+            doc = await store.get_document(result.document_id)
+        except Exception:
+            # Don't fail upload on read-back; return the safe fields we have
+            return UploadResponse(
+                document=UploadDocumentPart(
+                    id=result.document_id,
+                    library_id=result.library_id,
+                    source_name=result.source_name,
+                    source_sha256=result.source_sha256,
+                    size_bytes=result.size_bytes,
+                    status=result.document_status,
+                    created_at=0,
+                    updated_at=0,
+                ),
+                job=None,
+            )
+
+        return UploadResponse(
+            document=UploadDocumentPart(
+                id=doc.id,
+                library_id=doc.library_id,
+                source_name=doc.source_name,
+                source_sha256=doc.source_sha256,
+                size_bytes=doc.size_bytes,
+                status=doc.status,
+                created_at=doc.created_at,
+                updated_at=doc.updated_at,
+            ),
+            # Per C0 §21.2 — Job is created by worker claim, not at upload time
+            job=None,
+        )
 
 
 def register_session_knowledge_endpoints(router: APIRouter) -> None:
