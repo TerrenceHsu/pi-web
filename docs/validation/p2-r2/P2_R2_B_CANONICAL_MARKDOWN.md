@@ -2,8 +2,9 @@
 
 > **阶段**：P2-R2-B Canonical Markdown Builder + Safe Persistence
 > **基线 commit（R2-B 之前）**：`7db4780` — docs(rag): archive corrections to R2-A — R2-B baseline + openai specifier sync explanation
-> **R2-B freeze commit**：本提交（自引用；hash 由 git 在提交时生成）
-> **归档日期**：2026-07-31
+> **R2-B freeze commit**：`eb193b2` — test(rag): freeze canonical markdown builder
+> **R2-B Archive Closure**：✅ COMPLETE — User decision: A — RATIFIED @ 2026-08-03（详见 [`P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md §7.2`](P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md)）
+> **归档日期**：2026-07-31（initial）/ **追认日期**：2026-08-03（Ratified）
 > **范围**：PDF 文本质量评估 + needs_ocr 决策 + 保守 heading 启发式 + Canonical Markdown（含 frontmatter + page marker + collision 转义）+ 确定性 SHA-256 + KnowledgeFileStore 原子持久化。**不**实现 PDF upload API、Ingestion Worker、Job 状态转移、retry、HTTP composition wiring、Agent Tool、Chunk、FTS、向量检索、前端知识库 UI。
 
 ---
@@ -12,7 +13,8 @@
 
 ```
 P2-R2-B Canonical Markdown Builder + Safe Persistence
-✅ COMPLETE / FROZEN @ <this commit>
+✅ COMPLETE / FROZEN @ eb193b2
+✅ Archive Closure RATIFIED @ 2026-08-03 (User decision: A)
 
 R2-B commit chain:
 15b411b  docs(rag): amend P2-R0 — canonical markdown schema + needs_ocr threshold refinement
@@ -20,7 +22,8 @@ R2-B commit chain:
 0154cde  feat(rag): add PDF text quality evaluation         (R2-B1)
 c077d5a  feat(rag): build canonical PDF markdown             (R2-B2)
 677ed13  feat(rag): persist canonical markdown safely        (R2-B3)
-<this>   test(rag): freeze canonical markdown builder        (R2-B4)
+eb193b2  test(rag): freeze canonical markdown builder        (R2-B4)
+<ratification>  docs(rag): ratify P2-R2-B amendment 2        (R2-B Archive Closure — User decision: A)
 
 Baseline before R2-B:
 7db4780 — docs(rag): archive corrections to R2-A
@@ -587,11 +590,14 @@ Duration: ~3s.
 ```
 R2-B targeted selection        160 passed  (43 + 80 + 29 + 8)
 New tests added by R2-B        160         (纯新增；无修改既有测试文件)
-Backend reported delta         152         (2768 → 2920；8-test 统计差异未完全确诊)
+Backend reported delta         152         (2768 → 2920)
 Functional regression            0         (按 targeted 套件 + 默认 marker 完整跑 0 fail)
+8-test discrepancy              KNOWN NON-BLOCKING
+                                           (targeted 单独跑全 PASS；不阻塞 R2-C)
+                                           (MUST RECONCILE IN R2-D — 详见 audit §5.5)
 ```
 
-R2-B targeted 单独跑 160/160 PASS；完整 backend 报告 152 delta 是统计口径差异，不是功能缺陷。详见 audit §5 诊断。
+R2-B targeted 单独跑 160/160 PASS；完整 backend 报告 152 delta。8-test 统计差异**仅作假设**（ruff --fix / fixture 去重 / baseline 漂移）——**不升级为根因结论**。R2-D 必须按 audit §5.5 五项重新核对。详见 audit §5 诊断。
 
 ---
 
@@ -633,7 +639,7 @@ Result: **2920 passed, 2 skipped, 14 deselected** in 379s.
 - Baseline（R2-B 之前）：2768 passed / 2 skipped / 14 deselected
 - R2-B targeted：160 passed (单独跑)
 - 完整 backend delta：152（2768 → 2920）
-- 8-test 统计差异：未完全确诊；targeted 单独跑全 PASS；按 targeted 套件 + 默认 marker 0 fail / 0 error
+- 8-test 统计差异：**KNOWN NON-BLOCKING**——targeted 单独跑全 PASS；按 targeted 套件 + 默认 marker 0 fail / 0 error；不阻塞 R2-C；**MUST RECONCILE IN R2-D**（详见 audit §5.5 五项必查）
 - **0 functional regression**（按 §22-§24 targeted 套件零回归 + 默认 marker 完整跑 0 fail 确认）
 
 详细诊断见 [`P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md §5`](P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md)。
@@ -919,13 +925,15 @@ R2-B **不**完成：
 
 ```
 P2-R2-B Canonical Markdown Builder + Safe Persistence
-✅ COMPLETE / FROZEN @ <freeze commit>
+✅ COMPLETE / FROZEN @ eb193b2
+✅ Archive Closure RATIFIED @ 2026-08-03 (User decision: A)
 
 P2-R2-C Ingestion Worker + Upload/Retry API
-✅ APPROVED TO START
+✅ APPROVED TO START (MVP generated_at MUST NOT BE PASSED — 详见 audit §6)
 
 P2-R2-D Integration Validation + Freeze
 ⛔ BLOCKED BY P2-R2-C
+⚠ MUST RECONCILE 8-test discrepancy (audit §5.5 五项必查)
 
 P2-R3 Chunk + Retrieval MVP
 ⛔ BLOCKED BY COMPLETE P2-R2
@@ -937,4 +945,4 @@ Merge / Tag / Push
 ⛔ NOT AUTHORIZED
 ```
 
-R2-B 完成。R2-C 编码门已开（Canonical Markdown Builder ready + Parser Adapter ready）。等用户独立授权启动 R2-C。
+R2-B 完成 + Archive Closure 追认完成（User decision: A — RATIFIED @ 2026-08-03）。R2-C 编码门已开（Canonical Markdown Builder ready + Parser Adapter ready）；MVP 不得传 `generated_at`（确定性优先）。等用户独立授权启动 R2-C。

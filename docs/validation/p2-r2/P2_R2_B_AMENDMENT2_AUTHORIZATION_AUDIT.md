@@ -1,9 +1,10 @@
-# P2-R2-B Amendment 2 Authorization Audit（追认审计）
+# P2-R2-B Amendment 2 Authorization Audit（追认审计 — RATIFIED）
 
-> **阶段**：P2-R2-B Archive Closure 追认审计（docs-only）
+> **阶段**：P2-R2-B Archive Closure 追认审计（docs-only）— ✅ RATIFIED
 > **基线 commit**：`eb193b2` — test(rag): freeze canonical markdown builder
-> **审计日期**：2026-07-31
-> **范围**：核实 `15b411b` (P2-R0 Amendment 2) 是否获得用户独立授权；记录合同冲突源 + 字段决策理由 + 下游影响评估；纠正 R2-B 测试统计；明确 `generated_at` 在 R2-C 的确定性规则；提交用户追认。
+> **审计日期**：2026-07-31（initial）/ **追认日期**：2026-08-03（User decision: A — RATIFIED）
+> **范围**：核实 `15b411b` (P2-R0 Amendment 2) 是否获得用户独立授权；记录合同冲突源 + 字段决策理由 + 下游影响评估；纠正 R2-B 测试统计；明确 `generated_at` 在 R2-C 的确定性规则；记录用户追认决策。
+> **用户决策（2026-08-03）**：**A — RATIFIED**。Amendment 2 APPROVED；R2-B Archive Closure COMPLETE；R2-C MVP `generated_at` MUST NOT BE PASSED；8-test discrepancy NON-BLOCKING，MUST RECONCILE IN R2-D。
 
 ---
 
@@ -283,17 +284,20 @@ R2-B targeted 全 160 测试在默认 marker 下全 PASS。
 - 不是 R2-B 测试本身错误（targeted 单独运行 160/160 PASS）
 - 不是 marker filter 排除（默认 marker 包含 R2-B 测试）
 
-可能根因（未完全确诊）：
+可能根因（**假设**——未完全确诊；不升级为根因结论）：
 
-1. R2-B 期间 ruff `--fix --unsafe-fixes` 可能合并 / 重构了少量既有测试 helper（如重复赋值清理），导致个别 test item 在 collection 时被去重
-2. pytest collection 在某些环境下对 fixture-driven 测试去重
-3. R2-A 报告的 2768 可能在不同 pytest 会话存在 ±8 的轻微计数漂移
+1. **假设（H1）**：R2-B 期间 ruff `--fix --unsafe-fixes` 可能合并 / 重构了少量既有测试 helper（如重复赋值清理），导致个别 test item 在 collection 时被去重
+2. **假设（H2）**：pytest collection 在某些环境下对 fixture-driven 测试去重
+3. **假设（H3）**：R2-A 报告的 2768 可能在不同 pytest 会话存在 ±8 的轻微计数漂移
+
+> ⚠️ **以上 H1/H2/H3 仅作为假设保留**——不得在任何文档中升级为根因结论。R2-D 必须以实际诊断为准（重新跑 collect-only / 实际执行 / skipped/deselected 数量 / pytest 配置 / marker / 未执行测试项）。
 
 **结论**：本审计无法在不重新跑 baseline 的情况下完全确诊 8-test 差异。但所有证据表明：
 
 - R2-B targeted **160 全 PASS**（功能完整覆盖）
 - 完整 backend **0 regression**（按 targeted 套件零回归 + 完整 backend 在默认 marker 下 0 fail / 0 error 确认）
 - 数学差异是 **统计口径问题**，不是 **功能缺陷**
+- **8-test discrepancy**：**KNOWN NON-BLOCKING**；不阻塞 R2-C；**MUST RECONCILE IN R2-D**（详见 §5.5）
 
 ### 5.4 纠正后的统计口径
 
@@ -308,9 +312,19 @@ Functional regression            0         (按 targeted 套件 + 默认 marker 
 
 具体见 `P2_R2_B_CANONICAL_MARKDOWN.md §22 / §25`（已同步更新）。
 
-### 5.5 后续 follow-up
+### 5.5 后续 follow-up（R2-D 必查 — 强制）
 
-R2-B 不阻塞；R2-C 启动前可由 R2-C maintainer 选择性重跑 baseline 确认 8-test 差异根因（不强制）。
+**8-test discrepancy = KNOWN NON-BLOCKING，但 MUST RECONCILE IN R2-D**。
+
+R2-D Integration Validation 阶段**必须**重新核对以下 5 项（不强制 R2-C 解决，但 R2-D freeze 前必须有结论）：
+
+1. `pytest --collect-only` 数量（baseline `7db4780` vs 当前提交）
+2. 实际执行数量（passed + failed + skipped）
+3. `skipped` / `deselected` 数量
+4. baseline 与当前提交使用的 pytest 配置 / 插件 / marker（确认 R2-A 报告期与 R2-B 后是否一致）
+5. 是否存在 collection 后未执行的测试项（如 fixture 去重 / parametrize 折叠 / conftest skip）
+
+文档中关于 Ruff `--fix --unsafe-fixes` 自动修改或 pytest fixture 去重的内容，**只能保留为假设（H1/H2/H3）**，不能升级为根因结论——R2-D 必须以实际诊断为准。
 
 ---
 
@@ -355,11 +369,11 @@ R2-B 不阻塞；R2-C 启动前可由 R2-C maintainer 选择性重跑 baseline �
 
 ---
 
-## 7. 用户追认状态
+## 7. 用户追认状态（✅ RATIFIED @ 2026-08-03）
 
 ### 7.1 追认门
 
-本审计列出待用户追认的事实：
+本审计列出已确认的事实：
 
 1. ✅ `15b411b` 授权链完整（用户 AskUserQuestion 选择"走 amendment-2 流程"）
 2. ✅ 冲突源已精确引用（§2）
@@ -368,30 +382,32 @@ R2-B 不阻塞；R2-C 启动前可由 R2-C maintainer 选择性重跑 baseline �
 5. ✅ 测试统计已纠正（§5）
 6. ✅ `generated_at` R2-C 规则已明确（§6）
 
-### 7.2 待用户决策
+### 7.2 用户决策（2026-08-03）
 
-请用户在审阅本审计后明确追认或反对：
+> **User decision: A — RATIFIED**
+>
+> Amendment 2: **APPROVED**
+> R2-B Archive Closure: **COMPLETE**
+> R2-C MVP `generated_at`: **MUST NOT BE PASSED**（确定性优先；同 PDF 重 ingest 必须 byte-identical SHA-256）
+> 8-test discrepancy: **NON-BLOCKING**（不阻塞 R2-C），**MUST RECONCILE IN R2-D**（详见 §5.5）
 
-- **追认（A）**：用户接受 Amendment 2 的所有决策，R2-B 升级为 ✅ COMPLETE / FROZEN @ eb193b2；R2-C 编码门开启
-- **部分追认（B）**：用户对部分决策有异议，需 further amendment；R2-B 保持 Archive Closure REQUIRED；R2-C 继续阻塞
-- **反对（C）**：用户认为 Amendment 2 决策错误；需回滚部分字段或阈值；R2-B 不能 FROZEN
+用户在审阅本审计 §1–§6 后明确追认所有决策，包括：
 
-### 7.3 当前阶段门（待用户追认前）
+- `needs_ocr = total_non_whitespace_chars == 0`；低密度文本作 warning 不改变决策（避免短文本数字 PDF 被误判为扫描件）
+- Canonical Markdown frontmatter 字段集（schema / document_id / source_filename / source_sha256 / parser_id / parser_version / page_count / title?/ generated_at?）
+- 删除 `library_id`（query-time 上下文；DB / Session allowlist 提供；不削弱 Session ACL / R3 Citation / R3 Search）
+- `source_name` → `source_filename`（artifact 层解耦；DB 列名不变）
+- `parser_id` + `parser_version` 分离（与 R2-A `PdfExtractionResult` 一致）
+- 新增 Canonical Schema 标识（`"pi-agent-canonical-markdown/v1"`）
+- `title` 可选字段
+
+### 7.3 追认后阶段门
 
 ```
 P2-R2-A Parser Adapter                 ✅ FROZEN @ 0772324
-P2-R2-B Implementation                 ✅ COMPLETE @ eb193b2
-P2-R2-B Contract/Archive Closure       🟡 REQUIRED（本审计；待用户追认）
-P2-R2-C Ingestion Worker + API         ⛔ BLOCKED BY R2-B ARCHIVE CLOSURE
-P2-R2-D Integration Validation         ⛔ BLOCKED BY R2-C
-P2-R3 Retrieval MVP                    ⛔ BLOCKED BY COMPLETE P2-R2
-```
-
-追认后（用户选 A）：
-
-```
 P2-R2-B Canonical Markdown Builder     ✅ COMPLETE / FROZEN @ eb193b2
-P2-R2-C Ingestion Worker + API         ✅ APPROVED TO START
+P2-R2-B Contract/Archive Closure       ✅ COMPLETE @ <ratification commit>（User decision: A — RATIFIED）
+P2-R2-C Ingestion Worker + API         ✅ APPROVED TO START（独立启动授权另需用户发起）
 P2-R2-D Integration Validation         ⛔ BLOCKED BY R2-C
 P2-R3 Retrieval MVP                    ⛔ BLOCKED BY COMPLETE P2-R2
 ```
@@ -412,7 +428,7 @@ P2-R3 Retrieval MVP                    ⛔ BLOCKED BY COMPLETE P2-R2
 | 8 | R5 UI 影响 | ✅ §4.5 |
 | 9 | 测试统计纠正 | ✅ §5 |
 | 10 | generated_at R2-C 规则 | ✅ §6 |
-| 11 | 用户追认门 | 🟡 §7（待用户决策） |
+| 11 | 用户追认门 | ✅ §7（User decision: A — RATIFIED @ 2026-08-03） |
 
 ---
 
@@ -426,4 +442,4 @@ P2-R3 Retrieval MVP                    ⛔ BLOCKED BY COMPLETE P2-R2
 
 本审计 docs-only；不动任何生产代码 / 测试 / 依赖 / lockfile / schema / frontend。
 
-等用户在 §7.2 选择 A / B / C。
+**User decision: A — RATIFIED @ 2026-08-03**（详见 §7.2）。Amendment 2 APPROVED；R2-B Archive Closure COMPLETE；R2-C 编码门开启（独立启动授权另需用户发起）；R2-D 必查 8-test discrepancy。

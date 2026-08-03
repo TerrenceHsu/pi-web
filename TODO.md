@@ -195,13 +195,18 @@ M3 是 docs-only 归档阶段，未自动执行上述任一动作。
       含 R2-A1 `c359ee5` (build: pypdf dep + license record) + R2-A2 `88b017b` (feat: PdfParser Protocol + PypdfParser Adapter + 66 tests + fixture factory) + R2-A3 validation docs。
       2768 backend + 267 frontend + 0 回归 + 0 PDF parser 越界 + 0 网络/模型/OCR。
       详见 [docs/validation/p2-r2/P2_R2_A_PARSER_ADAPTER.md](docs/validation/p2-r2/P2_R2_A_PARSER_ADAPTER.md)。
-- [x] **P2-R2-B Canonical Markdown Builder** —— ✅ COMPLETE @ `eb193b2`（implementation + tests 完成）。
+- [x] **P2-R2-B Canonical Markdown Builder** —— ✅ COMPLETE / FROZEN @ `eb193b2`（implementation + tests + archive closure 全部完成）。
       含 P2-R0 Amendment 2 `15b411b`（pre-R2-B docs-only；用户 AskUserQuestion 显式选择 "走 amendment-2 流程"；解决 frontmatter 字段 + needs_ocr 阈值合同冲突）+ R2-B1 `0154cde` (feat: pdf_quality.py 43 tests) + R2-B2 `c077d5a` (feat: canonical_markdown.py 80 tests) + R2-B3 `677ed13` (feat: markdown_persistence.py 29 tests) + R2-B4 `eb193b2` freeze (8 integration tests + validation docs)。
       R2-B targeted 160/160 PASS + 完整 backend 2920 passed / 2 skipped / 14 deselected + 0 functional regression + 0 dependency diff + 0 schema diff + 0 frontend diff。详见 [docs/validation/p2-r2/P2_R2_B_CANONICAL_MARKDOWN.md](docs/validation/p2-r2/P2_R2_B_CANONICAL_MARKDOWN.md)。
-- [ ] **P2-R2-B Contract/Archive Closure** —— 🟡 REQUIRED（追认审计 docs-only，待用户在 §7.2 选择 A/B/C）。详见 [docs/validation/p2-r2/P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md](docs/validation/p2-r2/P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md)。
-- [ ] **P2-R2-C Ingestion Worker + Upload/Retry API** —— ⛔ BLOCKED BY R2-B Archive Closure。
-      上传 + Ingestion Job + worker + 状态转移 + retry + Document API 接线。**MVP 不传 generated_at**（确定性优先；详见 audit §6）。
+- [x] **P2-R2-B Contract/Archive Closure** —— ✅ COMPLETE @ 2026-08-03（User decision: **A — RATIFIED**；Amendment 2 APPROVED；docs-only closure commit）。
+      接受：`needs_ocr = total_non_whitespace_chars == 0`；低文本密度作 warning；Canonical frontmatter 字段集（schema / document_id / source_filename / source_sha256 / parser_id / parser_version / page_count / title? / generated_at?）；删除 library_id；source_name → source_filename；parser_id 与 parser_version 分离；新增 schema 标识；title 可选。
+      library_id 继续由数据库和 Session allowlist 提供，不从 Markdown frontmatter 获得；不削弱 Session ACL / R3 检索 / Citation。
+      `generated_at` 冻结规则：R2-C MVP 不传；Builder 默认省略；不调 `datetime.now()`；仅显式传入时写入；相同 PDF 重 ingest 必须生成相同 Markdown bytes 和 SHA-256。任务时间继续用 DB `created_at` / `updated_at` / Job 时间字段。
+      测试统计判定：targeted 160 / new 160 / backend delta 152 / functional regression 0；8-test 差异 = **KNOWN NON-BLOCKING**（不阻塞 R2-C），**MUST RECONCILE IN R2-D**。文档中 ruff --fix / pytest fixture 去重仅作假设，不升级为根因结论。详见 [docs/validation/p2-r2/P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md](docs/validation/p2-r2/P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md)。
+- [ ] **P2-R2-C Ingestion Worker + Upload/Retry API** —— ✅ APPROVED TO START（独立启动授权另需用户发起）。
+      上传 + Ingestion Job + worker + 状态转移 + retry + Document API 接线。**MVP `generated_at` MUST NOT BE PASSED**（确定性优先；详见 audit §6）；needs_ocr 检测后跳过 build+write（Document 状态 `extracting → needs_ocr` 终态，不写 document.md，不删 source.pdf）。
 - [ ] **P2-R2-D Integration Validation + Freeze** —— ⛔ BLOCKED BY R2-C。
+      **必查 8-test discrepancy**（5 项）：(1) `pytest --collect-only` 数量；(2) 实际执行数量；(3) skipped/deselected 数量；(4) baseline 与当前提交的 pytest 配置 / 插件 / marker；(5) 是否存在 collection 后未执行的测试项。
 
 ## Explicitly out of scope (long-term)
 
