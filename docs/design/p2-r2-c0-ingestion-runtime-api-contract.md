@@ -411,9 +411,24 @@ asyncio.Queue + asyncio.Event = wake-up hint only
 uploaded / extracting / normalizing / chunking / indexing / ready / failed / needs_ocr / deleting
 ```
 
-R2-C 仅使用：`uploaded` / `extracting` / `normalizing` / `ready` / `failed` / `needs_ocr` / `deleting`。
+R2-C 仅使用：`uploaded` / `extracting` / `normalizing` / `failed` / `needs_ocr` / `deleting`。
 
-`chunking` / `indexing` 留给 R3（状态机允许，但 R2-C 不进入）。
+R3 使用：`normalizing` → `chunking` → `indexing` → `ready`。
+
+> **[CORRECTED 2026-08-03 — C0 Archive Correction]**
+>
+> 原 C0 设计（frozen @ 6476f96）误将 R2-C 终态写为 `ready`，与 `models.py::_DOCUMENT_TRANSITIONS` 冻结状态机冲突——`normalizing` 只能转向 `{chunking, failed, deleting}`，**无**直接 `normalizing → ready` 路径。
+>
+> 用户 2026-08-03 决策：保留状态机不变；R2-C 终态 = `normalizing`（MD 已生成并持久化，等待 R3 切块）；`ready` 仍表示"已完成 Chunk + FTS5 索引，可被 search_knowledge 检索"（R3 终态）。
+>
+> 状态语义：
+> - `uploaded`：source.pdf 收到，无 Job
+> - `extracting`：Parser inspect+extract+Quality 运行中
+> - `normalizing`：Canonical Markdown 已生成并安全持久化，等待切块（**R2-C 终态**）
+> - `chunking`：chunker 运行（R3）
+> - `indexing`：FTS5 索引中（R3）
+> - `ready`：可被 search_knowledge 检索（**R3 终态**）
+> - `failed` / `needs_ocr` / `deleting`：终态
 
 ### 8.2 完整转移表
 
@@ -425,8 +440,10 @@ R2-C 仅使用：`uploaded` / `extracting` / `normalizing` / `ready` / `failed` 
 | `extracting` | extract 成功 + quality NEEDS_OCR | `needs_ocr` | Orchestrator | `transition_document_status(doc_id, 'needs_ocr', error_code='needs_ocr', page_count=N, parser_version=V)` + `finish_job(job_id, 'completed')` | 不写 document.md |
 | `extracting` | inspect/extract 失败 | `failed` | Orchestrator | `transition_document_status(doc_id, 'failed', error_code=...)` + `finish_job(job_id, 'failed', safe_error_code=...)` | source.pdf 保留 |
 | `extracting` | 进程崩溃（startup recovery） | `failed` | WorkerManager | `transition_document_status(doc_id, 'failed', error_code='ingestion_interrupted')` + `finish_job(job_id, 'failed', safe_error_code='ingestion_interrupted')` | source.pdf 保留 |
-| `normalizing` | build + persist 成功 + DB terminal commit 成功 | `ready` | Orchestrator | `transition_document_status(doc_id, 'ready', parser_version=V, page_count=N)` + `finish_job(job_id, 'completed')` | document.md exists (post atomic write) |
-| `normalizing` | build 失败 / persist 失败 / DB commit 失败 | `failed` | Orchestrator | `transition_document_status(doc_id, 'failed', error_code=...)` + `finish_job(job_id, 'failed', safe_error_code=...)` | 见 §19 失败矩阵 |
+| `normalizing` | build + persist + SHA verify 成功 | **（停留 `normalizing`；R2-C 终态）** | Orchestrator | **不转移 Document status**；仅 `finish_job(job_id, 'completed')`（parser_version/page_count 已在 step 8 的 `extracting → normalizing` 转移时写入；markdown_sha 在 write_result 内存校验，不持久化 schema） | document.md exists (post atomic write) |
+| `normalizing` | build 失败 / persist 失败 / SHA mismatch / terminal DB commit 失败 | `failed` | Orchestrator | `transition_document_status(doc_id, 'failed', error_code=...)` + `finish_job(job_id, 'failed', safe_error_code=...)` | 见 §19 失败矩阵 |
+| `normalizing` | 进程崩溃（startup recovery） | `failed` | WorkerManager | `transition_document_status(doc_id, 'failed', error_code='ingestion_interrupted')` + `finish_job(job_id, 'failed', safe_error_code='ingestion_interrupted')` | source.pdf + 可能部分 document.md 保留 |
+| `normalizing` | R3 chunker claim | `chunking` | R3 Worker | R3 阶段实现；不在 R2-C 范围 | document.md exists |
 | `ready` | user retry（MVP 不允许） | — | — | `retry_not_allowed` | — |
 | `needs_ocr` | user retry（MVP 不允许） | — | — | `retry_not_allowed` | — |
 | `failed` | user retry | `extracting` | Service（重试入口） | `transition_document_status(doc_id, 'extracting')` + `create_job(doc_id, 'extract')` | source.pdf exists |
@@ -436,6 +453,8 @@ R2-C 仅使用：`uploaded` / `extracting` / `normalizing` / `ready` / `failed` 
 ### 8.3 转移合法性（per `models.py::is_valid_document_transition`）
 
 R1 已实现并 frozen。R2-C 必须使用 `transition_document_status` Store API 而非裸 SQL UPDATE——状态机守卫由 Store 保证。
+
+**关键不变量**：`normalizing → ready` 不在 `_DOCUMENT_TRANSITIONS`——R2-C 绝不调用 `transition_document_status(doc_id, 'ready')`。`ready` 只能由 R3 通过 `normalizing → chunking → indexing → ready` 三步到达。
 
 ### 8.4 needs_ocr 终态规则
 
@@ -447,14 +466,18 @@ R1 已实现并 frozen。R2-C 必须使用 `transition_document_status` Store AP
 - 普通 retry **不允许**——`needs_ocr` 的判定结果对同 parser 是确定性的，重复运行结果相同。
 - 未来若引入 OCR 能力（marker OCR / surya），需独立 `reprocess` 语义（不在 R2-C MVP）。
 
-### 8.5 retry 允许状态
+### 8.5 R2-C 终态与 retry 允许状态
+
+**R2-C 终态**：`normalizing`（USABLE 路径）/ `needs_ocr`（NEEDS_OCR 路径）/ `failed`（错误路径）。
 
 | Document Status | 普通 retry | 备注 |
 |---|---|---|
-| `failed` | ✅ 允许 | 创建新 Job；attempt +1 |
+| `failed` | ✅ 允许 | 创建新 Job；attempt +1；从 extracting 重新开始 |
+| `normalizing` | ❌ 拒绝（R2-C 完成但 R3 未跑） | 返回 409 `retry_not_allowed`（normalizing 是 R2-C 终态；用户应等 R3 chunker 处理或显式 reprocess；MVP 不实现） |
 | `uploaded` | ⚠ 不需要（已有 pending work） | 返回 409 `retry_not_required`（Document 还在排队） |
-| `extracting` / `normalizing` | ❌ 拒绝 | 返回 409 `ingestion_already_active` |
-| `ready` | ❌ 拒绝 | 返回 409 `retry_not_allowed`（ready 是终态；未来用 reprocess 语义） |
+| `extracting` | ❌ 拒绝 | 返回 409 `ingestion_already_active` |
+| `chunking` / `indexing` | ❌ 拒绝 | 返回 409 `ingestion_already_active`（R3 处理中） |
+| `ready` | ❌ 拒绝 | 返回 409 `retry_not_allowed`（ready 是 R3 终态；未来用 reprocess 语义） |
 | `needs_ocr` | ❌ 拒绝 | 返回 409 `retry_not_allowed`（needs_ocr 是终态业务判定） |
 | `deleting` | ❌ 拒绝 | 返回 409 `document_deleting` |
 
@@ -482,13 +505,16 @@ running / completed / failed
 
 ### 9.3 Job 与 Document 终态对应
 
-| Document Status | latest Job Status | 备注 |
+**[CORRECTED 2026-08-03]** — R2-C 终态为 `normalizing`（不是 `ready`）；`ready` 是 R3 终态。
+
+| Document Status | latest Job Status (R2-C stage='extract') | 备注 |
 |---|---|---|
-| `ready` | `completed` | 成功路径 |
+| `normalizing` | `completed` | **R2-C 成功路径**（MD 已生成 + 持久化；等待 R3 chunker） |
 | `needs_ocr` | `completed` | 正常业务终态（pipeline 完成，判定为 needs_ocr） |
 | `failed` | `failed` | 执行错误 |
 | `extracting` / `normalizing`（crash 后） | `failed`（recovery 强制） | startup recovery 改写 |
 | `uploaded`（从未被 claim） | （无 Job 行） | upload 后 worker 尚未创建 Job |
+| `chunking` / `indexing` / `ready` | （R3 stage='chunk' / 'index' Job） | R3 范围；R2-C 不接触 |
 
 ### 9.4 Job 历史保持
 
@@ -923,14 +949,15 @@ INPUT: document_id (already status='extracting' + Job created by claim)
     → on error: jump to §19 Case 21 (canonical_markdown_write_failed)
 11. Verify write_result.sha256 == hashlib.sha256(artifact.content.encode('utf-8')).hexdigest()
     → mismatch: jump to §19 Case 21b (sha_mismatch)
-12. Atomic DB terminal commit (single BEGIN IMMEDIATE):
-    - transition_document_status(doc_id, 'ready',
-        parser_version=extraction.parser_version,
-        page_count=len(extraction.pages))
-    - finish_job(job_id, 'completed')
-    → on error: jump to §19 Case 22 (terminal_commit_failed; document.md 已写但 DB 未更新)
+12. Atomic DB terminal commit (single BEGIN IMMEDIATE) — **R2-C 终态 = `normalizing`**（per C0 Archive Correction 2026-08-03）：
+    - **不**调用 `transition_document_status(doc_id, 'ready')`——状态机不允许 `normalizing → ready`
+    - parser_version / page_count 已在 step 8 的 `extracting → normalizing` 转移时写入（无需重复更新）
+    - markdown_sha256 在 write_result 内存校验（step 11），不持久化 schema（per §25 Gap #6）
+    - 仅 `finish_job(job_id, 'completed')`
+    - Document 保持 `normalizing`，等待 R3 chunker 处理
+    → on error: jump to §19 Case 22 (terminal_commit_failed; document.md 已写但 Job 未更新 — Orchestrator finally 路径将 Job → failed + Document → failed)
 13. Cleanup attempt-local resources
-14. Return success
+14. Return success（Document status = `normalizing`）
 ```
 
 ### 18.2 Document 状态进入 `normalizing` 的时机
@@ -939,12 +966,14 @@ INPUT: document_id (already status='extracting' + Job created by claim)
 
 - 不是 build 之后——build 失败时 Document 不应停留在 `normalizing` 等待 build 重试；应直接 `failed`。
 - 不是 extract 之后立刻——quality 评估失败的话 Document 应进入 `failed` 而不是 `normalizing`。
+- parser_version + page_count 在 step 8 一并写入（避免 step 12 需要更新 metadata 但状态机不允许 `normalizing → normalizing` 自循环）。
 
 ### 18.3 不变量
 
 - Job status='running' 期间，Orchestrator 持有该 Job 的"active claim"。
 - Document status='extracting' 期间不允许 retry / delete（per §17）。
-- `document.md` 仅在 Document status 进入 `ready` 后才被认为有效（之前写入是中间态）。
+- `document.md` 在 Document status 进入 `normalizing`（step 8）**之后**、build+persist 完成（step 9-10）**之后**才被视为有效——但 Document 本身停在 `normalizing` 直到 R3 接手。
+- **R2-C 绝不调用 `transition_document_status(doc_id, 'ready')`**——状态机不允许；`ready` 是 R3 终态。
 
 ---
 
@@ -976,7 +1005,7 @@ INPUT: document_id (already status='extracting' + Job created by claim)
 | 20 | build: other | CanonicalMarkdownBuilder raised | source.pdf | `failed` | `failed` | — | `canonical_markdown_build_failed` | user retry |
 | 21 | persist: write failed | KnowledgeFileStore write failed | no document.md | `failed` | `failed` | cleanup partial temp (R1 primitive 保证) | `canonical_markdown_write_failed` | user retry |
 | 22 | persist: SHA mismatch | write sha != artifact sha | document.md exists | `failed` | `failed` | — | `canonical_markdown_sha_mismatch` | user retry |
-| 23 | terminal DB commit | DB UPDATE failed | document.md exists | unchanged (still normalizing) | unchanged (still running) | Orchestrator finally: status='failed', job='failed' | `terminal_commit_failed` | user retry (will overwrite document.md) |
+| 23 | terminal DB commit | DB UPDATE failed（finish_job 失败） | document.md exists | unchanged (still normalizing) | unchanged (still running) | Orchestrator finally: Document → failed + Job → failed（per §18.1 step 12 corrected）| `terminal_commit_failed` | user retry (will re-extract + re-build + re-persist, atomic覆盖 document.md) |
 | 24 | worker cancellation | SIGTERM / shutdown grace timeout | source.pdf + maybe partial document.md | `failed` | `failed` | Orchestrator finally | `ingestion_interrupted` | user retry |
 | 25 | app crash | process killed mid-orchestrator | source.pdf + maybe partial document.md | `extracting` or `normalizing` | `running` | startup recovery: doc → failed, job → failed | `ingestion_interrupted` | user retry |
 | 26 | delete race | DELETE wins over active Job | (blocked) | (blocked) | (blocked) | API returns 409 | (none) | (none) |
@@ -1175,12 +1204,14 @@ HTTP/1.1 409 Conflict
 
 ### 21.5 Markdown API
 
+> **[CORRECTED 2026-08-03]** 原 C0 设计要求 `status == 'ready'`；与冻结状态机冲突（R2-C 终态 = `normalizing`，无 `normalizing → ready` 路径）。修正后允许 `status in ('normalizing', 'ready')`——两者都表示 document.md 已生成可读。
+
 ```
 GET /api/knowledge/documents/{document_id}/markdown
 Headers: X-PI-Agent-UI: 1
 ```
 
-**前置**：Document `status == 'ready'`。其他状态 → 409 `markdown_not_ready`（`needs_ocr` 也返回此码——没有 markdown 可读）。
+**前置**：Document `status in ('normalizing', 'ready')`。其他状态（`uploaded` / `extracting` / `chunking` / `indexing` / `failed` / `needs_ocr` / `deleting`） → 409 `markdown_not_ready`（`needs_ocr` 也返回此码——没有 markdown 可读）。
 
 **响应**:
 
@@ -1932,6 +1963,42 @@ PDF ≤ 20 页 + 处理 ≤ 30s
 - R2-C0 directive 已授权 R0 §8.1 的最小化精化（per §70 "已经获得授权的精确合同细化"）
 - 不存在需要 Amendment 流程的其他冲突
 - 用户若发现本判定错误，可独立授权启动 Amendment 3
+
+### 35.5 Post-freeze Correction: R2-C Terminal Status（2026-08-03）
+
+**触发**：C1 启动前审计发现 C0 设计 §8.2 / §13.3 / §18.1 step 12 / §19 Case 23 / §21.5 等多处将 R2-C 终态写为 `Document → ready`，但 `models.py::_DOCUMENT_TRANSITIONS`（frozen @ R1 `3bca5fd`）冻结状态机仅允许 `normalizing → {chunking, failed, deleting}`——**无**直接 `normalizing → ready` 路径。
+
+**用户决策**（AskUserQuestion @ 2026-08-03）：选择 Option 2 — C0 Archive Correction：
+
+- 不修改 R0 §2.4 状态机（保持 frozen）
+- 不拆分为两个 Job（保持单 Job stage='extract' 覆盖整个 R2-C pipeline）
+- C0 设计错误由独立 docs commit 修正（本节即此修正记录）
+- R2-C 终态 = `normalizing`（MD 已生成 + 持久化，等待 R3 切块）
+- `ready` 仍表示"已完成 Chunk + FTS5 索引，可被 search_knowledge 检索"（R3 终态）
+
+**修正点**（本 commit 修改的章节）：
+
+| 章节 | 原表述 | 修正后 |
+|---|---|---|
+| §8.1 | "R2-C 仅使用：uploaded / extracting / normalizing / **ready** / failed / needs_ocr / deleting" | "R2-C 仅使用：uploaded / extracting / **normalizing** / failed / needs_ocr / deleting"（`ready` 留给 R3） |
+| §8.2 | "normalizing + build+persist 成功 → **ready**" | "normalizing + build+persist 成功 → **(停留 normalizing；R2-C 终态)**" |
+| §8.3 | （无关键不变量） | 加："R2-C 绝不调用 transition_document_status(doc_id, 'ready')" |
+| §8.5 | "ready 是终态" | 加：normalizing 是 R2-C 终态；retry normalizing 拒绝（409 retry_not_allowed） |
+| §9.3 | "ready + completed = 成功路径" | "normalizing + completed = **R2-C 成功路径**；ready 是 R3 终态" |
+| §18.1 step 12 | "transition_document_status(doc_id, 'ready', ...)" | "**不**调用 transition 到 ready；仅 finish_job(completed)" |
+| §18.3 | （无 R2-C 不变量） | 加："R2-C 绝不调用 transition 到 ready" |
+| §19 Case 23 | "unchanged (still normalizing) ... Document → failed" | "unchanged ... Document → failed"（保留补偿语义） |
+| §21.5 | "status == 'ready' 才能读 markdown" | "status in ('normalizing', 'ready') 都可读" |
+
+**协议依据**：per memory `feedback_r2_baseline_lockfile_audit`（多 commit baseline + post-freeze correction 审计），C0 设计 docs-only 修正属于"已冻结合同的归档订正"，类似 R2-B 阶段的 `ed442dc`（post-freeze audit）。**不创建 Amendment 3**——状态机未变；仅 C0 设计 doc 错误归档订正。
+
+**对 C1 实施的影响**：
+- Orchestrator 终态：`finish_job(job_id, 'completed')`；**不**调用 `transition_document_status(doc_id, 'ready')`
+- parser_version + page_count：在 step 8 的 `extracting → normalizing` 转移时一并写入（per §18.2 修订）
+- Markdown API（C3）：gating 改为 `status in ('normalizing', 'ready')`（per §21.5 修订）
+- 测试断言：success path 期望 Document status = `normalizing`（不是 `ready`）；Job status = `completed`
+
+**对 C0 退出 gate 的影响**：无——C0 仍 ✅ COMPLETE / FROZEN；本次修正为 docs-only post-freeze correction，不改 Schema / 不改 production code。
 
 ---
 

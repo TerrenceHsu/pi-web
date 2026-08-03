@@ -2,7 +2,8 @@
 
 > **阶段**：P2-R2-C0 Ingestion Runtime and API Contract（docs-only / contract-only / audit-only）
 > **基线 commit**：`c2436c7` — docs(rag): ratify P2-R2-B amendment 2
-> **C0 commit**：本提交（自引用；hash 由 git 在提交时生成）
+> **C0 commit**：`6476f96` — docs(rag): freeze ingestion runtime and API contract
+> **Post-freeze Correction**：见 §17（R2-C 终态修正：`ready` → `normalizing`）
 > **审计日期**：2026-08-03
 > **范围**：核实 R2-C0 启动前置（baseline / G1 stash / Schema 实测）+ 审计真实代码 vs R0 合同 + 记录 C0 决策清单 + 判定 Schema 是否需 amendment + 给出 C1 启动门。
 
@@ -497,3 +498,20 @@ git rev-parse stash@{0}       # = d7240268ec8b8e5d9e195c999e56fb6ec130fd55
 ```
 
 完成后立即停止——**不**进入 C1 / C0.5 / 任何后续编码阶段（独立启动授权另需用户发起）。
+
+---
+
+## 17. Post-freeze Correction（2026-08-03）：R2-C 终态修正
+
+**触发**：C1 启动前审计发现 C0 设计 §8.2 / §13.3 / §18.1 step 12 / §19 Case 23 / §21.5 多处将 R2-C 终态写为 `Document → ready`，与 `models.py::_DOCUMENT_TRANSITIONS` 冻结状态机冲突——`normalizing` 只能转向 `{chunking, failed, deleting}`，**无**直接 `normalizing → ready` 路径。
+
+**用户决策**（AskUserQuestion @ 2026-08-03）：选择 Option 2 — C0 Archive Correction（不修改状态机；不拆分 Job；C0 设计 doc 修正）。
+
+**修正内容**：见 [`p2-r2-c0-ingestion-runtime-api-contract.md §35.5`](../../design/p2-r2-c0-ingestion-runtime-api-contract.md) 完整记录。
+
+**对 C0 退出 gate 的影响**：**无**——C0 仍 ✅ COMPLETE / FROZEN；本次为 docs-only post-freeze correction（类似 R2-B `ed442dc`），不改 Schema / 不改 production code / 不创建 Amendment 3。
+
+**对 C1 启动门的影响**：解锁 C1——C1 Orchestrator 终态 = `normalizing`（不是 `ready`）；C1 测试断言相应调整。
+
+**Post-freeze correction commit**：本提交（self-reference；hash 由 git 生成）。
+
