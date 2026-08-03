@@ -216,8 +216,12 @@ M3 是 docs-only 归档阶段，未自动执行上述任一动作。
       含 C2-A `5aea74b` IngestionWorkerManager（asyncio.Queue cap=32 wake + 30s poll fallback + conditional UPDATE for shutdown race）+ C2-B `115136a` FastAPI lifespan 接线（manager.stop() before KnowledgeStore.close()）+ 37/37 targeted tests。
       **关键不变量**：worker_concurrency=1（frozen）；SQLite = durable source of truth；asyncio.Queue 仅 wake hint；startup recovery（Job running + Document extracting/normalizing → failed + ingestion_interrupted）；graceful shutdown 30s grace + conditional fail；import 无 side effect。
       详见 [docs/validation/p2-r2/P2_R2_C2_WORKER_RECOVERY.md](docs/validation/p2-r2/P2_R2_C2_WORKER_RECOVERY.md)。
-- [ ] **P2-R2-C3 Upload / Status / Retry / Markdown API** —— ✅ APPROVED TO START（独立启动授权另需用户发起）。
-      4 endpoints + Service 层 + KnowledgeUploadBodyLimitMiddleware + Trusted UI 接线 + DTO + API 测试。Markdown API gating: `status in ('normalizing', 'ready')`。Upload 后 `manager.notify_pending_job()` 触发 worker drain。
+- [x] **P2-R2-C3 Upload / Status / Retry / Markdown API** —— ✅ COMPLETE / FROZEN @ `c6a19ec` + freeze commit。
+      含 C3-A `72121c5` UploadService（streaming + SHA + staging + atomic rename + duplicate 409 + Worker notify）+ Upload endpoint + 25 tests；C3-B `c6a19ec` Status / Retry / Markdown endpoints + delete guards + 18 tests；C3-C Freeze。
+      **关键不变量**：4 endpoints under Trusted UI；MAX_PDF_BYTES=25 MB；streaming chunked 64 KiB；PDF `%PDF-` magic；R2-C terminal=`normalizing`（Markdown readable）；needs_ocr/normalizing/ready 不允许 retry；active Job blocks Document/Library delete；upload 不调 Parser；retry 复用 Document + source.pdf；generated_at 不传。
+      详见 [docs/validation/p2-r2/P2_R2_C3_INGESTION_APIS.md](docs/validation/p2-r2/P2_R2_C3_INGESTION_APIS.md)。
+- [ ] **P2-R2-C4 Integration Validation + R2-C Freeze** —— ✅ APPROVED TO START（独立启动授权另需用户发起）。
+      E2E upload→ingest→markdown 全链路 + restart recovery + concurrent retry + delete race + failure injection + 完整 backend + frontend 零回归 + freeze。
 - [ ] **P2-R2-C4 Integration Validation + R2-C Freeze** —— ⛔ BLOCKED BY C3。
       E2E + restart recovery + concurrent retry + delete race + failure injection + 完整 backend + frontend 零回归 + freeze。
 - [ ] **P2-R2-D Integration Validation + Freeze** —— ⛔ BLOCKED BY COMPLETE R2-C。
