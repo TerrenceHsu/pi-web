@@ -485,10 +485,74 @@ def create_app(
             state.knowledge_service = knowledge_service
             state.knowledge_store = k_store
             state.knowledge_file_store = k_file_store
+
+            # ============================================================
+            # P2-R2-C2: Ingestion Worker Manager — app-scoped singleton
+            # that drives PDF → Canonical Markdown pipeline.
+            #
+            # Constructed only if [rag] extra is available (PypdfParser
+            # import succeeds). If pypdf not installed, manager stays
+            # None — knowledge subsystem still works for metadata-only
+            # operations.
+            # ============================================================
+            ingestion_manager = None
+            try:
+                from .knowledge.canonical_markdown import (
+                    CanonicalMarkdownBuilder,
+                )
+                from .knowledge.ingestion_orchestrator import (
+                    IngestionOrchestrator,
+                )
+                from .knowledge.ingestion_store import IngestionStore
+                from .knowledge.ingestion_worker import (
+                    IngestionWorkerManager,
+                )
+                from .knowledge.markdown_persistence import (
+                    CanonicalMarkdownPersistence,
+                )
+                from .knowledge.pdf_quality import PdfTextQualityEvaluator
+                from .knowledge.pypdf_parser import PypdfParser
+
+                ingestion_store_obj = IngestionStore(k_store)
+                parser_obj = PypdfParser()
+                orchestrator_obj = IngestionOrchestrator(
+                    store=k_store,
+                    ingestion_store=ingestion_store_obj,
+                    file_store=k_file_store,
+                    parser=parser_obj,
+                    quality_evaluator=PdfTextQualityEvaluator(),
+                    builder=CanonicalMarkdownBuilder(),
+                    persistence=CanonicalMarkdownPersistence(k_file_store),
+                )
+                ingestion_manager = IngestionWorkerManager(
+                    orchestrator=orchestrator_obj,
+                    ingestion_store=ingestion_store_obj,
+                    store=k_store,
+                    parser=parser_obj,
+                    owns_parser=True,
+                )
+            except ImportError:
+                # [rag] extra (pypdf) not installed — skip ingestion pipeline
+                pass
+            except Exception as e:
+                raise RuntimeError(
+                    f"ingestion worker manager init failed: {type(e).__name__}"
+                ) from e
+
+            if ingestion_manager is not None:
+                try:
+                    await ingestion_manager.start()
+                    state.ingestion_worker_manager = ingestion_manager
+                except Exception as e:
+                    raise RuntimeError(
+                        f"ingestion worker manager start failed: "
+                        f"{type(e).__name__}"
+                    ) from e
         else:
             state.knowledge_service = None
             state.knowledge_store = None
             state.knowledge_file_store = None
+            state.ingestion_worker_manager = None
 
         # ====================================================================
         # P1-E1-4A: Credential Runtime Composition Root
@@ -657,6 +721,21 @@ def create_app(
                 await state.extension_store.close()
             except Exception:
                 pass
+        # P2-R2-C2: 关闭 Ingestion Worker Manager（在 KnowledgeStore.close 之前）
+        # Manager.stop() 会触发 startup recovery（已 done）+ graceful shutdown
+        # + parser.close(). 必须在 KnowledgeStore.close() 之前完成，否则
+        # Manager 的 worker_loop 会访问已关闭的 connection.
+        ingestion_mgr = (
+            state.ingestion_worker_manager
+            if hasattr(state, "ingestion_worker_manager")
+            else None
+        )
+        if ingestion_mgr is not None:
+            try:
+                await ingestion_mgr.stop()
+            except Exception:
+                pass
+            state.ingestion_worker_manager = None
         # P2-R1: 关闭 KnowledgeStore（独立 connection）
         k_store = state.knowledge_store if hasattr(state, "knowledge_store") else None
         if k_store is not None:

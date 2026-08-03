@@ -217,6 +217,11 @@ class WebAppState(BaseModel):
     knowledge_service: Any = None
     knowledge_store: Any = None
     knowledge_file_store: Any = None
+    # P2-R2-C2: Ingestion Worker Manager (None = disabled / [rag] extra missing).
+    # Holds app-scoped singleton that drives PDF→Canonical Markdown pipeline.
+    # Constructed in lifespan AFTER knowledge subsystem; started before yield;
+    # stopped in lifespan finally BEFORE knowledge_store.close().
+    ingestion_worker_manager: Any = None
 
 
 # ============================================================================
