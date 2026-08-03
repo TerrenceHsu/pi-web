@@ -212,10 +212,12 @@ M3 是 docs-only 归档阶段，未自动执行上述任一动作。
       含 C0 Archive Correction `0a8f554`（R2-C terminal `ready → normalizing`，per 状态机冻结冲突）+ C1-A `015dc45` IngestionStore（atomic claim / retry / recovery primitives + 38 tests）+ C1-B `cde0e0b` IngestionOrchestrator（Parser+Quality+Builder+Persistence composition + 20 tests）+ C1-C freeze（58/58 targeted + 2986 backend + 267 frontend + ruff clean + 0 regression）。
       **关键不变量**：generated_at MUST NOT BE PASSED；R2-C 终态 = `normalizing`（不调用 `transition_document_status(doc_id, 'ready')`）；needs_ocr 终态 Job='completed'；source.pdf 完整性保留；错误响应零路径/正文/异常泄漏。
       详见 [docs/validation/p2-r2/P2_R2_C1_INGESTION_ORCHESTRATOR.md](docs/validation/p2-r2/P2_R2_C1_INGESTION_ORCHESTRATOR.md)。
-- [ ] **P2-R2-C2 Bounded Worker + Recovery** —— ✅ APPROVED TO START（独立启动授权另需用户发起）。
-      WorkerManager + FastAPI lifespan 接线 + startup recovery（mark_running_jobs_interrupted）+ graceful shutdown（30s grace）+ worker 测试。
-- [ ] **P2-R2-C3 Upload / Status / Retry / Markdown API** —— ⛔ BLOCKED BY C2。
-      4 endpoints + Service 层 + KnowledgeUploadBodyLimitMiddleware + Trusted UI 接线 + DTO + API 测试。Markdown API gating: `status in ('normalizing', 'ready')`。
+- [x] **P2-R2-C2 Bounded Worker + Recovery** —— ✅ COMPLETE / FROZEN @ `115136a` + freeze commit。
+      含 C2-A `5aea74b` IngestionWorkerManager（asyncio.Queue cap=32 wake + 30s poll fallback + conditional UPDATE for shutdown race）+ C2-B `115136a` FastAPI lifespan 接线（manager.stop() before KnowledgeStore.close()）+ 37/37 targeted tests。
+      **关键不变量**：worker_concurrency=1（frozen）；SQLite = durable source of truth；asyncio.Queue 仅 wake hint；startup recovery（Job running + Document extracting/normalizing → failed + ingestion_interrupted）；graceful shutdown 30s grace + conditional fail；import 无 side effect。
+      详见 [docs/validation/p2-r2/P2_R2_C2_WORKER_RECOVERY.md](docs/validation/p2-r2/P2_R2_C2_WORKER_RECOVERY.md)。
+- [ ] **P2-R2-C3 Upload / Status / Retry / Markdown API** —— ✅ APPROVED TO START（独立启动授权另需用户发起）。
+      4 endpoints + Service 层 + KnowledgeUploadBodyLimitMiddleware + Trusted UI 接线 + DTO + API 测试。Markdown API gating: `status in ('normalizing', 'ready')`。Upload 后 `manager.notify_pending_job()` 触发 worker drain。
 - [ ] **P2-R2-C4 Integration Validation + R2-C Freeze** —— ⛔ BLOCKED BY C3。
       E2E + restart recovery + concurrent retry + delete race + failure injection + 完整 backend + frontend 零回归 + freeze。
 - [ ] **P2-R2-D Integration Validation + Freeze** —— ⛔ BLOCKED BY COMPLETE R2-C。
