@@ -208,12 +208,14 @@ M3 是 docs-only 归档阶段，未自动执行上述任一动作。
       **Schema Amendment NOT REQUIRED**（R1 schema 充分；3 non-blocking gaps deferred to R2-D：markdown_sha256 / parser_id / warnings_json）。
       **R0 §8.1 sync→async 已 minimal refine**（per R2-C0 directive §70 授权；不创建 Amendment 3）。
       4 子阶段：C1 Store+Orchestrator / C2 Worker+Recovery / C3 API / C4 Validation+Freeze。详见 [docs/design/p2-r2-c0-ingestion-runtime-api-contract.md](docs/design/p2-r2-c0-ingestion-runtime-api-contract.md) + [docs/validation/p2-r2/P2_R2_C0_INGESTION_CONTRACT_AUDIT.md](docs/validation/p2-r2/P2_R2_C0_INGESTION_CONTRACT_AUDIT.md)。
-- [ ] **P2-R2-C1 Ingestion Store Extensions + Orchestrator** —— ✅ APPROVED TO START（独立启动授权另需用户发起）。
-      KnowledgeStore 新方法（claim_next_uploaded_document / count_active_jobs_for_document / mark_running_jobs_interrupted / count_extract_attempts）+ KnowledgeFileStore 新方法（write_source_atomically / write_staging / cleanup_temp_files）+ IngestionOrchestrator + 错误映射 + 单元测试。**MVP `generated_at` MUST NOT BE PASSED**。
-- [ ] **P2-R2-C2 Bounded Worker + Recovery** —— ⛔ BLOCKED BY C1。
-      WorkerManager + FastAPI lifespan 接线 + startup recovery + graceful shutdown + worker 测试。
+- [x] **P2-R2-C1 Ingestion Store Extensions + Orchestrator** —— ✅ COMPLETE / FROZEN @ `cde0e0b` + freeze commit。
+      含 C0 Archive Correction `0a8f554`（R2-C terminal `ready → normalizing`，per 状态机冻结冲突）+ C1-A `015dc45` IngestionStore（atomic claim / retry / recovery primitives + 38 tests）+ C1-B `cde0e0b` IngestionOrchestrator（Parser+Quality+Builder+Persistence composition + 20 tests）+ C1-C freeze（58/58 targeted + 2986 backend + 267 frontend + ruff clean + 0 regression）。
+      **关键不变量**：generated_at MUST NOT BE PASSED；R2-C 终态 = `normalizing`（不调用 `transition_document_status(doc_id, 'ready')`）；needs_ocr 终态 Job='completed'；source.pdf 完整性保留；错误响应零路径/正文/异常泄漏。
+      详见 [docs/validation/p2-r2/P2_R2_C1_INGESTION_ORCHESTRATOR.md](docs/validation/p2-r2/P2_R2_C1_INGESTION_ORCHESTRATOR.md)。
+- [ ] **P2-R2-C2 Bounded Worker + Recovery** —— ✅ APPROVED TO START（独立启动授权另需用户发起）。
+      WorkerManager + FastAPI lifespan 接线 + startup recovery（mark_running_jobs_interrupted）+ graceful shutdown（30s grace）+ worker 测试。
 - [ ] **P2-R2-C3 Upload / Status / Retry / Markdown API** —— ⛔ BLOCKED BY C2。
-      4 endpoints + Service 层 + KnowledgeUploadBodyLimitMiddleware + Trusted UI 接线 + DTO + API 测试。
+      4 endpoints + Service 层 + KnowledgeUploadBodyLimitMiddleware + Trusted UI 接线 + DTO + API 测试。Markdown API gating: `status in ('normalizing', 'ready')`。
 - [ ] **P2-R2-C4 Integration Validation + R2-C Freeze** —— ⛔ BLOCKED BY C3。
       E2E + restart recovery + concurrent retry + delete race + failure injection + 完整 backend + frontend 零回归 + freeze。
 - [ ] **P2-R2-D Integration Validation + Freeze** —— ⛔ BLOCKED BY COMPLETE R2-C。

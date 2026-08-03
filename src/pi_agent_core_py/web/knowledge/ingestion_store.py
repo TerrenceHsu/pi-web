@@ -358,7 +358,7 @@ class IngestionStore:
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def _select_oldest_uploaded_id(db: "aiosqlite.Connection") -> str | None:
+    async def _select_oldest_uploaded_id(db: aiosqlite.Connection) -> str | None:
         async with db.execute(
             "SELECT id FROM knowledge_documents "
             "WHERE status = 'uploaded' "
@@ -369,7 +369,7 @@ class IngestionStore:
 
     @staticmethod
     async def _transition_to_extracting(
-        db: "aiosqlite.Connection", document_id: str
+        db: aiosqlite.Connection, document_id: str
     ) -> bool:
         """Conditional UPDATE uploaded→extracting. Returns True if row updated."""
         cur = await db.execute(
@@ -382,7 +382,7 @@ class IngestionStore:
 
     @staticmethod
     async def _transition_failed_to_extracting(
-        db: "aiosqlite.Connection", document_id: str
+        db: aiosqlite.Connection, document_id: str
     ) -> bool:
         """Conditional UPDATE failed→extracting (clears error_code)."""
         cur = await db.execute(
@@ -395,7 +395,7 @@ class IngestionStore:
 
     @staticmethod
     async def _count_active_jobs(
-        db: "aiosqlite.Connection", document_id: str
+        db: aiosqlite.Connection, document_id: str
     ) -> int:
         async with db.execute(
             "SELECT COUNT(*) AS n FROM knowledge_ingestion_jobs "
@@ -407,7 +407,7 @@ class IngestionStore:
 
     @staticmethod
     async def _count_extract_attempts(
-        db: "aiosqlite.Connection", document_id: str
+        db: aiosqlite.Connection, document_id: str
     ) -> int:
         async with db.execute(
             "SELECT COUNT(*) AS n FROM knowledge_ingestion_jobs "
@@ -419,7 +419,7 @@ class IngestionStore:
 
     @staticmethod
     async def _insert_running_extract_job(
-        db: "aiosqlite.Connection", document_id: str
+        db: aiosqlite.Connection, document_id: str
     ) -> IngestionJob:
         """INSERT a new ``running`` Job; auto-computes attempt from history."""
         job_id = f"job_{secrets.token_hex(8)}"
@@ -446,7 +446,7 @@ class IngestionStore:
         )
 
     @staticmethod
-    async def _best_effort_rollback(db: "aiosqlite.Connection") -> None:
+    async def _best_effort_rollback(db: aiosqlite.Connection) -> None:
         try:
             await db.execute("ROLLBACK")
         except Exception:
@@ -462,7 +462,7 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _row_to_job(row: "aiosqlite.Row") -> IngestionJob:
+def _row_to_job(row: aiosqlite.Row) -> IngestionJob:
     return IngestionJob(
         id=row["id"],
         document_id=row["document_id"],

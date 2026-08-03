@@ -33,7 +33,6 @@ from pi_agent_core_py.web.knowledge.ingestion_store import (
 from pi_agent_core_py.web.knowledge.markdown_persistence import (
     CanonicalMarkdownPersistence,
 )
-from pi_agent_core_py.web.knowledge.models import is_valid_job_id
 from pi_agent_core_py.web.knowledge.pdf_quality import PdfTextQualityEvaluator
 from pi_agent_core_py.web.knowledge.pypdf_parser import PypdfParser
 from pi_agent_core_py.web.knowledge.store import KnowledgeStore
@@ -115,7 +114,6 @@ async def _make_document_with_source(
     source_name: str = "doc.pdf",
 ) -> str:
     """Create Document metadata + write source.pdf to the right location."""
-    import secrets
 
     sha = hashlib.sha256(source_bytes).hexdigest()
     doc = await store.create_document(
@@ -581,9 +579,12 @@ class TestResultDTO:
             result.parser_version or "",
             result.markdown_sha256 or "",
         ):
-            assert "C:" not in str(field_value)
-            assert "/" not in str(field_value) or field_value.startswith("doc_") or field_value.startswith("job_")
-            assert "\\" not in str(field_value)
+            text = str(field_value)
+            assert "C:" not in text
+            assert "\\" not in text
+            # Forward slashes only allowed as part of standard id prefix
+            # (none of these fields should contain path separators)
+            assert "/" not in text
 
     async def test_result_does_not_contain_markdown_body(
         self, orchestrator, store, ingestion_store, file_store, tmp_path

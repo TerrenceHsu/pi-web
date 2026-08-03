@@ -71,8 +71,8 @@ async def _make_document(
         library_id=library_id,
         source_name=source_name,
         source_sha256=sha,
-        source_relpath=f"documents/_/source.pdf",  # actual path uses doc_id
-        markdown_relpath=f"documents/_/document.md",
+        source_relpath="documents/_/source.pdf",  # actual path uses doc_id
+        markdown_relpath="documents/_/document.md",
         mime_type="application/pdf",
     )
     if status != "uploaded":
@@ -104,7 +104,7 @@ async def _make_running_extract_job(store: KnowledgeStore, doc_id: str):
 
 class TestClaimNextPending:
     async def test_returns_none_when_no_pending(self, ingestion, store):
-        lib = await _make_library(store)
+        await _make_library(store)
         # No documents at all
         assert await ingestion.claim_next_pending_document() is None
 
@@ -384,7 +384,10 @@ class TestCreateRetryJob:
             )
 
             # Exactly one success + one IngestionAlreadyActive
-            successes = [r for r in results if isinstance(r, type(results[0])) and not isinstance(r, Exception)]
+            successes = [
+                r for r in results
+                if not isinstance(r, Exception) and hasattr(r, "id")
+            ]
             exceptions = [r for r in results if isinstance(r, Exception)]
             assert len(successes) == 1
             assert len(exceptions) == 1
@@ -451,7 +454,7 @@ class TestQueries:
     async def test_get_latest_extract_job_returns_most_recent(self, ingestion, store):
         lib = await _make_library(store)
         doc_id = await _make_document(store, lib.id)
-        j1 = await store.create_job(document_id=doc_id, stage=EXTRACT_STAGE)
+        await store.create_job(document_id=doc_id, stage=EXTRACT_STAGE)
         await asyncio.sleep(0.005)
         j2 = await store.create_job(document_id=doc_id, stage=EXTRACT_STAGE)
 
@@ -499,7 +502,7 @@ class TestRecoveryPrimitive:
 
     async def test_mark_running_jobs_interrupted_idempotent(self, ingestion, store):
         lib = await _make_library(store)
-        doc_id = await _make_document(store, lib.id)
+        await _make_document(store, lib.id)
         await ingestion.claim_next_pending_document()
 
         first = await ingestion.mark_running_jobs_interrupted()
@@ -512,7 +515,7 @@ class TestRecoveryPrimitive:
         self, ingestion, store
     ):
         lib = await _make_library(store)
-        doc_id = await _make_document(store, lib.id)
+        await _make_document(store, lib.id)
         claimed = await ingestion.claim_next_pending_document()
         await store.finish_job(claimed.job.id, status="completed")
 

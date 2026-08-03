@@ -70,13 +70,10 @@ from .pdf_quality import (
     PdfTextQualityEvaluator,
 )
 from .store import (
-    Document,
     DocumentNotFoundError,
-    IngestionJob,
     KnowledgeStore,
     KnowledgeStoreError,
 )
-
 
 # ============================================================================
 # Constants
@@ -346,7 +343,7 @@ class IngestionOrchestrator:
                 parser_version=parser_version,
                 page_count=page_count,
             )
-        except (KnowledgeStoreError, ValueError) as exc:
+        except (KnowledgeStoreError, ValueError):
             return await self._handle_failure(
                 _OrchestratorFailure(
                     "ingestion_state_conflict",
