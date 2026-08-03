@@ -203,9 +203,20 @@ M3 是 docs-only 归档阶段，未自动执行上述任一动作。
       library_id 继续由数据库和 Session allowlist 提供，不从 Markdown frontmatter 获得；不削弱 Session ACL / R3 检索 / Citation。
       `generated_at` 冻结规则：R2-C MVP 不传；Builder 默认省略；不调 `datetime.now()`；仅显式传入时写入；相同 PDF 重 ingest 必须生成相同 Markdown bytes 和 SHA-256。任务时间继续用 DB `created_at` / `updated_at` / Job 时间字段。
       测试统计判定：targeted 160 / new 160 / backend delta 152 / functional regression 0；8-test 差异 = **KNOWN NON-BLOCKING**（不阻塞 R2-C），**MUST RECONCILE IN R2-D**。文档中 ruff --fix / pytest fixture 去重仅作假设，不升级为根因结论。详见 [docs/validation/p2-r2/P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md](docs/validation/p2-r2/P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md)。
-- [ ] **P2-R2-C Ingestion Worker + Upload/Retry API** —— ✅ APPROVED TO START（独立启动授权另需用户发起）。
-      上传 + Ingestion Job + worker + 状态转移 + retry + Document API 接线。**MVP `generated_at` MUST NOT BE PASSED**（确定性优先；详见 audit §6）；needs_ocr 检测后跳过 build+write（Document 状态 `extracting → needs_ocr` 终态，不写 document.md，不删 source.pdf）。
-- [ ] **P2-R2-D Integration Validation + Freeze** —— ⛔ BLOCKED BY R2-C。
+- [x] **P2-R2-C0 Ingestion Runtime/API Contract** —— ✅ COMPLETE / FROZEN @ <this commit>（docs-only / contract-only / audit-only）。
+      含 38 项决策冻结（worker_concurrency=1 / queue=32 / shutdown_grace=30s / SQLite durable source of truth / Document `uploaded`=pending signal / app-level active Job uniqueness via BEGIN IMMEDIATE / 404-409-413-415-500-503 错误映射 / 27-case 失败矩阵 / 4 API endpoints / generated_at MUST NOT BE PASSED）。
+      **Schema Amendment NOT REQUIRED**（R1 schema 充分；3 non-blocking gaps deferred to R2-D：markdown_sha256 / parser_id / warnings_json）。
+      **R0 §8.1 sync→async 已 minimal refine**（per R2-C0 directive §70 授权；不创建 Amendment 3）。
+      4 子阶段：C1 Store+Orchestrator / C2 Worker+Recovery / C3 API / C4 Validation+Freeze。详见 [docs/design/p2-r2-c0-ingestion-runtime-api-contract.md](docs/design/p2-r2-c0-ingestion-runtime-api-contract.md) + [docs/validation/p2-r2/P2_R2_C0_INGESTION_CONTRACT_AUDIT.md](docs/validation/p2-r2/P2_R2_C0_INGESTION_CONTRACT_AUDIT.md)。
+- [ ] **P2-R2-C1 Ingestion Store Extensions + Orchestrator** —— ✅ APPROVED TO START（独立启动授权另需用户发起）。
+      KnowledgeStore 新方法（claim_next_uploaded_document / count_active_jobs_for_document / mark_running_jobs_interrupted / count_extract_attempts）+ KnowledgeFileStore 新方法（write_source_atomically / write_staging / cleanup_temp_files）+ IngestionOrchestrator + 错误映射 + 单元测试。**MVP `generated_at` MUST NOT BE PASSED**。
+- [ ] **P2-R2-C2 Bounded Worker + Recovery** —— ⛔ BLOCKED BY C1。
+      WorkerManager + FastAPI lifespan 接线 + startup recovery + graceful shutdown + worker 测试。
+- [ ] **P2-R2-C3 Upload / Status / Retry / Markdown API** —— ⛔ BLOCKED BY C2。
+      4 endpoints + Service 层 + KnowledgeUploadBodyLimitMiddleware + Trusted UI 接线 + DTO + API 测试。
+- [ ] **P2-R2-C4 Integration Validation + R2-C Freeze** —— ⛔ BLOCKED BY C3。
+      E2E + restart recovery + concurrent retry + delete race + failure injection + 完整 backend + frontend 零回归 + freeze。
+- [ ] **P2-R2-D Integration Validation + Freeze** —— ⛔ BLOCKED BY COMPLETE R2-C。
       **必查 8-test discrepancy**（5 项）：(1) `pytest --collect-only` 数量；(2) 实际执行数量；(3) skipped/deselected 数量；(4) baseline 与当前提交的 pytest 配置 / 插件 / marker；(5) 是否存在 collection 后未执行的测试项。
 
 ## Explicitly out of scope (long-term)

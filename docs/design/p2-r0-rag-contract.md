@@ -598,6 +598,17 @@ PDF > 20 页
   └── 直接 400 拒绝，提示用户分批
 ```
 
+> **[REFINED 2026-08-03 — 见 p2-r2-c0-ingestion-runtime-api-contract.md]**
+>
+> R2-C0 directive 已将 upload HTTP 行为细化为 **async 201 + bounded worker queue**：
+>
+> - upload 请求**不**等待 Parser 完成；立即返回 `201 Created` + Document DTO（`job: null`，Job 在 worker claim 时创建）。
+> - 处理由单进程、单 WorkerManager、`asyncio.Queue(maxsize=32)` + `asyncio.Event` wakeup + 30s DB polling 兜底驱动（worker_concurrency=1）。
+> - **30s 阈值保留**——语义从"upload 同步等待上限"改为"worker graceful shutdown grace"（per `p2-r2-c0-ingestion-runtime-api-contract.md §16`）。
+> - **PDF ≤ 20 页限制保留**——在 worker `inspect` 后强制（超限 → Document `failed` + `pdf_page_limit_exceeded`）。
+>
+> 此精化由 R2-C0 启动指令 §70 "允许最小修改 p2-r0-rag-contract.md" 明确授权——**不创建 Amendment 3**（R0 核心架构未变；仅 upload HTTP 行为精化）。详见 [`p2-r2-c0-ingestion-runtime-api-contract.md §10 / §14 / §35`](p2-r2-c0-ingestion-runtime-api-contract.md)。
+
 ### 8.2 Job 表的用途
 
 即使第一版同步处理，`knowledge_ingestion_jobs` 表仍记录每个 stage（extract / normalize / chunk / index）——失败时可审计到具体 stage。R2 引入 BackgroundTask 时直接复用此表，不改 schema。
