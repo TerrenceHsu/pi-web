@@ -258,16 +258,33 @@ class TestUploadServiceStreaming:
     async def test_streaming_enforces_max_size(
         self, upload_service, store, tmp_path
     ):
-        """Streaming aborts if cumulative bytes exceed MAX_PDF_BYTES."""
+        """Streaming aborts if cumulative bytes exceed MAX_PDF_BYTES.
+
+        Uses a streaming mock source that yields chunks without allocating
+        the full 25MB+ buffer in memory (avoids resource pressure in CI).
+        """
+
+        class OverflowSource:
+            """Yields chunks that exceed MAX_PDF_BYTES without full allocation."""
+
+            def __init__(self) -> None:
+                self._yielded = 0
+                self._chunk = b"x" * 65536  # 64 KiB chunks
+
+            async def read(self, size: int = -1) -> bytes:
+                await asyncio.sleep(0)
+                if self._yielded >= MAX_PDF_BYTES + 65536:
+                    return b""  # EOF
+                self._yielded += len(self._chunk)
+                return self._chunk
+
         lib = await store.create_library(name="lib1")
-        # Make a "PDF" larger than MAX_PDF_BYTES
-        big_bytes = b"%PDF-1.4\n" + b"x" * (MAX_PDF_BYTES + 100)
 
         with pytest.raises(UploadTooLargeError):
             await upload_service.upload_stream(
                 library_id=lib.id,
                 source_name="big.pdf",
-                chunk_source=_AsyncBytesSource(big_bytes),
+                chunk_source=OverflowSource(),
             )
 
         # Verify NO Document was created
@@ -453,14 +470,27 @@ class TestCompensation:
     async def test_no_orphan_document_on_size_overflow(
         self, upload_service, store, tmp_path
     ):
+        """Streaming overflow test using chunked source (no full 25MB alloc)."""
+
+        class OverflowSource:
+            def __init__(self) -> None:
+                self._yielded = 0
+                self._chunk = b"%PDF-1.4" + b"x" * 65528  # starts with magic
+
+            async def read(self, size: int = -1) -> bytes:
+                await asyncio.sleep(0)
+                if self._yielded >= MAX_PDF_BYTES + 65536:
+                    return b""
+                self._yielded += len(self._chunk)
+                return self._chunk
+
         lib = await store.create_library(name="lib1")
-        big_bytes = b"%PDF-1.4\n" + b"x" * (MAX_PDF_BYTES + 100)
 
         with pytest.raises(UploadTooLargeError):
             await upload_service.upload_stream(
                 library_id=lib.id,
                 source_name="big.pdf",
-                chunk_source=_AsyncBytesSource(big_bytes),
+                chunk_source=OverflowSource(),
             )
 
         docs = await store.list_documents(lib.id)

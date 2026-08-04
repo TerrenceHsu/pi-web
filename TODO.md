@@ -220,8 +220,9 @@ M3 是 docs-only 归档阶段，未自动执行上述任一动作。
       含 C3-A `72121c5` UploadService（streaming + SHA + staging + atomic rename + duplicate 409 + Worker notify）+ Upload endpoint + 25 tests；C3-B `c6a19ec` Status / Retry / Markdown endpoints + delete guards + 18 tests；C3-C Freeze。
       **关键不变量**：4 endpoints under Trusted UI；MAX_PDF_BYTES=25 MB；streaming chunked 64 KiB；PDF `%PDF-` magic；R2-C terminal=`normalizing`（Markdown readable）；needs_ocr/normalizing/ready 不允许 retry；active Job blocks Document/Library delete；upload 不调 Parser；retry 复用 Document + source.pdf；generated_at 不传。
       详见 [docs/validation/p2-r2/P2_R2_C3_INGESTION_APIS.md](docs/validation/p2-r2/P2_R2_C3_INGESTION_APIS.md)。
-- [ ] **P2-R2-C4 Integration Validation + R2-C Freeze** —— ✅ APPROVED TO START（独立启动授权另需用户发起）。
-      E2E upload→ingest→markdown 全链路 + restart recovery + concurrent retry + delete race + failure injection + 完整 backend + frontend 零回归 + freeze。
+- [x] **P2-R2-C4 Integration Validation + R2-C Freeze** —— ✅ COMPLETE / FROZEN @ `<this commit>`.
+      47 C4 integration tests across 5 files: E2E pipeline / failure injection / concurrency / restart+shutdown / security boundaries. Production diff=0. 详见 [P2_R2_C4_INTEGRATION_FREEZE.md](docs/validation/p2-r2/P2_R2_C4_INTEGRATION_FREEZE.md).
+- [ ] **P2-R2-D Final PDF Pipeline Validation** —— ✅ APPROVED TO START（⚠ MUST RECONCILE 8-test discrepancy；独立启动授权另需用户发起）。
 - [ ] **P2-R2-C4 Integration Validation + R2-C Freeze** —— ⛔ BLOCKED BY C3。
       E2E + restart recovery + concurrent retry + delete race + failure injection + 完整 backend + frontend 零回归 + freeze。
 - [ ] **P2-R2-D Integration Validation + Freeze** —— ⛔ BLOCKED BY COMPLETE R2-C。
