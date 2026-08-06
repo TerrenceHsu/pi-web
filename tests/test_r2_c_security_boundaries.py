@@ -214,25 +214,63 @@ class TestErrorLeakAudit:
 
 
 class TestImportSideEffects:
+    """Import side-effect verification via subprocess isolation.
+
+    Earlier implementation used ``importlib.reload()`` which re-executes module
+    code in the test process, replacing class objects in ``sys.modules``. Any
+    test that did ``from pi_agent_core_py.web.knowledge.upload_service import
+    InvalidUploadError`` at file load time kept a stale class binding; after the
+    reload, ``isinstance(new_instance, OLD_class) == False`` and
+    ``pytest.raises(OLD_class)`` failed to catch — manifesting as 15 spurious
+    failures across ``test_upload_api.py`` and ``test_web_prompt_execution_split.py``.
+
+    The contract "importing modules must not start worker / create tasks /
+    trigger lifespan" is now verified in a fresh child Python process: any side
+    effect is local to the child and cannot pollute the parent's ``sys.modules``.
+    """
+
+    @staticmethod
+    def _run_isolated_import(module_name: str, assertion: str) -> None:
+        import subprocess
+        import sys
+
+        code = (
+            f"import {module_name} as m; "
+            f"assert {assertion}, 'assertion failed'; "
+            "print('OK')"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, (
+            f"isolated import of {module_name} failed: "
+            f"rc={result.returncode}, stdout={result.stdout!r}, "
+            f"stderr={result.stderr!r}"
+        )
+
     def test_importing_upload_service_does_not_start_worker(self):
-        """Re-import upload_service module; verify no background task started."""
-        import pi_agent_core_py.web.knowledge.upload_service as mod
-        importlib.reload(mod)
-        # No worker task / DB connection / network should have started
-        assert hasattr(mod, "UploadService")  # import succeeded
+        """Fresh-process import of upload_service; no background task started."""
+        self._run_isolated_import(
+            "pi_agent_core_py.web.knowledge.upload_service",
+            "hasattr(m, 'UploadService')",
+        )
 
     def test_importing_worker_does_not_create_tasks(self):
-        """Re-import ingestion_worker module; no asyncio task created."""
-        import pi_agent_core_py.web.knowledge.ingestion_worker as mod
-        importlib.reload(mod)
-        assert hasattr(mod, "IngestionWorkerManager")
+        """Fresh-process import of ingestion_worker; no asyncio task created."""
+        self._run_isolated_import(
+            "pi_agent_core_py.web.knowledge.ingestion_worker",
+            "hasattr(m, 'IngestionWorkerManager')",
+        )
 
     def test_importing_app_does_not_start_lifespan(self):
-        """Re-import web.app; FastAPI app should be lazy."""
-        import pi_agent_core_py.web.app as mod
-        importlib.reload(mod)
-        # create_app exists but not yet called
-        assert callable(mod.create_app)
+        """Fresh-process import of web.app; FastAPI app should be lazy."""
+        self._run_isolated_import(
+            "pi_agent_core_py.web.app",
+            "callable(m.create_app)",
+        )
 
 
 # ============================================================================
