@@ -340,7 +340,7 @@ PYTHONPATH=src python -m pytest \
     -p no:cacheprovider -W "ignore::pytest.PytestUnraisableExceptionWarning" --no-cov
 ```
 
-Result: **343 passed + 1 platform skip** — 0 regression（R2-B 160 + R2-A 66 + R1 118 = 344 - 1 skipped）。
+Result: **343 passed + 1 platform skip** — 0 regression（**CORRECTED @ P2-R2-D-B**：selected 口径 R2-B 160 + R2-A 66 + R1 118 = 344 selected；passed 口径 R2-B 160 + R2-A 66 + R1 117 = 343 passed + 1 POSIX-only skip）。
 
 ---
 
@@ -544,7 +544,7 @@ PYTHONPATH=src python -m ruff check src tests scripts
 | 42 | C1 58 all pass | ✅ |
 | 43 | R2-B 160 all pass | ✅ |
 | 44 | R2-A 66 all pass | ✅ |
-| 45 | R1 zero regression | ✅ 118/118 + 1 platform skip |
+| 45 | R1 zero regression | ✅ 117 passed + 1 platform skip（118 selected） |
 | 46 | Complete backend zero regression | ✅ 3023 passed（delta 37 = C2 targeted count） |
 | 47 | Frontend 267/267 | ✅ |
 | 48 | typecheck/lint/build pass | ✅ |

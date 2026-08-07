@@ -285,7 +285,7 @@ PYTHONPATH=src python -m pytest tests/test_knowledge_store.py \
     -p no:cacheprovider -W "ignore::pytest.PytestUnraisableExceptionWarning" --no-cov
 ```
 
-Result: **118/118 PASS + 1 platform skip** — 0 regression.
+Result: **117 passed + 1 platform skip (118 selected)** — 0 regression. **CORRECTED @ P2-R2-D-B**：原报告"118/118 PASS"是把 selected 数误写成 passed 数。
 
 ---
 
@@ -483,7 +483,7 @@ PYTHONPATH=src python -m ruff check src tests scripts
 | 36 | C1 targeted all pass | ✅ 58/58 |
 | 37 | R2-B 160 all pass | ✅ |
 | 38 | R2-A 66 all pass | ✅ |
-| 39 | R1 zero regression | ✅ 118/118 + 1 platform skip |
+| 39 | R1 zero regression | ✅ 117 passed + 1 platform skip（118 selected） |
 | 40 | Complete backend zero regression | ✅ 2986 passed (delta 66; 8-test discrepancy non-blocking) |
 | 41 | Frontend 267/267 | ✅ |
 | 42 | Ruff pass | ✅ All checks passed |

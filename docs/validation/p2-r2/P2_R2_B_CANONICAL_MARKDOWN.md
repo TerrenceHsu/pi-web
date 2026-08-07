@@ -622,7 +622,7 @@ PYTHONPATH=src python -m pytest \
     -p no:cacheprovider -W "ignore::pytest.PytestUnraisableExceptionWarning" --no-cov
 ```
 
-Result: **118 passed, 1 skipped** (POSIX-only symlink test) — 0 regression.
+Result: **117 passed, 1 skipped (118 selected)** (POSIX-only symlink test) — 0 regression. **CORRECTED @ P2-R2-D-B**：原报告"118 passed"是把 selected 数误写成 passed 数。
 
 ---
 
@@ -897,7 +897,7 @@ R2-B **不**完成：
 | 39 | 不返回绝对路径 | ✅ |
 | 40 | R2-B 定向测试全通过 | ✅ 160/160 |
 | 41 | R2-A 66 测试零回归 | ✅ |
-| 42 | R1 测试零回归 | ✅ 118/118 + 1 skipped |
+| 42 | R1 测试零回归 | ✅ 117 passed + 1 platform skip（118 selected） |
 | 43 | 完整 Backend 零回归 | ✅ 2928 passed（**CORRECTED @ P2-R2-D-A**；原报告 2920 误抄） |
 | 44 | Frontend 267/267 | ✅ baseline 不变（diff=0） |
 | 45 | typecheck/lint/build 通过 | ✅（R2-A baseline 持续） |

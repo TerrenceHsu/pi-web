@@ -372,7 +372,7 @@ PYTHONPATH=src python -m pytest \
     -p no:cacheprovider -W "ignore::pytest.PytestUnraisableExceptionWarning" --no-cov
 ```
 
-Result: **118 passed, 1 skipped** (POSIX-only symlink test) — 0 regression.
+Result: **117 passed, 1 skipped (118 selected)** (POSIX-only symlink test) — 0 regression. **CORRECTED @ P2-R2-D-B**：原报告"118 passed"是把 selected 数误写成 passed 数；R1 §4.2 内部表述（`38 (37 pass + 1 skipped POSIX-only)`）一直正确。
 
 ---
 
@@ -575,7 +575,7 @@ G1 stash 未变化（与 R2-A 启动前一致）。G1 文件（5 个：eslint.co
 | 35 | Store/Service/API diff 0 | ✅ |
 | 36 | frontend diff 0 | ✅ |
 | 37 | Parser 定向测试全通过 | ✅ 66/66 |
-| 38 | R1 定向测试全通过 | ✅ 118/118 + 1 skipped |
+| 38 | R1 定向测试全通过 | ✅ 117 passed + 1 platform skip（118 selected） |
 | 39 | 完整 Backend 零回归 | ✅ 2768 passed / 0 regression |
 | 40 | Frontend 267/267 | ✅ |
 | 41 | typecheck/lint/build 通过 | ✅ |

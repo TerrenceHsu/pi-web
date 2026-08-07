@@ -1769,17 +1769,27 @@ C1 ~53 + C2 ~30 + C3 ~75 + C4 ~26 ≈ 184 new tests
 
 ---
 
-## 31. R2-D Count Reconciliation Handoff
+## 31. R2-D Count Reconciliation Handoff（✅ RECONCILED @ P2-R2-D-A）
 
-C0 正式传递给 R2-D：
+C0 正式传递给 R2-D（historical handoff；**SUPERSEDED**）：
 
 ```
 R2-B targeted tests = 160
 R2-A backend baseline = 2768
-R2-B backend reported = 2920
-reported delta = 152
-unreconciled difference = 8
+R2-B backend reported = 2920      # freeze-time typo；实测 2928
+reported delta = 152              # 错误数字；实测 delta = 160
+unreconciled difference = 8       # 虚构差异；node-ID-level = 0
 8-test discrepancy: KNOWN NON-BLOCKING
+```
+
+**✅ RECONCILED @ P2-R2-D-A**（[`P2_R2_D_TEST_COUNT_RECONCILIATION.md`](../validation/p2-r2/P2_R2_D_TEST_COUNT_RECONCILIATION.md)）：
+
+```
+R2-A: 2770 selected = 2768 passed + 2 skipped
+R2-B: 2930 selected = 2928 passed + 2 skipped
+selected delta = 160 = R2-B targeted 160 ✅
+node-ID-level discrepancy = 0
+historical "2920" = freeze-time 文档误抄
 ```
 
 R2-D 必须核对（per `P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md §5.5`）：

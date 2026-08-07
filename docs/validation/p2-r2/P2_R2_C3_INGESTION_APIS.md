@@ -326,7 +326,7 @@ Result: **37/37 PASS** — 0 regression.
 | C1 (Store + Orchestrator) | 58/58 PASS |
 | R2-B (Builder + Persistence) | 160/160 PASS |
 | R2-A (Parser) | 66/66 PASS |
-| R1 (Library Foundation) | 118/118 + 1 platform skip PASS |
+| R1 (Library Foundation) | 117 passed + 1 platform skip（118 selected） PASS |
 
 0 regression.
 

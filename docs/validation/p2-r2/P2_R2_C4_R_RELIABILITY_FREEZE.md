@@ -67,11 +67,31 @@ C4-R 完成后，**P2-R2-C 才能正式冻结**（`f211bd2` 仍保留为 C4 测�
 | C1 targeted | 58/58 PASS（保留） |
 | R2-B regression | 160/160 PASS（保留） |
 | R2-A regression | 66/66 PASS（保留） |
-| R1 regression | 118 PASS + 1 platform SKIP（保留） |
+| R1 regression | 117 PASS + 1 platform SKIP（118 selected；**CORRECTED @ P2-R2-D-B**） |
 | Frontend | 267/267 PASS（保留） |
-| Typecheck / lint / build / Ruff | PASS（保留） |
+| Typecheck / lint / build / Ruff | Typecheck / lint / build：PASS（保留）；**Ruff：⚠ archived claim INCORRECT — corrected by `a27494c`**（详见 §"后续未解决问题"） |
 | 生产 diff | 仅 `tests/test_r2_c_security_boundaries.py` 一个文件，无生产代码改动 |
 | Schema / dependency / frontend diff | 0 |
+
+### C4-R Ruff archival correction（per P2-R2-D-B）
+
+> **Functional reliability closure @ `9034842`：✅ VALID**（A/B/A 三态成立；subprocess isolation root cause proven；15 deterministic failures resolved）。
+>
+> **Archived Ruff PASS claim @ `9034842`：⚠ INCORRECT**——本 freeze 文档原始版本（line 72 et al.）记录"Ruff PASS（保留）"是不准确的。C4-R Fix-1 把 `importlib.reload()` 调用替换为 subprocess 隔离时，遗漏了清理顶部 `import importlib`；该 import 在 Fix-1 之后变为 unused，触发 Ruff F401。
+>
+> Stale import 影响**仅限 lint**：
+> - 不影响 subprocess isolation 行为；
+> - 不影响 A/B/A 因果证据；
+> - 不影响生产代码（src/）；
+> - 不影响完整 Backend 套件行为（3113 passed ×2 仍成立）。
+>
+> **Corrected by**: `a27494c` — `fix(test): remove stale import from C4-R isolation tests`（P2-R2-D-Fix；1 file / 1 line deletion；行为零变化）。
+>
+> **Post-fix**：Ruff PASS；Full Backend fresh process #1 + #2 = 3113 passed / 0 failed / 3 skipped / 14 deselected。
+>
+> **时间线（不改写历史 commit）**：
+> - `9034842` ✅ functional reliability closure / ⚠ archived Ruff claim inaccurate
+> - `a27494c` ✅ stale import cleanup / ✅ Ruff restored
 
 ## 3 个 skip（预期，全等价覆盖）
 
@@ -147,4 +167,4 @@ P2-R4 search_knowledge + Page Marker  ⛔ BLOCKED BY P2-R3
 
 - **B7 SQLite store leak**：5 个 store 中 4 个（KnowledgeStore / SQLiteCredentialStore / ExtensionStore / SessionStore）的 `open()` 缺 try/except close 保护（仅 `SQLiteProviderConfigStore` 做对了）。是独立缺陷，不影响 15 failures，但建议后续作为独立 P2-R2-C4-R-Fix-2 处理（不阻塞 P2-R2-D）
 - ~~**8-test discrepancy**（保留给 P2-R2-D）：R2-A baseline 2768 → R2-B reported 2920 → delta 152 → R2-B targeted 160 → 差异 8~~ → **✅ RECONCILED @ P2-R2-D-A**：R2-B freeze 时点误报 2920 passed（实测 2928）；selected delta = 160 = targeted；不存在 node-ID-level 差异。详见 [`P2_R2_D_TEST_COUNT_RECONCILIATION.md`](P2_R2_D_TEST_COUNT_RECONCILIATION.md)
-- **Ruff failure**（**D-B BLOCKER**，2026-08-07 发现）：`tests/test_r2_c_security_boundaries.py:13` `import importlib` 在 C4-R Fix-1（本 commit 9034842）移除 `importlib.reload()` 调用后变为 unused；Fix-1 漏了移除 import。C4-R freeze 文档错误报告 Ruff PASS。P2-R2-D docs-only 边界禁修 tests/**；提出独立 P2-R2-D-Fix 单独用户授权
+- **Ruff failure**（2026-08-07 由 P2-R2-D-A 发现；**✅ RESOLVED @ P2-R2-D-Fix `a27494c`**）：`tests/test_r2_c_security_boundaries.py:13` `import importlib` 在 C4-R Fix-1（本 commit 9034842）移除 `importlib.reload()` 调用后变为 unused；Fix-1 漏了移除 import。本 freeze 文档原始版本错误报告 Ruff PASS。Stale import 已由 `a27494c`（1 line deletion，行为零变化）修复；post-fix Ruff PASS、Full Backend ×2 fresh process = 3113/3/14/0 failed。详见 §"C4-R Ruff archival correction"

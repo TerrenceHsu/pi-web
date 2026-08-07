@@ -222,14 +222,12 @@ M3 是 docs-only 归档阶段，未自动执行上述任一动作。
       详见 [docs/validation/p2-r2/P2_R2_C3_INGESTION_APIS.md](docs/validation/p2-r2/P2_R2_C3_INGESTION_APIS.md)。
 - [x] **P2-R2-C4 Integration Validation + R2-C Freeze** —— ✅ COMPLETE / FROZEN @ `<this commit>`.
       47 C4 integration tests across 5 files: E2E pipeline / failure injection / concurrency / restart+shutdown / security boundaries. Production diff=0. 详见 [P2_R2_C4_INTEGRATION_FREEZE.md](docs/validation/p2-r2/P2_R2_C4_INTEGRATION_FREEZE.md).
-- [ ] **P2-R2-D-A Test Count Reconciliation** —— ✅ COMPLETE / FROZEN @ <D-A commit>（A/B 隔离 worktree + 集合分析；historical 8-test discrepancy ✅ RECONCILED；root cause = R2-B freeze 时点文档误报 2920 passed；实测 2928；selected delta = 160 = targeted 160 完全对账；node-ID-level 无差异）。详见 [docs/validation/p2-r2/P2_R2_D_TEST_COUNT_RECONCILIATION.md](docs/validation/p2-r2/P2_R2_D_TEST_COUNT_RECONCILIATION.md)。
-- [ ] **P2-R2-D-B Final PDF Pipeline Validation** —— ⛔ BLOCKED by Ruff failure。
-      `tests/test_r2_c_security_boundaries.py:13` `import importlib` unused 是 C4-R Fix-1（`9034842`）移除 `importlib.reload()` 调用后遗漏的 cleanup；C4-R freeze 文档错误报告 Ruff PASS；R2-D docs-only 边界禁修 tests/** → 提出独立 **P2-R2-D-Fix**（仅删 1 行 `import importlib`）单独用户授权。D-B 待 D-Fix 完成后重新启动。
-- [ ] **P2-R2-C4 Integration Validation + R2-C Freeze** —— ⛔ BLOCKED BY C3。
-      E2E + restart recovery + concurrent retry + delete race + failure injection + 完整 backend + frontend 零回归 + freeze。
-- [ ] **P2-R2-D Integration Validation + Freeze** —— ⛔ BLOCKED by Ruff failure。
-      ~~必查 8-test discrepancy~~ → ✅ **RECONCILED @ P2-R2-D-A**（5 项全 closed；详见 [P2_R2_D_TEST_COUNT_RECONCILIATION.md](docs/validation/p2-r2/P2_R2_D_TEST_COUNT_RECONCILIATION.md)）。
-      待启动 P2-R2-D-Fix（Ruff 修复）后才能进行 D-B freeze。
+- [x] **P2-R2-D-A Test Count Reconciliation** —— ✅ COMPLETE / FROZEN @ `287edb9`（A/B 隔离 worktree + 集合分析；historical 8-test discrepancy ✅ RECONCILED；root cause = R2-B freeze 时点文档误报 2920 passed；实测 2928；selected delta = 160 = targeted 160 完全对账；node-ID-level 无差异）。详见 [docs/validation/p2-r2/P2_R2_D_TEST_COUNT_RECONCILIATION.md](docs/validation/p2-r2/P2_R2_D_TEST_COUNT_RECONCILIATION.md)。
+- [x] **P2-R2-D-Fix Ruff Cleanup** —— ✅ COMPLETE / FROZEN @ `a27494c`（C4-R Fix-1 unused `import importlib` cleanup；1 file / 1 line deletion；ruff PASS；full backend ×2 fresh process = 3113/3/14/0 failed；行为零变化）。
+- [x] **P2-R2-D-B Final PDF Pipeline Freeze** —— ✅ COMPLETE / FROZEN @ `<this commit>`（docs-only；R1 targeted count ✅ RECONCILED 118 selected = 117 passed + 1 skipped；10 处 R1 历史误写已修；C4-R Ruff archival correction；P2-R2 全链归档关闭；P2-R3 APPROVED TO START 不在本提交启动）。详见 [docs/validation/p2-r2/P2_R2_D_FINAL_PDF_PIPELINE_VALIDATION.md](docs/validation/p2-r2/P2_R2_D_FINAL_PDF_PIPELINE_VALIDATION.md)。
+- [ ] **P2-R3 Heading-aware Chunk + SQLite FTS5** —— ✅ APPROVED TO START（独立启动授权另需用户发起；不在 R2-D-B 提交启动）。
+- [ ] **P2-R4 Session-scoped search_knowledge + Page Marker Citation** —— ⛔ BLOCKED BY P2-R3。
+- [ ] **B7 SQLite Store Open-Failure Cleanup** —— ⏸ PENDING / NOT AUTHORIZED（独立缺陷；4 个 Store `open()` 缺 try/except close 保护；不阻塞 P2-R2-D-B / 不阻塞 P2-R3；仅在完整 Backend 出现稳定 failure 时升级）。详见 [P2_R2_D_FINAL_PDF_PIPELINE_VALIDATION.md §17](docs/validation/p2-r2/P2_R2_D_FINAL_PDF_PIPELINE_VALIDATION.md)。
 
 ## Explicitly out of scope (long-term)
 
