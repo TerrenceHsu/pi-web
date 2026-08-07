@@ -1,0 +1,34 @@
+# R2-B worktree full backend run (D-A evidence)
+
+Command:
+  PYTHONPATH=src python -m pytest tests/ \
+    -m "not slow and not integration and not docker" \
+    -p no:cacheprovider -W "ignore::pytest.PytestUnraisableExceptionWarning" --no-cov
+
+Worktree: D:/LLMTutorial/.p2-r2-d-worktrees/r2-b-eb193b2
+HEAD: eb193b2 (detached)
+Date: 2026-08-07
+
+Result:
+  2928 passed
+  2 skipped
+  14 deselected
+  59 warnings
+  Duration: 360.36s
+
+selected count (collect-only): 2930
+  = 2928 passed + 2 skipped
+  + 14 deselected = 2944 total
+
+R2-B 文档报告（P2_R2_B_CANONICAL_MARKDOWN.md §25）：
+  2920 passed, 2 skipped, 14 deselected in 379s
+
+❌ DISCREPANCY：R2-B 文档报告 2920 passed；实际跑出 2928 passed（差 +8）。
+  - selected delta = 2930 (B) - 2770 (A) = 160 = R2-B targeted 160 ✅
+  - actual passed delta = 2928 - 2768 = 160 = R2-B targeted 160 ✅
+  - reported passed delta = 2920 - 2768 = 152 ❌（基于错误数字 2920）
+
+8-test discrepancy 根因：
+  P2_R2_B_CANONICAL_MARKDOWN.md §25 报告的 2920 passed 是错误数字。
+  R2-B worktree（同一 commit eb193b2）实际跑出 2928 passed。
+  差值恰好为 8。

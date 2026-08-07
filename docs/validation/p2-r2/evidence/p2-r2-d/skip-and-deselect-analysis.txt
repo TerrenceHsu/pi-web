@@ -1,0 +1,64 @@
+# Skip / Deselect Analysis
+
+## A/B selected count
+
+A (R2-A @ 0772324) selected:    2770
+B (R2-B @ eb193b2) selected:    2930
+T (R2-B targeted)         :     160
+
+## A/B actual execution
+
+A passed:  2768
+A skipped:    2
+A selected = passed + skipped = 2770  ✅ 对账
+
+B passed:  2928 (实际 worktree 跑出)
+B skipped:    2
+B selected = passed + skipped = 2930  ✅ 对账
+
+R2-B 文档报告 (P2_R2_B_CANONICAL_MARKDOWN.md §25): 2920 passed
+  → 与实际跑出 2928 差 8
+  → 这是 8-test discrepancy 的唯一来源
+
+## Deselected count
+
+A deselected: 14
+B deselected: 14
+delta:        0   ✅
+
+## Failed / xfailed / xpassed
+
+A failed:    0
+A xfailed:   0
+A xpassed:   0
+
+B failed:    0
+B xfailed:   0
+B xpassed:   0
+
+## 真正的 skip 与 deselect 明细（C4-R 之后 HEAD @ 9034842）
+
+3 个 skip（C4_R_SKIP_AUDIT.md 已记录）：
+  1. test_knowledge_files_and_service.py::TestSymlinks::test_symlink_target_resolved
+     — POSIX symlink on Windows requires admin
+  2. test_multi_provider_runtime_restart.py::TestStorageMode::test_keyring_storage_mode_persists
+     — keyring storage_mode not supported via this API path
+  3. test_upload_api.py::TestUploadHTTP::test_archived_library_returns_409
+     — HTTP-level archive test requires cross-loop async
+
+14 deselected：
+  slow / integration / docker markers —— pre-existing since P0/P1
+  delta A→B = 0
+
+## 结论
+
+A/B 两侧 selected / passed / skipped / deselected / failed / xfailed / xpassed
+全部对账成立。8-test discrepancy **不在执行层**。
+
+数学公式成立：
+  selected_A (2770) = passed_A (2768) + skipped_A (2)
+  selected_B (2930) = passed_B (2928) + skipped_B (2)
+  selected_B - selected_A = 160 = R2-B targeted 160 ✅
+
+R2-B 文档 §25 报告的 2920 passed 是错误数字；实际跑出 2928 passed。
+8-test discrepancy = 2928 - 2920 = 8（错误报告导致的虚构差异）。

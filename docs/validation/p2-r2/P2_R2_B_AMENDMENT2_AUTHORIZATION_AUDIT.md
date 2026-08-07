@@ -241,7 +241,9 @@ P2-R0 在 amendment-2 后不再冻结 library_id 进 frontmatter。
 
 ## 5. 测试统计纠正
 
-### 5.1 原始 R2-B 报告数学问题
+> **SUPERSEDED @ P2-R2-D-A**：本节关于 152 delta / 8-test discrepancy / H1-H3 假设的表述已被 P2-R2-D-A 完整 reconciliation 取代。8-test discrepancy 已通过 A/B 隔离 worktree + 集合分析关闭；根因为 freeze 时点数字误抄（2920 实际应为 2928）。详见 [`P2_R2_D_TEST_COUNT_RECONCILIATION.md`](P2_R2_D_TEST_COUNT_RECONCILIATION.md)。本节内容仅作历史诊断过程保留。
+
+### 5.1 原始 R2-B 报告数学问题（SUPERSEDED）
 
 R2-B freeze 文档（`P2_R2_B_CANONICAL_MARKDOWN.md`）原报告：
 
@@ -251,7 +253,9 @@ R2-B freeze 文档（`P2_R2_B_CANONICAL_MARKDOWN.md`）原报告：
 
 数学差异：160 - 152 = **8 测试无法对账**。
 
-### 5.2 实际计数核实
+→ **D-A 结论**：原报告的 2920 是 freeze 时点误抄；实测应为 2928。实际 delta = 2928 - 2768 = 160 = targeted 160 ✅。
+
+### 5.2 实际计数核实（unchanged — D-A 复现确认）
 
 | 测试文件 | `def test_` 函数数 | pytest `--collect-only` 数 | 单独运行结果 |
 |---|---|---|---|
@@ -261,70 +265,53 @@ R2-B freeze 文档（`P2_R2_B_CANONICAL_MARKDOWN.md`）原报告：
 | `tests/test_r2_b_integration.py` | 8 | 8 | 8 passed |
 | **总计** | **160** | **160** | **160 passed** |
 
-四个 R2-B 测试文件联合运行：
+→ D-A 在 R2-B worktree（`eb193b2`）复现确认：targeted = 160 ✅。
 
-```bash
-pytest tests/test_pdf_quality.py tests/test_canonical_markdown.py \
-    tests/test_markdown_persistence.py tests/test_r2_b_integration.py \
-    -m "not slow and not integration and not docker" --no-cov
-→ 160 passed in 3.23s
-```
-
-R2-B targeted 全 160 测试在默认 marker 下全 PASS。
-
-### 5.3 Backend 报告 2920 的诊断
+### 5.3 Backend 报告 2920 的诊断（SUPERSEDED — root cause FOUND in D-A）
 
 完整 backend 运行（`pytest tests/ -m "not slow and not integration and not docker" --no-cov`）报告 **2920 passed + 2 skipped + 14 deselected**。collect-only 显示 **2930/2944**（2944 总 / 14 deselected / 2930 应运行）。
 
 实际运行 2922（2920 passed + 2 skipped），与 collect 2930 差 **8 测试**。
 
-诊断：
+诊断（原 audit §5.3，**已被 D-A 取代**）：
 
 - 不是 R2-A baseline 错误（R2-A 报告 2768；本审计期间 git diff 确认 R2-B 未修改任何 R2-A 既有测试文件）
 - 不是 R2-B 测试本身错误（targeted 单独运行 160/160 PASS）
 - 不是 marker filter 排除（默认 marker 包含 R2-B 测试）
 
-可能根因（**假设**——未完全确诊；不升级为根因结论）：
+可能根因（**SUPERSEDED — D-A 已证明全部不成立**）：
 
-1. **假设（H1）**：R2-B 期间 ruff `--fix --unsafe-fixes` 可能合并 / 重构了少量既有测试 helper（如重复赋值清理），导致个别 test item 在 collection 时被去重
-2. **假设（H2）**：pytest collection 在某些环境下对 fixture-driven 测试去重
-3. **假设（H3）**：R2-A 报告的 2768 可能在不同 pytest 会话存在 ±8 的轻微计数漂移
+1. ~~**假设（H1）**：R2-B 期间 ruff `--fix --unsafe-fixes` 可能合并 / 重构了少量既有测试 helper~~ → D-A `git diff --name-status 0772324..eb193b2 -- tests` 显示 0 Modified / 4 Added，否决
+2. ~~**假设（H2）**：pytest collection 在某些环境下对 fixture-driven 测试去重~~ → D-A A/B collect-only 全部对账（2770/2930），否决
+3. ~~**假设（H3）**：R2-A 报告的 2768 可能在不同 pytest 会话存在 ±8 的轻微计数漂移~~ → D-A R2-A worktree 实测 = 2768 与文档完全一致，否决
 
-> ⚠️ **以上 H1/H2/H3 仅作为假设保留**——不得在任何文档中升级为根因结论。R2-D 必须以实际诊断为准（重新跑 collect-only / 实际执行 / skipped/deselected 数量 / pytest 配置 / marker / 未执行测试项）。
+**D-A 根因结论（2026-08-07）**：freeze 时点（`eb193b2`）完整 backend 实测 **2928 passed + 2 skipped + 14 deselected**（worktree @ `eb193b2`，2026-08-07）。原 audit §5.3 报告的 2920 是 freeze 时点数字抄写错误。8-test discrepancy **从未在 node-ID 层存在**——它是 reported 数字错误导致的虚构差异。
 
-**结论**：本审计无法在不重新跑 baseline 的情况下完全确诊 8-test 差异。但所有证据表明：
-
-- R2-B targeted **160 全 PASS**（功能完整覆盖）
-- 完整 backend **0 regression**（按 targeted 套件零回归 + 完整 backend 在默认 marker 下 0 fail / 0 error 确认）
-- 数学差异是 **统计口径问题**，不是 **功能缺陷**
-- **8-test discrepancy**：**KNOWN NON-BLOCKING**；不阻塞 R2-C；**MUST RECONCILE IN R2-D**（详见 §5.5）
-
-### 5.4 纠正后的统计口径
-
-替换原报告的混乱表述，统一为：
+### 5.4 纠正后的统计口径（CORRECTED @ P2-R2-D-A）
 
 ```
 R2-B targeted selection        160 passed  (43 + 80 + 29 + 8)
-New tests added by R2-B        160         (纯新增；无修改既有测试文件)
-Backend reported delta         152         (2768 → 2920；8-test 统计差异未完全确诊)
+New node IDs added by R2-B     160         (纯新增；git diff 0 Modified / 0 Deleted)
+Backend reported delta         160         (2768 → 2928；实测对账)
 Functional regression            0         (按 targeted 套件 + 默认 marker 完整跑 0 fail)
+Historical 8-test discrepancy    0         (RECONCILED @ P2-R2-D-A)
 ```
 
-具体见 `P2_R2_B_CANONICAL_MARKDOWN.md §22 / §25`（已同步更新）。
+具体见 `P2_R2_B_CANONICAL_MARKDOWN.md §22 / §25`（已同步更新）+ [`P2_R2_D_TEST_COUNT_RECONCILIATION.md`](P2_R2_D_TEST_COUNT_RECONCILIATION.md)。
 
-### 5.5 后续 follow-up（R2-D 必查 — 强制）
+### 5.5 后续 follow-up（✅ CLOSED @ P2-R2-D-A）
 
-**8-test discrepancy = KNOWN NON-BLOCKING，但 MUST RECONCILE IN R2-D**。
+~~8-test discrepancy = KNOWN NON-BLOCKING，但 MUST RECONCILE IN R2-D~~
 
-R2-D Integration Validation 阶段**必须**重新核对以下 5 项（不强制 R2-C 解决，但 R2-D freeze 前必须有结论）：
+**P2-R2-D-A 已完成此 5 项 follow-up**：
 
-1. `pytest --collect-only` 数量（baseline `7db4780` vs 当前提交）
-2. 实际执行数量（passed + failed + skipped）
-3. `skipped` / `deselected` 数量
-4. baseline 与当前提交使用的 pytest 配置 / 插件 / marker（确认 R2-A 报告期与 R2-B 后是否一致）
-5. 是否存在 collection 后未执行的测试项（如 fixture 去重 / parametrize 折叠 / conftest skip）
+1. ✅ `pytest --collect-only` 数量：A=2770 / B=2930 / delta=160 = targeted
+2. ✅ 实际执行数量：A=2770（2768 passed + 2 skipped） / B=2930（2928 passed + 2 skipped）
+3. ✅ `skipped` / `deselected`：A=B=2 skipped / 14 deselected；delta=0
+4. ✅ pytest 配置 / 插件 / marker：A 与 B worktree pyproject.toml `[tool.pytest.ini_options]` 完全相同
+5. ✅ collection 后未执行的测试项：无（实测 selected = passed + skipped；A/B 都对账）
 
-文档中关于 Ruff `--fix --unsafe-fixes` 自动修改或 pytest fixture 去重的内容，**只能保留为假设（H1/H2/H3）**，不能升级为根因结论——R2-D 必须以实际诊断为准。
+文档中关于 Ruff `--fix --unsafe-fixes` 自动修改或 pytest fixture 去重的内容，**已在 D-A 中被 git diff + 集合分析否决**。
 
 ---
 

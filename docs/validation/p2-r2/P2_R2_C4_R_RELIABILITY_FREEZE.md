@@ -134,7 +134,7 @@ P2-R2-C4 Test Evidence                🟡 RECORDED @ 169cb7e
 P2-R2-C4 Freeze Candidate             ❌ NOT ACCEPTED @ f211bd2（pre-C4-R）
 P2-R2-C4-R Reliability Closure        ✅ READY TO FREEZE（待 commit）
 P2-R2-C PDF Ingestion Pipeline        ✅ COMPLETE / FROZEN (after C4-R commit)
-P2-R2-D Final PDF Pipeline Validation ✅ APPROVED TO START（⚠ 仍需 reconcile 8-test discrepancy）
+P2-R2-D Final PDF Pipeline Validation ✅ APPROVED TO START（⚠ historical 8-test discrepancy → ✅ RECONCILED @ P2-R2-D-A；Ruff BLOCKER 发现 → 提出独立 P2-R2-D-Fix）
 P2-R3 Heading-aware Chunk + FTS5      ⛔ BLOCKED BY COMPLETE P2-R2
 P2-R4 search_knowledge + Page Marker  ⛔ BLOCKED BY P2-R3
 ```
@@ -146,4 +146,5 @@ P2-R4 search_knowledge + Page Marker  ⛔ BLOCKED BY P2-R3
 ## 后续未解决问题（不阻塞 C4-R）
 
 - **B7 SQLite store leak**：5 个 store 中 4 个（KnowledgeStore / SQLiteCredentialStore / ExtensionStore / SessionStore）的 `open()` 缺 try/except close 保护（仅 `SQLiteProviderConfigStore` 做对了）。是独立缺陷，不影响 15 failures，但建议后续作为独立 P2-R2-C4-R-Fix-2 处理（不阻塞 P2-R2-D）
-- **8-test discrepancy**（保留给 P2-R2-D）：R2-A baseline 2768 → R2-B reported 2920 → delta 152 → R2-B targeted 160 → 差异 8
+- ~~**8-test discrepancy**（保留给 P2-R2-D）：R2-A baseline 2768 → R2-B reported 2920 → delta 152 → R2-B targeted 160 → 差异 8~~ → **✅ RECONCILED @ P2-R2-D-A**：R2-B freeze 时点误报 2920 passed（实测 2928）；selected delta = 160 = targeted；不存在 node-ID-level 差异。详见 [`P2_R2_D_TEST_COUNT_RECONCILIATION.md`](P2_R2_D_TEST_COUNT_RECONCILIATION.md)
+- **Ruff failure**（**D-B BLOCKER**，2026-08-07 发现）：`tests/test_r2_c_security_boundaries.py:13` `import importlib` 在 C4-R Fix-1（本 commit 9034842）移除 `importlib.reload()` 调用后变为 unused；Fix-1 漏了移除 import。C4-R freeze 文档错误报告 Ruff PASS。P2-R2-D docs-only 边界禁修 tests/**；提出独立 P2-R2-D-Fix 单独用户授权

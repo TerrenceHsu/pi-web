@@ -1,0 +1,30 @@
+# Renamed / Reparameterized node IDs
+
+## 集合分析结果
+
+|A - B| (Removed)  = 0
+|B - A| (Added)    = 160
+|T ∩ A|            = 0
+|T - A|            = 160
+|Added - T|        = 0
+|T - B|            = 0
+
+## 结论
+
+R2-A → R2-B 之间没有任何 node ID 被删除、重命名或参数化收缩。
+
+R2-B targeted 160 个 node IDs 全部是 R2-A 中不存在的新增 node IDs。
+
+R2-B 全部 160 个 added node IDs 都是 targeted（即 R2-B 在 tests/ 中没有添加非 targeted 测试）。
+
+git diff 0772324..eb193b2 -- tests 显示：
+  4 files Added:
+    tests/test_canonical_markdown.py
+    tests/test_markdown_persistence.py
+    tests/test_pdf_quality.py
+    tests/test_r2_b_integration.py
+  0 files Modified
+  0 files Deleted
+
+→ R2-B 不可能影响 R2-A 既有测试的 node IDs。
+→ "renamed / reparameterized" 假设 H1（ruff --fix 修改）不成立。

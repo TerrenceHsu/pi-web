@@ -1,0 +1,26 @@
+# R2-A worktree full backend run (D-A evidence)
+
+Command:
+  PYTHONPATH=src python -m pytest tests/ \
+    -m "not slow and not integration and not docker" \
+    -p no:cacheprovider -W "ignore::pytest.PytestUnraisableExceptionWarning" --no-cov
+
+Worktree: D:/LLMTutorial/.p2-r2-d-worktrees/r2-a-0772324
+HEAD: 0772324 (detached)
+Date: 2026-08-07
+
+Result:
+  2768 passed
+  2 skipped
+  14 deselected
+  64 warnings
+  Duration: 341.12s
+
+selected count (collect-only): 2770
+  = 2768 passed + 2 skipped
+  + 14 deselected = 2784 total
+
+R2-A 文档报告（P2_R2_A_PARSER_ADAPTER.md §16）：
+  2768 passed, 2 skipped, 14 deselected in 276.32s
+
+对账结论：✅ MATCH（与 R2-A 文档报告完全一致）

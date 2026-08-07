@@ -1,0 +1,12 @@
+# pytest plugin inventory
+
+Plugins active (per pyproject + project deps):
+  pytest-asyncio 1.4.0  (asyncio_mode = "auto")
+  pytest-cov     7.1.0  (default in addopts; suppressed by --no-cov)
+  anyio          4.14.0  (transitive)
+
+Not installed (verified):
+  pytest-xdist, pytest-rerunfailures, pytest-randomly,
+  pytest-timeout, pytest-benchmark
+
+→ No plugin that would de-dup, reorder, or skip node IDs at collection time.

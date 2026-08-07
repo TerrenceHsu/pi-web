@@ -1,0 +1,31 @@
+# Commands used for A/B evidence collection
+
+## A/B collect-only (selected node IDs)
+
+PYTHONPATH=src python -m pytest tests/ \
+  -m "not slow and not integration and not docker" \
+  --collect-only -q --no-cov -p no:cacheprovider
+
+## R2-B targeted collect-only
+
+PYTHONPATH=src python -m pytest \
+  tests/test_pdf_quality.py \
+  tests/test_canonical_markdown.py \
+  tests/test_markdown_persistence.py \
+  tests/test_r2_b_integration.py \
+  --collect-only -q --no-cov -p no:cacheprovider
+
+## Full backend (R2-A and R2-B worktrees)
+
+PYTHONPATH=src python -m pytest tests/ \
+  -m "not slow and not integration and not docker" \
+  -p no:cacheprovider -W "ignore::pytest.PytestUnraisableExceptionWarning" --no-cov
+
+## All commands run from worktree root.
+
+## Worktrees (created via `git worktree add --detach`):
+
+  D:/LLMTutorial/.p2-r2-d-worktrees/r2-a-0772324  @  0772324
+  D:/LLMTutorial/.p2-r2-d-worktrees/r2-b-eb193b2  @  eb193b2
+
+No production code or test code modified. No checkout in main worktree.

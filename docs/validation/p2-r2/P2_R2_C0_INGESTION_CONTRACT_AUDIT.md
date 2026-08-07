@@ -373,28 +373,21 @@ C0 不运行完整 backend / frontend / parser / ingestion / worker / network / 
 
 ---
 
-## 13. Test Count Handoff（to R2-D）
+## 13. Test Count Handoff（✅ RECONCILED @ P2-R2-D-A）
 
-per design §31 — 正式传递：
+> **SUPERSEDED @ P2-R2-D-A**：本节原列出的 "8-test discrepancy MUST RECONCILE IN R2-D" 已通过 P2-R2-D-A 完整 reconciliation 关闭。根因为 R2-B freeze 时点文档误报 2920 passed（实测应为 2928）。详见 [`P2_R2_D_TEST_COUNT_RECONCILIATION.md`](P2_R2_D_TEST_COUNT_RECONCILIATION.md)。
 
 ```
 R2-B targeted tests         160
 R2-A backend baseline       2768
-R2-B backend reported       2920
-reported delta              152
-unreconciled difference     8
-8-test discrepancy          KNOWN NON-BLOCKING
+R2-B backend (实测)         2928     (freeze 时点文档误报 2920；worktree @ eb193b2 实测 2928)
+backend delta (实测)        160      (= targeted 160 ✅)
+historical 8-test diff      RECONCILED @ P2-R2-D-A
 ```
 
-R2-D 必须核对 5 项（per `P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md §5.5`）：
+D-A 已完成 5 项核对（per 原 `P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md §5.5`）：collect-only / 实际执行 / skipped-deselected / 配置-marker / collection 后未执行项——全部对账成立。
 
-1. `pytest --collect-only` 数量
-2. 实际执行数量
-3. `skipped` / `deselected` 数量
-4. baseline 与当前提交的 pytest 配置 / 插件 / marker
-5. 是否存在 collection 后未执行的测试项
-
-C0 本身不重新跑测试；8-test discrepancy 假设（Ruff --fix / fixture 去重）不升级为根因。
+C0 本身不重新跑测试；8-test discrepancy 假设（Ruff --fix / fixture 去重）已被 D-A 否决。
 
 ---
 

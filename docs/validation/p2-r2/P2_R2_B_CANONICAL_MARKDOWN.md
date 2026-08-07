@@ -585,19 +585,19 @@ PYTHONPATH=src python -m pytest tests/test_pdf_quality.py tests/test_canonical_m
 
 Duration: ~3s.
 
-**统计口径说明**（per `P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md §5`）：
+**统计口径说明**（**CORRECTED @ P2-R2-D-A** — 详见 [`P2_R2_D_TEST_COUNT_RECONCILIATION.md`](P2_R2_D_TEST_COUNT_RECONCILIATION.md)）：
 
 ```
 R2-B targeted selection        160 passed  (43 + 80 + 29 + 8)
-New tests added by R2-B        160         (纯新增；无修改既有测试文件)
-Backend reported delta         152         (2768 → 2920)
+New node IDs added by R2-B     160         (纯新增；无修改既有测试文件)
+Backend reported delta         160         (2768 → 2928；实测对账)
 Functional regression            0         (按 targeted 套件 + 默认 marker 完整跑 0 fail)
-8-test discrepancy              KNOWN NON-BLOCKING
-                                           (targeted 单独跑全 PASS；不阻塞 R2-C)
-                                           (MUST RECONCILE IN R2-D — 详见 audit §5.5)
+Historical 8-test discrepancy    0         (RECONCILED @ P2-R2-D-A)
+                                           (freeze 时点文档曾误报 2920 passed；
+                                            实测 2928 passed；差 8 = 历史虚构)
 ```
 
-R2-B targeted 单独跑 160/160 PASS；完整 backend 报告 152 delta。8-test 统计差异**仅作假设**（ruff --fix / fixture 去重 / baseline 漂移）——**不升级为根因结论**。R2-D 必须按 audit §5.5 五项重新核对。详见 audit §5 诊断。
+R2-B targeted 单独跑 160/160 PASS。完整 backend 实测 2928 passed（worktree @ `eb193b2`，2026-08-07）—— 与 targeted 160 完全对账。本 freeze 文档（§25）原报告 2920 passed 为 freeze 时点的数字抄写错误；P2-R2-D-A 已通过 A/B 隔离 worktree + 集合分析关闭此差异。详见 [`P2_R2_D_TEST_COUNT_RECONCILIATION.md`](P2_R2_D_TEST_COUNT_RECONCILIATION.md)。
 
 ---
 
@@ -634,15 +634,15 @@ PYTHONPATH=src python -m pytest tests/ \
     -p no:cacheprovider -W "ignore::pytest.PytestUnraisableExceptionWarning" --no-cov
 ```
 
-Result: **2920 passed, 2 skipped, 14 deselected** in 379s.
+Result（**CORRECTED @ P2-R2-D-A**）：**2928 passed, 2 skipped, 14 deselected** in 360s（实测于 worktree @ `eb193b2`，2026-08-07）。本 freeze 时点原文档误报为 2920 passed；P2-R2-D-A 通过 A/B worktree 集合分析已关闭此差异（详见 [`P2_R2_D_TEST_COUNT_RECONCILIATION.md`](P2_R2_D_TEST_COUNT_RECONCILIATION.md)）。
 
 - Baseline（R2-B 之前）：2768 passed / 2 skipped / 14 deselected
 - R2-B targeted：160 passed (单独跑)
-- 完整 backend delta：152（2768 → 2920）
-- 8-test 统计差异：**KNOWN NON-BLOCKING**——targeted 单独跑全 PASS；按 targeted 套件 + 默认 marker 0 fail / 0 error；不阻塞 R2-C；**MUST RECONCILE IN R2-D**（详见 audit §5.5 五项必查）
+- 完整 backend delta（实测）：**160**（2768 → 2928）✅ = targeted 160 完全对账
+- 8-test 统计差异：**RECONCILED @ P2-R2-D-A**（freeze 时点文档曾误报 2920 passed；实测 2928 passed；差异完全来自数字抄写错误，与 collection / node ID / 参数化 / skip / deselect 无关）
 - **0 functional regression**（按 §22-§24 targeted 套件零回归 + 默认 marker 完整跑 0 fail 确认）
 
-详细诊断见 [`P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md §5`](P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md)。
+详细 reconciliation 见 [`P2_R2_D_TEST_COUNT_RECONCILIATION.md`](P2_R2_D_TEST_COUNT_RECONCILIATION.md)；历史诊断见 [`P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md §5`](P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md)（其中 152 delta / 8-test discrepancy 表述已由 D-A 标记为 superseded）。
 
 ---
 
@@ -898,7 +898,7 @@ R2-B **不**完成：
 | 40 | R2-B 定向测试全通过 | ✅ 160/160 |
 | 41 | R2-A 66 测试零回归 | ✅ |
 | 42 | R1 测试零回归 | ✅ 118/118 + 1 skipped |
-| 43 | 完整 Backend 零回归 | ✅ 2920 passed |
+| 43 | 完整 Backend 零回归 | ✅ 2928 passed（**CORRECTED @ P2-R2-D-A**；原报告 2920 误抄） |
 | 44 | Frontend 267/267 | ✅ baseline 不变（diff=0） |
 | 45 | typecheck/lint/build 通过 | ✅（R2-A baseline 持续） |
 | 46 | Ruff 通过 | ✅ |
@@ -933,7 +933,7 @@ P2-R2-C Ingestion Worker + Upload/Retry API
 
 P2-R2-D Integration Validation + Freeze
 ⛔ BLOCKED BY P2-R2-C
-⚠ MUST RECONCILE 8-test discrepancy (audit §5.5 五项必查)
+⚠ Historical 8-test discrepancy → ✅ RECONCILED @ P2-R2-D-A（freeze 时点文档误报 2920 passed；实测 2928）
 
 P2-R3 Chunk + Retrieval MVP
 ⛔ BLOCKED BY COMPLETE P2-R2

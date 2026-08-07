@@ -303,22 +303,15 @@ Result: **2986 passed, 2 skipped, 14 deselected** in 185s.
 |---|---|
 | pytest version | 9.1.1 |
 | Plugins | anyio-4.14.0, asyncio-1.4.0 (mode=Mode.AUTO), cov-7.1.0 |
-| Baseline（pre-C1） | 2920 passed / 2 skipped / 14 deselected |
+| Baseline（pre-C1） | 2928 passed / 2 skipped / 14 deselected（**CORRECTED @ P2-R2-D-A**；原报告 2920 误抄） |
 | C1 added | 58 targeted tests |
-| Backend delta | 66（2920 → 2986） |
-| **8-test discrepancy (continued from R2-B)** | still 8; NON-BLOCKING; R2-D must reconcile |
+| Backend delta | 58（2928 → 2986）✅ = targeted 58 完全对账 |
+| Historical 8-test discrepancy | ✅ RECONCILED @ P2-R2-D-A（freeze 文档误抄；不存在 node-ID-level 差异） |
 | Functional regression | 0 |
 
-Per directive §三十四: "不要以简单减法推导测试数量". Backend delta = 66; C1 targeted = 58; 66 − 58 = 8 unaccounted — this is the **same** 8-test discrepancy inherited from R2-B (per `P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md §5.5`).
+**Note（CORRECTED @ P2-R2-D-A）**：原报告"Baseline pre-C1 = 2920 / delta = 66 / 8-test discrepancy continued"是基于 R2-B freeze 时点误抄数字 2920 的连锁推算。P2-R2-D-A 通过 A/B worktree 实测确认 R2-B 实际为 2928 passed，因此 C1 baseline = 2928 / delta = 58 = C1 targeted 58，完全对账。
 
-R2-D handoff (5 diagnostic items, unchanged):
-1. `pytest --collect-only` count（baseline `7db4780` vs current commit）
-2. Actual executed count（passed + failed + skipped）
-3. `skipped` / `deselected` count
-4. baseline 与当前提交的 pytest 配置 / 插件 / marker
-5. 是否存在 collection 后未执行的测试项
-
-Ruff `--fix` / fixture dedup 假设（H1/H2/H3）继续保留为 hypothesis only，不升级为根因。
+详见 [`P2_R2_D_TEST_COUNT_RECONCILIATION.md`](P2_R2_D_TEST_COUNT_RECONCILIATION.md)。原 5 项 R2-D handoff 已在 D-A 完成；Ruff `--fix` / fixture dedup 假设（H1/H2/H3）已被 git diff + 集合分析否决。
 
 ---
 

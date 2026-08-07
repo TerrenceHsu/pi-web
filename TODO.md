@@ -197,12 +197,12 @@ M3 是 docs-only 归档阶段，未自动执行上述任一动作。
       详见 [docs/validation/p2-r2/P2_R2_A_PARSER_ADAPTER.md](docs/validation/p2-r2/P2_R2_A_PARSER_ADAPTER.md)。
 - [x] **P2-R2-B Canonical Markdown Builder** —— ✅ COMPLETE / FROZEN @ `eb193b2`（implementation + tests + archive closure 全部完成）。
       含 P2-R0 Amendment 2 `15b411b`（pre-R2-B docs-only；用户 AskUserQuestion 显式选择 "走 amendment-2 流程"；解决 frontmatter 字段 + needs_ocr 阈值合同冲突）+ R2-B1 `0154cde` (feat: pdf_quality.py 43 tests) + R2-B2 `c077d5a` (feat: canonical_markdown.py 80 tests) + R2-B3 `677ed13` (feat: markdown_persistence.py 29 tests) + R2-B4 `eb193b2` freeze (8 integration tests + validation docs)。
-      R2-B targeted 160/160 PASS + 完整 backend 2920 passed / 2 skipped / 14 deselected + 0 functional regression + 0 dependency diff + 0 schema diff + 0 frontend diff。详见 [docs/validation/p2-r2/P2_R2_B_CANONICAL_MARKDOWN.md](docs/validation/p2-r2/P2_R2_B_CANONICAL_MARKDOWN.md)。
+      R2-B targeted 160/160 PASS + 完整 backend **2928** passed（**CORRECTED @ P2-R2-D-A**；原报告 2920 误抄）/ 2 skipped / 14 deselected + 0 functional regression + 0 dependency diff + 0 schema diff + 0 frontend diff。详见 [docs/validation/p2-r2/P2_R2_B_CANONICAL_MARKDOWN.md](docs/validation/p2-r2/P2_R2_B_CANONICAL_MARKDOWN.md)。
 - [x] **P2-R2-B Contract/Archive Closure** —— ✅ COMPLETE @ 2026-08-03（User decision: **A — RATIFIED**；Amendment 2 APPROVED；docs-only closure commit）。
       接受：`needs_ocr = total_non_whitespace_chars == 0`；低文本密度作 warning；Canonical frontmatter 字段集（schema / document_id / source_filename / source_sha256 / parser_id / parser_version / page_count / title? / generated_at?）；删除 library_id；source_name → source_filename；parser_id 与 parser_version 分离；新增 schema 标识；title 可选。
       library_id 继续由数据库和 Session allowlist 提供，不从 Markdown frontmatter 获得；不削弱 Session ACL / R3 检索 / Citation。
       `generated_at` 冻结规则：R2-C MVP 不传；Builder 默认省略；不调 `datetime.now()`；仅显式传入时写入；相同 PDF 重 ingest 必须生成相同 Markdown bytes 和 SHA-256。任务时间继续用 DB `created_at` / `updated_at` / Job 时间字段。
-      测试统计判定：targeted 160 / new 160 / backend delta 152 / functional regression 0；8-test 差异 = **KNOWN NON-BLOCKING**（不阻塞 R2-C），**MUST RECONCILE IN R2-D**。文档中 ruff --fix / pytest fixture 去重仅作假设，不升级为根因结论。详见 [docs/validation/p2-r2/P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md](docs/validation/p2-r2/P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md)。
+      测试统计判定：targeted 160 / new 160 / backend delta **160**（**CORRECTED @ P2-R2-D-A**；原报告 delta 152 是 freeze 时点误报 2920 passed 导致；实测 2928 passed）/ functional regression 0；historical 8-test discrepancy = ✅ **RECONCILED @ P2-R2-D-A**（freeze 时点文档误抄；不存在 node-ID-level 差异）。详见 [docs/validation/p2-r2/P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md](docs/validation/p2-r2/P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md) + [docs/validation/p2-r2/P2_R2_D_TEST_COUNT_RECONCILIATION.md](docs/validation/p2-r2/P2_R2_D_TEST_COUNT_RECONCILIATION.md)。
 - [x] **P2-R2-C0 Ingestion Runtime/API Contract** —— ✅ COMPLETE / FROZEN @ <this commit>（docs-only / contract-only / audit-only）。
       含 38 项决策冻结（worker_concurrency=1 / queue=32 / shutdown_grace=30s / SQLite durable source of truth / Document `uploaded`=pending signal / app-level active Job uniqueness via BEGIN IMMEDIATE / 404-409-413-415-500-503 错误映射 / 27-case 失败矩阵 / 4 API endpoints / generated_at MUST NOT BE PASSED）。
       **Schema Amendment NOT REQUIRED**（R1 schema 充分；3 non-blocking gaps deferred to R2-D：markdown_sha256 / parser_id / warnings_json）。
@@ -222,11 +222,14 @@ M3 是 docs-only 归档阶段，未自动执行上述任一动作。
       详见 [docs/validation/p2-r2/P2_R2_C3_INGESTION_APIS.md](docs/validation/p2-r2/P2_R2_C3_INGESTION_APIS.md)。
 - [x] **P2-R2-C4 Integration Validation + R2-C Freeze** —— ✅ COMPLETE / FROZEN @ `<this commit>`.
       47 C4 integration tests across 5 files: E2E pipeline / failure injection / concurrency / restart+shutdown / security boundaries. Production diff=0. 详见 [P2_R2_C4_INTEGRATION_FREEZE.md](docs/validation/p2-r2/P2_R2_C4_INTEGRATION_FREEZE.md).
-- [ ] **P2-R2-D Final PDF Pipeline Validation** —— ✅ APPROVED TO START（⚠ MUST RECONCILE 8-test discrepancy；独立启动授权另需用户发起）。
+- [ ] **P2-R2-D-A Test Count Reconciliation** —— ✅ COMPLETE / FROZEN @ <D-A commit>（A/B 隔离 worktree + 集合分析；historical 8-test discrepancy ✅ RECONCILED；root cause = R2-B freeze 时点文档误报 2920 passed；实测 2928；selected delta = 160 = targeted 160 完全对账；node-ID-level 无差异）。详见 [docs/validation/p2-r2/P2_R2_D_TEST_COUNT_RECONCILIATION.md](docs/validation/p2-r2/P2_R2_D_TEST_COUNT_RECONCILIATION.md)。
+- [ ] **P2-R2-D-B Final PDF Pipeline Validation** —— ⛔ BLOCKED by Ruff failure。
+      `tests/test_r2_c_security_boundaries.py:13` `import importlib` unused 是 C4-R Fix-1（`9034842`）移除 `importlib.reload()` 调用后遗漏的 cleanup；C4-R freeze 文档错误报告 Ruff PASS；R2-D docs-only 边界禁修 tests/** → 提出独立 **P2-R2-D-Fix**（仅删 1 行 `import importlib`）单独用户授权。D-B 待 D-Fix 完成后重新启动。
 - [ ] **P2-R2-C4 Integration Validation + R2-C Freeze** —— ⛔ BLOCKED BY C3。
       E2E + restart recovery + concurrent retry + delete race + failure injection + 完整 backend + frontend 零回归 + freeze。
-- [ ] **P2-R2-D Integration Validation + Freeze** —— ⛔ BLOCKED BY COMPLETE R2-C。
-      **必查 8-test discrepancy**（5 项）：(1) `pytest --collect-only` 数量；(2) 实际执行数量；(3) skipped/deselected 数量；(4) baseline 与当前提交的 pytest 配置 / 插件 / marker；(5) 是否存在 collection 后未执行的测试项。
+- [ ] **P2-R2-D Integration Validation + Freeze** —— ⛔ BLOCKED by Ruff failure。
+      ~~必查 8-test discrepancy~~ → ✅ **RECONCILED @ P2-R2-D-A**（5 项全 closed；详见 [P2_R2_D_TEST_COUNT_RECONCILIATION.md](docs/validation/p2-r2/P2_R2_D_TEST_COUNT_RECONCILIATION.md)）。
+      待启动 P2-R2-D-Fix（Ruff 修复）后才能进行 D-B freeze。
 
 ## Explicitly out of scope (long-term)
 

@@ -1,0 +1,51 @@
+# Environment for P2-R2-D A/B comparison
+
+Date: 2026-08-07
+Platform: win32 (Windows 11 Pro 10.0.26200)
+Shell: bash
+
+## Python
+
+Python 3.12.13
+Path: D:\miniconda\envs\pipy\python.exe
+Conda env: pipy
+
+## pytest and plugins
+
+pytest: 9.1.1
+pytest-asyncio: 1.4.0
+pytest-cov: 7.1.0
+anyio: 4.14.0
+
+## Configuration (identical in main / R2-A worktree / R2-B worktree)
+
+pyproject.toml [tool.pytest.ini_options]:
+  asyncio_mode = "auto"
+  testpaths = ["tests"]
+  markers:
+    slow, integration, docker
+  addopts:
+    --cov=pi_agent_core_py
+    --cov-report=term-missing
+    --cov-report=xml:.coverage.xml
+    --no-cov-on-fail
+    -m "not slow and not integration and not docker"
+
+## Marker expression (used for both A and B)
+
+"not slow and not integration and not docker"
+
+## Invocation
+
+All collect-only and full-suite runs use:
+  PYTHONPATH=src
+  python -m pytest ...
+  -p no:cacheprovider
+  -W "ignore::pytest.PytestUnraisableExceptionWarning"
+  --no-cov
+
+## Import provenance
+
+R2-A worktree: D:\LLMTutorial\.p2-r2-d-worktrees\r2-a-0772324\src\pi_agent_core_py\__init__.py
+R2-B worktree: D:\LLMTutorial\.p2-r2-d-worktrees\r2-b-eb193b2\src\pi_agent_core_py\__init__.py
+→ Each worktree imports from its own src tree (verified).

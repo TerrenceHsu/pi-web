@@ -72,17 +72,19 @@ No blocking security gaps in any skip.
 
 ---
 
-## 6. 8-Test Discrepancy Handoff（unchanged）
+## 6. 8-Test Discrepancy Handoff（✅ RECONCILED @ P2-R2-D-A）
+
+> **SUPERSEDED @ P2-R2-D-A**：原 8-test discrepancy 已通过 P2-R2-D-A A/B 隔离 worktree + 集合分析关闭。根因为 R2-B freeze 时点文档误报 2920 passed（实测应为 2928）。
 
 ```
-R2-A baseline:  2768
-R2-B reported:  2920
-R2-B targeted:  160
-Reported delta: 152
-Discrepancy:    8 → NON-BLOCKING; MUST RECONCILE IN R2-D
+R2-A baseline (实测):  2768
+R2-B backend (实测):   2928   (freeze 时点误报 2920)
+R2-B targeted:         160
+Backend delta (实测):  160    ✅ = targeted 160 完全对账
+Discrepancy:           ✅ RECONCILED @ P2-R2-D-A (虚构；从未在 node-ID 层存在)
 ```
 
-Ruff --fix / fixture dedup hypotheses retained; NOT elevated to root cause.
+Ruff --fix / fixture dedup 假设已被 D-A git diff + 集合分析否决。详见 [`P2_R2_D_TEST_COUNT_RECONCILIATION.md`](P2_R2_D_TEST_COUNT_RECONCILIATION.md)。
 
 ---
 
