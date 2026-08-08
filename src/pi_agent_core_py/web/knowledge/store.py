@@ -743,7 +743,7 @@ class KnowledgeStore:
         return await self.get_library(library_id)
 
     async def delete_library_hard(self, library_id: str) -> None:
-        """Hard-delete a Library + cascade Documents / Chunks / Jobs / Bindings.
+        """Hard-delete a Library + cascade Documents / Chunks / FTS / Jobs / Bindings.
 
         Implements P2-R0 §7.2 invariant 8 (delete Library must clean all
         downstream rows). Called by Service after file system cleanup or
@@ -751,6 +751,9 @@ class KnowledgeStore:
 
         Idempotent — succeeds even if rows already cascaded; raises
         ``LibraryNotFoundError`` only if the Library itself never existed.
+
+        R3-B: added ``knowledge_chunks_fts`` cleanup in the same transaction
+        so FTS rows never orphan when library is cascade-deleted.
         """
         validate_library_id_or_raise(library_id)
         db = self._require_db()
@@ -760,6 +763,11 @@ class KnowledgeStore:
             try:
                 await db.execute("BEGIN IMMEDIATE")
                 # Order: child → parent (no SQL FK; do it manually)
+                await db.execute(
+                    "DELETE FROM knowledge_chunks_fts "
+                    "WHERE library_id = ?",
+                    (existing.id,),
+                )
                 await db.execute(
                     "DELETE FROM knowledge_chunks "
                     "WHERE library_id = ?",
@@ -989,10 +997,13 @@ class KnowledgeStore:
         return await self.get_document(document_id)
 
     async def delete_document_hard(self, document_id: str) -> None:
-        """Hard-delete Document + cascade Chunks + Jobs.
+        """Hard-delete Document + cascade Chunks + FTS + Jobs.
 
         Idempotent; raises ``DocumentNotFoundError`` if never existed.
         Service layer is responsible for any file system cleanup before / after.
+
+        R3-B: added ``knowledge_chunks_fts`` cleanup in the same transaction
+        so FTS rows never orphan when chunks are cascade-deleted.
         """
         validate_document_id_or_raise(document_id)
         db = self._require_db()
@@ -1000,6 +1011,10 @@ class KnowledgeStore:
         async with self._write_lock:
             try:
                 await db.execute("BEGIN IMMEDIATE")
+                await db.execute(
+                    "DELETE FROM knowledge_chunks_fts WHERE document_id = ?",
+                    (existing.id,),
+                )
                 await db.execute(
                     "DELETE FROM knowledge_chunks WHERE document_id = ?",
                     (existing.id,),
