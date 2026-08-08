@@ -25,6 +25,7 @@ Chunks / SessionLibraryBindings.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from pathlib import Path
 from typing import Any
@@ -50,7 +51,7 @@ from .models import (
 # Constants
 # ============================================================================
 
-KNOWLEDGE_SCHEMA_VERSION: int = 1
+KNOWLEDGE_SCHEMA_VERSION: int = 2
 
 _SCHEMA_META_KEY: str = "schema_version"
 
@@ -108,7 +109,9 @@ CREATE TABLE IF NOT EXISTS knowledge_schema_meta (
 """
 
 #: Fresh-DB DDL statements executed inside a single BEGIN IMMEDIATE transaction.
-#: Order matters: tables before indexes; meta row last.
+#: Order matters: tables before indexes; meta row last. v2 adds ``char_count``
+#: and ``content_sha256`` columns on ``knowledge_chunks`` (R3-A DTO contract)
+#: plus the ``knowledge_chunks_fts`` FTS5 virtual table (R3-B search index).
 _DDL_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS knowledge_libraries (
@@ -164,17 +167,19 @@ _DDL_STATEMENTS: tuple[str, ...] = (
     """,
     """
     CREATE TABLE IF NOT EXISTS knowledge_chunks (
-        id            TEXT PRIMARY KEY,
-        library_id    TEXT NOT NULL,
-        document_id   TEXT NOT NULL,
-        ordinal       INTEGER NOT NULL,
-        heading_path  TEXT NOT NULL DEFAULT '',
-        page_start    INTEGER NOT NULL,
-        page_end      INTEGER NOT NULL,
-        content       TEXT NOT NULL,
-        content_hash  TEXT NOT NULL,
-        token_count   INTEGER NOT NULL DEFAULT 0,
-        created_at    INTEGER NOT NULL,
+        id              TEXT PRIMARY KEY,
+        library_id      TEXT NOT NULL,
+        document_id     TEXT NOT NULL,
+        ordinal         INTEGER NOT NULL,
+        heading_path    TEXT NOT NULL DEFAULT '',
+        page_start      INTEGER NOT NULL,
+        page_end        INTEGER NOT NULL,
+        content         TEXT NOT NULL,
+        content_hash    TEXT NOT NULL,
+        char_count      INTEGER NOT NULL DEFAULT 0,
+        content_sha256  TEXT NOT NULL DEFAULT '',
+        token_count     INTEGER NOT NULL DEFAULT 0,
+        created_at      INTEGER NOT NULL,
         CHECK (ordinal >= 0),
         CHECK (page_start >= 1),
         CHECK (page_end >= page_start),
@@ -199,7 +204,42 @@ _DDL_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_chunks_library     ON knowledge_chunks(library_id);",
     "CREATE INDEX IF NOT EXISTS idx_bindings_session   ON session_knowledge_libraries(session_id);",
     "CREATE INDEX IF NOT EXISTS idx_bindings_library   ON session_knowledge_libraries(library_id);",
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_chunks_fts USING fts5(
+        chunk_id     UNINDEXED,
+        document_id  UNINDEXED,
+        library_id   UNINDEXED,
+        heading_text,
+        content,
+        tokenize     = 'unicode61 remove_diacritics 2'
+    );
+    """,
 )
+
+#: Statements executed inside a single BEGIN IMMEDIATE transaction when an
+#: existing v1 database is opened by v2 code. SQLite does not support adding
+#: CHECK constraints via ALTER, so migrated v1→v2 ``knowledge_chunks`` rows
+#: keep their loose v1 column constraints; the R3-B2 chunk store enforces
+#: the strict R3-A contract at the application layer (char_count > 0,
+#: length(content_sha256) = 64, length(content_hash) = 64).
+_V1_TO_V2_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    "ALTER TABLE knowledge_chunks ADD COLUMN char_count INTEGER NOT NULL DEFAULT 0;",
+    "ALTER TABLE knowledge_chunks ADD COLUMN content_sha256 TEXT NOT NULL DEFAULT '';",
+)
+
+#: FTS5 virtual table DDL — used both by fresh v2 schema build and by the
+#: v1→v2 migration. ``tokenize='unicode61 remove_diacritics 2'`` is frozen
+#: per P2-R3-0 capability probe.
+_V1_TO_V2_FTS_DDL: str = """
+CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_chunks_fts USING fts5(
+    chunk_id     UNINDEXED,
+    document_id  UNINDEXED,
+    library_id   UNINDEXED,
+    heading_text,
+    content,
+    tokenize     = 'unicode61 remove_diacritics 2'
+);
+"""
 
 
 # ============================================================================
@@ -377,15 +417,25 @@ class KnowledgeStore:
     # ------------------------------------------------------------------
 
     async def _initialize_schema(self) -> None:
-        """Idempotent — fresh DB builds v1; existing DB validates version."""
+        """Idempotent — fresh DB builds current version; existing DB migrates
+        or validates against ``KNOWLEDGE_SCHEMA_VERSION``.
+
+        Supported paths:
+          * fresh DB (no meta row) → build latest schema
+          * v1 DB → migrate to v2 (ADD COLUMN + CREATE VIRTUAL TABLE)
+          * v2 DB → validate
+          * future version (> v2) → reject
+        """
         db = self._db
         assert db is not None
         await db.execute(_SCHEMA_META_DDL)
         version = await self.get_schema_version()
         if version is None:
-            await self._initialize_fresh_v1_schema()
+            await self._initialize_fresh_latest_schema()
+        elif version == 1:
+            await self._migrate_v1_to_v2()
         elif version == KNOWLEDGE_SCHEMA_VERSION:
-            await self._validate_v1_schema()
+            await self._validate_v2_schema()
         elif version > KNOWLEDGE_SCHEMA_VERSION:
             raise KnowledgeSchemaVersionError(
                 "Knowledge database schema is newer than this application "
@@ -396,7 +446,8 @@ class KnowledgeStore:
                 f"Unsupported knowledge schema version: v{version}"
             )
 
-    async def _initialize_fresh_v1_schema(self) -> None:
+    async def _initialize_fresh_latest_schema(self) -> None:
+        """Build the latest (v2) schema on a fresh DB inside one transaction."""
         db = self._db
         assert db is not None
         try:
@@ -415,11 +466,64 @@ class KnowledgeStore:
                 pass
             raise
 
-    async def _validate_v1_schema(self) -> None:
-        """Verify all 5 tables + 7 indexes exist; raise if any missing.
+    async def _migrate_v1_to_v2(self) -> None:
+        """Migrate an existing v1 DB to v2 (R3-A chunk columns + R3-B FTS5).
 
-        Light check — does not parse column types (DDL is the source of truth).
+        Idempotent: ``ALTER TABLE ADD COLUMN`` fails on retry if column
+        exists, so the migration guards each statement with a column/table
+        existence probe. Whole migration runs in one BEGIN IMMEDIATE.
         """
+        db = self._db
+        assert db is not None
+        # Pre-flight: detect which migration steps still need to run.
+        existing_chunk_columns = await self._existing_columns("knowledge_chunks")
+        needs_char_count = "char_count" not in existing_chunk_columns
+        needs_content_sha256 = "content_sha256" not in existing_chunk_columns
+        needs_fts = not await self._table_exists("knowledge_chunks_fts")
+        if not (needs_char_count or needs_content_sha256 or needs_fts):
+            # Already at v2 structurally; just bump the version row.
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                await db.execute(
+                    "UPDATE knowledge_schema_meta SET value = ? WHERE key = ?",
+                    (KNOWLEDGE_SCHEMA_VERSION, _SCHEMA_META_KEY),
+                )
+                await db.execute("COMMIT")
+            except Exception:
+                try:
+                    await db.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+            return
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            if needs_char_count:
+                await db.execute(
+                    "ALTER TABLE knowledge_chunks "
+                    "ADD COLUMN char_count INTEGER NOT NULL DEFAULT 0;"
+                )
+            if needs_content_sha256:
+                await db.execute(
+                    "ALTER TABLE knowledge_chunks "
+                    "ADD COLUMN content_sha256 TEXT NOT NULL DEFAULT '';"
+                )
+            if needs_fts:
+                await db.execute(_V1_TO_V2_FTS_DDL)
+            await db.execute(
+                "UPDATE knowledge_schema_meta SET value = ? WHERE key = ?",
+                (KNOWLEDGE_SCHEMA_VERSION, _SCHEMA_META_KEY),
+            )
+            await db.execute("COMMIT")
+        except Exception:
+            try:
+                await db.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+
+    async def _validate_v2_schema(self) -> None:
+        """Verify all v2 tables (incl. FTS5 virtual table) exist."""
         db = self._db
         assert db is not None
         expected_tables = {
@@ -427,6 +531,7 @@ class KnowledgeStore:
             "knowledge_documents",
             "knowledge_ingestion_jobs",
             "knowledge_chunks",
+            "knowledge_chunks_fts",
             "session_knowledge_libraries",
         }
         async with db.execute(
@@ -437,8 +542,34 @@ class KnowledgeStore:
         missing = expected_tables - actual
         if missing:
             raise KnowledgeSchemaVersionError(
-                f"Knowledge schema v1 validation failed: missing tables {sorted(missing)}"
+                f"Knowledge schema v2 validation failed: missing tables {sorted(missing)}"
             )
+
+    async def _existing_columns(self, table: str) -> set[str]:
+        """Return the set of column names currently on ``table``.
+
+        Uses ``PRAGMA table_info`` so it works on any SQLite version.
+        """
+        db = self._db
+        assert db is not None
+        cols: set[str] = set()
+        async with db.execute(f"PRAGMA table_info({table})") as cursor:
+            rows = await cursor.fetchall()
+        for row in rows:
+            cols.add(row["name"])
+        return cols
+
+    async def _table_exists(self, table: str) -> bool:
+        """Return True iff a table (or virtual table) named ``table`` exists."""
+        db = self._db
+        assert db is not None
+        async with db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') "
+            "AND name = ?",
+            (table,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row is not None
 
     # ------------------------------------------------------------------
     # Library CRUD
@@ -1193,12 +1324,27 @@ class KnowledgeStore:
         async with self._write_lock:
             try:
                 await db.execute("BEGIN IMMEDIATE")
+                # v2 schema adds char_count + content_sha256 columns. R1
+                # Chunk DTO does not carry these; derive from content so the
+                # row satisfies NOT NULL. R3-B2 chunk store is the strict
+                # enforcement layer (validates length(sha256)=64, char_count>0).
+                char_count = len(chunk.content)
+                # Prefer the explicit content_hash if it already looks like a
+                # sha256 hex; otherwise compute one. R1 stub tests use
+                # arbitrary strings; the column is best-effort for legacy
+                # rows and authoritative for R3-B2 rows.
+                content_sha256 = (
+                    chunk.content_hash
+                    if len(chunk.content_hash) == 64
+                    and all(c in "0123456789abcdef" for c in chunk.content_hash)
+                    else hashlib.sha256(chunk.content.encode("utf-8")).hexdigest()
+                )
                 await db.execute(
                     "INSERT INTO knowledge_chunks "
                     "(id, library_id, document_id, ordinal, heading_path, "
                     " page_start, page_end, content, content_hash, "
-                    " token_count, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " char_count, content_sha256, token_count, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         chunk.id,
                         chunk.library_id,
@@ -1209,6 +1355,8 @@ class KnowledgeStore:
                         chunk.page_end,
                         chunk.content,
                         chunk.content_hash,
+                        char_count,
+                        content_sha256,
                         chunk.token_count,
                         chunk.created_at or _now_ms(),
                     ),
