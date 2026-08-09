@@ -45,8 +45,10 @@ _DOCUMENT_MARKDOWN_FILENAME: Final[str] = "document.md"
 
 #: Frontmatter extractor for ``source_sha256`` (R2-B serialises via
 #: ``json.dumps(value, ensure_ascii=False)`` → JSON-quoted 64-hex string).
+#: R2-B ``_build_frontmatter`` emits ``key: value`` (colon-separated).
+#: Regex accepts optional colon (``:?\s+``) for fixture compatibility.
 _FM_SOURCE_SHA256_RE: Final[re.Pattern[str]] = re.compile(
-    r"^source_sha256\s+(.+?)\s*$", re.MULTILINE
+    r"^source_sha256:?\s+(.+?)\s*$", re.MULTILINE
 )
 
 # ============================================================================

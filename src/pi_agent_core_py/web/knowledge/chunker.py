@@ -57,11 +57,15 @@ _FENCE_RE: Final[re.Pattern[str]] = re.compile(r"^(```|~~~)(.*)$")
 
 #: Frontmatter field extractors. R2-B serialises scalar values via
 #: ``json.dumps(value, ensure_ascii=False)`` so values are JSON-quoted.
+#: R2-B ``_build_frontmatter`` emits ``key: value`` (colon-separated,
+#: per canonical_markdown.py:448 ``f"{key}: {value}"``). The regex
+#: accepts an optional colon (``:?\s+``) so it also matches the
+#: colon-less ``key value`` form used by some test fixtures.
 _FM_DOCUMENT_ID_RE: Final[re.Pattern[str]] = re.compile(
-    r'^document_id\s+(.+?)\s*$', re.MULTILINE
+    r'^document_id:?\s+(.+?)\s*$', re.MULTILINE
 )
 _FM_PAGE_COUNT_RE: Final[re.Pattern[str]] = re.compile(
-    r'^page_count\s+(\d+)\s*$', re.MULTILINE
+    r'^page_count:?\s+(\d+)\s*$', re.MULTILINE
 )
 
 #: Sentence boundary for hard-split fallback.
