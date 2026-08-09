@@ -76,6 +76,18 @@ New Agent Tool   = 0
 
 ### Total R3-E targeted: 23 tests, all PASS
 
+### Cumulative P2-R3 targeted total
+
+```
+R3-A chunker            44
+R3-B chunk store        84
+R3-C indexing           58
+R3-D worker + guard     35
+R3-E integration        23
+──────────────────────────
+Total P2-R3 targeted   244
+```
+
 ## 29-52. R3-A/B/C/D regression
 
 All frozen-stage targeted tests inherited (no frozen code change beyond regex fix):
@@ -222,4 +234,33 @@ exact global root cause not established
 ```
 P2-R3 Heading-aware Chunk + SQLite FTS5 Indexing
 ✅ COMPLETE / FINAL FROZEN @ <this commit>
+
+Sub-stage provenance (downstream amendments noted):
+
+P2-R3-A Chunk Contract + Chunker
+  ✅ original freeze @ 677fe33
+  ↳ frontmatter regex fix @ bcf8d88 (R3-E-Fix: colon format match)
+
+P2-R3-A-R Reliability Closure
+  ✅ @ 64b7416
+
+P2-R3-B Schema + SQLite FTS5
+  ✅ original freeze @ a9dd32b
+  ↳ recovery bridge @ 7b59479 (R3-D-R: ChunkStore in-transaction variant)
+
+P2-R3-C Indexing Runtime
+  ✅ original freeze @ a4ebf41
+  ↳ recovery bridge @ 7b59479 (R3-D-R: IndexingStore chunk_store param)
+  ↳ frontmatter regex fix @ bcf8d88 (R3-E-Fix: colon format match)
+
+P2-R3-D Bounded Index Worker
+  ✅ @ 7b59479 (incl D-R closure)
+
+P2-R3-E Final Integration Freeze
+  ✅ @ <this commit>
+    (R3-E integration validation exposed frontmatter colon-format defect;
+     R3-E blocked → R3-E-Fix @ bcf8d88 → integration re-validation → Final Freeze)
+
+Total P2-R3 targeted tests: 244
+  (44 R3-A + 84 R3-B + 58 R3-C + 35 R3-D + 23 R3-E)
 ```
