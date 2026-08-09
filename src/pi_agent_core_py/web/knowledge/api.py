@@ -382,6 +382,40 @@ async def _library_has_active_job(
     return row is not None
 
 
+async def _document_is_indexing(
+    store: KnowledgeStore, document_id: str
+) -> bool:
+    """Check if ``document_id`` is in an active indexing state.
+
+    Per P2-R3-D2 §37 — block delete while status is ``chunking`` or
+    ``indexing`` (R3-C runtime is mid-flight). ``normalizing`` is NOT
+    blocked (delete-vs-claim race resolves atomically via R3-C
+    conditional claim).
+    """
+    db = store._require_db()
+    async with db.execute(
+        "SELECT 1 FROM knowledge_documents "
+        "WHERE id = ? AND status IN ('chunking', 'indexing') LIMIT 1",
+        (document_id,),
+    ) as cursor:
+        row = await cursor.fetchone()
+    return row is not None
+
+
+async def _library_has_indexing_doc(
+    store: KnowledgeStore, library_id: str
+) -> bool:
+    """Check if any Document in ``library_id`` is in active indexing state."""
+    db = store._require_db()
+    async with db.execute(
+        "SELECT 1 FROM knowledge_documents "
+        "WHERE library_id = ? AND status IN ('chunking', 'indexing') LIMIT 1",
+        (library_id,),
+    ) as cursor:
+        row = await cursor.fetchone()
+    return row is not None
+
+
 # ============================================================================
 # Safe error → HTTPException translation
 # ============================================================================
@@ -665,6 +699,13 @@ def register_knowledge_endpoints(router: APIRouter) -> None:
                 409, "library_ingestion_active",
                 "Library has documents with active ingestion jobs; cannot delete.",
             ) from None
+        # R3-D2: active-indexing guard — block library delete while any
+        # Document in the Library is in ``chunking`` or ``indexing``.
+        if await _library_has_indexing_doc(store, library_id):
+            raise _safe_error(
+                409, "library_indexing_active",
+                "Library has documents being indexed; cannot delete.",
+            ) from None
         try:
             await service.delete_library(library_id)
         except KnowledgeServiceError as exc:
@@ -704,6 +745,7 @@ def register_knowledge_endpoints(router: APIRouter) -> None:
     async def delete_document(
         document_id: Annotated[str, Path()],
         service: Annotated[KnowledgeService, Depends(get_knowledge_service)],
+        store: Annotated[KnowledgeStore, Depends(get_knowledge_store)],
         ingestion_store: Annotated[IngestionStore, Depends(get_ingestion_store)],
     ) -> None:
         if not is_valid_document_id(document_id):
@@ -713,6 +755,15 @@ def register_knowledge_endpoints(router: APIRouter) -> None:
             raise _safe_error(
                 409, "document_ingestion_active",
                 "Document has an active ingestion job; cannot delete.",
+            ) from None
+        # R3-D2: active-indexing guard — block delete while Document is
+        # in ``chunking`` or ``indexing`` (R3-C runtime mid-flight).
+        # ``normalizing`` is allowed (delete-vs-claim race resolves
+        # atomically via R3-C conditional claim).
+        if await _document_is_indexing(store, document_id):
+            raise _safe_error(
+                409, "document_indexing_active",
+                "Document is being indexed; cannot delete.",
             ) from None
         try:
             await service.delete_document(document_id)

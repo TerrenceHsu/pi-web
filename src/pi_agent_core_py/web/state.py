@@ -222,6 +222,12 @@ class WebAppState(BaseModel):
     # Constructed in lifespan AFTER knowledge subsystem; started before yield;
     # stopped in lifespan finally BEFORE knowledge_store.close().
     ingestion_worker_manager: Any = None
+    # P2-R3-D2: Indexing Worker Manager (None = disabled / [rag] extra missing).
+    # Holds app-scoped singleton that drives normalizing → chunking →
+    # indexing → ready background execution. Constructed in lifespan AFTER
+    # Ingestion Worker Manager; started after Ingestion; stopped in lifespan
+    # finally AFTER Ingestion Worker stop, BEFORE knowledge_store.close().
+    indexing_worker_manager: Any = None
 
 
 # ============================================================================

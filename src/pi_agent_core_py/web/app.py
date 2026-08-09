@@ -548,11 +548,57 @@ def create_app(
                         f"ingestion worker manager start failed: "
                         f"{type(e).__name__}"
                     ) from e
+
+            # ============================================================
+            # P2-R3-D2: Indexing Worker Manager — app-scoped singleton
+            # that drives normalizing → chunking → indexing → ready.
+            #
+            # Constructed only if Ingestion Worker is available (depends
+            # on the same [rag] extra). Started AFTER Ingestion Worker
+            # (producer before consumer); stopped BEFORE Ingestion Worker
+            # stop in shutdown (consumer before producer — actually
+            # directive §28 says producer stops first to prevent new
+            # normalizing Docs during Index Worker drain; so Index
+            # Worker stops AFTER Ingestion Worker in shutdown).
+            # ============================================================
+            if ingestion_manager is not None:
+                try:
+                    from .knowledge.chunk_store import ChunkStore
+                    from .knowledge.indexing_orchestrator import (
+                        IndexingOrchestrator,
+                    )
+                    from .knowledge.indexing_store import IndexingStore
+                    from .knowledge.indexing_worker import (
+                        IndexingWorkerManager,
+                    )
+
+                    chunk_store_obj = ChunkStore(k_store)
+                    indexing_store_obj = IndexingStore(k_store)
+                    indexing_orchestrator_obj = IndexingOrchestrator(
+                        knowledge_store=k_store,
+                        knowledge_file_store=k_file_store,
+                        chunk_store=chunk_store_obj,
+                        indexing_store=indexing_store_obj,
+                    )
+                    indexing_manager = IndexingWorkerManager(
+                        knowledge_store=k_store,
+                        chunk_store=chunk_store_obj,
+                        indexing_store=indexing_store_obj,
+                        orchestrator=indexing_orchestrator_obj,
+                    )
+                    await indexing_manager.start()
+                    state.indexing_worker_manager = indexing_manager
+                except Exception as e:
+                    raise RuntimeError(
+                        f"indexing worker manager start failed: "
+                        f"{type(e).__name__}"
+                    ) from e
         else:
             state.knowledge_service = None
             state.knowledge_store = None
             state.knowledge_file_store = None
             state.ingestion_worker_manager = None
+            state.indexing_worker_manager = None
 
         # ====================================================================
         # P1-E1-4A: Credential Runtime Composition Root
@@ -736,6 +782,20 @@ def create_app(
             except Exception:
                 pass
             state.ingestion_worker_manager = None
+        # P2-R3-D2: 关闭 Indexing Worker Manager（在 Ingestion Worker stop 之后，
+        # KnowledgeStore.close 之前）。Per directive §28: producer stops
+        # first to prevent new normalizing during Index Worker drain.
+        indexing_mgr = (
+            state.indexing_worker_manager
+            if hasattr(state, "indexing_worker_manager")
+            else None
+        )
+        if indexing_mgr is not None:
+            try:
+                await indexing_mgr.stop()
+            except Exception:
+                pass
+            state.indexing_worker_manager = None
         # P2-R1: 关闭 KnowledgeStore（独立 connection）
         k_store = state.knowledge_store if hasattr(state, "knowledge_store") else None
         if k_store is not None:
