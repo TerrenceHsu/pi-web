@@ -501,52 +501,99 @@ class TestRecovery:
         assert result.indexing_recovered == 1
         assert result.total_recovered == 2
 
-    async def test_recover_with_cleanup_callback(
+    async def test_recover_with_chunk_store_cleanup(
         self, store_and_indexing_store: tuple[KnowledgeStore, IndexingStore]
     ):
-        """Cleanup callback is invoked once per recovered Document before
-        the state transition commits. If it raises, the whole txn rolls back.
+        """P2-R3-C-D Bridge Amendment: chunk_store cleanup is invoked
+        inside the recovery transaction (no lock re-acquisition).
+
+        Seeds a chunking Document + stale chunks/FTS, then recovers —
+        chunks + FTS should be cleaned up by ChunkStore's in-transaction
+        variant, and Document → failed.
         """
+        from pi_agent_core_py.web.knowledge.chunk_store import ChunkStore
+
+        store, idx = store_and_indexing_store
+        chunk_store = ChunkStore(store)
+        await _seed_doc(store, document_id="doc_test00000001", status="chunking")
+        # Seed stale chunks + FTS.
+        async with store._write_lock:
+            await store._db.execute("BEGIN IMMEDIATE")
+            await store._db.execute(
+                "INSERT INTO knowledge_chunks (id, library_id, document_id, "
+                " ordinal, heading_path, page_start, page_end, content, "
+                " content_hash, char_count, content_sha256, token_count, "
+                " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("chunk_stale00001", "lib_test00000001", "doc_test00000001",
+                 0, "[]", 1, 1, "stale", "x" * 64, 5, "y" * 64, 0, 1),
+            )
+            await store._db.execute(
+                "INSERT INTO knowledge_chunks_fts (chunk_id, document_id, "
+                " library_id, heading_text, content) VALUES (?, ?, ?, ?, ?)",
+                ("chunk_stale00001", "doc_test00000001", "lib_test00000001",
+                 "", "stale"),
+            )
+            await store._db.execute("COMMIT")
+        result = await idx.recover_interrupted_indexing(chunk_store=chunk_store)
+        assert result.total_recovered == 1
+        # Chunks + FTS cleaned up.
+        async with store._db.execute(
+            "SELECT COUNT(*) AS n FROM knowledge_chunks"
+        ) as cursor:
+            assert (await cursor.fetchone())["n"] == 0
+        async with store._db.execute(
+            "SELECT COUNT(*) AS n FROM knowledge_chunks_fts"
+        ) as cursor:
+            assert (await cursor.fetchone())["n"] == 0
+
+    async def test_recover_without_chunk_store_no_cleanup(
+        self, store_and_indexing_store: tuple[KnowledgeStore, IndexingStore]
+    ):
+        """If chunk_store is None, recovery still transitions state but
+        does NOT clean up chunks/FTS (caller's responsibility)."""
         store, idx = store_and_indexing_store
         await _seed_doc(store, document_id="doc_test00000001", status="chunking")
-        called_with: list[str] = []
-
-        async def cleanup(doc_id: str) -> None:
-            called_with.append(doc_id)
-
-        result = await idx.recover_interrupted_indexing(cleanup_callback=cleanup)
+        async with store._write_lock:
+            await store._db.execute("BEGIN IMMEDIATE")
+            await store._db.execute(
+                "INSERT INTO knowledge_chunks (id, library_id, document_id, "
+                " ordinal, heading_path, page_start, page_end, content, "
+                " content_hash, char_count, content_sha256, token_count, "
+                " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("chunk_stale00001", "lib_test00000001", "doc_test00000001",
+                 0, "[]", 1, 1, "stale", "x" * 64, 5, "y" * 64, 0, 1),
+            )
+            await store._db.execute("COMMIT")
+        # Recover WITHOUT chunk_store — chunks remain.
+        result = await idx.recover_interrupted_indexing(chunk_store=None)
         assert result.total_recovered == 1
-        assert called_with == ["doc_test00000001"]
+        async with store._db.execute(
+            "SELECT COUNT(*) AS n FROM knowledge_chunks"
+        ) as cursor:
+            assert (await cursor.fetchone())["n"] == 1
 
     async def test_recover_cleanup_failure_rolls_back(
         self, store_and_indexing_store: tuple[KnowledgeStore, IndexingStore]
     ):
+        """If ChunkStore cleanup raises inside the recovery transaction,
+        the whole txn rolls back (Document stays chunking)."""
+        from pi_agent_core_py.web.knowledge.chunk_store import ChunkStore
+
         store, idx = store_and_indexing_store
+        chunk_store = ChunkStore(store)
         await _seed_doc(store, document_id="doc_test00000001", status="chunking")
 
-        async def boom(_doc_id: str) -> None:
+        # Monkey-patch the in-transaction method to raise.
+        async def boom(db, doc_id):
             raise RuntimeError("simulated cleanup failure")
 
+        chunk_store.delete_document_chunks_in_transaction = boom
+
         with pytest.raises(RuntimeError, match="simulated"):
-            await idx.recover_interrupted_indexing(cleanup_callback=boom)
+            await idx.recover_interrupted_indexing(chunk_store=chunk_store)
         # Document should remain in chunking (recovery rolled back).
         row = await _get_status(store, "doc_test00000001")
         assert row["status"] == "chunking"
-
-    async def test_recover_sync_callback_supported(
-        self, store_and_indexing_store: tuple[KnowledgeStore, IndexingStore]
-    ):
-        """Sync callbacks (no await) are also supported via duck-typing."""
-        store, idx = store_and_indexing_store
-        await _seed_doc(store, document_id="doc_test00000001", status="chunking")
-        called_with: list[str] = []
-
-        def cleanup(doc_id: str) -> None:
-            called_with.append(doc_id)
-
-        result = await idx.recover_interrupted_indexing(cleanup_callback=cleanup)
-        assert result.total_recovered == 1
-        assert called_with == ["doc_test00000001"]
 
 
 # ============================================================================

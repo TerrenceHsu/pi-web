@@ -365,6 +365,39 @@ class ChunkStore:
                 f"delete_document_chunks failed: {type(exc).__name__}"
             ) from None
 
+    async def delete_document_chunks_in_transaction(
+        self,
+        db: aiosqlite.Connection,
+        document_id: str,
+    ) -> None:
+        """Delete chunks + FTS for ``document_id`` WITHOUT acquiring
+        ``_write_lock`` or starting a new transaction.
+
+        P2-R3-C-D Bridge Amendment (per directive §18): for use by
+        ``IndexingStore.recover_interrupted_indexing`` when it already
+        holds ``_write_lock`` + ``BEGIN IMMEDIATE``. asyncio.Lock is
+        non-reentrant; calling ``delete_document_chunks`` (which
+        re-acquires the lock) would deadlock.
+
+        Caller MUST hold ``_write_lock`` and be inside a ``BEGIN
+        IMMEDIATE`` transaction. COMMIT / ROLLBACK is owned by the
+        caller.
+
+        ChunkStore is the **single persistence owner** — this method
+        keeps all chunk / FTS SQL inside ``chunk_store.py`` rather than
+        leaking into the Worker or IndexingStore.
+        """
+        if not is_valid_document_id(document_id):
+            raise ChunkValidationError(f"invalid document_id: {document_id!r}")
+        await db.execute(
+            "DELETE FROM knowledge_chunks_fts WHERE document_id = ?",
+            (document_id,),
+        )
+        await db.execute(
+            "DELETE FROM knowledge_chunks WHERE document_id = ?",
+            (document_id,),
+        )
+
     # ------------------------------------------------------------------
     # FTS rebuild
     # ------------------------------------------------------------------

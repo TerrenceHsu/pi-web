@@ -293,7 +293,7 @@ class IndexingStore:
     async def recover_interrupted_indexing(
         self,
         *,
-        cleanup_callback=None,
+        chunk_store=None,
     ) -> RecoveryResult:
         """Convert stale ``chunking`` / ``indexing`` Documents to ``failed``.
 
@@ -307,12 +307,18 @@ class IndexingStore:
 
         ``ready`` / ``failed`` / ``needs_ocr`` / terminal states — UNCHANGED.
 
-        Optional ``cleanup_callback(document_id)``: invoked for each
-        recovered Document BEFORE the state transition commits. The
-        callback should clean up any partial chunk / FTS rows. If the
-        callback raises, the recovery transaction ROLLBACKs and the
-        Document remains in its interrupted state (so a future recovery
-        pass can retry). The callback MUST be idempotent.
+        P2-R3-C-D Bridge Amendment (Option B): the ``cleanup_callback``
+        parameter is REMOVED. Cleanup of partial chunk / FTS rows is
+        now owned by ChunkStore via its ``delete_document_chunks_in_transaction``
+        method, which this recovery primitive calls inside its own
+        transaction (no lock re-acquisition; no deadlock). The Worker
+        no longer writes persistence SQL.
+
+        ``chunk_store``: optional ChunkStore. If provided, recovery
+        will call its internal ``delete_document_chunks_in_transaction``
+        for each recovered Document BEFORE the state transition commits.
+        If None, no chunk/FTS cleanup happens (caller must clean up
+        separately — used by unit tests that don't seed chunks).
 
         Idempotent: a second call recovers 0 rows.
 
@@ -324,18 +330,12 @@ class IndexingStore:
         async with self._store._write_lock:
             try:
                 await db.execute("BEGIN IMMEDIATE")
-                # Snapshot the candidate IDs inside the txn so cleanup
-                # callbacks run with a consistent view.
                 candidates = await self._select_interrupted_ids(db)
                 for doc_id, current_status in candidates:
-                    if cleanup_callback is not None:
-                        # Callback may be sync or async; the runtime
-                        # dispatches via awaitable-or-result. We support
-                        # async callbacks because chunk/FTS cleanup goes
-                        # through ChunkStore which is async.
-                        result = cleanup_callback(doc_id)
-                        if hasattr(result, "__await__"):
-                            await result
+                    if chunk_store is not None:
+                        await chunk_store.delete_document_chunks_in_transaction(
+                            db, doc_id
+                        )
                     cur = await db.execute(
                         "UPDATE knowledge_documents "
                         "SET status = 'failed', "

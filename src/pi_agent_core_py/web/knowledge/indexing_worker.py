@@ -170,27 +170,14 @@ class IndexingWorkerManager:
         self._last_event_at = _now_ms()
 
         # 1. Startup recovery (per directive §17 — BEFORE first scan).
-        # The recovery primitive invokes the cleanup callback INSIDE its
-        # own BEGIN IMMEDIATE transaction while holding the parent
-        # KnowledgeStore._write_lock. asyncio.Lock is non-reentrant, so
-        # we cannot call ChunkStore.delete_document_chunks here (it
-        # would re-acquire the same lock and deadlock). Instead we
-        # execute the chunk+FTS cleanup SQL directly on the same
-        # connection — the recovery primitive owns the COMMIT/ROLLBACK.
-        async def _cleanup(doc_id: str) -> None:
-            db = self._knowledge_store._require_db()
-            await db.execute(
-                "DELETE FROM knowledge_chunks_fts WHERE document_id = ?",
-                (doc_id,),
-            )
-            await db.execute(
-                "DELETE FROM knowledge_chunks WHERE document_id = ?",
-                (doc_id,),
-            )
-
+        # P2-R3-C-D Bridge Amendment (Option B): recovery cleanup is
+        # owned by ChunkStore.delete_document_chunks_in_transaction
+        # (called by IndexingStore inside its own transaction). The
+        # Worker does NOT write persistence SQL — it passes the
+        # ChunkStore reference and IndexingStore handles the rest.
         try:
             await self._indexing_store.recover_interrupted_indexing(
-                cleanup_callback=_cleanup
+                chunk_store=self._chunk_store
             )
         except Exception as exc:
             self._state = "failed"
