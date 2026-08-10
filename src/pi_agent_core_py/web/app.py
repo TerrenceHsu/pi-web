@@ -1493,81 +1493,96 @@ def create_app(
         """所有乐观校验——成功返回 _PromptValidated，失败抛 PromptValidationError。
 
         异常 → HTTP 层 catch 转 JSONResponse（4xx）；async 层 catch 后不创建 request。
+
+        P2-R4-B2 TOCTOU fix: ``_ensure_idle()`` + ``state.running = True``
+        happen back-to-back with NO await between them. This closes the
+        race window where a second prompt could pass ``_ensure_idle()``
+        while the first hadn't yet set ``state.running``. Any exception
+        in the remaining validation rolls back the reservation.
         """
         _ensure_idle()  # HTTPException(409)——HTTP 层 FastAPI 自动处理；async 层 catch
 
-        text = (payload or {}).get("text") or ""
-        if not text.strip():
-            raise PromptValidationError(400, "text is required")
+        # Atomically reserve the single-active-request slot BEFORE any
+        # await. No suspension point between check and reserve.
+        state.running = True
 
-        skill_sel_raw = (payload or {}).get("skill_selection") or {}
-        skill_names_raw = (payload or {}).get("skill_names")
-        if skill_names_raw is not None:
-            if not isinstance(skill_names_raw, list):
-                raise PromptValidationError(
-                    400, "skill_names must be a list of strings"
-                )
-            bad = [
-                n
-                for n in skill_names_raw
-                if not isinstance(n, str) or not n
-            ]
-            if bad:
-                raise PromptValidationError(
-                    400,
-                    f"skill_names entries must be non-empty strings (got {bad[0]!r})",
-                )
+        try:
+            text = (payload or {}).get("text") or ""
+            if not text.strip():
+                raise PromptValidationError(400, "text is required")
 
-        merged_names, _sel_names, _top_names = _merge_skill_names(
-            skill_sel_raw, skill_names_raw
-        )
-        skill_selection = _build_skill_selection(skill_sel_raw, merged_names)
+            skill_sel_raw = (payload or {}).get("skill_selection") or {}
+            skill_names_raw = (payload or {}).get("skill_names")
+            if skill_names_raw is not None:
+                if not isinstance(skill_names_raw, list):
+                    raise PromptValidationError(
+                        400, "skill_names must be a list of strings"
+                    )
+                bad = [
+                    n
+                    for n in skill_names_raw
+                    if not isinstance(n, str) or not n
+                ]
+                if bad:
+                    raise PromptValidationError(
+                        400,
+                        f"skill_names entries must be non-empty strings (got {bad[0]!r})",
+                    )
 
-        if merged_names and harness.skill_registry is not None:
-            missing = [
-                n for n in merged_names if not harness.skill_registry.has(n)
-            ]
-            if missing:
-                raise PromptValidationError(
-                    400,
-                    f"Unknown skill: {missing[0]!r}",
-                    missing_skill_names=missing,
-                )
-
-        session_id = (payload or {}).get("session_id") or state.current_session_id
-        store = state.session_store
-
-        original_messages: list[Any] | None = None
-        if store is not None and session_id is not None:
-            from ..session_sqlite import SessionNotFoundError
-
-            try:
-                history = await store.list_messages(session_id)
-            except SessionNotFoundError:
-                raise PromptValidationError(
-                    404, f"session {session_id!r} not found"
-                ) from None
-            original_messages = list(harness.agent.state.messages)
-            harness.agent.state.messages = list(history)
-
-        file_ids_raw = (payload or {}).get("file_ids") or []
-        if not isinstance(file_ids_raw, list):
-            raise PromptValidationError(
-                400, "file_ids must be a list of strings"
+            merged_names, _sel_names, _top_names = _merge_skill_names(
+                skill_sel_raw, skill_names_raw
             )
-        attached_blocks, attached_summary = await _resolve_file_blocks(
-            session_id, list(file_ids_raw)
-        )
+            skill_selection = _build_skill_selection(skill_sel_raw, merged_names)
 
-        return _PromptValidated(
-            text=text,
-            skill_selection=skill_selection,
-            session_id=session_id,
-            store=store,
-            original_messages=original_messages,
+            if merged_names and harness.skill_registry is not None:
+                missing = [
+                    n for n in merged_names if not harness.skill_registry.has(n)
+                ]
+                if missing:
+                    raise PromptValidationError(
+                        400,
+                        f"Unknown skill: {missing[0]!r}",
+                        missing_skill_names=missing,
+                    )
+
+            session_id = (payload or {}).get("session_id") or state.current_session_id
+            store = state.session_store
+
+            original_messages: list[Any] | None = None
+            if store is not None and session_id is not None:
+                from ..session_sqlite import SessionNotFoundError
+
+                try:
+                    history = await store.list_messages(session_id)
+                except SessionNotFoundError:
+                    raise PromptValidationError(
+                        404, f"session {session_id!r} not found"
+                    ) from None
+                original_messages = list(harness.agent.state.messages)
+                harness.agent.state.messages = list(history)
+
+            file_ids_raw = (payload or {}).get("file_ids") or []
+            if not isinstance(file_ids_raw, list):
+                raise PromptValidationError(
+                    400, "file_ids must be a list of strings"
+                )
+            attached_blocks, attached_summary = await _resolve_file_blocks(
+                session_id, list(file_ids_raw)
+            )
+
+            return _PromptValidated(
+                text=text,
+                skill_selection=skill_selection,
+                session_id=session_id,
+                store=store,
+                original_messages=original_messages,
             attached_blocks=attached_blocks,
             attached_summary=attached_summary,
-        )
+            )
+        except Exception:
+            # Rollback the reservation if any validation step fails.
+            state.running = False
+            raise
 
     async def _run_prompt_core(
         validated: _PromptValidated,
