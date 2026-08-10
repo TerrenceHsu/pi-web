@@ -476,9 +476,10 @@ class TestRestartPersistence:
 class TestNoToolRegistration:
     """R1 must NOT register any AgentTool — search_knowledge is R3."""
 
-    def test_no_search_knowledge_tool_in_harness(self, tmp_path):
+    def test_search_knowledge_tool_registered_in_harness(self, tmp_path):
+        """P2-R4-B2: search_knowledge IS registered when Knowledge enabled."""
         app = _build_app(tmp_path)
         with TestClient(app) as _client:
             harness = app.state.web.harness
             tool_names = harness.agent.tools.names()
-        assert "search_knowledge" not in tool_names
+        assert "search_knowledge" in tool_names

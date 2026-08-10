@@ -593,6 +593,46 @@ def create_app(
                         f"indexing worker manager start failed: "
                         f"{type(e).__name__}"
                     ) from e
+
+            # ============================================================
+            # P2-R4-B2: search_knowledge Agent Tool — Session-scoped
+            # FTS5 retrieval via SearchKnowledgeService. Registered only
+            # when Knowledge subsystem + [rag] extra are available.
+            # ============================================================
+            if ingestion_manager is not None:
+                try:
+                    from .knowledge.chunk_store import ChunkStore as _CS
+                    from .knowledge.evidence import EvidenceRegistry as _ER
+                    from .knowledge.search_service import (
+                        SearchKnowledgeService as _SKS,
+                    )
+                    from .knowledge.search_tool import (
+                        create_search_knowledge_tool,
+                    )
+
+                    _chunk_store_for_search = _CS(k_store)
+                    _search_service = _SKS(
+                        knowledge_store=k_store,
+                        chunk_store=_chunk_store_for_search,
+                    )
+
+                    def _evidence_registry_getter():
+                        if state._evidence_registry is None:
+                            state._evidence_registry = _ER()
+                        return state._evidence_registry
+
+                    _search_tool = create_search_knowledge_tool(
+                        search_service=_search_service,
+                        session_id_getter=_session_id_getter,
+                        evidence_registry_getter=_evidence_registry_getter,
+                    )
+                    if not harness.agent.tools.has("search_knowledge"):
+                        harness.agent.tools.register(_search_tool)
+                except Exception as e:
+                    raise RuntimeError(
+                        f"search_knowledge tool init failed: "
+                        f"{type(e).__name__}"
+                    ) from e
         else:
             state.knowledge_service = None
             state.knowledge_store = None

@@ -228,6 +228,10 @@ class WebAppState(BaseModel):
     # Ingestion Worker Manager; started after Ingestion; stopped in lifespan
     # finally AFTER Ingestion Worker stop, BEFORE knowledge_store.close().
     indexing_worker_manager: Any = None
+    # P2-R4-B2: Turn-scoped Evidence Registry for search_knowledge tool.
+    # Lazily created by the tool's evidence_registry_getter closure.
+    # Reset to None at the start of each prompt request (turn boundary).
+    _evidence_registry: Any = None
 
 
 # ============================================================================

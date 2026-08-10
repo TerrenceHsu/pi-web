@@ -244,7 +244,8 @@ P1-E M1 之前的配置后端已 frozen，不再扩展。
 | **R3 (整体) Heading-aware Chunk + FTS5** | ✅ COMPLETE / FINAL FROZEN | R2 | R3-A→R3-E 全链 FROZEN；real PDF upload→ready pipeline verified end-to-end | R4 ready to start |
 | **R4-A Retrieval + Citation Contract** | ✅ COMPLETE / FROZEN @ `<this commit>` | R3 | docs-only contract gate；真实代码审计 + 冻结 Tool/ACL/Evidence/Citation 合同；12 threats；29/29 exit gate | [P2_R4_A_CONTRACT_SECURITY_GATE.md](docs/validation/p2-r4/P2_R4_A_CONTRACT_SECURITY_GATE.md) + [contract doc](docs/design/p2-r4-search-knowledge-citation-contract.md) |
 | **R4-B1 Search Service + Evidence** | ✅ COMPLETE / FROZEN @ `<this commit>` | R4-A | search_models.py + evidence.py + search_service.py：KnowledgeEvidence DTO / EvidenceRegistry turn-scoped E1/E2 / SearchKnowledgeService session ACL→ChunkStore | 29/29 tests / full Backend 3386/0 failed / R3 frozen 未触动 |
-| **R4-B2 search_knowledge Tool + Agent wiring** | ⛔ APPROVED TO START（独立授权另需） | R4-B1 | Tool adapter + registration + session getter wiring + Agent integration tests | 待 R4-B2 启动 |
+| **R4-B2 search_knowledge Tool + Agent wiring** | ✅ COMPLETE / FROZEN @ `<this commit>` | R4-B1 | search_tool.py + app.py lifespan + state.py：SearchKnowledgeTool schema=query+limit；session_id_getter + evidence_registry_getter closure；注册 when Knowledge enabled | 12/12 tool tests / full Backend 3398/0 failed / R3 frozen 未触动 |
+| **R4-B3 Validation Freeze** | ⛔ APPROVED TO START（独立授权另需） | R4-B2 | regression + validation docs + STATUS/TODO/ROADMAP | 待 R4-B3 启动 |
 | **R4-C Citation + Agent Integration** | ⛔ BLOCKED BY R4-B | R4-B | CitationParser/Validator/Renderer + system prompt + Assistant finalize | 待 R4-C 启动 |
 | **R4-D Final RAG Integration Freeze** | ⛔ BLOCKED BY R4-C | R4-C | full E2E RAG validation + ACL/deletion/leakage/reliability tests + final freeze | 待 R4-D 启动 |
 | **R3-C3 Validation Freeze** | ⛔ BLOCKED BY R3-C2 | R3-C2 | regression + validation docs + STATUS/TODO/ROADMAP | 待 R3-C2 完成 |
