@@ -1464,6 +1464,7 @@ class AgentHarness:
                 skills=default_skills,
                 mcp_tools=default_mcp_tools,
                 file_tools_enabled=True,
+                knowledge_enabled=self.agent.tools.has("search_knowledge"),
             )
             self.context.metadata["system_prompt_source"] = "default"
             self.context.metadata["enabled_skill_names"] = [s.name for s in default_skills]

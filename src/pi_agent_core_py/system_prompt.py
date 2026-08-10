@@ -63,6 +63,19 @@ _FILE_TOOLS_HINT = """
 - web_search：搜索网页（如已注册）"""
 
 
+_KNOWLEDGE_HINT = """
+
+知识库工具（当知识库已启用时）：
+- search_knowledge：搜索当前会话有权限访问的知识库
+    返回结构化的 Evidence（[E1] / [E2] / ...），含来源文件名、页码、标题路径、内容片段
+
+引用知识库内容时：
+- 使用工具返回的 Evidence ID，例如 [cite:E1]
+- 不要编造文件名、页码或 Evidence ID
+- 引用多个来源时可以叠加：[cite:E1][cite:E2]
+- 服务器会自动将 [cite:E1] 转换为 [1] 并在回答末尾附上来源列表"""
+
+
 # ============================================================================
 # 渲染辅助
 # ============================================================================
@@ -133,6 +146,7 @@ def build_default_system_prompt(
     skills: list[Skill] | None = None,
     mcp_tools: list[Any] | None = None,
     file_tools_enabled: bool = True,
+    knowledge_enabled: bool = False,
 ) -> str:
     """构造默认对话向 system prompt。
 
@@ -143,6 +157,8 @@ def build_default_system_prompt(
         file_tools_enabled: 是否在 prompt 中提及 list_files / view_file / web_search
                             （P0-3 完成前为 True 也无副作用——LLM 收到不存在的
                             工具调用会失败，prompt 仅作上下文说明）
+        knowledge_enabled: 是否在 prompt 中提及 search_knowledge + [cite:E1] 引用规则
+                           （P2-R4-C2：当 search_knowledge 工具已注册时设为 True）
 
     返回：拼好的 system_prompt 字符串（非空）
 
@@ -153,6 +169,9 @@ def build_default_system_prompt(
     if file_tools_enabled:
         sections.append(_FILE_TOOLS_HINT)
 
+    if knowledge_enabled:
+        sections.append(_KNOWLEDGE_HINT)
+
     if skills:
         sections.append(_format_skills_section(skills))
 
@@ -162,4 +181,4 @@ def build_default_system_prompt(
     return "\n\n".join(sections)
 
 
-__all__ = ["build_default_system_prompt"]
+__all__ = ["build_default_system_prompt", "_KNOWLEDGE_HINT"]

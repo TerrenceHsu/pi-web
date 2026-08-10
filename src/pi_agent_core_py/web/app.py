@@ -239,6 +239,55 @@ class PromptRunOutcome:
 # ============================================================================
 
 
+def _apply_citation_transform(
+    execution: PromptExecutionResult,
+    state: WebAppState,
+) -> None:
+    """P2-R4-C2: Post-execution citation transform.
+
+    After the LLM generates text containing ``[cite:E1]`` tokens,
+    validate them against the turn-scoped EvidenceRegistry and
+    render numbered citations + source footer before persistence.
+
+    Operates in-place on ``execution.messages`` (mutates the last
+    qualifying AssistantMessage's text content). No-op if registry
+    is empty or no citations found.
+    """
+    registry = getattr(state, "_evidence_registry", None)
+    if registry is None or len(registry) == 0:
+        return
+
+    from ..messages import AssistantMessage, TextContent
+    from .knowledge.citations import (
+        process_citations,
+        render_source_footer,
+    )
+
+    for msg in reversed(execution.messages):
+        if not isinstance(msg, AssistantMessage):
+            continue
+        if getattr(msg, "error_message", None):
+            continue
+        for i in range(len(msg.content) - 1, -1, -1):
+            block = msg.content[i]
+            if not isinstance(block, TextContent):
+                continue
+            if "[cite:" not in block.text:
+                continue
+            result = process_citations(block.text, registry)
+            if not result.citations:
+                msg.content[i] = TextContent(text=result.rendered_content)
+                continue
+            footer = render_source_footer(result.citations)
+            if footer:
+                final_text = result.rendered_content.rstrip() + "\n\n" + footer
+            else:
+                final_text = result.rendered_content
+            msg.content[i] = TextContent(text=final_text)
+            return
+        break
+
+
 def create_app(
     harness: AgentHarness,
     *,
@@ -1599,11 +1648,17 @@ def create_app(
         # request boundary. The registry is lazily created by
         # search_knowledge tool's evidence_registry_getter on first use
         # within this request. Multiple search_knowledge calls in the
-        # same request share the same registry (chunk_id dedupe).
+        # same request share the registry (chunk_id dedupe).
         # Next request starts fresh from E1.
         state._evidence_registry = None
 
         execution = await _execute_prompt(validated)
+
+        # P2-R4-C2: Citation transform — after LLM generates text with
+        # [cite:E1] tokens, validate against EvidenceRegistry and render
+        # numbered citations + source footer before persistence.
+        _apply_citation_transform(execution, state)
+
         return await _persist_normal_prompt_result(validated, execution)
 
     def _extract_terminal_assistant(suffix: list[Any]) -> Any | None:
