@@ -249,7 +249,9 @@ P1-E M1 之前的配置后端已 frozen，不再扩展。
 | **R4-B (整体) Session-scoped search_knowledge** | ✅ COMPLETE / FUNCTIONALLY FROZEN @ `0353be8` | R4-A | SearchService + EvidenceRegistry + Tool + lifecycle fix + TOCTOU fix；R4-C ready to start | 04c386b + b8dd49a + 1c1d4d4 + 7f35696 + 0353be8 |
 | **R4-C1 Citation 模块** | ✅ COMPLETE / FROZEN @ `<this commit>` | R4-B | citations.py: CitationParser/Processor/Renderer；strict `[cite:E1]` regex；first-use numbering；invalid evidence remove+warning；source footer `filename · p.N` | 32/32 unit tests / full Backend 3434/0 failed / R4-B frozen 未触动 |
 | **R4-C2 system prompt + Assistant finalize** | ✅ COMPLETE / FROZEN @ `<this commit>` | R4-C1 | system_prompt.py _KNOWLEDGE_HINT + knowledge_enabled；harness.py build_default_system_prompt(knowledge_enabled=)；app.py _apply_citation_transform | 9/9 integration tests / full Backend 3443/0 failed / R4-C1 frozen 未触动 |
-| **R4-C3 Validation Freeze** | ⛔ APPROVED TO START（独立授权另需） | R4-C2 | regression + validation docs + STATUS/TODO/ROADMAP | 待 R4-C3 启动 |
+| **R4-C3 Validation Freeze** | ✅ COMPLETE / FROZEN @ `<this commit>` | R4-C2 | docs-only；validation doc（23 节）；27/27 exit gate；[cite:E1]→[1]+Sources footer pipeline verified | [P2_R4_C_CITATION_AGENT_INTEGRATION.md](docs/validation/p2-r4/P2_R4_C_CITATION_AGENT_INTEGRATION.md) 41 targeted tests / 3443/0 failed ×2 |
+| **R4-C (整体) Citation + Agent Integration** | ✅ COMPLETE / FROZEN | R4-B | CitationParser/Processor/Renderer + system prompt + Assistant finalize；R4-D ready to start | f0c407b + 6006dca + this commit |
+| **R4-D Final RAG Integration Freeze** | ⛔ APPROVED TO START（独立授权另需） | R4-C | full E2E RAG validation (upload→ready→search→answer→citation) + final R4 freeze | 待 R4-D 启动 |
 | **R4-C Citation + Agent Integration** | ⛔ BLOCKED BY R4-B | R4-B | CitationParser/Validator/Renderer + system prompt + Assistant finalize | 待 R4-C 启动 |
 | **R4-D Final RAG Integration Freeze** | ⛔ BLOCKED BY R4-C | R4-C | full E2E RAG validation + ACL/deletion/leakage/reliability tests + final freeze | 待 R4-D 启动 |
 | **R3-C3 Validation Freeze** | ⛔ BLOCKED BY R3-C2 | R3-C2 | regression + validation docs + STATUS/TODO/ROADMAP | 待 R3-C2 完成 |
