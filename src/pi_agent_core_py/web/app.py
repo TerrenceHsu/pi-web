@@ -1782,12 +1782,20 @@ def create_app(
 
         # 2. 临时替换 harness state，执行 model
         harness.agent.state.messages = list(regeneration_history)
+
+        # P2-R4-B2 + R4-C2: Reset turn-scoped Evidence Registry + apply
+        # citation transform for regenerate path (mirrors _run_prompt_core).
+        # Without this, regenerate would bypass the citation pipeline.
+        state._evidence_registry = None
+
         try:
             execution = await _execute_prompt(
                 validated,
                 override_initial_messages=regeneration_history,
                 suppress_user_append=True,
             )
+            # P2-R4-C2: Citation transform — same as _run_prompt_core.
+            _apply_citation_transform(execution, state)
         except PromptRuntimeError as e:
             # 模型/Agent 执行失败 → revision.error
             await ext_store.mark_revision_error(
