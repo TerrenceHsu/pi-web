@@ -1580,6 +1580,14 @@ def create_app(
         旧调用方无需改动——此函数返回 PromptRunOutcome（旧 PromptExecutionResult
         的重命名），字段完全兼容。
         """
+        # P2-R4-B2: Reset turn-scoped Evidence Registry at each prompt
+        # request boundary. The registry is lazily created by
+        # search_knowledge tool's evidence_registry_getter on first use
+        # within this request. Multiple search_knowledge calls in the
+        # same request share the same registry (chunk_id dedupe).
+        # Next request starts fresh from E1.
+        state._evidence_registry = None
+
         execution = await _execute_prompt(validated)
         return await _persist_normal_prompt_result(validated, execution)
 
