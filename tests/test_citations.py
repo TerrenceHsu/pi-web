@@ -256,6 +256,80 @@ class TestRenderSourceFooter:
         assert "/home/" not in footer
         assert "documents/" not in footer
 
+    def test_markdown_link_injection_prevented(self):
+        """Filename with [text](url) must NOT form a Markdown link."""
+        entries = (
+            CitationEntry(
+                number=1, evidence_id="E1",
+                source_filename="[click-me](https://evil.com).pdf",
+                page_start=1, page_end=1,
+            ),
+        )
+        footer = render_source_footer(entries)
+        # Escaped brackets/parens prevent Markdown link parsing
+        assert "\\[click-me\\]" in footer
+        assert "\\(https://evil.com\\)" in footer
+
+    def test_markdown_emphasis_injection_prevented(self):
+        """Filename with **text** must NOT form bold."""
+        entries = (
+            CitationEntry(
+                number=1, evidence_id="E1",
+                source_filename="**fake-heading**.pdf",
+                page_start=1, page_end=1,
+            ),
+        )
+        footer = render_source_footer(entries)
+        assert "\\*\\*fake-heading\\*\\*" in footer
+
+    def test_markdown_image_injection_prevented(self):
+        """Filename with ![alt](url) must NOT form an image."""
+        entries = (
+            CitationEntry(
+                number=1, evidence_id="E1",
+                source_filename="![img](https://evil.com/x.png).pdf",
+                page_start=1, page_end=1,
+            ),
+        )
+        footer = render_source_footer(entries)
+        assert "\\!" in footer
+        assert "\\[img\\]" in footer
+
+    def test_markdown_code_injection_prevented(self):
+        """Filename with backticks must NOT form code span."""
+        entries = (
+            CitationEntry(
+                number=1, evidence_id="E1",
+                source_filename="`code`.pdf",
+                page_start=1, page_end=1,
+            ),
+        )
+        footer = render_source_footer(entries)
+        assert "\\`code\\`" in footer
+
+    def test_normal_filename_not_escaped(self):
+        """Common filenames (underscores, hyphens, dots) stay readable."""
+        entries = (
+            CitationEntry(
+                number=1, evidence_id="E1",
+                source_filename="my_report_v2.pdf",
+                page_start=1, page_end=1,
+            ),
+        )
+        footer = render_source_footer(entries)
+        assert "my_report_v2.pdf" in footer
+        assert "\\" not in footer  # no escaping needed
+
+    def test_inline_renderer_also_escapes(self):
+        """render_citation_inline must also escape Markdown."""
+        entry = CitationEntry(
+            number=1, evidence_id="E1",
+            source_filename="[link](url).pdf",
+            page_start=1, page_end=1,
+        )
+        inline = render_citation_inline(entry)
+        assert "\\[link\\]" in inline
+
 
 class TestRenderCitationInline:
     def test_single_page(self):

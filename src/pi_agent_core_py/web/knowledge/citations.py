@@ -19,6 +19,31 @@ from dataclasses import dataclass
 from .evidence import EvidenceRegistry
 
 # ============================================================================
+# Markdown escape — prevents source_name injection
+# ============================================================================
+
+#: Characters that can form Markdown structure when embedded in text.
+#: Escaped with backslash per CommonMark §2.4. Prevents filenames like
+#: ``[click](url).pdf`` or ``**bold**.pdf`` from injecting links,
+#: emphasis, code spans, images, or autolinks into citation footers.
+_MD_ESCAPE_RE: re.Pattern[str] = re.compile(r"([\\`*\[\]()!<|>])")
+
+
+def _escape_markdown_text(s: str) -> str:
+    """Escape Markdown-special characters in plain text.
+
+    Applied to ``source_filename`` before embedding in citation footer
+    so that user-supplied filenames cannot inject Markdown structure
+    (links, images, emphasis, code spans, autolinks, table separators).
+
+    Does NOT escape ``_``, ``#``, ``+``, ``-``, ``.``, ``{``, ``}``,
+    ``~``, ``"`` — these are either safe in mid-line text (not at line
+    start in the footer context) or form only benign emphasis (not
+    security-relevant).
+    """
+    return _MD_ESCAPE_RE.sub(r"\\\1", s)
+
+# ============================================================================
 # Constants
 # ============================================================================
 
@@ -165,7 +190,8 @@ def render_source_footer(citations: tuple[CitationEntry, ...]) -> str:
             pages = f"p.{c.page_start}"
         else:
             pages = f"pp.{c.page_start}–{c.page_end}"
-        lines.append(f"[{c.number}] {c.source_filename} · {pages}")
+        safe_name = _escape_markdown_text(c.source_filename)
+        lines.append(f"[{c.number}] {safe_name} · {pages}")
     return "\n".join(lines)
 
 
@@ -178,4 +204,5 @@ def render_citation_inline(entry: CitationEntry) -> str:
         pages = f"p.{entry.page_start}"
     else:
         pages = f"pp.{entry.page_start}–{entry.page_end}"
-    return f"{entry.source_filename} · {pages}"
+    safe_name = _escape_markdown_text(entry.source_filename)
+    return f"{safe_name} · {pages}"

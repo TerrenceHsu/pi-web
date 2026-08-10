@@ -223,20 +223,25 @@ Tested: called transform twice on same execution → `Sources:` count = 1. ✅
 - NUL / CR / LF / control chars (< 0x20) + DEL (0x7F)
 - Leading dots/spaces
 
-Does NOT strip Markdown-special chars: `[`, `]`, `<`, `>`, `*`, `_`, `#`, `` ` ``, `|`.
+Does NOT strip Markdown-special chars: `[`, `]`, `<`, `>`, `*`, `!`, `` ` ``, `|`, `\`.
 
-Citation renderer (`render_source_footer`) concatenates source_name
-without Markdown escaping: `f"[{c.number}] {c.source_filename} · ..."`.
+Citation renderer now applies `_escape_markdown_text()` to
+``source_filename`` before embedding in footer/inline output.
+Escapes (per CommonMark §2.4): `\`, `` ` ``, `*`, `[`, `]`, `(`, `)`,
+`!`, `<`, `>`, `|` — prevents link/image/emphasis/code-span/autolink
+injection.
 
-**Risk**: A filename like `evil[link](url).pdf` could inject Markdown.
-**Defense**: Frontend MUST render Markdown with raw HTML disabled
-(already enforced per R2-B contract: "Canonical Markdown is evidence
-artifact, NOT trusted HTML — UI rendering must disable raw HTML").
-The existing Markdown renderer already sanitizes raw HTML.
+Tested injection vectors (all neutralized):
+- `[click-me](https://evil.com).pdf` → `\[click-me\]\(https://evil.com\).pdf`
+- `**fake-heading**.pdf` → `\*\*fake-heading\*\*.pdf`
+- `` `code`.pdf `` → `` \`code\`.pdf ``
+- `![img](url).pdf` → `\!\[img\]\(url\).pdf`
+- `normal_report_v2.pdf` → unchanged (underscores/dots/hyphens safe)
 
-**Status**: ⚠ Known limitation. CR/LF injection impossible (sanitized).
-Markdown-special chars preserved but neutralized by frontend's existing
-raw-HTML-disabled renderer. No code change needed for MVP.
+Applied to both `render_source_footer()` and `render_citation_inline()`.
+
+**Status**: ✅ Fixed. CR/LF impossible (upstream sanitize). Markdown
+structural injection impossible (downstream escape). 6 dedicated tests.
 
 ### Gate 5 — Regenerate / turn isolation
 
@@ -298,7 +303,7 @@ Turn isolation proof:
 | 31 | Gate 4: source_name Markdown safety | ⚠ documented §22 |
 | 32 | Gate 5: regenerate turn isolation | ✅ fixed §22 |
 
-**31/32 PASS + 1 ⚠ documented** ✅
+**32/32 PASS** ✅
 
 ## 23. Final verdict
 
