@@ -176,6 +176,51 @@ class ErrorResponse(BaseModel):
 
 
 # ============================================================================
+# P2-R5-B2 DTOs (Library-scoped Search REST)
+# ============================================================================
+
+#: Default / max result limits for the Web Knowledge Manager search. Per
+#: P2-R5-A §5.2 — REST default 10, cap = ``ChunkStore.MAX_FTS_LIMIT`` (50).
+#: These differ from the Agent Tool (default 5 / max 10) because the Web
+#: UI surfaces more hits than the LLM evidence budget.
+DEFAULT_SEARCH_LIMIT: int = 10
+
+
+class LibrarySearchRequest(BaseModel):
+    """POST /api/knowledge/libraries/{library_id}/search body."""
+
+    query: str = Field(..., min_length=1)
+    limit: int = Field(default=DEFAULT_SEARCH_LIMIT, ge=1, le=50)
+
+
+class LibrarySearchResultItem(BaseModel):
+    """Single search hit in the Web response.
+
+    ``source_name`` is enriched from ``Document.source_name`` (never from
+    filesystem path). ``rank`` is the FTS5 bm25 score (lower = better;
+    same convention as ``ChunkSearchHit.rank``). No ``evidence_id`` —
+    Evidence IDs are R4 Agent-only (per R5-A §39).
+    """
+
+    document_id: str
+    source_name: str
+    chunk_id: str
+    heading_path: list[str]
+    page_start: int
+    page_end: int
+    content: str
+    rank: float
+
+
+class LibrarySearchResponse(BaseModel):
+    """``POST .../search`` response."""
+
+    library_id: str
+    query: str
+    results: list[LibrarySearchResultItem]
+
+
+# ============================================================================
 # P2-R2-C3 DTOs (Upload / Status / Retry / Markdown)
 # ============================================================================
 
@@ -294,6 +339,27 @@ async def get_ingestion_store(request: Request) -> IngestionStore:
         )
     # IngestionStore is a thin wrapper over KnowledgeStore — construct on demand.
     return IngestionStore(store)
+
+
+async def get_chunk_store(request: Request):
+    """Read ChunkStore; raise 503 if subsystem disabled.
+
+    Per P2-R5-A §10 — ChunkStore is sole owner of FTS SQL + BM25 ranking.
+    Constructed lazily on each request (same pattern as ``get_ingestion_store``);
+    cheap (only holds a back-ref to KnowledgeStore).
+    """
+    web_state = getattr(request.app.state, "web", None)
+    store = getattr(web_state, "knowledge_store", None) if web_state else None
+    if store is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "knowledge_service_unavailable",
+                "message": "Knowledge subsystem is not initialized.",
+            },
+        )
+    from .chunk_store import ChunkStore
+    return ChunkStore(store)
 
 
 async def get_worker_manager(request: Request) -> IngestionWorkerManager:
@@ -1065,6 +1131,99 @@ def register_knowledge_endpoints(router: APIRouter) -> None:
             },
         )
 
+    # ========================================================================
+    # P2-R5-B2: Library-scoped Knowledge Search REST
+    # ========================================================================
+
+    @router.post(
+        "/libraries/{library_id}/search",
+        response_model=LibrarySearchResponse,
+    )
+    async def search_library(
+        library_id: Annotated[str, Path()],
+        body: LibrarySearchRequest,
+        service: Annotated[KnowledgeService, Depends(get_knowledge_service)],
+        chunk_store: Annotated[Any, Depends(get_chunk_store)],
+        store: Annotated[KnowledgeStore, Depends(get_knowledge_store)],
+    ) -> LibrarySearchResponse:
+        """Search one Library's indexed chunks via BM25.
+
+        Per P2-R5-A §5 (frozen contract):
+
+        - Scope: explicit ``library_id`` path param; **never** search-all.
+        - Ready-only: ``ChunkStore.search_chunks_fts`` filters
+          ``documents.status='ready'`` by construction.
+        - Safe FTS: ``ChunkStore.compile_literal_fts_query`` is sole owner
+          of FTS compilation; this handler passes raw user ``query`` to
+          ChunkStore — no handler-level grammar / mode / column added.
+        - No session: REST Search is **not** the R4 Agent Tool. Library
+          scope comes from path param; ``SearchKnowledgeService`` (R4
+          session ACL) is **not** reused — no fake Session constructed.
+        - Response excludes absolute paths, SQL, internal FTS query,
+          Session ID, and Evidence ID (Evidence IDs are Agent-only).
+
+        Errors: 400 validation_error / 404 library_not_found / 409
+        library_not_ready / 500 internal_knowledge_error / 503
+        knowledge_service_unavailable.
+        """
+        # 1. Validate library_id format
+        try:
+            validate_library_id_or_raise(library_id)
+        except ValueError:
+            raise _safe_error(400, "validation_error", "Invalid library id.") from None
+
+        # 2. Library must exist (404) and be active (409 library_not_ready)
+        try:
+            view = await service.get_library(library_id)
+        except KnowledgeServiceError as exc:
+            raise _translate_service_error(exc) from exc
+        if view.library.status != "active":
+            raise _safe_error(
+                409, "library_not_ready",
+                "Library is not active; search rejected.",
+            ) from None
+
+        # 3. Run search via ChunkStore (sole FTS owner). library_ids is a
+        #    single-element list — NEVER None — so search-all is impossible.
+        from .chunk_store import (
+            ChunkValidationError,
+            FTSQueryError,
+        )
+        try:
+            hits = await chunk_store.search_chunks_fts(
+                body.query,
+                library_ids=[library_id],
+                limit=body.limit,
+            )
+        except FTSQueryError as exc:
+            # Whitespace-only / too-long queries fail safe compilation.
+            raise _safe_error(400, "validation_error", str(exc)) from exc
+        except ChunkValidationError as exc:
+            raise _safe_error(400, "validation_error", str(exc)) from exc
+
+        # 4. Enrich hits with Document.source_name (NOT filesystem path).
+        source_names = await _load_source_names_for_hits(store, hits)
+
+        # 5. Build response DTO (no path / SQL / session / evidence_id)
+        items = [
+            LibrarySearchResultItem(
+                document_id=h.document_id,
+                source_name=source_names.get(h.document_id, ""),
+                chunk_id=h.chunk_id,
+                heading_path=list(h.heading_path),
+                page_start=h.page_start,
+                page_end=h.page_end,
+                content=h.content,
+                rank=h.rank,
+            )
+            for h in hits
+        ]
+        return LibrarySearchResponse(
+            library_id=library_id,
+            query=body.query,
+            results=items,
+        )
+
 
 def register_session_knowledge_endpoints(router: APIRouter) -> None:
     """Session ↔ Library binding endpoints."""
@@ -1114,6 +1273,27 @@ def register_session_knowledge_endpoints(router: APIRouter) -> None:
 # ============================================================================
 
 
+async def _load_source_names_for_hits(store: KnowledgeStore, hits: list) -> dict[str, str]:
+    """Batch-load ``Document.source_name`` for each hit's document_id.
+
+    Used by ``search_library`` (R5-B2) — mirrors the friend-access pattern
+    in ``SearchKnowledgeService._load_source_names`` (R4-B1). Returns
+    ``{document_id: source_name}``; missing documents map to "".
+    """
+    doc_ids = {h.document_id for h in hits}
+    if not doc_ids:
+        return {}
+    db = store._require_db()
+    placeholders = ", ".join(["?"] * len(doc_ids))
+    async with db.execute(
+        f"SELECT id, source_name FROM knowledge_documents "
+        f"WHERE id IN ({placeholders})",
+        tuple(doc_ids),
+    ) as cursor:
+        rows = await cursor.fetchall()
+    return {row["id"]: row["source_name"] for row in rows}
+
+
 def _library_view_to_response(view) -> LibraryResponse:
     """Convert service-layer LibraryView → API LibraryResponse.
 
@@ -1161,11 +1341,15 @@ def _document_to_response(doc) -> DocumentResponse:
 
 
 __all__ = [
+    "DEFAULT_SEARCH_LIMIT",
     "DocumentResponse",
     "ErrorResponse",
     "LibraryCreateRequest",
     "LibraryPatchRequest",
     "LibraryResponse",
+    "LibrarySearchRequest",
+    "LibrarySearchResponse",
+    "LibrarySearchResultItem",
     "SessionBindingPutRequest",
     "SessionBindingResponse",
     "build_knowledge_router",
