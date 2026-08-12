@@ -253,9 +253,9 @@ M3 是 docs-only 归档阶段，未自动执行上述任一动作。
 
 R5 阶段总目标：把 R2/R3/R4 已交付的 Knowledge backend 能力 Web 产品化——REST API composition + Knowledge Manager UI + Upload→Ingest→Search E2E。
 
-- [x] **P2-R5-A Web API + UI Contract Audit** —— ✅ COMPLETE / FROZEN @ `<this commit>`（docs-only；production diff=0；audit 14 existing Knowledge REST endpoints；冻结 Search REST 合同 / status mapping / polling model / UI architecture / E2E plan）。详见 [P2_R5_A_WEB_CONTRACT.md](docs/validation/p2-r5/P2_R5_A_WEB_CONTRACT.md)。
-- [ ] **P2-R5-B Knowledge REST API** —— ⛔ BLOCKED BY R5-A → APPROVED TO START。Add 1 Search REST endpoint（`POST /api/knowledge/libraries/{lib}/search`，library-scoped，ready-only，ChunkStore reuse）。
-- [ ] **P2-R5-C Knowledge Management Frontend** —— ⛔ BLOCKED BY R5-B。
+- [x] **P2-R5-A Web API + UI Contract Audit** —— ✅ COMPLETE / FROZEN @ `1c1f519`（docs-only；production diff=0；audit 14 existing Knowledge REST endpoints；冻结 Search REST 合同 / status mapping / polling model / UI architecture / E2E plan）。详见 [P2_R5_A_WEB_CONTRACT.md](docs/validation/p2-r5/P2_R5_A_WEB_CONTRACT.md)。
+- [x] **P2-R5-B Knowledge REST API** —— ✅ COMPLETE / FROZEN @ `d099185` + `134094a`（R5-B2 Search REST endpoint + DTOs；R5-B3 35 targeted tests；full Backend 3492/0 failed；R2/R3/R4 0 regression；schema/deps/Core Runtime/R2/R3/R4 diff = 0）。R5-B1 跳过（Library/Document REST 已完整）。详见 [P2_R5_B_REST_API.md](docs/validation/p2-r5/P2_R5_B_REST_API.md)。
+- [ ] **P2-R5-C Knowledge Management Frontend** —— ⛔ BLOCKED BY R5-B → APPROVED TO START。
 - [ ] **P2-R5-D Final Upload→Ingest→Search E2E Freeze** —— ⛔ BLOCKED BY R5-C。
 
 ## Explicitly out of scope (long-term)
