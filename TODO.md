@@ -249,6 +249,15 @@ M3 是 docs-only 归档阶段，未自动执行上述任一动作。
 - [ ] **P2-R4 Session-scoped search_knowledge + Page Marker Citation** —— ⛔ BLOCKED BY P2-R3。
 - [ ] **B7 SQLite Store Open-Failure Cleanup** —— ⏸ PENDING / NOT AUTHORIZED（独立缺陷；4 个 Store `open()` 缺 try/except close 保护；不阻塞 P2-R2-D-B / 不阻塞 P2-R3；仅在完整 Backend 出现稳定 failure 时升级）。详见 [P2_R2_D_FINAL_PDF_PIPELINE_VALIDATION.md §17](docs/validation/p2-r2/P2_R2_D_FINAL_PDF_PIPELINE_VALIDATION.md)。
 
+## P2-R5 — Web Knowledge Management + REST + E2E（🟡 IN PROGRESS）
+
+R5 阶段总目标：把 R2/R3/R4 已交付的 Knowledge backend 能力 Web 产品化——REST API composition + Knowledge Manager UI + Upload→Ingest→Search E2E。
+
+- [x] **P2-R5-A Web API + UI Contract Audit** —— ✅ COMPLETE / FROZEN @ `<this commit>`（docs-only；production diff=0；audit 14 existing Knowledge REST endpoints；冻结 Search REST 合同 / status mapping / polling model / UI architecture / E2E plan）。详见 [P2_R5_A_WEB_CONTRACT.md](docs/validation/p2-r5/P2_R5_A_WEB_CONTRACT.md)。
+- [ ] **P2-R5-B Knowledge REST API** —— ⛔ BLOCKED BY R5-A → APPROVED TO START。Add 1 Search REST endpoint（`POST /api/knowledge/libraries/{lib}/search`，library-scoped，ready-only，ChunkStore reuse）。
+- [ ] **P2-R5-C Knowledge Management Frontend** —— ⛔ BLOCKED BY R5-B。
+- [ ] **P2-R5-D Final Upload→Ingest→Search E2E Freeze** —— ⛔ BLOCKED BY R5-C。
+
 ## Explicitly out of scope (long-term)
 
 - OCR / Image understanding（marker 配置 `force_ocr=False`；扫描 PDF 进 `status=needs_ocr` 终态）
