@@ -5,6 +5,7 @@ import { useChatStore } from "../../stores/chatStore"
 import { useFileStore } from "../../stores/fileStore"
 import { useSessionStore } from "../../stores/sessionStore"
 import LoadingSpinner from "../common/LoadingSpinner.vue"
+import KnowledgeManagerModal from "../knowledge/KnowledgeManagerModal.vue"
 import MCPManagerModal from "../mcp/MCPManagerModal.vue"
 import ProviderSettingsModal from "../providers/ProviderSettingsModal.vue"
 import SkillManagerModal from "../skills/SkillManagerModal.vue"
@@ -19,6 +20,7 @@ const activeId = computed(() => sessionStore.activeSessionId)
 const skillsOpen = ref(false)
 const mcpOpen = ref(false)
 const providerOpen = ref(false)
+const knowledgeOpen = ref(false)
 
 // 请求运行中（sending/streaming/active request）禁用 Provider Settings 入口
 const requestRunning = computed(
@@ -200,6 +202,14 @@ async function exportSession(id: string) {
       </button>
       <button
         class="footer-btn"
+        data-testid="knowledge-button"
+        title="Knowledge libraries manager"
+        @click="knowledgeOpen = true"
+      >
+        Knowledge
+      </button>
+      <button
+        class="footer-btn"
         data-testid="mcp-button"
         title="MCP manager"
         @click="mcpOpen = true"
@@ -218,6 +228,7 @@ async function exportSession(id: string) {
     </div>
 
     <SkillManagerModal :open="skillsOpen" @close="skillsOpen = false" />
+    <KnowledgeManagerModal :open="knowledgeOpen" @close="knowledgeOpen = false" />
     <MCPManagerModal :open="mcpOpen" @close="mcpOpen = false" />
     <ProviderSettingsModal
       :open="providerOpen"
