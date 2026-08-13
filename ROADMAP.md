@@ -259,11 +259,11 @@ P1-E M1 之前的配置后端已 frozen，不再扩展。
 | **R3-B3 Validation Freeze** | ⛔ BLOCKED BY R3-B2 | R3-B2 | regression + validation docs + STATUS/TODO/ROADMAP | 待 R3-B2 完成 |
 | **R3 Retrieval (overall)** | 🟡 IN PROGRESS (R3-A done) | R2 | `search_knowledge` tool + **pure FTS5 BM25**（无向量；D1/D2/D3 DECLINED @ 2026-08-03）+ heading-aware chunker + top_k 排序 + 引用 evidence（chunk.page_start / page_end 即 page marker 引用，per R2-B `<!-- page:N -->`） | query 召回 / tool 不暴露 session_id（AST 校验） / 0 vector dependency |
 | **R4 Session Library ACL** | ⛔ BLOCKED BY R3 | R3 | `session_knowledge_libraries` CRUD + 后端 allowlist 过滤 | 未授权 library 不出现 / A/B session 越权测试 |
-| **R5 Web API + UI** | 🟡 IN PROGRESS (R5-C done) | R4 | library / document / search REST + 前端管理面板 | E2E upload→ingest→search 全链路 |
+| **R5 Web API + UI** | ✅ COMPLETE / FROZEN (R5-D done) | R4 | library / document / search REST + 前端管理面板 | E2E upload→ingest→search 全链路 |
 | **R5-A Web API + UI Contract Audit** | ✅ COMPLETE / FROZEN @ `1c1f519` | R4 | docs-only audit + freeze | [P2_R5_A_WEB_CONTRACT.md](docs/validation/p2-r5/P2_R5_A_WEB_CONTRACT.md) 16/16 exit gate PASS / 14 existing REST reused / 1 new Search REST / production diff=0 |
 | **R5-B Knowledge REST API** | ✅ COMPLETE / FROZEN @ `d099185` + `134094a` | R5-A | Search REST + Library/Document gap fill (R5-B1 skipped) | [P2_R5_B_REST_API.md](docs/validation/p2-r5/P2_R5_B_REST_API.md) 35 targeted tests / 3492 full backend / 0 regression / schema diff=0 / Ruff PASS |
 | **R5-C Frontend Knowledge Manager** | ✅ COMPLETE / FROZEN @ working tree (pending commit on `041801c`) | R5-B | KnowledgeManagerModal + Library/Document/Upload/Search/Binding UI | [P2_R5_C_FRONTEND.md](docs/validation/p2-r5/P2_R5_C_FRONTEND.md) 80 vitest (33 store + 47 component) / 347 total / typecheck+lint+build PASS / frontend-only / backend diff=0 |
-| **R5-D Final E2E Freeze** | ⛔ BLOCKED BY R5-C → APPROVED TO START | R5-C | Upload→Ingest→Search→Binding E2E + Agent continuity | Full Backend ×2 = 0 failed / Browser E2E (or integration tests in this copy) PASS |
+| **R5-D Final E2E Freeze** | ✅ COMPLETE / FROZEN @ working tree (pending commit on `f2750e3`) | R5-C | Upload→Ingest→Search→Binding E2E + Agent continuity | [P2_R5_D_FINAL_E2E_FREEZE.md](docs/validation/p2-r5/P2_R5_D_FINAL_E2E_FREEZE.md) 19 E2E tests / Full Backend 3511/0 / production diff=0 |
 | **R6 Freeze + Validation** | ⛔ BLOCKED BY R5 | R5 | validation report + security freeze + tag `v0.0.XX-knowledge-rag` | 全 pytest + E2E + ruff + 0 Core Runtime 回归 |
 
 **关键冻结决策**（详见 decisions-log）：

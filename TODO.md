@@ -259,7 +259,11 @@ R5 阶段总目标：把 R2/R3/R4 已交付的 Knowledge backend 能力 Web 产�
       含 R5-C1 production（api/types/store + 7 components + SessionSidebar entry，~1834 new + 11 modified）+ R5-C2 tests（7 spec files，80 tests：33 store + 47 component）+ R5-C3 freeze docs。
       **关键不变量**：347/347 vitest（delta 80）+ typecheck/lint/build PASS + frontend-only（backend production diff = 0）；stale-request safety（AbortController + selectedLibraryId guard + searchRequestId）；polling cleanup（onModalClose / onBeforeUnmount / library-switch）；status mapping 终态保留 raw string；binding optimistic + rollback；markdown preview MVP（raw blob in new tab）。
       详见 [P2_R5_C_FRONTEND.md](docs/validation/p2-r5/P2_R5_C_FRONTEND.md)。
-- [ ] **P2-R5-D Final Upload→Ingest→Search E2E Freeze** —— ⛔ BLOCKED BY R5-C → APPROVED TO START。
+- [x] **P2-R5-D Final Upload→Ingest→Search E2E Freeze** —— ✅ COMPLETE / FROZEN @ working tree（pending commit on top of `f2750e3`）。
+      含 R5-D1 tests（tests/test_r5_d_knowledge_e2e.py，19 tests across 9 classes）+ R5-D2 freeze docs。
+      **关键不变量**：production diff = 0（validation-only）；Full Backend #1 3511/0 failed（delta +19 = R5-D targeted 全对账）；12 R5-A §16 场景全覆盖（library lifecycle / upload→ready pipeline / REST search / cross-library isolation / delete exclusions / retry 409 / binding via REST / agent continuity / repeated reads / app restart / needs_ocr exclusion / boundary）；0 external HTTP / 0 model downloads / 0 mocks in pipeline。
+      详见 [P2_R5_D_FINAL_E2E_FREEZE.md](docs/validation/p2-r5/P2_R5_D_FINAL_E2E_FREEZE.md)。
+      **P2-R5 全系列 ✅ COMPLETE**。
 
 ## Explicitly out of scope (long-term)
 
