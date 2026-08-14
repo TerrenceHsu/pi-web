@@ -93,6 +93,20 @@ Run #2:  3455 passed / 0 failed (300s)
 
 Math: 3449 (R4-C) + 6 (R4-D) = **3455** ✅
 
+> **[CORRECTED 2026-08-13 — post-freeze audit @ P2-R5-D §15.2]**
+> The freeze-time reported count `3455` was a **misreport**; the actual
+> baseline at `7faf635` is **3457 passed / 3 skipped / 12 deselected /
+> 0 failed** (re-run fresh 2026-08-13, 533.99s, detached HEAD checkout).
+> Under-report by 2 tests — same nature as the historical P2-R2-B
+> 8-test discrepancy (2920 reported vs 2928 actual, reconciled in
+> `P2_R2_D_TEST_COUNT_RECONCILIATION.md`). The two runs above therefore
+> almost certainly also passed 3457; the count was transcribed incorrectly
+> at freeze time. No test files were added or removed since. Downstream
+> impact: R5-B freeze doc initially derived baseline `3455` and delta
+> `+37` from this section; corrected derivation is baseline `3457` /
+> delta `+35` = R5-B targeted exactly. See
+> `docs/validation/p2-r5/P2_R5_D_FINAL_E2E_FREEZE.md` §15.2.
+
 ## 12. Ruff
 
 ```

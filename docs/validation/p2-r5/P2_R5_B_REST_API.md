@@ -204,10 +204,19 @@ Result:  3492 passed / 3 skipped / 12 deselected / 0 failed
 Time:    400s
 ```
 
-Baseline (HEAD `7faf635`): **3455 passed / 0 failed**.
-R5-B delta: **+37 tests / 0 regression**.
-- +35 from test_knowledge_search_api.py
-- +2 from slight collection variance (re-test pick-up)
+Baseline (HEAD `7faf635`): **3457 passed / 0 failed** ([CORRECTED 2026-08-13]).
+R5-B delta: **+35 tests / 0 regression** = test_knowledge_search_api.py exactly.
+
+> **[CORRECTED 2026-08-13 — post-freeze audit @ P2-R5-D §15.2]**
+> Freeze-time docs recorded baseline `3455` / delta `+37` with the `+2`
+> attributed to "slight collection variance (re-test pick-up)". That
+> attribution was wrong. The actual baseline at `7faf635` is **3457**
+> (re-run fresh 2026-08-13, detached HEAD, 533.99s: 3457 passed / 3
+> skipped / 12 deselected / 0 failed) — the R4-D freeze doc
+> under-reported by 2. True delta = 3492 − 3457 = **+35** = R5-B
+> targeted exactly. No collection variance exists; no tests were missed
+> or duplicated. Same nature as the historical P2-R2-B 8-test
+> discrepancy. See `P2_R5_D_FINAL_E2E_FREEZE.md` §15.2.
 
 Coverage: 83.99% (>= 75% gate).
 

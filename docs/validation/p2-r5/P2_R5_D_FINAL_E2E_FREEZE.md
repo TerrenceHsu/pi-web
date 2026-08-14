@@ -237,3 +237,108 @@ R5-D  Final Upload→Ingest→Search E2E  ✅ @ <pending commit>             (va
 - Commit (local): ⏸ PENDING user authorization — proposed 2-commit chain in §2
 - B7 SQLite Store Open-Failure: ⏸ PENDING / NOT AUTHORIZED
 - G1 stash @ `5731ab7d`: ⏸ preserved (not popped/applied/dropped/recreated)
+
+---
+
+## §15 Audit notes — test count + commit count reconciliation
+
+Post-freeze audit (2026-08-13) surfaced two numeric discrepancies that require
+explanation for archive integrity. Neither is a functional or production
+defect — both are documentation misreporting.
+
+### §15.1 R5 series commit count
+
+The P2-R5 series spans exactly **9 commits** between baseline `7faf635`
+(R4-D Final RAG Freeze, exclusive) and `6527be5` (R5-D docs freeze, inclusive):
+
+```
+1c1f519  docs(rag): freeze R5 web API and UI contract              (R5-A)
+d099185  feat(rag): add library-scoped knowledge search API        (R5-B2 production)
+134094a  test(rag): freeze knowledge REST API                      (R5-B3 tests)
+041801c  docs(rag): freeze R5-B knowledge REST API validation      (R5-B docs)
+4215413  feat(rag): add knowledge manager frontend                 (R5-C production)
+fdec068  test(rag): freeze knowledge manager frontend              (R5-C tests)
+f2750e3  docs(rag): freeze R5-C knowledge manager frontend         (R5-C docs)
+64c2084  test(rag): freeze knowledge manager E2E pipeline          (R5-D tests)
+6527be5  docs(rag): freeze R5-D final knowledge E2E                (R5-D docs)
+```
+
+Verified via `git log --oneline 7faf635..6527be5`.
+
+An earlier report drafting referenced "11 commits" — that figure was a typo
+and is superseded by this section. Authoritative count for the R5 series
+archive: **9 commits**.
+
+### §15.2 R5-B backend delta — 35 vs 37 reconciliation
+
+R5-B freeze doc (`P2_R5_B_REST_API.md` §10) records:
+
+```
+Baseline (HEAD 7faf635):  3455 passed
+R5-B targeted tests:      35
+R5-B Full Backend:        3492 passed
+Doc-stated delta:         +37
+```
+
+The `+37` vs targeted `35` gap of 2 tests was flagged during R5-D archive
+audit. To resolve, the baseline commit `7faf635` was re-run fresh on
+2026-08-13 (this audit):
+
+```
+HEAD = 7faf635 (detached)
+PYTHONPATH=src pytest tests/ -m "not slow" --no-header -q --no-cov
+Result: 3457 passed / 3 skipped / 12 deselected / 0 failed (533.99s)
+```
+
+Actual R4-D baseline is **3457**, not 3455. The R4-D freeze doc
+(`P2_R4_D_FINAL_RAG_FREEZE.md`) under-reports by 2 tests — same nature
+as the historical P2-R2-B 8-test discrepancy (R2-B freeze doc misreported
+2920 vs actual 2928; reconciled in `P2_R2_D_TEST_COUNT_RECONCILIATION.md`).
+
+Re-derived R5-B delta against the correct baseline:
+
+```
+R5-B Full Backend (134094a):   3492 passed
+R4-D baseline (7faf635) actual: 3457 passed
+True delta:                     +35 = R5-B targeted (test_knowledge_search_api.py)
+```
+
+✅ **Fully reconciled.** No missing tests; no phantom tests; no regression.
+The R5-B targeted count (35) matches the actual delta (35) exactly.
+
+### §15.3 R5-D delta re-verification
+
+For completeness, R5-D delta is unaffected by the R4-D baseline correction:
+
+```
+R5-C baseline (f2750e3):        3492 passed (R5-B baseline carried forward)
+R5-D Full Backend ×2 (6527be5): 3511 passed
+True delta:                     +19 = R5-D targeted (test_r5_d_knowledge_e2e.py)
+```
+
+✅ Reconciled with no remainder.
+
+### §15.4 Recommended follow-ups (NOT in this commit)
+
+These do not block R5-D freeze, but should be addressed in a future
+docs-only correction commit if strict archive integrity is required
+(same pattern as `P2_R2_D-A` post-freeze correction @ `287edb9`):
+
+1. `docs/validation/p2-r4/P2_R4_D_FINAL_RAG_FREEZE.md` — update baseline
+   `3455` → `3457`, add audit note pointing to this section.
+2. `docs/validation/p2-r5/P2_R5_B_REST_API.md` — update baseline
+   `3455` → `3457`, update delta `+37` → `+35`, add audit note.
+3. Memory `project_p2_progress.md` — update R4-D baseline reference
+   `3455` → `3457` (post-freeze memory correction).
+
+None of these corrections change production code, test code, or test
+outcomes — they only rectify reported numbers in freeze documentation.
+
+### §15.5 Authorization for §15
+
+This section is a docs-only post-freeze audit addition. It does not
+re-open the R5-D exit gate (§12) — the gate remains ✅ PASS. The
+corrections are **additive transparency** per the precedent set by
+P2-R2-D-A and the user feedback memory `feedback_milestone_report_math.md`
+("freeze 报告同时声称 'targeted N tests' + 'backend delta M' 时数学必须
+reconcile；差异必须显性诊断").
