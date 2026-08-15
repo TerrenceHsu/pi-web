@@ -22,16 +22,16 @@ from pi_agent_core_py.secrets import (  # noqa: E402
     EnvSecretStore,
     InMemorySecretStore,
 )
-from pi_agent_core_py.web.credentials_api import (  # noqa: E402
+from pi_agent_core_py.web.credentials.api import (  # noqa: E402
     CredentialBodyLimitMiddleware,
     build_full_credential_router,
 )
-from pi_agent_core_py.web.credentials_runtime import (  # noqa: E402
+from pi_agent_core_py.web.credentials.runtime import (  # noqa: E402
     CredentialRuntimeState,
     build_credential_runtime_config,
 )
-from pi_agent_core_py.web.credentials_service import CredentialService  # noqa: E402
-from pi_agent_core_py.web.credentials_store import SQLiteCredentialStore  # noqa: E402
+from pi_agent_core_py.web.credentials.service import CredentialService  # noqa: E402
+from pi_agent_core_py.web.credentials.store import SQLiteCredentialStore  # noqa: E402
 from pi_agent_core_py.web.local_web_security import (  # noqa: E402
     default_web_security_config,
 )
@@ -39,7 +39,7 @@ from pi_agent_core_py.web.provider_validation import (  # noqa: E402
     ProviderValidationResult,
     ValidationStrategyRegistry,
 )
-from pi_agent_core_py.web.secret_store_router import SecretStoreRouter  # noqa: E402
+from pi_agent_core_py.web.credentials.secret_store import SecretStoreRouter  # noqa: E402
 
 SECRET_MARKER = "PI_E1_SECRET_MARKER_7F3A91D2"
 
@@ -133,7 +133,7 @@ def _build_test_app(
                 strategies={"anthropic_models": fake_strategy}
             ),
         )
-        from pi_agent_core_py.web.credentials_runtime import CredentialReadiness
+        from pi_agent_core_py.web.credentials.runtime import CredentialReadiness
 
         runtime = CredentialRuntimeState(
             config=cfg,

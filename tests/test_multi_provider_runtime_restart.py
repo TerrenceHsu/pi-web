@@ -422,7 +422,7 @@ async def test_keyring_credential_survives_restart_via_shared_store(
     # Patch OSKeyringSecretStore to return our shared in-memory store——this
     # simulates a persistent keyring backend that survives process restart.
     monkeypatch.setattr(
-        "pi_agent_core_py.web.credentials_runtime.OSKeyringSecretStore",
+        "pi_agent_core_py.web.credentials.runtime.OSKeyringSecretStore",
         lambda: shared_store,
         raising=False,
     )

@@ -179,8 +179,8 @@ def test_core_runtime_modules_still_importable() -> None:
 def test_e1_credential_modules_still_importable() -> None:
     """E1 Credential 子系统模块未受 factory 加入影响."""
     import pi_agent_core_py.secrets.memory as mem_mod
-    import pi_agent_core_py.web.credentials_service as svc_mod
-    import pi_agent_core_py.web.credentials_store as store_mod
+    import pi_agent_core_py.web.credentials.service as svc_mod
+    import pi_agent_core_py.web.credentials.store as store_mod
 
     assert mem_mod is not None
     assert svc_mod is not None

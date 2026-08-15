@@ -246,7 +246,7 @@ async def test_provider_config_shares_db_file_with_credentials_store(
     db = tmp_path / "coexist.db"
 
     # Open credentials store first
-    from pi_agent_core_py.web.credentials_store import (
+    from pi_agent_core_py.web.credentials.store import (
         SQLiteCredentialStore,
     )
     cred_store = await SQLiteCredentialStore.open(str(db))

@@ -33,19 +33,19 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
-from ..providers.registry import (
+from ...providers.registry import (
     ProviderRegistry,
     detect_provider_hint,
     list_provider_definitions,
 )
-from ..secrets import (
+from ...secrets import (
     SecretStore,
     SecretStoreError,
     fingerprint_secret,
     mask_secret,
 )
-from ..secrets.errors import SecretStoreUnavailableError
-from .credentials_errors import (
+from ...secrets.errors import SecretStoreUnavailableError
+from .errors import (
     CredentialBackendUnavailableError,
     CredentialCompensationError,
     CredentialInputError,
@@ -56,7 +56,7 @@ from .credentials_errors import (
     CredentialSecretWriteError,
     CredentialServiceError,
 )
-from .credentials_store import (
+from .store import (
     CredentialConcurrentModificationError,
     CredentialNotFoundError,
     CredentialRecord,
@@ -68,13 +68,13 @@ from .credentials_store import (
     SQLiteCredentialStore,
     resolve_storage_status,
 )
-from .provider_validation import (
+from ..provider_validation import (
     CredentialValidationErrorCode,
     ProviderValidationResult,
     ValidationStrategyRegistry,
     get_default_validation_strategy_registry,
 )
-from .secret_store_router import SecretStoreRouter
+from .secret_store import SecretStoreRouter
 
 __all__ = [
     # Commands

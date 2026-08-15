@@ -14,14 +14,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from pi_agent_core_py.secrets import InMemorySecretStore
-from pi_agent_core_py.web.credentials_runtime import (
+from pi_agent_core_py.web.credentials.runtime import (
     build_credential_runtime_config,
     credential_runtime_context,
 )
-from pi_agent_core_py.web.credentials_service import (
+from pi_agent_core_py.web.credentials.service import (
     CreateCredentialCommand,
 )
-from pi_agent_core_py.web.credentials_store import resolve_storage_status
+from pi_agent_core_py.web.credentials.store import resolve_storage_status
 from pi_agent_core_py.web.local_web_security import default_web_security_config
 
 # ============================================================================
@@ -211,7 +211,7 @@ class TestKeyringRestart:
         # Use a single shared InMemorySecretStore to simulate persistent keyring
         shared_keyring = InMemorySecretStore()
 
-        from pi_agent_core_py.web import credentials_runtime as rt
+        from pi_agent_core_py.web.credentials import runtime as rt
 
         # Patch construction + probe
         async def _probe_ok() -> bool:

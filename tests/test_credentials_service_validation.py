@@ -27,15 +27,15 @@ from pi_agent_core_py.secrets import (
     InMemorySecretStore,
     SecretStoreUnavailableError,
 )
-from pi_agent_core_py.web.credentials_errors import (
+from pi_agent_core_py.web.credentials.errors import (
     CredentialBackendUnavailableError,
     CredentialServiceError,
 )
-from pi_agent_core_py.web.credentials_service import (
+from pi_agent_core_py.web.credentials.service import (
     CreateCredentialCommand,
     CredentialService,
 )
-from pi_agent_core_py.web.credentials_store import (
+from pi_agent_core_py.web.credentials.store import (
     CredentialNotFoundError,
     SQLiteCredentialStore,
 )
@@ -44,7 +44,7 @@ from pi_agent_core_py.web.provider_validation import (
     ProviderValidationResult,
     ValidationStrategyRegistry,
 )
-from pi_agent_core_py.web.secret_store_router import SecretStoreRouter
+from pi_agent_core_py.web.credentials.secret_store import SecretStoreRouter
 
 # ============================================================================
 # Fakes
@@ -353,7 +353,7 @@ class TestBasicWiring:
     ) -> None:
         """Secret 在 store 中找不到（store 返回 None）→ attempted=False / credential_missing."""
         # 直接在 repo 写一条 record，但 store 中没有对应 secret
-        from pi_agent_core_py.web.credentials_store import CredentialRecord
+        from pi_agent_core_py.web.credentials.store import CredentialRecord
 
         now_ms = service._now_ms()
         orphan = CredentialRecord(
@@ -413,7 +413,7 @@ class TestBasicWiring:
         )
         # Insert record directly (we can't go through create() since
         # create() also resolves the store and would raise first).
-        from pi_agent_core_py.web.credentials_store import CredentialRecord
+        from pi_agent_core_py.web.credentials.store import CredentialRecord
 
         ts = now_ms()
         record = CredentialRecord(
@@ -723,7 +723,7 @@ class TestSecretReadFailures:
             now_ms=now_ms,
         )
         # Insert record manually pointing at store that fails
-        from pi_agent_core_py.web.credentials_store import CredentialRecord
+        from pi_agent_core_py.web.credentials.store import CredentialRecord
 
         now_ms_val = now_ms()
         record = CredentialRecord(
@@ -790,7 +790,7 @@ class TestEmptySecret:
             validation_strategy_registry=strategy_registry,
             now_ms=now_ms,
         )
-        from pi_agent_core_py.web.credentials_store import CredentialRecord
+        from pi_agent_core_py.web.credentials.store import CredentialRecord
 
         now_ms_val = now_ms()
         record = CredentialRecord(

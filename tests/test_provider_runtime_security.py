@@ -24,10 +24,10 @@ from pi_agent_core_py.providers.registry import (
     ProviderDefinition,
     ProviderRegistry,
 )
-from pi_agent_core_py.web.credentials_errors import (
+from pi_agent_core_py.web.credentials.errors import (
     CredentialRequestSecretUnavailableError,
 )
-from pi_agent_core_py.web.credentials_service import CredentialService
+from pi_agent_core_py.web.credentials.service import CredentialService
 from pi_agent_core_py.web.provider_runtime import (
     ProviderInitializationError,
     ProviderSelectionUnavailableError,

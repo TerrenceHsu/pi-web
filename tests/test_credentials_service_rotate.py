@@ -23,22 +23,22 @@ from pi_agent_core_py.secrets import (
     fingerprint_secret,
     mask_secret,
 )
-from pi_agent_core_py.web.credentials_errors import (
+from pi_agent_core_py.web.credentials.errors import (
     CredentialBackendUnavailableError,
     CredentialCompensationError,
     CredentialInputError,
     CredentialSecretWriteError,
 )
-from pi_agent_core_py.web.credentials_service import (
+from pi_agent_core_py.web.credentials.service import (
     CreateCredentialCommand,
     CredentialService,
     RotateCredentialCommand,
 )
-from pi_agent_core_py.web.credentials_store import (
+from pi_agent_core_py.web.credentials.store import (
     CredentialNotFoundError,
     SQLiteCredentialStore,
 )
-from pi_agent_core_py.web.secret_store_router import SecretStoreRouter
+from pi_agent_core_py.web.credentials.secret_store import SecretStoreRouter
 
 SECRET_MARKER = "PI_E1_SECRET_MARKER_7F3A91D2"
 

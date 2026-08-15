@@ -47,7 +47,7 @@ from pi_agent_core_py import (  # noqa: E402
     Usage,
 )
 from pi_agent_core_py.web.app import create_app  # noqa: E402
-from pi_agent_core_py.web.credentials_api import (  # noqa: E402
+from pi_agent_core_py.web.credentials.api import (  # noqa: E402
     CredentialBodyLimitMiddleware,
 )
 

@@ -17,18 +17,18 @@ from pi_agent_core_py.secrets import (
     InMemorySecretStore,
     SecretStoreUnavailableError,
 )
-from pi_agent_core_py.web.credentials_errors import (
+from pi_agent_core_py.web.credentials.errors import (
     CredentialCompensationError,
     CredentialInputError,
     CredentialSecretDeleteError,
     CredentialSecretWriteError,
 )
-from pi_agent_core_py.web.credentials_service import (
+from pi_agent_core_py.web.credentials.service import (
     CreateCredentialCommand,
     CredentialService,
 )
-from pi_agent_core_py.web.credentials_store import SQLiteCredentialStore
-from pi_agent_core_py.web.secret_store_router import SecretStoreRouter
+from pi_agent_core_py.web.credentials.store import SQLiteCredentialStore
+from pi_agent_core_py.web.credentials.secret_store import SecretStoreRouter
 
 SECRET_MARKER = "PI_E1_SECRET_MARKER_7F3A91D2"
 
@@ -401,7 +401,7 @@ class TestCompensationChainSafety:
 
 
 def test_credentials_service_module_globals_no_marker() -> None:
-    import pi_agent_core_py.web.credentials_service as mod
+    import pi_agent_core_py.web.credentials.service as mod
 
     for name, value in vars(mod).items():
         if isinstance(value, str) and not name.startswith("__"):
@@ -411,7 +411,7 @@ def test_credentials_service_module_globals_no_marker() -> None:
 
 
 def test_credentials_errors_module_globals_no_marker() -> None:
-    import pi_agent_core_py.web.credentials_errors as mod
+    import pi_agent_core_py.web.credentials.errors as mod
 
     for name, value in vars(mod).items():
         if isinstance(value, str) and not name.startswith("__"):

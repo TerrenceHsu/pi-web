@@ -365,7 +365,7 @@ def create_app(
     # ========================================================================
     # P1-E1-4B3: Resolve Credential API configuration at app creation
     # ========================================================================
-    from .credentials_runtime import (
+    from .credentials.runtime import (
         CredentialWebSecurityConfigurationError,
         resolve_credential_api_configuration,
     )
@@ -694,7 +694,7 @@ def create_app(
         # 仅在文件型 DB 路径 + 显式 / 默认 enable 时启动；独立 connection
         # 与 session/extension store 共享 DB 文件但生命周期独立
         # ====================================================================
-        from .credentials_runtime import (
+        from .credentials.runtime import (
             build_credential_runtime_config,
             credential_runtime_context,
         )
@@ -956,7 +956,7 @@ def create_app(
     # P1-E1-4B3: Credential REST API（8 endpoints）+ 32 KiB body limit
     # 仅在 API enabled 时 mount——Router 自带 X-PI-Agent-UI / Origin 强制
     if _cred_resolved.api_enabled:
-        from .credentials_api import (
+        from .credentials.api import (
             CredentialBodyLimitMiddleware,
             build_full_credential_router,
         )

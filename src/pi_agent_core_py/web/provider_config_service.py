@@ -28,8 +28,8 @@ from dataclasses import dataclass
 from typing import Literal
 
 from ..providers.registry import ProviderDefinition, ProviderRegistry
-from .credentials_service import CredentialService, CredentialView
-from .credentials_store import CredentialNotFoundError
+from .credentials.service import CredentialService, CredentialView
+from .credentials.store import CredentialNotFoundError
 from .model_options import (
     InvalidModelIdError,
     ModelOption,

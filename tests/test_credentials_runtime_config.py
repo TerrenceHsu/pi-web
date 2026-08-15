@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from pi_agent_core_py.web.credentials_runtime import (
+from pi_agent_core_py.web.credentials.runtime import (
     CredentialRuntimeConfigError,
     build_credential_runtime_config,
 )

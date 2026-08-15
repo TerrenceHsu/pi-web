@@ -21,19 +21,19 @@ from pi_agent_core_py.secrets import (
     InMemorySecretStore,
     SecretStoreError,
 )
-from pi_agent_core_py.web.credentials_errors import (
+from pi_agent_core_py.web.credentials.errors import (
     CredentialRequestSecretBackendError,
     CredentialRequestSecretUnavailableError,
 )
-from pi_agent_core_py.web.credentials_service import (
+from pi_agent_core_py.web.credentials.service import (
     CreateCredentialCommand,
     CredentialService,
 )
-from pi_agent_core_py.web.credentials_store import (
+from pi_agent_core_py.web.credentials.store import (
     CredentialNotFoundError,
     SQLiteCredentialStore,
 )
-from pi_agent_core_py.web.secret_store_router import SecretStoreRouter
+from pi_agent_core_py.web.credentials.secret_store import SecretStoreRouter
 
 pytestmark = pytest.mark.asyncio
 

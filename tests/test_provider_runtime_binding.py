@@ -25,14 +25,14 @@ from pi_agent_core_py.providers.registry import (
     ProviderDefinition,
     ProviderRegistry,
 )
-from pi_agent_core_py.web.credentials_errors import (
+from pi_agent_core_py.web.credentials.errors import (
     CredentialRequestSecretBackendError,
     CredentialRequestSecretUnavailableError,
 )
-from pi_agent_core_py.web.credentials_service import (
+from pi_agent_core_py.web.credentials.service import (
     CredentialService,
 )
-from pi_agent_core_py.web.credentials_store import CredentialNotFoundError
+from pi_agent_core_py.web.credentials.store import CredentialNotFoundError
 from pi_agent_core_py.web.provider_config_service import ProviderConfigService
 from pi_agent_core_py.web.provider_runtime import (
     ProviderInitializationError,

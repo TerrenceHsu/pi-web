@@ -18,7 +18,7 @@ import asyncio
 import aiosqlite
 import pytest
 
-from pi_agent_core_py.web.credentials_store import (
+from pi_agent_core_py.web.credentials.store import (
     CredentialAlreadyExistsError,
     CredentialConcurrentModificationError,
     CredentialNotFoundError,
@@ -217,7 +217,7 @@ class TestTransactionIsolation:
 
         # 默认 isolation_level='' (deferred)——不是 None
         async with aiosqlite.connect(db_path) as raw:
-            from pi_agent_core_py.web.credentials_store import CredentialStoreError
+            from pi_agent_core_py.web.credentials.store import CredentialStoreError
 
             with pytest.raises(CredentialStoreError, match="isolation_level"):
                 await SQLiteCredentialStore.for_testing(raw)

@@ -29,8 +29,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from ..secrets import SecretStore
-from .credentials_errors import (
+from ...secrets import SecretStore
+from .errors import (
     CredentialBackendUnavailableError,
     CredentialInputError,
 )

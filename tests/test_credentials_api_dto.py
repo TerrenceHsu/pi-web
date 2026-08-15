@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from pi_agent_core_py.web.credentials_dto import (
+from pi_agent_core_py.web.credentials.dto import (
     MAX_LABEL_CHARS,
     MAX_SECRET_BYTES,
     CredentialCreateRequest,

@@ -31,25 +31,25 @@ from pi_agent_core_py.providers.registry import (
     list_provider_definitions,
 )
 from pi_agent_core_py.secrets import EnvSecretStore, InMemorySecretStore
-from pi_agent_core_py.web.credentials_errors import (
+from pi_agent_core_py.web.credentials.errors import (
     CredentialBackendUnavailableError,
     CredentialOperationConflictError,
     CredentialServiceError,
 )
-from pi_agent_core_py.web.credentials_service import (
+from pi_agent_core_py.web.credentials.service import (
     CreateCredentialCommand,
     CredentialService,
     CredentialValidationOperationResult,
     RotateCredentialCommand,
 )
-from pi_agent_core_py.web.credentials_store import SQLiteCredentialStore
+from pi_agent_core_py.web.credentials.store import SQLiteCredentialStore
 from pi_agent_core_py.web.provider_validation import (
     AnthropicModelsValidationStrategy,
     HttpClientFactory,
     ProviderValidationResult,
     ValidationStrategyRegistry,
 )
-from pi_agent_core_py.web.secret_store_router import SecretStoreRouter
+from pi_agent_core_py.web.credentials.secret_store import SecretStoreRouter
 
 SECRET_MARKER = "PI_E1_SECRET_MARKER_7F3A91D2"
 
@@ -298,7 +298,7 @@ class TestServiceErrorSafety:
         # Insert a keyring record pointing at a marker-bearing secret_ref
         # (secret_ref itself is non-sensitive, but we verify marker doesn't
         # leak even if input contains it)
-        from pi_agent_core_py.web.credentials_store import CredentialRecord
+        from pi_agent_core_py.web.credentials.store import CredentialRecord
 
         record = CredentialRecord(
             id="cred-x",
@@ -501,7 +501,7 @@ class TestSQLiteBytesSafety:
 
 
 def test_credentials_service_module_globals_no_marker() -> None:
-    import pi_agent_core_py.web.credentials_service as mod
+    import pi_agent_core_py.web.credentials.service as mod
 
     for name, value in vars(mod).items():
         if isinstance(value, str) and not name.startswith("__"):

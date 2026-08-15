@@ -63,12 +63,12 @@ from ..providers.base import ProviderAdapter
 from ..providers.errors import ProviderConfigError
 from ..providers.factory import create_provider
 from ..providers.registry import ProviderRegistry
-from .credentials_errors import (
+from .credentials.errors import (
     CredentialRequestSecretBackendError,
     CredentialRequestSecretUnavailableError,
 )
-from .credentials_service import CredentialService
-from .credentials_store import CredentialNotFoundError
+from .credentials.service import CredentialService
+from .credentials.store import CredentialNotFoundError
 from .provider_config_service import ProviderConfigService
 from .provider_config_store import ProviderProfileNotFoundError
 

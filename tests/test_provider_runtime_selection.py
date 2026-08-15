@@ -25,11 +25,11 @@ from pi_agent_core_py.providers.registry import (
     ProviderDefinition,
     ProviderRegistry,
 )
-from pi_agent_core_py.web.credentials_service import (
+from pi_agent_core_py.web.credentials.service import (
     CredentialService,
     CredentialView,
 )
-from pi_agent_core_py.web.credentials_store import CredentialNotFoundError
+from pi_agent_core_py.web.credentials.store import CredentialNotFoundError
 from pi_agent_core_py.web.provider_config_service import (
     ProviderConfigService,
     SessionNotFoundError,

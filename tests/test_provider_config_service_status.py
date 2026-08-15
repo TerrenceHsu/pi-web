@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from pi_agent_core_py.web.credentials_service import CredentialView
+from pi_agent_core_py.web.credentials.service import CredentialView
 from pi_agent_core_py.web.provider_config_service import (
     derive_profile_status,
 )

@@ -24,23 +24,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from ..providers.registry import (
+from ...providers.registry import (
     ProviderRegistry,
     list_provider_definitions,
 )
-from ..secrets import (
+from ...secrets import (
     EnvSecretStore,
     InMemorySecretStore,
     OSKeyringSecretStore,
     SecretStore,
 )
-from .credentials_service import CredentialService
-from .credentials_store import SQLiteCredentialStore
-from .local_web_security import WebSecurityConfig
-from .provider_validation import (
+from .service import CredentialService
+from .store import SQLiteCredentialStore
+from ..local_web_security import WebSecurityConfig
+from ..provider_validation import (
     get_default_validation_strategy_registry,
 )
-from .secret_store_router import SecretStoreRouter
+from .secret_store import SecretStoreRouter
 
 __all__ = [
     "CredentialRuntimeConfigError",

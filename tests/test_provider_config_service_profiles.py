@@ -10,8 +10,8 @@ from typing import Any
 import pytest
 
 from pi_agent_core_py.providers.registry import ProviderDefinition, ProviderRegistry
-from pi_agent_core_py.web.credentials_service import CredentialService, CredentialView
-from pi_agent_core_py.web.credentials_store import CredentialNotFoundError
+from pi_agent_core_py.web.credentials.service import CredentialService, CredentialView
+from pi_agent_core_py.web.credentials.store import CredentialNotFoundError
 from pi_agent_core_py.web.model_options import InvalidModelIdError
 from pi_agent_core_py.web.provider_config_service import (
     CredentialNotFoundForProfileError,

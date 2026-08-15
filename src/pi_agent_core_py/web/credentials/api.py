@@ -32,12 +32,12 @@ from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from ..providers.registry import (
+from ...providers.registry import (
     ProviderDefinition,
     detect_provider_hint,
     list_provider_definitions,
 )
-from .credentials_dto import (
+from .dto import (
     CREDENTIAL_ID_PATTERN,
     CredentialCreateRequest,
     CredentialLabelUpdateRequest,
@@ -46,7 +46,7 @@ from .credentials_dto import (
     ProviderHintRequest,
     SafeValidationErrorResponse,
 )
-from .credentials_errors import (
+from .errors import (
     CredentialBackendUnavailableError,
     CredentialCompensationError,
     CredentialInputError,
@@ -55,21 +55,21 @@ from .credentials_errors import (
     CredentialSecretWriteError,
     CredentialServiceError,
 )
-from .credentials_service import (
+from .service import (
     CreateCredentialCommand,
     CredentialService,
     CredentialValidationOperationResult,
     CredentialView,
     RotateCredentialCommand,
 )
-from .credentials_store import (
+from .store import (
     CredentialAlreadyExistsError,
     CredentialConcurrentModificationError,
     CredentialNotFoundError,
     CredentialSecretRefConflictError,
     CredentialsSchemaError,
 )
-from .local_web_security import WebSecurityConfig
+from ..local_web_security import WebSecurityConfig
 
 __all__ = [
     # Body limit middleware

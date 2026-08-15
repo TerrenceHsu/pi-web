@@ -19,7 +19,7 @@ from pi_agent_core_py.secrets import (
     InMemorySecretStore,
     SecretStoreUnavailableError,
 )
-from pi_agent_core_py.web.credentials_store import (
+from pi_agent_core_py.web.credentials.store import (
     CredentialRecord,
     SQLiteCredentialStore,
     resolve_storage_status,

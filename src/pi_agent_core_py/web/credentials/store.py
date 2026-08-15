@@ -46,7 +46,7 @@ from typing import Any, Literal
 
 import aiosqlite
 
-from ..secrets import SecretStore
+from ...secrets import SecretStore
 
 # ============================================================================
 # Types

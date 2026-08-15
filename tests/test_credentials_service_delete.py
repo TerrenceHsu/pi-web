@@ -21,20 +21,20 @@ from pi_agent_core_py.secrets import (
     InMemorySecretStore,
     SecretStoreUnavailableError,
 )
-from pi_agent_core_py.web.credentials_errors import (
+from pi_agent_core_py.web.credentials.errors import (
     CredentialBackendUnavailableError,
     CredentialInputError,
     CredentialSecretDeleteError,
 )
-from pi_agent_core_py.web.credentials_service import (
+from pi_agent_core_py.web.credentials.service import (
     CreateCredentialCommand,
     CredentialService,
 )
-from pi_agent_core_py.web.credentials_store import (
+from pi_agent_core_py.web.credentials.store import (
     CredentialNotFoundError,
     SQLiteCredentialStore,
 )
-from pi_agent_core_py.web.secret_store_router import SecretStoreRouter
+from pi_agent_core_py.web.credentials.secret_store import SecretStoreRouter
 
 SECRET_MARKER = "PI_E1_SECRET_MARKER_7F3A91D2"
 
@@ -303,7 +303,7 @@ class TestStaleDelete:
         # 先 rotate 一次（new secret_ref 写入）
         await service.rotate(
             __import__(
-                "pi_agent_core_py.web.credentials_service", fromlist=["RotateCredentialCommand"]
+                "pi_agent_core_py.web.credentials.service", fromlist=["RotateCredentialCommand"]
             ).RotateCredentialCommand(
                 credential_id=cred_id,
                 secret_value="sk-new-12345678901",

@@ -16,7 +16,7 @@ from __future__ import annotations
 import aiosqlite
 import pytest
 
-from pi_agent_core_py.web.credentials_store import (
+from pi_agent_core_py.web.credentials.store import (
     WEB_CREDENTIALS_SCHEMA_VERSION,
     CredentialsSchemaValidationError,
     CredentialsSchemaVersionError,
@@ -284,7 +284,7 @@ class TestTransactionRollback:
         db_path = str(tmp_path / "creds.db")
         store = await SQLiteCredentialStore.open(db_path)
 
-        from pi_agent_core_py.web.credentials_store import (
+        from pi_agent_core_py.web.credentials.store import (
             CredentialAlreadyExistsError,
             CredentialRecord,
         )

@@ -219,7 +219,7 @@ class TestAppRestartRecovery:
         )
         with TestClient(app1):
             # Create a credential via service（直接调 service，不用 REST——E1-4B）
-            from pi_agent_core_py.web.credentials_service import (
+            from pi_agent_core_py.web.credentials.service import (
                 CreateCredentialCommand,
             )
 

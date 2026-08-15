@@ -23,7 +23,7 @@ pytest.importorskip("fastapi")
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from pi_agent_core_py.web.credentials_api import (  # noqa: E402
+from pi_agent_core_py.web.credentials.api import (  # noqa: E402
     CredentialBodyLimitMiddleware,
     build_credential_router,
 )
@@ -170,7 +170,7 @@ class TestForgedContentLength:
         # direct ASGI call.
         import asyncio
 
-        from pi_agent_core_py.web.credentials_api import (
+        from pi_agent_core_py.web.credentials.api import (
             CredentialBodyLimitMiddleware,
         )
 
@@ -250,7 +250,7 @@ class TestMultipleChunks:
         Limit=100——should reject after 3rd chunk."""
         import asyncio
 
-        from pi_agent_core_py.web.credentials_api import (
+        from pi_agent_core_py.web.credentials.api import (
             CredentialBodyLimitMiddleware,
         )
 

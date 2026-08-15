@@ -13,7 +13,7 @@ from __future__ import annotations
 import aiosqlite
 import pytest
 
-from pi_agent_core_py.web.credentials_store import (
+from pi_agent_core_py.web.credentials.store import (
     CredentialNotFoundError,
     CredentialRecord,
     CredentialRecordDecodeError,
@@ -221,7 +221,7 @@ class TestRepositoryExceptions:
     async def test_create_conflict_error_no_marker(self, store_with_marker) -> None:
         store, _ = store_with_marker
         # Duplicate id but different secret_ref——error 应只含 credential_id (safe)
-        from pi_agent_core_py.web.credentials_store import (
+        from pi_agent_core_py.web.credentials.store import (
             CredentialAlreadyExistsError,
         )
         try:
@@ -308,7 +308,7 @@ class TestDecodeErrorSafety:
         async with s._require_db().execute("SELECT * FROM broken_creds") as cur:
             row = await cur.fetchone()
 
-        from pi_agent_core_py.web.credentials_store import _decode_row
+        from pi_agent_core_py.web.credentials.store import _decode_row
         with pytest.raises(CredentialRecordDecodeError) as exc_info:
             _decode_row(row)
 
@@ -421,7 +421,7 @@ class TestExtensionSchemaPreserved:
 
 def test_credentials_store_module_globals_no_marker() -> None:
     """credentials_store 模块顶层 globals 不含 marker."""
-    import pi_agent_core_py.web.credentials_store as mod
+    import pi_agent_core_py.web.credentials.store as mod
     for name, value in vars(mod).items():
         if isinstance(value, str) and not name.startswith("__"):
             assert SECRET_MARKER not in value, (

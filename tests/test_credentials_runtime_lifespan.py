@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from pi_agent_core_py.web.credentials_runtime import (
+from pi_agent_core_py.web.credentials.runtime import (
     CredentialReadiness,
     CredentialRuntimeConfig,
     CredentialRuntimeState,
@@ -113,7 +113,7 @@ class TestReadinessStates:
     ) -> None:
         """强制 keyring unavailable（CI 通常已经如此，但显式 patch OSKeyringSecretStore）."""
         # Patch OSKeyringSecretStore so it always reports unavailable
-        from pi_agent_core_py.web import credentials_runtime as rt
+        from pi_agent_core_py.web.credentials import runtime as rt
 
         async def _probe_fail() -> bool:
             return False
@@ -128,7 +128,7 @@ class TestReadinessStates:
     async def test_keyring_mode_unavailable_is_degraded(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        from pi_agent_core_py.web import credentials_runtime as rt
+        from pi_agent_core_py.web.credentials import runtime as rt
 
         async def _probe_fail() -> bool:
             return False
@@ -144,7 +144,7 @@ class TestReadinessStates:
     ) -> None:
         """Patch _probe_keyring_available=True——auto 走 ready 路径."""
         from pi_agent_core_py.secrets import InMemorySecretStore as _IMS
-        from pi_agent_core_py.web import credentials_runtime as rt
+        from pi_agent_core_py.web.credentials import runtime as rt
 
         async def _probe_ok() -> bool:
             return True
@@ -163,7 +163,7 @@ class TestReadinessStates:
         self, tmp_path: Path, monkeypatch
     ) -> None:
         """memory 模式——keyring 不可用是用户期望，不应标记 degraded."""
-        from pi_agent_core_py.web import credentials_runtime as rt
+        from pi_agent_core_py.web.credentials import runtime as rt
 
         async def _probe_fail() -> bool:
             return False
@@ -221,7 +221,7 @@ class TestPartialInitRollback:
         during schema validation. AsyncExitStack must close the connection."""
         import aiosqlite
 
-        from pi_agent_core_py.web.credentials_store import (
+        from pi_agent_core_py.web.credentials.store import (
             WEB_CREDENTIALS_SCHEMA_VERSION,
             CredentialsSchemaVersionError,
         )
@@ -255,7 +255,7 @@ class TestPartialInitRollback:
         self, tmp_path: Path
     ) -> None:
         """If init raises, no CredentialRuntimeState is yielded."""
-        from pi_agent_core_py.web import credentials_runtime as rt
+        from pi_agent_core_py.web.credentials import runtime as rt
 
         original_open = rt.SQLiteCredentialStore.open
 

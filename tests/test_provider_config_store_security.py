@@ -325,7 +325,7 @@ async def test_65_e1_credential_schema_untouched(tmp_path: Path) -> None:
     db = tmp_path / "e1.db"
 
     # First seed Credentials schema via E1 store
-    from pi_agent_core_py.web.credentials_store import (
+    from pi_agent_core_py.web.credentials.store import (
         WEB_CREDENTIALS_SCHEMA_VERSION,
         SQLiteCredentialStore,
     )

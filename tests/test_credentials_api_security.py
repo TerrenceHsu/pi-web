@@ -12,7 +12,7 @@ pytest.importorskip("fastapi")
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from pi_agent_core_py.web.credentials_api import build_credential_router  # noqa: E402
+from pi_agent_core_py.web.credentials.api import build_credential_router  # noqa: E402
 from pi_agent_core_py.web.local_web_security import (  # noqa: E402
     default_web_security_config,
 )

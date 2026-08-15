@@ -33,7 +33,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.requests import Request as StarletteRequest
 
-from .credentials_api import (
+from .credentials.api import (
     CredentialBodyLimitMiddleware,
     SafeValidationErrorResponse,
     _HeaderMissingError,
@@ -42,7 +42,7 @@ from .credentials_api import (
     require_ui_header_dep,
     safe_validation_response,
 )
-from .credentials_dto import SafeValidationField  # noqa: F401 (re-export convenience)
+from .credentials.dto import SafeValidationField  # noqa: F401 (re-export convenience)
 from .local_web_security import WebSecurityConfig
 from .provider_config_runtime import ProviderConfigRuntimeState
 from .provider_config_service import (

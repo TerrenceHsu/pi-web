@@ -21,15 +21,15 @@ from pi_agent_core_py.providers.registry import (
     list_provider_definitions,
 )
 from pi_agent_core_py.secrets import EnvSecretStore, InMemorySecretStore
-from pi_agent_core_py.web.credentials_errors import (
+from pi_agent_core_py.web.credentials.errors import (
     CredentialOperationConflictError,
 )
-from pi_agent_core_py.web.credentials_service import (
+from pi_agent_core_py.web.credentials.service import (
     CreateCredentialCommand,
     CredentialService,
     RotateCredentialCommand,
 )
-from pi_agent_core_py.web.credentials_store import (
+from pi_agent_core_py.web.credentials.store import (
     CredentialNotFoundError,
     SQLiteCredentialStore,
 )
@@ -37,7 +37,7 @@ from pi_agent_core_py.web.provider_validation import (
     ProviderValidationResult,
     ValidationStrategyRegistry,
 )
-from pi_agent_core_py.web.secret_store_router import SecretStoreRouter
+from pi_agent_core_py.web.credentials.secret_store import SecretStoreRouter
 
 # ============================================================================
 # Fakes

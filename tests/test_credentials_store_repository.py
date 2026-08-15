@@ -21,7 +21,7 @@ import time
 
 import pytest
 
-from pi_agent_core_py.web.credentials_store import (
+from pi_agent_core_py.web.credentials.store import (
     CredentialAlreadyExistsError,
     CredentialNotFoundError,
     CredentialRecord,

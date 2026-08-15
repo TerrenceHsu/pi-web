@@ -21,11 +21,11 @@ from pi_agent_core_py.secrets import (
     InMemorySecretStore,
     SecretStore,
 )
-from pi_agent_core_py.web.credentials_errors import (
+from pi_agent_core_py.web.credentials.errors import (
     CredentialBackendUnavailableError,
     CredentialInputError,
 )
-from pi_agent_core_py.web.secret_store_router import SecretStoreRouter
+from pi_agent_core_py.web.credentials.secret_store import SecretStoreRouter
 
 # ============================================================================
 # Fixtures

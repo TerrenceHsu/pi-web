@@ -52,7 +52,7 @@ from fastapi import (
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from ..credentials_api import (
+from ..credentials.api import (
     SafeValidationErrorResponse,
     require_allowed_origin_dep,
     require_ui_header_dep,
