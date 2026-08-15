@@ -25,7 +25,7 @@ from pi_agent_core_py.providers.registry import (
     ProviderDefinition,
     ProviderRegistry,
 )
-from pi_agent_core_py.web.provider_runtime import (
+from pi_agent_core_py.web.providers.runtime import (
     RequestProviderRuntime,
     RequestProviderSelection,
 )

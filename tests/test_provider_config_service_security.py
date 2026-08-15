@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from pi_agent_core_py.web import provider_config_service as svc_module
-from pi_agent_core_py.web.provider_config_service import (
+from pi_agent_core_py.web.providers import config_service as svc_module
+from pi_agent_core_py.web.providers.config_service import (
     ProviderConfigService,
     ProviderProfileView,
 )
@@ -112,10 +112,10 @@ async def test_4_errors_do_not_leak_credential_dto(
 ) -> None:
     """Service-level errors must not embed CredentialView or full DTO in str."""
     # Build service with no credentials seeded
-    from pi_agent_core_py.web.provider_config_service import (
+    from pi_agent_core_py.web.providers.config_service import (
         CredentialNotFoundForProfileError,
     )
-    from pi_agent_core_py.web.provider_config_store import (
+    from pi_agent_core_py.web.providers.config_store import (
         SQLiteProviderConfigStore,
     )
     from tests.test_provider_config_service_profiles import (
@@ -185,7 +185,7 @@ def test_5_profile_view_has_no_secret_fields() -> None:
 def test_6_model_option_has_no_secret_fields() -> None:
     import dataclasses
 
-    from pi_agent_core_py.web.model_options import ModelOption
+    from pi_agent_core_py.web.providers.model_options import ModelOption
     forbidden = (
         "secret", "api_key", "authorization", "headers",
         "endpoint", "credential", "base_url",
@@ -204,7 +204,7 @@ async def test_7_static_model_query_does_not_modify_sqlite(
     tmp_path: Path,
 ) -> None:
     """list_models must NOT write to SQLite."""
-    from pi_agent_core_py.web.provider_config_store import (
+    from pi_agent_core_py.web.providers.config_store import (
         SQLiteProviderConfigStore,
     )
     from tests.test_provider_config_service_profiles import (

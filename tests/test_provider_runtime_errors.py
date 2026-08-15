@@ -26,7 +26,7 @@ from pi_agent_core_py.web.credentials.errors import (
 )
 from pi_agent_core_py.web.credentials.service import CredentialService
 from pi_agent_core_py.web.credentials.store import CredentialNotFoundError
-from pi_agent_core_py.web.provider_runtime import (
+from pi_agent_core_py.web.providers.runtime import (
     ProviderInitializationError,
     ProviderSelectionDisabledError,
     ProviderSelectionNotFoundError,
@@ -206,7 +206,7 @@ async def test_provider_definition_missing_maps_to_initialization() -> None:
 
 
 def test_error_hierarchy() -> None:
-    from pi_agent_core_py.web.provider_runtime import (
+    from pi_agent_core_py.web.providers.runtime import (
         RequestProviderRuntimeError,
     )
 
@@ -232,7 +232,7 @@ SAFE_MESSAGES = {
 def test_safe_messages_set_covers_all_runtime_errors() -> None:
     """All four runtime error classes must use one of the fixed safe messages.
     Since messages are module constants, instantiate + check directly."""
-    from pi_agent_core_py.web import provider_runtime as mod
+    from pi_agent_core_py.web.providers import runtime as mod
 
     assert mod._MSG_PROFILE_UNAVAILABLE in SAFE_MESSAGES
     assert mod._MSG_PROFILE_DISABLED in SAFE_MESSAGES

@@ -122,7 +122,7 @@ async def test_profile_deleted_during_binding_triggers_compensation(
     store = app.state.provider_config_runtime.store
     original_upsert = store.upsert_binding
 
-    from pi_agent_core_py.web.provider_config_store import (
+    from pi_agent_core_py.web.providers.config_store import (
         ProviderProfileNotFoundError,
     )
 

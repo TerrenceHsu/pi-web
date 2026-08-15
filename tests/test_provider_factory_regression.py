@@ -189,8 +189,8 @@ def test_e1_credential_modules_still_importable() -> None:
 
 def test_e2_profile_binding_modules_still_importable() -> None:
     """E2 Profile / Binding 子系统模块未受 factory 加入影响."""
-    import pi_agent_core_py.web.provider_config_service as svc_mod
-    import pi_agent_core_py.web.provider_config_store as store_mod
+    import pi_agent_core_py.web.providers.config_service as svc_mod
+    import pi_agent_core_py.web.providers.config_store as store_mod
 
     assert svc_mod is not None
     assert store_mod is not None

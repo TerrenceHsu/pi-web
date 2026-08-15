@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from pi_agent_core_py.web.provider_config_store import (
+from pi_agent_core_py.web.providers.config_store import (
     ProviderProfile,
     ProviderProfileAlreadyExistsError,
     ProviderProfileInUseError,
@@ -422,7 +422,7 @@ async def test_delete_profile_with_binding_rejected(
 async def test_create_profile_rejects_control_chars_in_name(
     store: SQLiteProviderConfigStore,
 ) -> None:
-    from pi_agent_core_py.web.provider_config_store import (
+    from pi_agent_core_py.web.providers.config_store import (
         ProviderConfigStoreError,
     )
     with pytest.raises(ProviderConfigStoreError):
@@ -438,7 +438,7 @@ async def test_create_profile_rejects_control_chars_in_name(
 async def test_create_profile_rejects_control_chars_in_model_id(
     store: SQLiteProviderConfigStore,
 ) -> None:
-    from pi_agent_core_py.web.provider_config_store import (
+    from pi_agent_core_py.web.providers.config_store import (
         ProviderConfigStoreError,
     )
     with pytest.raises(ProviderConfigStoreError):

@@ -32,7 +32,7 @@ from contextlib import asynccontextmanager
 import httpx
 import pytest
 
-from pi_agent_core_py.web.provider_validation import (
+from pi_agent_core_py.web.providers.validation import (
     AnthropicModelsValidationStrategy,
     HttpClientFactory,
 )

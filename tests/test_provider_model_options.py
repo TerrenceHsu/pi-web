@@ -8,8 +8,8 @@ import inspect
 
 import pytest
 
-from pi_agent_core_py.web import model_options
-from pi_agent_core_py.web.model_options import (
+from pi_agent_core_py.web.providers import model_options
+from pi_agent_core_py.web.providers.model_options import (
     ANTHROPIC_MODEL_OPTIONS,
     GLM_MODEL_OPTIONS,
     InvalidModelIdError,

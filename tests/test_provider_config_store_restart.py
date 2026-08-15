@@ -15,7 +15,7 @@ from pathlib import Path
 import aiosqlite
 import pytest
 
-from pi_agent_core_py.web.provider_config_store import (
+from pi_agent_core_py.web.providers.config_store import (
     ProviderProfileNotFoundError,
     SQLiteProviderConfigStore,
 )

@@ -40,7 +40,7 @@ from pi_agent_core_py.providers.registry import (  # noqa: E402
 )
 from pi_agent_core_py.stream_events import StreamEvent, ToolCallEvent  # noqa: E402
 from pi_agent_core_py.web.app import create_app  # noqa: E402
-from pi_agent_core_py.web.provider_runtime import (  # noqa: E402
+from pi_agent_core_py.web.providers.runtime import (  # noqa: E402
     RequestProviderRuntime,
 )
 

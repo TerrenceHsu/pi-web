@@ -28,7 +28,7 @@ from pi_agent_core_py.web.credentials.errors import (
     CredentialRequestSecretUnavailableError,
 )
 from pi_agent_core_py.web.credentials.service import CredentialService
-from pi_agent_core_py.web.provider_runtime import (
+from pi_agent_core_py.web.providers.runtime import (
     ProviderInitializationError,
     ProviderSelectionUnavailableError,
     RequestProviderRuntime,
@@ -53,7 +53,8 @@ _RUNTIME_SRC_PATH = (
     / "src"
     / "pi_agent_core_py"
     / "web"
-    / "provider_runtime.py"
+    / "providers"
+    / "runtime.py"
 )
 
 

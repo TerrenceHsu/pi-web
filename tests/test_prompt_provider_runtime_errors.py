@@ -36,7 +36,7 @@ from pi_agent_core_py.providers.registry import (  # noqa: E402
     ProviderDefinition,
 )
 from pi_agent_core_py.web.app import create_app  # noqa: E402
-from pi_agent_core_py.web.provider_runtime import (  # noqa: E402
+from pi_agent_core_py.web.providers.runtime import (  # noqa: E402
     RequestProviderRuntime,
 )
 
@@ -190,7 +190,7 @@ async def test_profile_missing_returns_unavailable_error(env: tuple) -> None:
     # Delete profile after binding——store layer may FK-restrict, so use svc
     # patch path: monkeypatch get_profile to raise NotFound
     runtime: RequestProviderRuntime = app.state.request_provider_runtime
-    from pi_agent_core_py.web.provider_config_store import (
+    from pi_agent_core_py.web.providers.config_store import (
         ProviderProfileNotFoundError,
     )
 

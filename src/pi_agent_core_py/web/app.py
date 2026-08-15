@@ -56,7 +56,7 @@ from fastapi.responses import (
 
 from ..harness import AgentHarness
 from ..skills import SkillSelection
-from .provider_runtime import (
+from .providers.runtime import (
     ProviderInitializationError,
     ProviderSelectionDisabledError,
     ProviderSelectionNotFoundError,
@@ -387,7 +387,7 @@ def create_app(
     # P1-E2-3B1: Resolve Provider Profiles API configuration at app creation
     # Depends on Credential resolver—must be called AFTER _cred_resolved.
     # ========================================================================
-    from .provider_config_runtime import (
+    from .providers.config_runtime import (
         ProviderConfigWebSecurityConfigurationError,
         resolve_provider_profiles_api_configuration,
     )
@@ -725,7 +725,7 @@ def create_app(
                 # Depends on CredentialService (safe API) — must init AFTER credential
                 # runtime entered, shutdown BEFORE credential runtime exits.
                 if _pc_resolved.runtime_enabled:
-                    from .provider_config_runtime import (
+                    from .providers.config_runtime import (
                         provider_config_runtime_context,
                     )
 
@@ -754,7 +754,7 @@ def create_app(
                     # 读取；为 None 时 _execute_prompt 走 legacy client 兼容路径.
                     from ..providers.factory import create_provider
                     from ..providers.registry import _DEFAULT_REGISTRY
-                    from .provider_runtime import RequestProviderRuntime
+                    from .providers.runtime import RequestProviderRuntime
 
                     _app.state.request_provider_runtime = RequestProviderRuntime(
                         provider_config_service=_app.state.provider_config_runtime.service,
@@ -983,7 +983,7 @@ def create_app(
     # 与 Credential API 共用 WebSecurityConfig；Router 复用 E1 安全 deps
     if _pc_resolved.api_enabled:
         from .local_web_security import default_web_security_config as _pc_ws
-        from .provider_profiles_api import (
+        from .providers.api import (
             ProviderProfileBodyLimitMiddleware,
             build_full_provider_profile_router,
         )

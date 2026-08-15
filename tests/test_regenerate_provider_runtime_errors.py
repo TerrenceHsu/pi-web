@@ -42,7 +42,7 @@ from pi_agent_core_py.providers.registry import (  # noqa: E402
     ProviderDefinition,
 )
 from pi_agent_core_py.web.app import create_app  # noqa: E402
-from pi_agent_core_py.web.provider_runtime import (  # noqa: E402
+from pi_agent_core_py.web.providers.runtime import (  # noqa: E402
     RequestProviderRuntime,
 )
 
@@ -263,7 +263,7 @@ async def test_profile_missing_marks_revision_error(env: tuple) -> None:
 
     # Simulate profile missing——patch service to raise NotFound
     runtime: RequestProviderRuntime = app.state.request_provider_runtime
-    from pi_agent_core_py.web.provider_config_store import (
+    from pi_agent_core_py.web.providers.config_store import (
         ProviderProfileNotFoundError,
     )
 

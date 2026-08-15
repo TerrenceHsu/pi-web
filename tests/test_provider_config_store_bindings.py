@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from pi_agent_core_py.web.provider_config_store import (
+from pi_agent_core_py.web.providers.config_store import (
     ProviderConfigStoreError,
     ProviderProfileNotFoundError,
     SessionModelBinding,

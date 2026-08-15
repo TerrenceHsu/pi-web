@@ -33,8 +33,8 @@ from pi_agent_core_py.web.credentials.service import (
     CredentialService,
 )
 from pi_agent_core_py.web.credentials.store import CredentialNotFoundError
-from pi_agent_core_py.web.provider_config_service import ProviderConfigService
-from pi_agent_core_py.web.provider_runtime import (
+from pi_agent_core_py.web.providers.config_service import ProviderConfigService
+from pi_agent_core_py.web.providers.runtime import (
     ProviderInitializationError,
     ProviderSelectionUnavailableError,
     RequestProviderRuntime,

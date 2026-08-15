@@ -41,7 +41,7 @@ from pi_agent_core_py.providers.registry import (  # noqa: E402
     ProviderDefinition,
 )
 from pi_agent_core_py.web.app import create_app  # noqa: E402
-from pi_agent_core_py.web.provider_runtime import (  # noqa: E402
+from pi_agent_core_py.web.providers.runtime import (  # noqa: E402
     RequestProviderRuntime,
 )
 
@@ -525,7 +525,7 @@ def test_core_runtime_modules_unchanged() -> None:
     """Spot-check: provider_runtime.py still defines the expected public API.
     This is a sanity check, not a full diff——M1-6 is test-only.
     """
-    from pi_agent_core_py.web import provider_runtime as pr
+    from pi_agent_core_py.web.providers import runtime as pr
 
     for name in (
         "RequestProviderRuntime",

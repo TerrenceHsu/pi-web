@@ -308,7 +308,7 @@ def test_provider_profiles_api_source_no_api_key_literals() -> None:
     """Source must NOT contain HTTP header / api key constants."""
     import inspect
 
-    from pi_agent_core_py.web import provider_profiles_api as mod
+    from pi_agent_core_py.web.providers import api as mod
 
     src = inspect.getsource(mod)
     forbidden = (

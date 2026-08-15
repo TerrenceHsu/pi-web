@@ -104,7 +104,7 @@ def test_core_runtime_does_not_import_provider_runtime(module_rel: str) -> None:
                 )
         if isinstance(node, ast.Import):
             for alias in node.names:
-                assert alias.name != "pi_agent_core_py.web.provider_runtime", (
+                assert alias.name != "pi_agent_core_py.web.providers.runtime", (
                     f"{module_rel}: imports provider_runtime module"
                 )
 
@@ -242,7 +242,7 @@ def test_request_provider_runtime_constructed_only_in_composition_root() -> None
 
 def test_provider_runtime_does_not_import_secret_store_router() -> None:
     """provider_runtime.py 不直接导入 SecretStoreRouter."""
-    tree = _parse_module("web/provider_runtime.py")
+    tree = _parse_module("web/providers/runtime.py")
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             for alias in node.names:
@@ -253,7 +253,7 @@ def test_provider_runtime_does_not_import_secret_store_router() -> None:
 
 def test_provider_runtime_does_not_import_credential_repository() -> None:
     """provider_runtime.py 不导入 CredentialRepository / SQLiteCredentialStore."""
-    tree = _parse_module("web/provider_runtime.py")
+    tree = _parse_module("web/providers/runtime.py")
     forbidden_names = {
         "CredentialRepository",
         "SQLiteCredentialStore",
@@ -271,7 +271,7 @@ def test_provider_runtime_does_not_import_credential_repository() -> None:
 
 def test_provider_runtime_does_not_import_sdk() -> None:
     """provider_runtime.py 不导入 anthropic / openai SDK 直接."""
-    tree = _parse_module("web/provider_runtime.py")
+    tree = _parse_module("web/providers/runtime.py")
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -330,7 +330,7 @@ def test_glm_does_not_import_registry_or_web() -> None:
 
 def test_provider_runtime_public_api_stable() -> None:
     """Spot-check: provider_runtime.py still exports the expected names."""
-    module = importlib.import_module("pi_agent_core_py.web.provider_runtime")
+    module = importlib.import_module("pi_agent_core_py.web.providers.runtime")
     for name in (
         "RequestProviderRuntime",
         "RequestProviderSelection",

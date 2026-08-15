@@ -68,7 +68,7 @@ from .store import (
     SQLiteCredentialStore,
     resolve_storage_status,
 )
-from ..provider_validation import (
+from ..providers.validation import (
     CredentialValidationErrorCode,
     ProviderValidationResult,
     ValidationStrategyRegistry,
@@ -1127,7 +1127,7 @@ class CredentialService:
 
         用于 env 路径——没写 Secret 无需补偿，所以不用 CredentialCompensationError.
         """
-        from .credentials_store import (
+        from .store import (
             CredentialAlreadyExistsError,
             CredentialSecretRefConflictError,
         )

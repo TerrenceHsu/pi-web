@@ -12,14 +12,14 @@ import pytest
 from pi_agent_core_py.providers.registry import ProviderDefinition, ProviderRegistry
 from pi_agent_core_py.web.credentials.service import CredentialService, CredentialView
 from pi_agent_core_py.web.credentials.store import CredentialNotFoundError
-from pi_agent_core_py.web.model_options import InvalidModelIdError
-from pi_agent_core_py.web.provider_config_service import (
+from pi_agent_core_py.web.providers.model_options import InvalidModelIdError
+from pi_agent_core_py.web.providers.config_service import (
     CredentialNotFoundForProfileError,
     InvalidProfileNameError,
     ProviderConfigService,
     UnknownProviderError,
 )
-from pi_agent_core_py.web.provider_config_store import (
+from pi_agent_core_py.web.providers.config_store import (
     ProviderProfileInUseError,
     ProviderProfileNotFoundError,
     SQLiteProviderConfigStore,

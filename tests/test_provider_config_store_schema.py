@@ -24,7 +24,7 @@ from pathlib import Path
 import aiosqlite
 import pytest
 
-from pi_agent_core_py.web.provider_config_store import (
+from pi_agent_core_py.web.providers.config_store import (
     WEB_PROVIDER_CONFIG_SCHEMA_VERSION,
     ProviderConfigSchemaValidationError,
     ProviderConfigSchemaVersionError,
@@ -479,7 +479,7 @@ async def test_14_foreign_keys_pragma_returns_1_after_open(tmp_path: Path) -> No
         assert int(row[0]) == 1
 
         # Functional: FK fires when inserting binding with non-existent profile
-        from pi_agent_core_py.web.provider_config_store import (
+        from pi_agent_core_py.web.providers.config_store import (
             ProviderProfileNotFoundError,
         )
         with pytest.raises(ProviderProfileNotFoundError):

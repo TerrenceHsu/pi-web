@@ -30,12 +30,12 @@ from pi_agent_core_py.web.credentials.service import (
     CredentialView,
 )
 from pi_agent_core_py.web.credentials.store import CredentialNotFoundError
-from pi_agent_core_py.web.provider_config_service import (
+from pi_agent_core_py.web.providers.config_service import (
     ProviderConfigService,
     SessionNotFoundError,
 )
-from pi_agent_core_py.web.provider_config_store import SQLiteProviderConfigStore
-from pi_agent_core_py.web.provider_runtime import (
+from pi_agent_core_py.web.providers.config_store import SQLiteProviderConfigStore
+from pi_agent_core_py.web.providers.runtime import (
     ProviderInitializationError,
     ProviderSelectionDisabledError,
     ProviderSelectionNotFoundError,
@@ -354,7 +354,7 @@ async def test_20_profile_not_found(
     )
 
     # Simulate "binding points to deleted profile"——raise at the service layer
-    from pi_agent_core_py.web.provider_config_store import (
+    from pi_agent_core_py.web.providers.config_store import (
         ProviderProfileNotFoundError,
     )
 

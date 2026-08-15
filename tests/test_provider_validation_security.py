@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 import httpx
 import pytest
 
-from pi_agent_core_py.web.provider_validation import (
+from pi_agent_core_py.web.providers.validation import (
     AnthropicModelsValidationStrategy,
     HttpClientFactory,
     ValidationStrategyRegistry,
@@ -197,7 +197,7 @@ class TestLogSafety:
         factory = make_mock_factory(lambda req: _ok({"data": []}))
         strategy = AnthropicModelsValidationStrategy(client_factory=factory)
 
-        with caplog.at_level(logging.DEBUG, logger="pi_agent_core_py.web.provider_validation"):
+        with caplog.at_level(logging.DEBUG, logger="pi_agent_core_py.web.providers.validation"):
             await strategy.validate(SECRET_MARKER)
 
         for record in caplog.records:
@@ -292,7 +292,7 @@ class TestProviderErrorBodySafety:
 
 
 def test_provider_validation_module_globals_no_marker() -> None:
-    import pi_agent_core_py.web.provider_validation as mod
+    import pi_agent_core_py.web.providers.validation as mod
 
     for name, value in vars(mod).items():
         if isinstance(value, str) and not name.startswith("__"):

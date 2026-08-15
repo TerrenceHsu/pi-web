@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from pi_agent_core_py.web.provider_config_store import (
+from pi_agent_core_py.web.providers.config_store import (
     ProviderProfileNotFoundError,
     SQLiteProviderConfigStore,
 )
@@ -230,7 +230,7 @@ async def test_49_transaction_failure_rolls_back(tmp_path: Path) -> None:
         )
 
         # Force a failure mid-update: invalid name (control char)
-        from pi_agent_core_py.web.provider_config_store import (
+        from pi_agent_core_py.web.providers.config_store import (
             ProviderConfigStoreError,
         )
         with pytest.raises(ProviderConfigStoreError):
@@ -267,7 +267,7 @@ async def test_50_rollback_does_not_affect_other_store(tmp_path: Path) -> None:
         )
 
         # s1 attempts an operation that fails
-        from pi_agent_core_py.web.provider_config_store import (
+        from pi_agent_core_py.web.providers.config_store import (
             ProviderConfigStoreError,
         )
         with pytest.raises(ProviderConfigStoreError):

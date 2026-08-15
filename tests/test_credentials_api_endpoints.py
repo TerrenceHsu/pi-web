@@ -35,7 +35,7 @@ from pi_agent_core_py.web.credentials.store import SQLiteCredentialStore  # noqa
 from pi_agent_core_py.web.local_web_security import (  # noqa: E402
     default_web_security_config,
 )
-from pi_agent_core_py.web.provider_validation import (  # noqa: E402
+from pi_agent_core_py.web.providers.validation import (  # noqa: E402
     ProviderValidationResult,
     ValidationStrategyRegistry,
 )

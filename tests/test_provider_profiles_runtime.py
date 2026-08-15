@@ -21,7 +21,7 @@ from pi_agent_core_py import (  # noqa: E402
     Usage,
 )
 from pi_agent_core_py.web.app import create_app  # noqa: E402
-from pi_agent_core_py.web.provider_config_runtime import (  # noqa: E402
+from pi_agent_core_py.web.providers.config_runtime import (  # noqa: E402
     ProviderConfigWebSecurityConfigurationError,
     resolve_provider_profiles_api_configuration,
 )
@@ -131,7 +131,7 @@ async def test_4_provider_runtime_shutdown_closes_store(tmp_path: Path) -> None:
         # Verify functional
         await store.list_profiles()
     # After close: store rejects operations
-    from pi_agent_core_py.web.provider_config_store import (
+    from pi_agent_core_py.web.providers.config_store import (
         ProviderConfigStoreError,
     )
     with pytest.raises(ProviderConfigStoreError):

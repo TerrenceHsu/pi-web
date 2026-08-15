@@ -39,7 +39,7 @@ from pi_agent_core_py.web.credentials.store import (
     CredentialNotFoundError,
     SQLiteCredentialStore,
 )
-from pi_agent_core_py.web.provider_validation import (
+from pi_agent_core_py.web.providers.validation import (
     CredentialValidationErrorCode,
     ProviderValidationResult,
     ValidationStrategyRegistry,

@@ -43,7 +43,7 @@ from pi_agent_core_py.web.credentials.service import (
     RotateCredentialCommand,
 )
 from pi_agent_core_py.web.credentials.store import SQLiteCredentialStore
-from pi_agent_core_py.web.provider_validation import (
+from pi_agent_core_py.web.providers.validation import (
     AnthropicModelsValidationStrategy,
     HttpClientFactory,
     ProviderValidationResult,

@@ -18,7 +18,7 @@ from pathlib import Path
 import aiosqlite
 import pytest
 
-from pi_agent_core_py.web.provider_config_store import (
+from pi_agent_core_py.web.providers.config_store import (
     ProviderConfigRecordDecodeError,
     ProviderConfigStoreError,
     ProviderProfile,
@@ -198,7 +198,7 @@ async def test_61_error_messages_do_not_leak_row_or_sql(
         model_id="claude-X",
         source="explicit",
     )
-    from pi_agent_core_py.web.provider_config_store import (
+    from pi_agent_core_py.web.providers.config_store import (
         ProviderProfileInUseError,
     )
     with pytest.raises(ProviderProfileInUseError) as exc_info:
@@ -217,7 +217,7 @@ async def test_61_error_messages_do_not_leak_row_or_sql(
 @pytest.mark.asyncio
 async def test_62_decode_error_does_not_dump_row(tmp_path: Path) -> None:
     """ProviderConfigRecordDecodeError must not include full row in str/repr."""
-    from pi_agent_core_py.web.provider_config_store import _decode_profile
+    from pi_agent_core_py.web.providers.config_store import _decode_profile
 
     # Construct a row-like dict missing required keys
     bad_row = {
@@ -237,7 +237,7 @@ async def test_62_decode_error_does_not_dump_row(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_62b_decode_binding_error_does_not_dump_row() -> None:
-    from pi_agent_core_py.web.provider_config_store import _decode_binding
+    from pi_agent_core_py.web.providers.config_store import _decode_binding
 
     bad_row = {"session_id": "sess-x"}
     with pytest.raises(ProviderConfigRecordDecodeError) as exc_info:
@@ -278,7 +278,8 @@ def test_64_production_source_has_no_api_key_or_http_patterns() -> None:
         / "src"
         / "pi_agent_core_py"
         / "web"
-        / "provider_config_store.py"
+        / "providers"
+        / "config_store.py"
     )
     source = src_path.read_text(encoding="utf-8")
 
@@ -388,7 +389,7 @@ def test_all_errors_inherit_from_base() -> None:
     Lets callers write ``except ProviderConfigStoreError`` to catch all
     domain errors uniformly.
     """
-    from pi_agent_core_py.web import provider_config_store as mod
+    from pi_agent_core_py.web.providers import config_store as mod
 
     expected = [
         "ProviderConfigSchemaError",

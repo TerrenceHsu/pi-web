@@ -5,10 +5,10 @@
 from __future__ import annotations
 
 from pi_agent_core_py.web.credentials.service import CredentialView
-from pi_agent_core_py.web.provider_config_service import (
+from pi_agent_core_py.web.providers.config_service import (
     derive_profile_status,
 )
-from pi_agent_core_py.web.provider_config_store import ProviderProfile
+from pi_agent_core_py.web.providers.config_store import ProviderProfile
 
 # ============================================================================
 # Helpers

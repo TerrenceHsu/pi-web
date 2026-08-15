@@ -57,20 +57,20 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Literal
 
-from ..harness import AgentHarness
-from ..model_client import ModelClient
-from ..providers.base import ProviderAdapter
-from ..providers.errors import ProviderConfigError
-from ..providers.factory import create_provider
-from ..providers.registry import ProviderRegistry
-from .credentials.errors import (
+from ...harness import AgentHarness
+from ...model_client import ModelClient
+from ...providers.base import ProviderAdapter
+from ...providers.errors import ProviderConfigError
+from ...providers.factory import create_provider
+from ...providers.registry import ProviderRegistry
+from ..credentials.errors import (
     CredentialRequestSecretBackendError,
     CredentialRequestSecretUnavailableError,
 )
-from .credentials.service import CredentialService
-from .credentials.store import CredentialNotFoundError
-from .provider_config_service import ProviderConfigService
-from .provider_config_store import ProviderProfileNotFoundError
+from ..credentials.service import CredentialService
+from ..credentials.store import CredentialNotFoundError
+from .config_service import ProviderConfigService
+from .config_store import ProviderProfileNotFoundError
 
 __all__ = [
     "RequestProviderSelection",

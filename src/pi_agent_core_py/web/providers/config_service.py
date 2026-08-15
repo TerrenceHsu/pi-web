@@ -27,16 +27,16 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal
 
-from ..providers.registry import ProviderDefinition, ProviderRegistry
-from .credentials.service import CredentialService, CredentialView
-from .credentials.store import CredentialNotFoundError
+from ...providers.registry import ProviderDefinition, ProviderRegistry
+from ..credentials.service import CredentialService, CredentialView
+from ..credentials.store import CredentialNotFoundError
 from .model_options import (
     InvalidModelIdError,
     ModelOption,
     get_static_model_options,
     normalize_model_id,
 )
-from .provider_config_store import (
+from .config_store import (
     ProviderConfigStoreError,
     ProviderProfile,
     ProviderProfileNotFoundError,
@@ -227,7 +227,7 @@ def _generate_profile_id() -> str:
 
     Delegates to the Store-level helper to keep ID format consistent.
     """
-    from .provider_config_store import generate_profile_id
+    from .config_store import generate_profile_id
     return generate_profile_id()
 
 

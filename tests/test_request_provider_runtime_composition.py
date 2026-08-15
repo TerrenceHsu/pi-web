@@ -29,7 +29,7 @@ from pi_agent_core_py import (  # noqa: E402
 from pi_agent_core_py.providers.factory import create_provider  # noqa: E402
 from pi_agent_core_py.providers.registry import _DEFAULT_REGISTRY  # noqa: E402
 from pi_agent_core_py.web.app import create_app  # noqa: E402
-from pi_agent_core_py.web.provider_runtime import RequestProviderRuntime  # noqa: E402
+from pi_agent_core_py.web.providers.runtime import RequestProviderRuntime  # noqa: E402
 
 pytestmark = pytest.mark.asyncio
 
@@ -181,7 +181,8 @@ async def test_7_does_not_create_second_secret_store_router(
         / "src"
         / "pi_agent_core_py"
         / "web"
-        / "provider_runtime.py"
+        / "providers"
+        / "runtime.py"
     )
     tree = ast.parse(src_path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):

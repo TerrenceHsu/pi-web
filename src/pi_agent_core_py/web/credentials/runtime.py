@@ -37,7 +37,7 @@ from ...secrets import (
 from .service import CredentialService
 from .store import SQLiteCredentialStore
 from ..local_web_security import WebSecurityConfig
-from ..provider_validation import (
+from ..providers.validation import (
     get_default_validation_strategy_registry,
 )
 from .secret_store import SecretStoreRouter
