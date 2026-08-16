@@ -19,9 +19,9 @@ after_tool_call
 - `permission_policy is None` → loop 不做权限检查，保持旧行为（向后兼容）
 - `policy` 抛异常 / 返回非法对象 → 不让 loop 崩，
   转成 `error_type="ToolPermissionPolicyError"` ToolResult
-- `require_approval` 在 Step 18 中按"不执行工具"处理——没有交互式审批 UI，
-  loop 把它转成 `error_type="ToolApprovalRequired"` 的 is_error ToolResult，
-  语义上等同于 deny 但 error_type 区分（未来 Step 20 UI 能据此弹审批框）
+- `require_approval` 默认仍按"不执行工具"处理；P2-B 可注入一次性
+  `ToolApprovalHandler`。批准后仅继续当前精确 ToolCall，拒绝或没有 handler
+  都返回安全 ToolResult
 - 每次检查都写一条 `ToolPermissionAuditRecord`（如果 audit_log 不为 None）
 
 实现策略：
@@ -32,11 +32,14 @@ after_tool_call
   - 显式 allow 名单是最高级放行配置（不受 allow_write=False 等类别开关阻止）
   - read-only 工具名模式默认允许（含 MCP `mcp__*_read* / list* / get* / search*`）
   - 高风险关键字（write / delete / shell / network / sql / post / put / patch）
-    默认 `require_approval`；Step 18 没有 UI，loop 按拒绝执行处理
+    默认 `require_approval`；无审批 handler 时 loop 按拒绝执行处理
 """
 from __future__ import annotations
 
 import abc
+import asyncio
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -52,7 +55,7 @@ from ..tools import AgentTool
 #: 权限决策类型。
 #: - "allow"            允许执行
 #: - "deny"             拒绝；返回 is_error ToolResult
-#: - "require_approval" 需要人工审批；Step 18 按 deny 处理（error_type 区分）
+#: - "require_approval" 需要人工审批；无 handler 时不执行
 PermissionDecisionType = Literal["allow", "deny", "require_approval"]
 
 
@@ -79,6 +82,20 @@ class ToolPermissionDecision(BaseModel):
     @property
     def require_approval(self) -> bool:
         return self.decision == "require_approval"
+
+
+@dataclass(frozen=True)
+class ToolApprovalContext:
+    """一次 ``require_approval`` 决策交给交互层时的不可变上下文。"""
+
+    tool_call: ToolCall
+    tool: AgentTool | None
+    decision: ToolPermissionDecision
+    signal: asyncio.Event | None = None
+
+
+# ``True`` 只批准本次精确 ToolCall；``False`` 拒绝。同步/异步 handler 均支持。
+ToolApprovalHandler = Callable[[ToolApprovalContext], bool | Awaitable[bool]]
 
 
 # ============================================================================
@@ -539,6 +556,8 @@ class DefaultToolPermissionPolicy(ToolPermissionPolicy):
 __all__ = [
     "PermissionDecisionType",
     "ToolPermissionDecision",
+    "ToolApprovalContext",
+    "ToolApprovalHandler",
     "ToolPermissionPolicy",
     "AllowAllToolPermissionPolicy",
     "DenyAllToolPermissionPolicy",

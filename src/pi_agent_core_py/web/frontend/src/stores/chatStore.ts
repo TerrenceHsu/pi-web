@@ -18,8 +18,10 @@ import * as messagesApi from "../api/messages"
 import * as eventsApi from "../api/events"
 import * as regenerateApi from "../api/regenerate"
 import * as slashCommandsApi from "../api/slashCommands"
+import * as approvalsApi from "../api/approvals"
 import { ApiError } from "../api/client"
 import { createEventSocket, type EventSocket } from "../api/websocket"
+import { useContextBudgetStore } from "./contextBudgetStore"
 import type {
   AgentMessage,
   ChatStreamItem,
@@ -28,6 +30,9 @@ import type {
   PersistedMessageDto,
   ToolCallItem,
   ToolResultItem,
+  ToolApprovalDecision,
+  ToolApprovalItem,
+  ToolApprovalRecord,
   FileReadItem,
   WebEvent,
   WebEventEnvelope,
@@ -269,6 +274,8 @@ export const useChatStore = defineStore("chat", () => {
     "message_start", "message_update", "message_end",
     "request_end", "agent_end", "error", "agent_abort",
     "tool_execution_start", "tool_execution_update", "tool_execution_end",
+    "tool_approval_requested", "tool_approval_resolved",
+    "context_budget_updated",
     "turn_end", "turn_start", "agent_start",
     "request_start", "request_queued",
   ])
@@ -293,10 +300,17 @@ export const useChatStore = defineStore("chat", () => {
   let currentAssistantItemId: string | null = null
   /** tool_call.id → streamItem.id 映射——用于 start/end 配对。 */
   const toolItemIds: Record<string, string> = {}
+  /** approval_id → streamItem.id；刷新 replay / pending API 共用同一张卡。 */
+  const approvalItemIds: Record<string, string> = {}
   /** 已展示过的 SkillUsedItem signature——避免重复。 */
   let lastSkillSignature: string | null = null
 
   const itemCount = computed(() => streamItems.value.length)
+  const pendingApprovalCount = computed(
+    () => streamItems.value.filter(
+      (item) => item.kind === "tool_approval" && item.status === "pending",
+    ).length,
+  )
 
   // ----------------------------------------------------------------------
   // 历史消息加载
@@ -315,9 +329,21 @@ export const useChatStore = defineStore("chat", () => {
         kind: "assistant_message",
         id,
         content: textOf(msg),
+        usage: msg.usage,
+        generationMetrics: msg.generation_metrics,
       }
     }
-    // toolResult / summary / 其它——历史消息中没有 tool_call 配对信息，
+    if (msg.role === "summary") {
+      return {
+        kind: "context_summary",
+        id,
+        content: textOf(msg),
+        sourceMessageCount: msg.source_message_count ?? 0,
+        sourceTurnCount: msg.source_turn_count ?? 0,
+        createdAt: msg.created_at,
+      }
+    }
+    // toolResult / 其它——历史消息中没有 tool_call 配对信息，
     // 简化为 turn_info（避免在历史中显示一堆孤立的 tool_result card）
     return {
       kind: "turn_info",
@@ -357,6 +383,18 @@ export const useChatStore = defineStore("chat", () => {
         messageIndex: dto.idx,
         persisted: true,
         content: textOf(msg),
+        usage: msg.usage,
+        generationMetrics: msg.generation_metrics,
+      }
+    }
+    if (msg.role === "summary") {
+      return {
+        kind: "context_summary",
+        id: dto.message_id,
+        content: textOf(msg),
+        sourceMessageCount: msg.source_message_count ?? 0,
+        sourceTurnCount: msg.source_turn_count ?? 0,
+        createdAt: msg.created_at,
       }
     }
     return {
@@ -1229,6 +1267,146 @@ export const useChatStore = defineStore("chat", () => {
     return true
   }
 
+  function upsertToolApproval(raw: unknown): void {
+    if (!raw || typeof raw !== "object") return
+    const record = raw as ToolApprovalRecord
+    if (
+      typeof record.approval_id !== "string" ||
+      typeof record.request_id !== "string" ||
+      typeof record.tool_call_id !== "string" ||
+      typeof record.tool_name !== "string" ||
+      !["pending", "approved", "denied", "cancelled"].includes(record.status)
+    ) {
+      return
+    }
+    if (
+      activeSessionId.value &&
+      record.session_id &&
+      record.session_id !== activeSessionId.value
+    ) {
+      return
+    }
+
+    let itemId: string | undefined = approvalItemIds[record.approval_id]
+    if (!itemId) {
+      const existing = streamItems.value.find(
+        (item) =>
+          item.kind === "tool_approval" &&
+          item.approvalId === record.approval_id,
+      )
+      itemId = existing?.id
+    }
+    if (itemId) {
+      approvalItemIds[record.approval_id] = itemId
+      updateItem(itemId, (item: ToolApprovalItem) => {
+        item.status = record.status
+        item.resolvedAt = record.resolved_at
+        item.submitting = false
+        item.error = null
+      })
+      return
+    }
+
+    const item: ToolApprovalItem = {
+      kind: "tool_approval",
+      id: genId("approval"),
+      approvalId: record.approval_id,
+      requestId: record.request_id,
+      sessionId: record.session_id,
+      toolCallId: record.tool_call_id,
+      toolName: record.tool_name,
+      toolLabel: record.tool_label || record.tool_name,
+      arguments:
+        record.arguments && typeof record.arguments === "object"
+          ? record.arguments
+          : {},
+      reason: record.reason,
+      policyName: record.policy_name,
+      status: record.status,
+      createdAt: record.created_at,
+      resolvedAt: record.resolved_at,
+      submitting: false,
+      error: null,
+    }
+    approvalItemIds[record.approval_id] = item.id
+    streamItems.value.push(item)
+  }
+
+  async function loadPendingApprovals(
+    sessionId: string,
+    requestId: string,
+  ): Promise<void> {
+    try {
+      const response = await approvalsApi.listRequestApprovals(requestId, "pending")
+      if (
+        activeSessionId.value !== sessionId ||
+        currentRequestId.value !== requestId ||
+        response.request_id !== requestId ||
+        response.session_id !== sessionId
+      ) {
+        return
+      }
+      for (const approval of response.approvals) {
+        if (
+          approval.request_id === requestId &&
+          approval.session_id === sessionId &&
+          approval.status === "pending"
+        ) {
+          upsertToolApproval(approval)
+        }
+      }
+    } catch {
+      if (
+        activeSessionId.value === sessionId &&
+        currentRequestId.value === requestId
+      ) {
+        needsFinalResync.value = true
+      }
+    }
+  }
+
+  async function resolveToolApproval(
+    approvalId: string,
+    decision: ToolApprovalDecision,
+  ): Promise<void> {
+    const itemId = approvalItemIds[approvalId]
+    const item = streamItems.value.find(
+      (candidate) => candidate.id === itemId && candidate.kind === "tool_approval",
+    ) as ToolApprovalItem | undefined
+    if (!item || item.status !== "pending" || item.submitting) return
+    if (
+      currentRequestId.value !== item.requestId ||
+      activeSessionId.value !== item.sessionId
+    ) {
+      return
+    }
+
+    updateItem(item.id, (target: ToolApprovalItem) => {
+      target.submitting = true
+      target.error = null
+    })
+    try {
+      const response = await approvalsApi.resolveToolApproval(
+        item.requestId,
+        approvalId,
+        decision,
+      )
+      if (
+        currentRequestId.value === item.requestId &&
+        activeSessionId.value === item.sessionId
+      ) {
+        upsertToolApproval(response.approval)
+      }
+    } catch (e) {
+      const message = e instanceof ApiError ? e.detail : String(e)
+      updateItem(item.id, (target: ToolApprovalItem) => {
+        target.submitting = false
+        target.error = message
+      })
+      throw e
+    }
+  }
+
   // ----------------------------------------------------------------------
   // handleEvent —— WS event → ChatStreamItem 完整映射
   // ----------------------------------------------------------------------
@@ -1362,6 +1540,11 @@ export const useChatStore = defineStore("chat", () => {
 
     const t = event.type
 
+    if (t === "context_budget_updated") {
+      useContextBudgetStore().applyEvent(activeSessionId.value, event)
+      return
+    }
+
     // 2. error 事件
     if (t === "error") {
       appendError((event as any).message || "stream error", event)
@@ -1437,6 +1620,8 @@ export const useChatStore = defineStore("chat", () => {
             if (it.kind === "assistant_message") {
               it.content = finalText
               it.streaming = false
+              it.usage = msg.usage
+              it.generationMetrics = msg.generation_metrics
             }
           })
         }
@@ -1500,6 +1685,8 @@ export const useChatStore = defineStore("chat", () => {
                 it.content = full
               }
               it.streaming = false
+              it.usage = msg.usage
+              it.generationMetrics = msg.generation_metrics
             }
           })
         } else {
@@ -1509,10 +1696,17 @@ export const useChatStore = defineStore("chat", () => {
             kind: "assistant_message",
             id,
             content: full,
+            usage: msg.usage,
+            generationMetrics: msg.generation_metrics,
           })
           currentAssistantItemId = id
         }
       }
+      return
+    }
+
+    if (t === "tool_approval_requested" || t === "tool_approval_resolved") {
+      upsertToolApproval((event as any).approval)
       return
     }
 
@@ -1862,6 +2056,7 @@ export const useChatStore = defineStore("chat", () => {
     currentTurnInfoId = null
     currentAssistantItemId = null
     Object.keys(toolItemIds).forEach((k) => delete toolItemIds[k])
+    Object.keys(approvalItemIds).forEach((k) => delete approvalItemIds[k])
     lastSkillSignature = null
     // P1-B2: 重置去重 state（session 切换时不清理 lastSequenceBySession——
     // 保留 per-session sequence 用于后续切回时 gap 检测；但 seenEventIds
@@ -1978,6 +2173,7 @@ export const useChatStore = defineStore("chat", () => {
     checkpointing,
     checkpointNotice,
     itemCount,
+    pendingApprovalCount,
     // P1-B2: envelope-aware state（暴露给调试 / 后续 UI）
     lastSequenceBySession,
     gapDetected,
@@ -2014,6 +2210,8 @@ export const useChatStore = defineStore("chat", () => {
     findActiveRequest,
     resumeActiveRequest,
     recoverActiveRequestEvents,
+    loadPendingApprovals,
+    resolveToolApproval,
     resetWorkspace,
   }
 })

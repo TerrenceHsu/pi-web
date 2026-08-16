@@ -46,6 +46,8 @@ const sessionStore = useSessionStore()
 
 const profileName = ref("")
 const modelInput = ref("")
+const contextWindowInput = ref("")
+const maxOutputTokensInput = ref("")
 const enabled = ref(true)
 const isDefault = ref(false)
 
@@ -85,6 +87,8 @@ function initializeFromProps() {
     isDefault.value = false
     effectiveCredentialId.value = null
   }
+  contextWindowInput.value = ""
+  maxOutputTokensInput.value = ""
   credentialStageCompleted.value = false
 
   if (props.credential) {
@@ -112,6 +116,12 @@ onMounted(async () => {
   if (props.profile) {
     try {
       modelOptions.value = await providerStore.loadProfileModels(props.profile.id)
+      const capabilities = await providerStore.loadModelCapabilities(
+        props.profile.id,
+        props.profile.default_model,
+      )
+      contextWindowInput.value = capabilities?.context_window?.toString() ?? ""
+      maxOutputTokensInput.value = capabilities?.max_output_tokens?.toString() ?? ""
     } catch {
       // 模型加载失败不阻塞表单——用户仍可手动输入
       modelOptions.value = []
@@ -183,6 +193,17 @@ function validateFields(): boolean {
   const errors: Record<string, string> = {}
   if (!profileName.value.trim()) errors.profileName = "Profile name is required."
   if (!modelInput.value.trim()) errors.modelInput = "Model ID is required."
+  const contextWindow = contextWindowInput.value.trim()
+  const maxOutput = maxOutputTokensInput.value.trim()
+  if (contextWindow && (!/^\d+$/.test(contextWindow) || Number(contextWindow) < 1024)) {
+    errors.contextWindowInput = "Context window must be at least 1,024 tokens."
+  }
+  if (maxOutput && (!/^\d+$/.test(maxOutput) || Number(maxOutput) < 1)) {
+    errors.maxOutputTokensInput = "Max output tokens must be a positive integer."
+  }
+  if (contextWindow && maxOutput && Number(maxOutput) > Number(contextWindow)) {
+    errors.maxOutputTokensInput = "Max output tokens cannot exceed the context window."
+  }
   if (!credentialLabel.value.trim()) {
     errors.credentialLabel = "Credential label is required."
   }
@@ -307,7 +328,8 @@ async function runStageA(): Promise<boolean> {
   return true
 }
 
-async function runStageB(): Promise<boolean> {
+async function runStageB(): Promise<ProviderProfileView | null> {
+  let savedProfile: ProviderProfileView
   if (props.profile) {
     const updated = await providerStore.updateProfile(props.profile.id, {
       name: profileName.value.trim(),
@@ -318,8 +340,9 @@ async function runStageB(): Promise<boolean> {
     })
     if (!updated) {
       localError.value = "Credential saved, but profile could not be saved."
-      return false
+      return null
     }
+    savedProfile = updated
   } else {
     const created = await providerStore.createProfile({
       name: profileName.value.trim(),
@@ -331,10 +354,24 @@ async function runStageB(): Promise<boolean> {
     })
     if (!created) {
       localError.value = "Credential saved, but profile could not be saved."
-      return false
+      return null
+    }
+    savedProfile = created
+  }
+  const contextWindow = contextWindowInput.value.trim()
+  const maxOutput = maxOutputTokensInput.value.trim()
+  if (contextWindow || maxOutput) {
+    const capabilities = await providerStore.saveModelCapabilities(savedProfile.id, {
+      model_id: modelInput.value.trim(),
+      context_window: contextWindow ? Number(contextWindow) : null,
+      max_output_tokens: maxOutput ? Number(maxOutput) : null,
+    })
+    if (!capabilities) {
+      localError.value = "Profile saved, but model limits could not be saved."
+      return null
     }
   }
-  return true
+  return savedProfile
 }
 
 async function saveConfiguration() {
@@ -372,8 +409,8 @@ async function saveConfiguration() {
   }
 
   // Stage B——Profile
-  const stageBOk = await runStageB()
-  if (!stageBOk) {
+  const savedProfile = await runStageB()
+  if (!savedProfile) {
     saveStatus.value = "error"
     return
   }
@@ -503,6 +540,34 @@ watch(
           </option>
         </datalist>
         <span v-if="fieldErrors.modelInput" class="field-error">{{ fieldErrors.modelInput }}</span>
+      </label>
+
+      <label class="form-field">
+        <span class="form-label">Context window (tokens)</span>
+        <input
+          v-model="contextWindowInput"
+          type="number"
+          min="1024"
+          max="10000000"
+          class="form-input"
+          data-testid="context-window-input"
+          placeholder="Unknown"
+        />
+        <span v-if="fieldErrors.contextWindowInput" class="field-error">{{ fieldErrors.contextWindowInput }}</span>
+      </label>
+
+      <label class="form-field">
+        <span class="form-label">Max output tokens</span>
+        <input
+          v-model="maxOutputTokensInput"
+          type="number"
+          min="1"
+          max="1000000"
+          class="form-input"
+          data-testid="max-output-tokens-input"
+          placeholder="Provider default"
+        />
+        <span v-if="fieldErrors.maxOutputTokensInput" class="field-error">{{ fieldErrors.maxOutputTokensInput }}</span>
       </label>
 
       <div class="form-row">

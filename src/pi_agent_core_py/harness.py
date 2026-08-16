@@ -69,7 +69,8 @@ Step 18 新增（Permission / Approval Policy）：
 - snapshot / session.metadata["harness"]["context_metadata"]["policy"] 自动捕获
 - audit records **不**全量进 snapshot metadata——通过 list_permission_audit_records() 读
 
-Step 18 **不做**：真实 human approval UI（require_approval 按 deny 处理，error_type 区分）/
+P2-B：可选 ``tool_approval_handler`` 把 require_approval 交给 Web UI；未配置时
+仍按安全错误处理，保持 Step 18 向后兼容。
               Web UI（Step 20 PolicyPage 才展示 audit）/ 多用户权限 / OAuth / RBAC /
               企业 secret vault / RAG / Long-term Memory / MCP resources / MCP prompts（Step 19）。
 """
@@ -110,6 +111,7 @@ from .mcp.prompts import (
 from .messages import Message
 from .policy import (
     InMemoryToolPermissionAuditLog,
+    ToolApprovalHandler,
     ToolPermissionAuditRecord,
     ToolPermissionPolicy,
 )
@@ -235,6 +237,7 @@ class AgentHarness:
         metadata: dict[str, Any] | None = None,
         permission_policy: ToolPermissionPolicy | None = None,
         permission_audit_log: InMemoryToolPermissionAuditLog | None = None,
+        tool_approval_handler: ToolApprovalHandler | None = None,
     ):
         self.agent = agent
         self.before_request_hooks: list[BeforeRequestHook] = (
@@ -287,6 +290,7 @@ class AgentHarness:
         # Harness 持有 policy + audit_log；每次 _run_one 前同步到 agent
         # （agent 只持有引用——它本身不做策略决策，只是透传给 loop）
         self.permission_policy: ToolPermissionPolicy | None = permission_policy
+        self.tool_approval_handler: ToolApprovalHandler | None = tool_approval_handler
         self.permission_audit_log: InMemoryToolPermissionAuditLog = (
             permission_audit_log if permission_audit_log is not None
             else InMemoryToolPermissionAuditLog()
@@ -294,6 +298,7 @@ class AgentHarness:
         # 把 audit_log / policy 同步到 agent（loop 实际读 agent 的字段）
         self.agent.permission_policy = self.permission_policy
         self.agent.permission_audit_log = self.permission_audit_log
+        self.agent.tool_approval_handler = self.tool_approval_handler
 
         # Step 19：最近一次 attach_mcp_prompts_as_skills 中被吞掉的错误
         # （完整 list[{server, prompt, error}]——区别于 metadata 中只存摘要）
@@ -825,6 +830,14 @@ class AgentHarness:
         """
         self.permission_policy = policy
         self.agent.permission_policy = policy
+
+    def set_tool_approval_handler(
+        self,
+        handler: ToolApprovalHandler | None,
+    ) -> None:
+        """替换一次性工具审批处理器；``None`` 恢复安全错误行为。"""
+        self.tool_approval_handler = handler
+        self.agent.tool_approval_handler = handler
 
     def list_permission_audit_records(self) -> list[ToolPermissionAuditRecord]:
         """读取权限审计记录（按写入顺序）。"""

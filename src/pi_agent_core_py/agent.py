@@ -49,11 +49,17 @@ from .hooks import (
     AfterToolCallFn,
     BeforeToolCallFn,
 )
-from .loop import PrepareNextTurnFn, ShouldStopAfterTurnFn, run_event_loop
+from .loop import (
+    BeforeModelCallFn,
+    PrepareNextTurnFn,
+    ShouldStopAfterTurnFn,
+    run_event_loop,
+)
 from .messages import Message
 from .model_client import ModelClient
 from .policy import (
     InMemoryToolPermissionAuditLog,
+    ToolApprovalHandler,
     ToolPermissionPolicy,
 )
 from .tools import AgentTool, ToolRegistry
@@ -132,8 +138,10 @@ class Agent:
         after_tool_call: AfterToolCallFn | None = None,
         permission_policy: ToolPermissionPolicy | None = None,
         permission_audit_log: InMemoryToolPermissionAuditLog | None = None,
+        tool_approval_handler: ToolApprovalHandler | None = None,
         should_stop_after_turn: ShouldStopAfterTurnFn | None = None,
         prepare_next_turn: PrepareNextTurnFn | None = None,
+        before_model_call: BeforeModelCallFn | None = None,
         max_turns: int = 50,
     ):
         self.system_prompt = system_prompt
@@ -151,8 +159,10 @@ class Agent:
         # Agent 只做"持有 + 透传"，不做决策；Harness 可在运行期替换。
         self.permission_policy: ToolPermissionPolicy | None = permission_policy
         self.permission_audit_log: InMemoryToolPermissionAuditLog | None = permission_audit_log
+        self.tool_approval_handler: ToolApprovalHandler | None = tool_approval_handler
         self.should_stop_after_turn = should_stop_after_turn
         self.prepare_next_turn = prepare_next_turn
+        self.before_model_call = before_model_call
         # Bug-fix：max_turns 安全网——透传给 run_event_loop
         self.max_turns: int = max_turns
 
@@ -384,8 +394,10 @@ class Agent:
             signal=signal,
             permission_policy=self.permission_policy,
             permission_audit_log=self.permission_audit_log,
+            tool_approval_handler=self.tool_approval_handler,
             should_stop_after_turn=self.should_stop_after_turn,
             prepare_next_turn=self.prepare_next_turn,
+            before_model_call=self.before_model_call,
             max_turns=self.max_turns,
         ):
             await self._handle_event(ev)

@@ -8,6 +8,7 @@ from pi_agent_core_py.messages import (
     AssistantMessage,
     CustomMessage,
     FileBlock,
+    GenerationMetrics,
     Message,
     SummaryMessage,
     TextContent,
@@ -37,6 +38,26 @@ def test_assistant_message_minimal_required_fields() -> None:
     assert msg.role == "assistant"
     assert msg.stop_reason == "stop"
     assert msg.error_message is None
+    assert msg.generation_metrics is None
+
+
+def test_assistant_generation_metrics_round_trip() -> None:
+    msg = AssistantMessage(
+        content=[TextContent(text="hello")],
+        api="anthropic-messages",
+        provider="glm",
+        model="glm-4.5-flash",
+        generation_metrics=GenerationMetrics(
+            latency_ms=125,
+            time_to_first_token_ms=42,
+            usage_available=True,
+        ),
+    )
+    restored = AssistantMessage.model_validate(msg.model_dump(mode="json"))
+    assert restored.generation_metrics is not None
+    assert restored.generation_metrics.latency_ms == 125
+    assert restored.generation_metrics.time_to_first_token_ms == 42
+    assert restored.generation_metrics.usage_available is True
 
 
 def test_assistant_message_missing_provider_raises() -> None:

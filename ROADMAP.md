@@ -321,31 +321,31 @@ Session 激活现同步为 `/chat/{session_id}`，浏览器前进/后退、直�
 
 **验证**：Frontend 382/382 + typecheck/lint/build；Backend route/auth 42/42；Full Backend 3563 passed / 3 skipped / 15 deselected（83.66% coverage）；完整 Chromium refresh E2E 5/5（URL/history、历史+AGENT+Memory+树、active Prompt/Regenerate、invalid/deleted、admin→alice）；应用内浏览器直达刷新无 console error。
 
-### P2-B — Human Approval UI（优先级 2）
+### P2-B — Human Approval UI（✅ IMPLEMENTED / LOCAL BASELINE，2026-08-16）
 
-> 项目已有 `allow` / `deny` / `require_approval`，但 `require_approval` 当前按 `deny` 处理。
+`require_approval` 已从安全拒绝占位升级为可选暂停点：Core Runtime 把原始 ToolCall、Tool、policy decision 与 abort signal 交给 `ToolApprovalHandler`；Web handler 在当前 active request 内等待用户决定。没有 handler 的 library 使用方式仍保持 `ToolApprovalRequired` 安全错误，不会自动放行。
 
-**范围**：
-- Agent 请求执行高风险工具 → UI 显示 Approval Card（工具名 + 参数）
-- 第一版只支持：Approve once / Deny（不做永久授权、不做 RBAC）
-- 不影响 inline turn card 原则（Approval Card 也是 inline card）
+Web 只把有界、递归脱敏的参数视图发送给浏览器，原始 ToolCall 保留在暂停的 Agent task 内且不能由客户端替换。Approval ID 与 request/session 严格绑定；Approve once 仅执行该次调用，Deny、abort、shutdown、handler 异常均不执行工具。冲突二次决策返回 409，相同决策可幂等重试。
 
-### P2-C — Context Budget + Compaction UI（优先级 3）
+前端在对应 Turn 内联显示 Approval Card（工具名、原因、参数、Approve once / Deny）。P2-A 的 request event replay 与 pending approval REST fallback 让整页刷新继续显示等待状态，且保持 Session/账号隔离。
 
-**前置 Audit（启动前必做）**：
-1. AssistantMessage.usage 当前字段
-2. GLM 返回 usage 的位置
-3. Snapshot/session 是否保存 usage
-4. system prompt 和 tool schema 如何参与估算
-5. 现有 compaction API
-6. SummaryMessage 如何进入 LLM context
-7. 不同模型的 context_window 是否已知
+**验证**：Core/Web targeted 18/18；broader backend regression 158/158；Frontend 387/387 + typecheck/lint/build；P2-B Chromium 2/2，P2-A+P2-B 联合 7/7；Offline Backend 3569 passed / 3 skipped / 15 deselected（83.68% coverage）；Ruff / targeted mypy / production hook scan PASS。
 
-**范围**：
-- preflight token estimate（按边界 F）
-- UI：`Context ~42%`（必须显示近似符号）+ warning 70% / compaction 85% / hard stop 95%
-- Compaction 触发或提示
-- post-hoc 展示 provider usage（input/output token / latency）
+**第一版边界**：pending approval 是进程内 active-request 状态；浏览器刷新可恢复，后端重启不恢复。无永久授权、RBAC 或跨重启持久化。
+
+### P2-C — Context Budget + Compaction UI（✅ IMPLEMENTED / LOCAL BASELINE，2026-08-17）
+
+前置 Audit 已完成并固化为代码边界：Provider usage 只用于事后展示；下一次调用的预算始终由实际 canonical input 重新估算。估算覆盖渲染后的 system prompt、`AGENT.md`、`Memory.md`、所选 Skills、消息、Tool schemas 与附件块，并在 Web 预检和 Core `before_model_call` 两层执行。工具续轮也会重新估算。
+
+模型能力按 `(provider_id, model_id)` 持久化到账号隔离的 workspace DB，解析优先级为 user override → static metadata → unknown；Provider Profile UI 可编辑 `context_window` 与 `max_output_tokens`。未知窗口只显示 `Context unknown`，不会伪造百分比或阻止调用。
+
+UI 显示 `Context ~N%`，阈值为 warning 70%、建议压缩 85%、hard stop 95%；阻断时保留输入草稿。用户触发的 compaction 只在完整 Turn 边界切分，绝不保留孤立 ToolResult；规则式 SummaryMessage 原子替换旧消息、保留 snapshots，并作为 canonical history 参与后续 LLM context。摘要卡片与预算在刷新后恢复。
+
+AssistantMessage 记录 provider input/output usage、总延迟与首 token 延迟；无 usage 的 Provider 明确标记 unavailable，不用估算值冒充真实 usage。
+
+**验证**：P2-C 新增/受影响 Backend 83/83；Frontend 393/393 + typecheck/lint/build；Chromium E2E 1/1（hard stop、草稿保留、压缩、刷新恢复）；changed-file Ruff PASS。全 marker 回归执行 3580 passed，修正 3 个 Provider 静态契约后相关安全契约 34/34；剩余失败仅真实 DDGS 网络超时与当前 GLM credential 401。
+
+**第一版边界**：tokenizer 为带 12% 安全余量的确定性中英混合估算器；压缩摘要为本地规则式，不额外消费 LLM；暂不自动压缩。
 
 ### P2 候选（未启动）
 

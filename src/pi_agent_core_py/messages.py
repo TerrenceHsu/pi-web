@@ -107,6 +107,14 @@ class Usage(BaseModel):
     total_tokens: int = 0
 
 
+class GenerationMetrics(BaseModel):
+    """Provider timing for one real LLM call, excluding tool execution."""
+
+    latency_ms: int | None = None
+    time_to_first_token_ms: int | None = None
+    usage_available: bool = False
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -134,6 +142,7 @@ class AssistantMessage(BaseModel):
     stop_reason: str = "stop"
     error_message: str | None = None
     usage: Usage = Field(default_factory=Usage)
+    generation_metrics: GenerationMetrics | None = None
     timestamp: int = Field(default_factory=_now_ms)
 
 
@@ -238,7 +247,7 @@ __all__ = [
     "TextContent", "ToolCall", "AssistantContent",
     # P0-3
     "FileFormat", "FileBlock", "UserContent",
-    "Usage",
+    "Usage", "GenerationMetrics",
     "UserMessage", "AssistantMessage", "ToolResultMessage", "Message",
     "CustomMessage", "AgentMessage",
     # Step 15

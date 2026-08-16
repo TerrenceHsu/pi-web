@@ -6,6 +6,33 @@
 
 ## Current phase
 
+**P2-C Context Budget + Compaction UI — ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-17）**。
+
+- [x] Audit usage、GLM DoneEvent、Snapshot/session、完整 system prompt、Tool schema、SummaryMessage 与模型窗口数据源
+- [x] 新增带 12% 安全余量的确定性 mixed-char estimator；分项统计 system/messages/tools，并计入 reserved output
+- [x] Web draft 预检 + Core `before_model_call` 双层 admission；每个工具续轮重新估算，95% hard stop 保留草稿
+- [x] 阈值固定为 warning 70%、compaction 85%、blocked 95%；unknown context window 明确显示 unknown 且 fail-open
+- [x] Provider Profile 支持查看/保存 `context_window` 与 `max_output_tokens`；workspace SQLite 持久化 user override
+- [x] 新增 Context Budget GET/preview API、`context_budget_updated` 事件与 `Context ~N%` Badge
+- [x] 用户手动 compaction 只按完整 Turn 边界切分，安全处理 parallel tools；原子替换消息并保留 snapshots
+- [x] SummaryMessage 以 Markdown 卡片进入 canonical history，Session 切换与整页刷新后恢复
+- [x] AssistantMessage 展示真实 input/output usage、总 latency 与 TTFT；usage 不可用时不伪造
+- [x] Backend P2-C 新增/受影响 83/83；Frontend 393/393；Chromium E2E 1/1；typecheck/lint/build/changed-file Ruff PASS
+- [ ] Provider 官方 tokenizer、自动 compaction、LLM 摘要器——不在 P2-C 第一版范围
+
+### Previous phase: P2-B
+
+**P2-B Human Approval UI — ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-16）**。
+
+- [x] Core Runtime 新增可选 `ToolApprovalHandler`，`require_approval` 可暂停精确 ToolCall；未配置 handler 时保持安全 `ToolApprovalRequired`
+- [x] Approve once 只批准当前 ToolCall；Deny、handler 异常、abort 与 shutdown 均返回安全结果且不执行未批准工具
+- [x] Web approval manager + requested/resolved 事件 + list/resolve REST API；approval 与 request/session 严格绑定
+- [x] 浏览器参数预览递归脱敏并限制大小；当前 Turn 内联 Approval Card，整页刷新恢复 pending 状态
+- [x] Core/Web 18/18；broader regression 158/158；Frontend 387/387；联合 E2E 7/7；Offline Backend 3569 passed
+- [ ] 永久授权、RBAC、跨后端重启审批持久化——不在 P2-B 第一版范围
+
+### Previous phase: P0-AGENT-RUNTIME
+
 **P0-AGENT-RUNTIME Upstream Contract Alignment — ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-16）**。
 
 - [x] Turn 改为一次 LLM 调用及其当批工具；每次继续调用前重新发 `turn_start`
@@ -234,8 +261,8 @@ M3 是 docs-only 归档阶段，未自动执行上述任一动作。
 
 - P1-D3 PDF Text Extraction ✅ RESTARTED via P2-R（2026-07-27；见 [ROADMAP §P2-R](ROADMAP.md) + [docs/design/p2-r0-rag-contract.md](docs/design/p2-r0-rag-contract.md)）
 - [x] **P2-A URL Routing + Full Reload Recovery** —— ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-16）；`/chat/{session_id}`、精确刷新恢复、active Prompt/Regenerate replay、非法/越权 ID 回退、登出跨账号隔离；Frontend 382/382；Chromium E2E 5/5；Full Backend 3563 passed。
-- [ ] P2-B Human Approval UI
-- [ ] P2-C Context Budget + Compaction UI
+- [x] **P2-B Human Approval UI** —— ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-16）；精确 ToolCall 暂停、脱敏 inline Approval Card、Approve once / Deny、刷新恢复、abort/shutdown 安全取消；Frontend 387/387；联合 Chromium E2E 7/7；Offline Backend 3569 passed。
+- [x] **P2-C Context Budget + Compaction UI** —— ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-17）；完整 canonical input 近似估算、70/85/95% 分级、Profile 模型窗口持久化、Core hard stop、Turn-safe compaction、usage/latency、刷新恢复；Backend 83/83；Frontend 393/393；Chromium E2E 1/1。
 
 ## P2-R — Knowledge / RAG Subsystem（🟡 IN PROGRESS）
 

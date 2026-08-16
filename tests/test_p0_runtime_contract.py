@@ -16,6 +16,7 @@ from pi_agent_core_py import (
     AgentTool,
     DoneEvent,
     FakeClient,
+    ModelCallDecision,
     RequestSnapshot,
     TextContent,
     TextDeltaEvent,
@@ -25,6 +26,7 @@ from pi_agent_core_py import (
     ToolResult,
     ToolResultMessage,
     TurnSnapshot,
+    Usage,
     run_event_loop,
 )
 from pi_agent_core_py.hooks import (
@@ -334,3 +336,77 @@ def test_legacy_request_shaped_snapshot_is_readable() -> None:
     })
     assert snapshot.id == "legacy"
     assert snapshot.turns == []
+
+
+@pytest.mark.asyncio
+async def test_generation_usage_and_provider_latency_are_persisted_on_message() -> None:
+    client = FakeClient([[
+        TextDeltaEvent(delta="done"),
+        DoneEvent(
+            stop_reason="stop",
+            usage=Usage(input=12, output=3, total_tokens=15),
+        ),
+    ]])
+    events = [event async for event in run_event_loop(
+        system_prompt="sys",
+        user_text="go",
+        client=client,
+    )]
+    message = next(
+        event.message
+        for event in events
+        if event.type == "message_end"
+        and getattr(event.message, "role", None) == "assistant"
+    )
+    assert message.usage.total_tokens == 15
+    assert message.generation_metrics is not None
+    assert message.generation_metrics.latency_ms is not None
+    assert message.generation_metrics.usage_available is True
+    assert message.generation_metrics.time_to_first_token_ms is not None
+
+
+@pytest.mark.asyncio
+async def test_before_model_call_runs_for_first_and_tool_followup_calls() -> None:
+    seen: list[tuple[int, int, int]] = []
+
+    async def before_model_call(context):
+        seen.append((context.turn_index, len(context.messages), len(context.tools)))
+        return ModelCallDecision()
+
+    events = [event async for event in run_event_loop(
+        system_prompt="sys",
+        user_text="go",
+        client=_two_turn_client(),
+        tools=ToolRegistry([UpdatingTool()]),
+        before_model_call=before_model_call,
+    )]
+    assert [turn for turn, _, _ in seen] == [1, 2]
+    assert all(tool_count == 1 for _, _, tool_count in seen)
+    assert [event.type for event in events].count("turn_end") == 2
+
+
+@pytest.mark.asyncio
+async def test_before_model_call_denial_is_a_safe_terminal_assistant() -> None:
+    events = [event async for event in run_event_loop(
+        system_prompt="sys",
+        user_text="go",
+        client=FakeClient([[TextDeltaEvent(delta="must not stream")]]),
+        before_model_call=lambda context: ModelCallDecision(
+            allow=False,
+            error_message="context budget exceeded",
+        ),
+    )]
+    assert [event.type for event in events] == [
+        "agent_start",
+        "turn_start",
+        "message_start",
+        "message_end",
+        "message_start",
+        "message_end",
+        "turn_end",
+        "agent_end",
+    ]
+    assistant = events[-2].message
+    assert assistant.stop_reason == "error"
+    assert assistant.error_message == "context budget exceeded"
+    assert assistant.generation_metrics.latency_ms == 0

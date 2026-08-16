@@ -8,6 +8,8 @@
 // 去重 + 隔离不同 session/request。旧裸事件 schema 已退役。
 
 import type { FileRef } from "./files"
+import type { ToolApprovalStatus } from "./approvals"
+import type { GenerationMetrics, MessageUsage } from "./messages"
 
 /**
  * P1-B2: 统一事件信封——所有 WS / SSE / GET /api/events 用同一个 schema。
@@ -104,6 +106,8 @@ export interface AssistantMessageItem {
   messageIndex?: number
   /** D2-7：regeneration 流式 draft——独立 bubble，不覆盖原 active assistant */
   isRegenerationDraft?: boolean
+  usage?: MessageUsage
+  generationMetrics?: GenerationMetrics | null
 }
 
 export interface TurnInfoItem {
@@ -189,15 +193,45 @@ export interface ErrorItem {
   details?: unknown
 }
 
+export interface ContextSummaryItem {
+  kind: "context_summary"
+  id: string
+  content: string
+  sourceMessageCount: number
+  sourceTurnCount: number
+  createdAt?: number
+}
+
+export interface ToolApprovalItem {
+  kind: "tool_approval"
+  id: string
+  approvalId: string
+  requestId: string
+  sessionId: string | null
+  toolCallId: string
+  toolName: string
+  toolLabel: string
+  arguments: Record<string, unknown>
+  reason: string | null
+  policyName: string
+  status: ToolApprovalStatus
+  createdAt: string
+  resolvedAt: string | null
+  submitting?: boolean
+  error?: string | null
+}
+
 export type ChatStreamItem =
   | UserMessageItem
   | AssistantMessageItem
   | TurnInfoItem
+  | ContextSummaryItem
   | ToolCallItem
   | ToolResultItem
   | FileReadItem
   | SkillUsedItem
   | MCPToolCallItem
+  | ToolApprovalItem
   | ErrorItem
 
 /** AssistantMessageItem 或 TurnInfoItem 等可以被 history 模式复用。 */

@@ -16,12 +16,14 @@ import type {
   CredentialLabelUpdateRequest,
   CredentialRotateRequest,
   CredentialView,
+  ModelCapabilitiesPutRequest,
   ProviderDefinitionView,
   ProviderProfileCreateRequest,
   ProviderProfileStatus,
   ProviderProfileUpdateRequest,
   ProviderProfileView,
   ProviderModelOption,
+  ResolvedModelCapabilitiesView,
   SessionModelBindingView,
   VisibleProviderId,
 } from "../types"
@@ -510,6 +512,30 @@ export const useProviderStore = defineStore("providers", () => {
     }
   }
 
+  async function loadModelCapabilities(
+    profileId: string,
+    modelId: string,
+  ): Promise<ResolvedModelCapabilitiesView | null> {
+    try {
+      return (await providersApi.getModelCapabilities(profileId, modelId)).capabilities
+    } catch (error) {
+      mutationError.value = toSafeProviderError(error, MUTATION_ERROR_SAFE)
+      return null
+    }
+  }
+
+  async function saveModelCapabilities(
+    profileId: string,
+    payload: ModelCapabilitiesPutRequest,
+  ): Promise<ResolvedModelCapabilitiesView | null> {
+    try {
+      return (await providersApi.putModelCapabilities(profileId, payload)).capabilities
+    } catch (error) {
+      mutationError.value = toSafeProviderError(error, MUTATION_ERROR_SAFE)
+      return null
+    }
+  }
+
   function resetWorkspace(): void {
     bindingLoadToken += 1
     definitions.value = []
@@ -581,6 +607,8 @@ export const useProviderStore = defineStore("providers", () => {
     deleteProfile,
     setSessionBinding,
     loadProfileModels,
+    loadModelCapabilities,
+    saveModelCapabilities,
     resetWorkspace,
   }
 })

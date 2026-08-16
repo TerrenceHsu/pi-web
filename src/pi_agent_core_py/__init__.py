@@ -31,6 +31,13 @@ from .context import (
     convert_to_llm,
     transform_context,
 )
+from .context_budget import (
+    ContextBudgetLevel,
+    ContextEstimate,
+    classify_context_budget,
+    estimate_context,
+    estimate_text_tokens,
+)
 
 # AgentEvent（Step 5 加 ToolExecutionStart/EndEvent；Step 9 加 Queue/Abort 事件）
 from .events import (
@@ -85,6 +92,9 @@ from .llm_messages import (
 
 # Loop
 from .loop import (
+    BeforeModelCallFn,
+    ModelCallContext,
+    ModelCallDecision,
     PrepareNextTurnFn,
     ShouldStopAfterTurnFn,
     TurnControlContext,
@@ -128,6 +138,7 @@ from .messages import (
     AssistantContent,
     AssistantMessage,
     CustomMessage,
+    GenerationMetrics,
     Message,
     SummaryMessage,
     SummaryType,
@@ -158,6 +169,8 @@ from .policy import (
     DenyAllToolPermissionPolicy,
     InMemoryToolPermissionAuditLog,
     PermissionDecisionType,
+    ToolApprovalContext,
+    ToolApprovalHandler,
     ToolPermissionAuditRecord,
     ToolPermissionDecision,
     ToolPermissionPolicy,
@@ -290,7 +303,7 @@ __all__ = [
     # messages
     "AgentMessage", "AssistantContent", "AssistantMessage", "CustomMessage",
     "Message", "SummaryMessage", "SummaryType",
-    "TextContent", "ToolCall", "ToolResultMessage", "Usage", "UserMessage",
+    "TextContent", "ToolCall", "ToolResultMessage", "Usage", "GenerationMetrics", "UserMessage",
     # llm_messages
     "LLMAssistantMessage", "LLMMessage", "LLMToolResultMessage", "LLMUserMessage",
     # model_client
@@ -315,6 +328,8 @@ __all__ = [
     "AgentEvent",
     # context
     "TransformContextFn", "convert_to_llm", "transform_context",
+    "ContextBudgetLevel", "ContextEstimate", "classify_context_budget",
+    "estimate_context", "estimate_text_tokens",
     # hooks
     "BeforeToolCallFn", "AfterToolCallFn",
     "BeforeToolCallContext", "BeforeToolCallResult",
@@ -323,6 +338,7 @@ __all__ = [
     # loop
     "run_event_loop", "run_min_loop",
     "TurnControlContext", "ShouldStopAfterTurnFn", "PrepareNextTurnFn",
+    "ModelCallContext", "ModelCallDecision", "BeforeModelCallFn",
     # agent
     "Agent", "AgentRequest", "AgentState", "AgentStatus", "Subscriber",
     # harness
@@ -386,6 +402,7 @@ __all__ = [
     "make_mcp_prompt_skill_name", "MAX_MCP_PROMPT_SKILL_NAME_LEN",
     # Permission / Approval Policy (Step 18)
     "PermissionDecisionType",
+    "ToolApprovalContext", "ToolApprovalHandler",
     "ToolPermissionDecision", "ToolPermissionPolicy",
     "AllowAllToolPermissionPolicy", "DenyAllToolPermissionPolicy",
     "DefaultToolPermissionPolicy",

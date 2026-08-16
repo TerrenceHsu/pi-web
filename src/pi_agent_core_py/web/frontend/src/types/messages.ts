@@ -33,6 +33,18 @@ export interface ToolResultContent {
 
 export type UserContent = TextContent | FileBlock | ToolCallContent | ToolResultContent | { type: string; [k: string]: JsonValue }
 
+export interface MessageUsage {
+  input: number
+  output: number
+  total_tokens: number
+}
+
+export interface GenerationMetrics {
+  latency_ms: number | null
+  time_to_first_token_ms: number | null
+  usage_available: boolean
+}
+
 /** 后端任意消息的统一形状——字段宽松，UI 按 role 分发。 */
 export interface AgentMessage {
   role: MessageRole
@@ -42,6 +54,17 @@ export interface AgentMessage {
   tool_call_id?: string
   tool_calls?: JsonValue[]
   name?: string
+  api?: string
+  provider?: string
+  model?: string
+  stop_reason?: string
+  error_message?: string | null
+  usage?: MessageUsage
+  generation_metrics?: GenerationMetrics | null
+  summary_type?: string
+  source_message_count?: number
+  source_turn_count?: number
+  created_at?: number
 }
 
 /** GET /api/messages response。 */
@@ -212,6 +235,9 @@ export interface RequestSummary {
   regeneration_id?: string | null
   /** D2-5：regenerate 目标 assistant_message_id */
   target_message_id?: string | null
+  awaiting_approval?: boolean
+  pending_approval_count?: number
+  approvals_url?: string
 }
 
 /** D2-5：request operation 类型。 */

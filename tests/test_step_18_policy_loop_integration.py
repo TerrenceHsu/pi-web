@@ -25,6 +25,7 @@ from pi_agent_core_py import (
     InMemoryToolPermissionAuditLog,
     TextContent,
     TextDeltaEvent,
+    ToolApprovalContext,
     ToolCall,
     ToolCallEvent,
     ToolRegistry,
@@ -349,6 +350,82 @@ async def test_require_approval_does_not_execute() -> None:
         # 仅消费；断言在末尾
         pass
     assert tool.execute_calls == []
+
+
+@pytest.mark.asyncio
+async def test_approval_handler_approve_once_executes_exact_tool_call() -> None:
+    tool = _StubTool("write_file")
+    fake = _make_fake_llm_single_tool_call("write_file", {"filename": "report.md"})
+    contexts: list[ToolApprovalContext] = []
+
+    async def approve(context: ToolApprovalContext) -> bool:
+        contexts.append(context)
+        return True
+
+    async for _ev in run_event_loop(
+        system_prompt="x",
+        user_text="hi",
+        client=fake,
+        tools=ToolRegistry([tool]),
+        permission_policy=DefaultToolPermissionPolicy(),
+        tool_approval_handler=approve,
+    ):
+        pass
+
+    assert len(contexts) == 1
+    assert contexts[0].tool_call.id == "call_write_file"
+    assert contexts[0].tool_call.arguments == {"filename": "report.md"}
+    assert contexts[0].decision.require_approval is True
+    assert len(tool.execute_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_approval_handler_deny_returns_safe_error_without_execute() -> None:
+    tool = _StubTool("shell")
+    fake = _make_fake_llm_single_tool_call("shell")
+    agent_end: AgentEndEvent | None = None
+
+    async for event in run_event_loop(
+        system_prompt="x",
+        user_text="hi",
+        client=fake,
+        tools=ToolRegistry([tool]),
+        permission_policy=DefaultToolPermissionPolicy(),
+        tool_approval_handler=lambda _context: False,
+    ):
+        if isinstance(event, AgentEndEvent):
+            agent_end = event
+
+    assert agent_end is not None
+    assert tool.execute_calls == []
+    result = next(m for m in agent_end.messages if isinstance(m, ToolResultMessage))
+    assert result.details["error_type"] == "ToolApprovalDenied"
+
+
+@pytest.mark.asyncio
+async def test_approval_handler_failure_is_a_safe_tool_result() -> None:
+    tool = _StubTool("shell")
+    fake = _make_fake_llm_single_tool_call("shell")
+    agent_end: AgentEndEvent | None = None
+
+    async def broken(_context: ToolApprovalContext) -> bool:
+        raise RuntimeError("approval channel unavailable")
+
+    async for event in run_event_loop(
+        system_prompt="x",
+        user_text="hi",
+        client=fake,
+        tools=ToolRegistry([tool]),
+        permission_policy=DefaultToolPermissionPolicy(),
+        tool_approval_handler=broken,
+    ):
+        if isinstance(event, AgentEndEvent):
+            agent_end = event
+
+    assert agent_end is not None
+    assert tool.execute_calls == []
+    result = next(m for m in agent_end.messages if isinstance(m, ToolResultMessage))
+    assert result.details["error_type"] == "ToolApprovalHandlerError"
 
 
 # ============================================================================

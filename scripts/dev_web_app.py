@@ -39,6 +39,7 @@ def _build_harness() -> AgentHarness:
         StreamEvent,
         TextDeltaEvent,
     )
+    from pi_agent_core_py.policy import DefaultToolPermissionPolicy
 
     deltas = ["Hello", " from", " delayed", " fake", " backend"]
     script: list[StreamEvent] = [TextDeltaEvent(delta=d) for d in deltas]
@@ -54,7 +55,7 @@ def _build_harness() -> AgentHarness:
     scripts = [list(script) for _ in range(200)]
     fake = _DelayedFakeClient(scripts)
     agent = Agent(system_prompt="", client=fake)
-    harness = AgentHarness(agent)
+    harness = AgentHarness(agent, permission_policy=DefaultToolPermissionPolicy())
     harness.attach_skills([])
     return harness
 

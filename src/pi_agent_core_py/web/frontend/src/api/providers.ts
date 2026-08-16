@@ -14,6 +14,8 @@ import type {
   CredentialMutationResponse,
   CredentialRotateRequest,
   CredentialsResponse,
+  ModelCapabilitiesPutRequest,
+  ModelCapabilitiesResponse,
   ProviderDefinitionView,
   ProviderModelOption,
   ProviderModelsResponse,
@@ -130,6 +132,26 @@ export function deleteProviderProfile(profileId: string): Promise<null> {
 export function getProviderProfileModels(profileId: string): Promise<ProviderModelsResponse> {
   return requestJson<ProviderModelsResponse>(
     `/api/provider-profiles/${encodeURIComponent(profileId)}/models`,
+  )
+}
+
+export function getModelCapabilities(
+  profileId: string,
+  modelId: string,
+): Promise<ModelCapabilitiesResponse> {
+  const query = new URLSearchParams({ model_id: modelId })
+  return requestJson<ModelCapabilitiesResponse>(
+    `/api/provider-profiles/${encodeURIComponent(profileId)}/model-capabilities?${query}`,
+  )
+}
+
+export function putModelCapabilities(
+  profileId: string,
+  payload: ModelCapabilitiesPutRequest,
+): Promise<ModelCapabilitiesResponse> {
+  return requestJson<ModelCapabilitiesResponse>(
+    `/api/provider-profiles/${encodeURIComponent(profileId)}/model-capabilities`,
+    { method: "PUT", body: payload },
   )
 }
 

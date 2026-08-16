@@ -38,6 +38,12 @@ vi.mock("../../src/api/events", () => ({
   getEvents: vi.fn(),
 }))
 
+vi.mock("../../src/api/approvals", () => ({
+  listRequestApprovals: vi.fn(),
+  resolveToolApproval: vi.fn(),
+}))
+
+import * as approvalsApi from "../../src/api/approvals"
 import * as eventsApi from "../../src/api/events"
 import * as messagesApi from "../../src/api/messages"
 import * as slashCommandsApi from "../../src/api/slashCommands"
@@ -95,6 +101,12 @@ const FAKE_RESP = {
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.mocked(messagesApi.sendPromptAsync).mockResolvedValue(FAKE_RESP)
+  vi.mocked(approvalsApi.listRequestApprovals).mockResolvedValue({
+    request_id: "req-fake",
+    session_id: "sess-1",
+    count: 0,
+    approvals: [],
+  })
   vi.mocked(slashCommandsApi.executeSlashCommand).mockResolvedValue({
     ok: true,
     command: "/checkpointer",
@@ -113,6 +125,22 @@ beforeEach(() => {
     gap: false,
   })
 })
+
+const PENDING_APPROVAL = {
+  approval_id: "approval-1",
+  request_id: "req-approval",
+  session_id: "sess-1",
+  tool_call_id: "call-write",
+  tool_name: "write_file",
+  tool_label: "Write file",
+  arguments: { filename: "report.md" },
+  reason: "high-risk tool category 'write' not explicitly allowed",
+  policy_name: "default",
+  policy_metadata: { category: "write" },
+  status: "pending" as const,
+  created_at: "2026-08-16T00:00:00Z",
+  resolved_at: null,
+}
 
 async function flushAll() {
   await new Promise((r) => setTimeout(r, 0))
@@ -352,5 +380,97 @@ describe("full reload active request recovery", () => {
     })
     await secondRecovery
     expect(JSON.stringify(store.streamItems)).toContain("current live text")
+  })
+})
+
+describe("P2-B tool approvals", () => {
+  it("renders a request-scoped approval event and resolves it once", async () => {
+    vi.mocked(approvalsApi.resolveToolApproval).mockResolvedValue({
+      ok: true,
+      request_id: "req-approval",
+      session_id: "sess-1",
+      idempotent: false,
+      approval: {
+        ...PENDING_APPROVAL,
+        status: "approved",
+        resolved_at: "2026-08-16T00:00:01Z",
+      },
+    })
+    const store = useChatStore()
+    store.setActiveSession("sess-1")
+    store.resumeActiveRequest("req-approval")
+    store.handleEvent({
+      event_id: "evt-approval",
+      request_id: "req-approval",
+      session_id: "sess-1",
+      sequence: 30,
+      type: "tool_approval_requested",
+      timestamp: "2026-08-16T00:00:00Z",
+      payload: { type: "tool_approval_requested", approval: PENDING_APPROVAL },
+    } as any)
+
+    expect(store.pendingApprovalCount).toBe(1)
+    expect(store.streamItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "tool_approval",
+          approvalId: "approval-1",
+          status: "pending",
+        }),
+      ]),
+    )
+
+    await store.resolveToolApproval("approval-1", "approve")
+    expect(approvalsApi.resolveToolApproval).toHaveBeenCalledWith(
+      "req-approval",
+      "approval-1",
+      "approve",
+    )
+    expect(store.pendingApprovalCount).toBe(0)
+    expect(store.streamItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ approvalId: "approval-1", status: "approved" }),
+      ]),
+    )
+  })
+
+  it("restores a pending approval through the request API after refresh", async () => {
+    vi.mocked(approvalsApi.listRequestApprovals).mockResolvedValue({
+      request_id: "req-approval",
+      session_id: "sess-1",
+      count: 1,
+      approvals: [PENDING_APPROVAL],
+    })
+    const store = useChatStore()
+    store.setActiveSession("sess-1")
+    store.resumeActiveRequest("req-approval")
+
+    await store.loadPendingApprovals("sess-1", "req-approval")
+
+    expect(approvalsApi.listRequestApprovals).toHaveBeenCalledWith(
+      "req-approval",
+      "pending",
+    )
+    expect(store.pendingApprovalCount).toBe(1)
+  })
+
+  it("ignores an approval from another Session", () => {
+    const store = useChatStore()
+    store.setActiveSession("sess-1")
+    store.resumeActiveRequest("req-approval")
+    store.handleEvent({
+      event_id: "evt-foreign-approval",
+      request_id: "req-approval",
+      session_id: "sess-foreign",
+      sequence: 31,
+      type: "tool_approval_requested",
+      timestamp: "2026-08-16T00:00:00Z",
+      payload: {
+        type: "tool_approval_requested",
+        approval: { ...PENDING_APPROVAL, session_id: "sess-foreign" },
+      },
+    } as any)
+
+    expect(store.pendingApprovalCount).toBe(0)
   })
 })

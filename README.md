@@ -481,6 +481,7 @@ python steps/step-XX-name/demo.py
 - **Session 文件夹**：每个 Session 创建时立即初始化独立目录及唯一根 `AGENT.md`；用户上传和 Agent 生成文件都只属于当前 Session
 - **文件树、指令与记忆**：Folder 面板按逻辑路径展示可展开文件树；根 `AGENT.md` 与 `/checkpointer` 生成的 `Memory.md` 均可查看、编辑并使用 SHA-256 乐观锁保存；两者从下一轮请求开始加载
 - **Slash Command**：输入 `/` 显示命令菜单；`/checkpointer` 用当前 Session Provider 总结现有对话到累计 `Memory.md`，成功保存后清空消息窗口，后续请求自动加载该记忆
+- **Human Approval**：高风险工具在当前 Turn 内暂停并显示脱敏 Approval Card；支持 Approve once / Deny，刷新页面可恢复等待状态，abort/退出不执行未批准工具
 - **文件读写**：`list_files` / `view_file` 查阅 Session 文件；`write_file(filename, content, folder?)` 让 Agent 在逻辑目录创建新的 UTF-8 文本文件（不接受物理路径、不覆盖已有文件）
 - **文件上传**：上传文件直接保存到当前 Session 文件夹；支持 md / html / csv / parquet / 文本；**图片明确 unsupported**；**PDF 正文不解析**
 - **Skills Modal**：上传 SKILL.md + enable/disable + Use-this-turn 选择（selected 必须是 enabled 子集）
@@ -605,6 +606,8 @@ Playwright E2E smoke（5 核心用例 + 1 skip）位于 `tests/e2e/`，覆盖真
 | `/api/auth/logout` | POST | 吊销登录 Session 并清除 Cookie |
 | `/api/prompt` | POST | 同步触发 prompt（支持 session_id / file_ids / skill_names） |
 | `/api/abort` | POST | 中止当前请求 |
+| `/api/requests/{request_id}/approvals` | GET | 查询当前请求的审批记录，可按状态过滤 |
+| `/api/requests/{request_id}/approvals/{approval_id}` | POST | 对精确 ToolCall 执行 Approve once / Deny |
 | `/api/reset` | POST | 重置 agent / clear events / snapshots / audit |
 
 ### 实时事件流（SSE / WebSocket）
@@ -653,6 +656,9 @@ Playwright E2E smoke（5 核心用例 + 1 skip）位于 `tests/e2e/`，覆盖真
 - ✅ **Web Claude P0 MVP**（P0-1 sqlite 多会话 + P0-2 VirtualFileStore + P0-3 view_file/list_files + P0-4 Claude-like Web UI Step 1–8 + P0-5 默认 system prompt）
 - ✅ **Session Folder Workspace**（Session 创建即初始化目录与 `AGENT.md` + 持久历史 + 逻辑文件树 + list/view/write Agent 工具 + 指令编辑与逐轮加载）
 - ✅ **Slash Command `/checkpointer`**（LLM 累计总结到 Session `Memory.md` + 保存后清空 + 失败回滚 + 后续逐轮加载）
+- ✅ **P2-A Session 刷新恢复**（`/chat/{session_id}` + 历史/文件/运行中请求恢复 + 账号安全回退）
+- ✅ **P2-B Human Approval UI**（精确 ToolCall 暂停 + 脱敏 Approve once / Deny + 刷新恢复）
+- ✅ **P2-C Context Budget + Compaction UI**（完整输入近似估算 + 70/85/95% 阈值 + 模型窗口持久化 + Turn-safe Summary + usage/latency）
 
 ### 后续 step（不在本副本）
 
@@ -663,7 +669,7 @@ Playwright E2E smoke（5 核心用例 + 1 skip）位于 `tests/e2e/`，覆盖真
 - Step 24 — Slash Command System（本副本已先实现首个 `/checkpointer`，并非完整主仓库 Step 24）
 - Step 25+ — Plan Mode / Auto Compaction / Multi-Agent
 
-本副本（`D:\LLMTutorial\test\`）核心移植仍以 Step 21 为边界，但 Web 产品层已先实现 `/checkpointer`；主仓库 Step 22+ 的其余内容不在这里。
+本副本（`D:\LLMTutorial\test\`）核心移植仍以 Step 21 为边界，但 Web 产品层已先实现 Session Workspace、`/checkpointer`、刷新恢复、Human Approval 与 Context Budget/Compaction；主仓库 Step 22+ 的其余内容不在这里。
 
 > 主仓库 Python 路径（不在本副本）：`../pi-py/PLAN.md`
 

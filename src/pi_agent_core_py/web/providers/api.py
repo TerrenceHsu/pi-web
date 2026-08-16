@@ -44,6 +44,11 @@ from ..credentials.api import (
 )
 from ..credentials.dto import SafeValidationField  # noqa: F401 (re-export convenience)
 from ..local_web_security import WebSecurityConfig
+from ..model_capabilities import (
+    ModelCapabilityValidationError,
+    SQLiteModelCapabilityStore,
+    serialize_model_capabilities,
+)
 from .config_runtime import ProviderConfigRuntimeState
 from .config_service import (
     CredentialNotFoundForProfileError,
@@ -149,6 +154,18 @@ class SessionModelBindingPutRequest(BaseModel):
     model_id: str = Field(..., min_length=1, max_length=256)
 
 
+class ModelCapabilitiesPutRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model_id: str = Field(..., min_length=1, max_length=256)
+    context_window: int | None = Field(default=None, ge=1_024, le=10_000_000)
+    max_output_tokens: int | None = Field(default=None, ge=1, le=1_000_000)
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.context_window is None and self.max_output_tokens is None:
+            raise ValueError("at least one model limit is required")
+
+
 # ============================================================================
 # Response DTOs
 # ============================================================================
@@ -190,6 +207,7 @@ class ModelCapabilitiesResponse(BaseModel):
     reasoning: bool | None = None
     vision: bool | None = None
     context_window: int | None = None
+    max_output_tokens: int | None = None
 
 
 class ModelOptionResponse(BaseModel):
@@ -251,6 +269,7 @@ def serialize_model_option(opt: Any) -> dict[str, Any]:
             "reasoning": caps.reasoning,
             "vision": caps.vision,
             "context_window": caps.context_window,
+            "max_output_tokens": caps.max_output_tokens,
         },
     }
 
@@ -319,7 +338,11 @@ def provider_profile_error_to_response(
             "session_not_found",
             "Session not found.",
         )
-    if isinstance(exc, (InvalidModelIdError, InvalidProfileNameError)):
+    if isinstance(exc, (
+        InvalidModelIdError,
+        InvalidProfileNameError,
+        ModelCapabilityValidationError,
+    )):
         # These are service-level normalization errors——422 safe validation
         return _provider_profile_error_response(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -421,6 +444,22 @@ def get_provider_config_service(
     return runtime.service
 
 
+def get_model_capability_store(
+    request: StarletteRequest,
+) -> SQLiteModelCapabilityStore:
+    state = getattr(request.app.state, "web", None)
+    store = getattr(state, "model_capability_store", None)
+    if store is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "model_capabilities_unavailable",
+                "message": "Model capabilities are not initialized.",
+            },
+        )
+    return store
+
+
 # ============================================================================
 # Router factory
 # ============================================================================
@@ -450,7 +489,7 @@ def build_provider_profile_router(
 
 
 def register_provider_profile_endpoints(router: APIRouter) -> None:
-    """Register 7 endpoints on the given router."""
+    """Register Provider Profile, Binding, and model-limit endpoints."""
 
     # ========================================================================
     # GET /api/provider-profiles
@@ -544,6 +583,45 @@ def register_provider_profile_endpoints(router: APIRouter) -> None:
             content={"models": [serialize_model_option(o) for o in options]}
         )
 
+    @router.get("/api/provider-profiles/{profile_id}/model-capabilities")
+    async def get_model_capabilities(
+        profile_id: str,
+        model_id: str,
+        service: Annotated[
+            ProviderConfigService, Depends(get_provider_config_service)
+        ],
+        store: Annotated[
+            SQLiteModelCapabilityStore, Depends(get_model_capability_store)
+        ],
+    ) -> JSONResponse:
+        profile = await service.get_profile(profile_id)
+        resolved = await store.resolve(profile.provider_id, model_id)
+        return JSONResponse(content={
+            "capabilities": serialize_model_capabilities(resolved)
+        })
+
+    @router.put("/api/provider-profiles/{profile_id}/model-capabilities")
+    async def put_model_capabilities(
+        profile_id: str,
+        req: ModelCapabilitiesPutRequest,
+        service: Annotated[
+            ProviderConfigService, Depends(get_provider_config_service)
+        ],
+        store: Annotated[
+            SQLiteModelCapabilityStore, Depends(get_model_capability_store)
+        ],
+    ) -> JSONResponse:
+        profile = await service.get_profile(profile_id)
+        resolved = await store.upsert(
+            provider_id=profile.provider_id,
+            model_id=req.model_id,
+            context_window=req.context_window,
+            max_output_tokens=req.max_output_tokens,
+        )
+        return JSONResponse(content={
+            "capabilities": serialize_model_capabilities(resolved)
+        })
+
     # ========================================================================
     # GET /api/sessions/{session_id}/model-binding
     # ========================================================================
@@ -596,6 +674,7 @@ __all__ = [
     "ProviderProfileCreateRequest",
     "ProviderProfileUpdateRequest",
     "SessionModelBindingPutRequest",
+    "ModelCapabilitiesPutRequest",
     "ProviderProfileResponse",
     "SessionModelBindingResponse",
     "ModelOptionResponse",
@@ -613,4 +692,5 @@ __all__ = [
     "register_provider_profile_endpoints",
     # Service dep
     "get_provider_config_service",
+    "get_model_capability_store",
 ]

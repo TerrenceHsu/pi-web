@@ -15,6 +15,7 @@ const props = withDefaults(
     /** Provider 是否就绪——由父组件从 providerStore.canSendPrompt 传入。
      * 默认 true 保持向后兼容（不传则不阻止发送）。 */
     providerReady?: boolean
+    contextBlocked?: boolean
     slashCommands?: SlashCommandDefinition[]
   }>(),
   {
@@ -23,6 +24,7 @@ const props = withDefaults(
     sessionId: null,
     wsConnected: false,
     providerReady: true,
+    contextBlocked: false,
     slashCommands: () => [],
   },
 )
@@ -53,6 +55,7 @@ const showCommandMenu = computed(
 const canSend = computed(() => {
   // Provider 未就绪——阻止所有发送路径（按钮 / Enter / submit / 附件 send）
   if (!props.providerReady) return false
+  if (props.contextBlocked) return false
   if (props.sending) return false
   if (text.value.trim()) return true
   return props.pendingAttachments.length > 0
@@ -195,7 +198,7 @@ function onDragOver(e: DragEvent) {
         class="send-btn primary"
         data-testid="send-button"
         :disabled="!canSend"
-        title="Send (Enter)"
+        :title="contextBlocked ? 'Compact context before sending' : 'Send (Enter)'"
         @click="submit"
       >
         Send
@@ -214,6 +217,9 @@ function onDragOver(e: DragEvent) {
     <div class="input-hint">
       <span v-if="uploading">● uploading…</span>
       <span v-else-if="sending">● agent is running</span>
+      <span v-else-if="contextBlocked" class="context-blocked"
+        >Context limit reached · compact before sending</span
+      >
       <span v-else-if="!wsConnected" class="muted"
         >○ disconnected · supports md / html / csv / parquet / text</span
       >
@@ -350,4 +356,5 @@ function onDragOver(e: DragEvent) {
 .input-hint .muted {
   color: var(--muted);
 }
+.context-blocked { color: #991b1b; }
 </style>

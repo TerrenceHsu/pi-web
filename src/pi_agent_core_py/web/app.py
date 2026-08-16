@@ -26,6 +26,7 @@ Browser (Vue)                  FastAPI                       AgentHarness
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import time
@@ -58,6 +59,7 @@ from fastapi.responses import (
 
 from ..harness import AgentHarness
 from ..skills import SkillSelection
+from .approvals import ToolApprovalManager
 from .checkpointer import (
     CHECKPOINTER_COMMAND,
     SESSION_MEMORY_PATH,
@@ -216,8 +218,8 @@ class PromptExecutionResult:
       排除中间 tool-call-only assistant；如果没有合格 candidate 则为 None）
     - `messages_before`：执行前 harness state 的 messages 快照
     - `messages_after`：执行后 harness state 的 messages 快照（同 messages）
-    - `stop_reason`：从 harness.last_snapshot.metadata 提取（如果有）
-    - `usage`：同上
+    - `stop_reason`：本次终态 AssistantMessage 的停止原因
+    - `usage`：本次终态 AssistantMessage 的 Provider usage
     - `snapshot_payload`：harness.last_snapshot 的可序列化视图（如果有）
     - `result_summary`：额外元数据（applied_skill_names / attachment_meta 等）
     """
@@ -445,6 +447,16 @@ def create_app(
             # 初始化失败不应阻塞 app 启动——session_store 仍可用 None 路径
             state.session_store = session_store
             state.current_session_id = None
+
+        # P2-C: exact provider/model limits are user workspace data and share
+        # the authenticated workspace DB connection.
+        from .model_capabilities import SQLiteModelCapabilityStore
+
+        model_capability_store = SQLiteModelCapabilityStore(
+            session_store.connection
+        )
+        await model_capability_store.init()
+        state.model_capability_store = model_capability_store
 
         # Session 工作目录：初始化 VirtualFileStore，并为所有已有 session
         # 立即创建独立目录（而不是等第一次上传时才惰性出现）。
@@ -838,6 +850,7 @@ def create_app(
         # ====================================================================
         # 1. 拒绝新 async prompt（POST /api/prompt/async 看到 shutting_down=True 返回 503）
         state.shutting_down = True
+        await approval_manager.cancel_all()
 
         # 2. 收集所有 active request 的 task——abort queued（cancel）+ abort running（harness.abort）
         #    用 list 快照——_abort_request_internal 会修改 state.active_requests
@@ -874,6 +887,10 @@ def create_app(
         if hook is not None:
             harness.remove_on_event_hook(hook)
             container["hook"] = None
+        if harness.agent.tool_approval_handler is _web_tool_approval_handler:
+            harness.set_tool_approval_handler(previous_tool_approval_handler)
+        if harness.agent.before_model_call is _web_before_model_call:
+            harness.agent.before_model_call = previous_before_model_call
         # 通知 SSE / WS client 关闭（不抛错）
         # container 里两个都是 set——用 set 联合（list | list 不合法）
         all_clients = set(container["sse_clients"])
@@ -1090,6 +1107,32 @@ def create_app(
     # WebSocket 客户端队列集合——同 SSE，独立 queue 池
     ws_clients: set[asyncio.Queue[dict[str, Any]]] = container["ws_clients"]
 
+    async def _emit_web_payload(
+        payload: dict[str, Any],
+        request_id: str | None,
+        session_id: str | None,
+    ) -> None:
+        """Assign one envelope sequence and broadcast a JSON-safe Web event."""
+        safe_payload = dict(payload)
+        safe_payload.setdefault("_received_at_ms", int(time.time() * 1000))
+        sequence = state.next_event_sequence
+        state.next_event_sequence = sequence + 1
+        envelope = {
+            "event_id": f"evt_{uuid4().hex[:16]}",
+            "request_id": request_id,
+            "session_id": session_id,
+            "sequence": sequence,
+            "type": safe_payload.get("type") or "unknown",
+            "timestamp": _now_utc().isoformat(),
+            "payload": safe_payload,
+        }
+        state.event_buffer.append(envelope)
+        for q in list(sse_clients) + list(ws_clients):
+            try:
+                q.put_nowait(envelope)
+            except asyncio.QueueFull:
+                continue
+
     async def _web_event_hook(event: Any, _ctx: Any) -> None:
         """on_event hook：序列化 event → 包装 WebEventEnvelope → 写入 buffer + 广播。
 
@@ -1113,33 +1156,95 @@ def create_app(
             if not isinstance(payload, dict):
                 # 防御坏 event——不可能发生但兜底
                 payload = {}
-            # 加上 server-side 接收时间，便于 UI 排序（保留旧字段向后兼容）
-            payload.setdefault("_received_at_ms", int(time.time() * 1000))
-
-            # 分配 sequence + 生成 envelope（在本入口一次性完成）
-            sequence = state.next_event_sequence
-            state.next_event_sequence = sequence + 1
-
-            envelope = {
-                "event_id": f"evt_{uuid4().hex[:16]}",
-                "request_id": state.current_request_id,
-                "session_id": state.current_request_session_id,
-                "sequence": sequence,
-                "type": payload.get("type") or type(event).__name__,
-                "timestamp": _now_utc().isoformat(),
-                "payload": payload,
-            }
-
-            state.event_buffer.append(envelope)
-            # 广播到所有 SSE / WS client——慢客户端 put_nowait 抛 QueueFull 时
-            # 丢弃该 event（不阻塞其它 client / 不阻塞主 loop）
-            for q in list(sse_clients) + list(ws_clients):
-                try:
-                    q.put_nowait(envelope)
-                except asyncio.QueueFull:
-                    continue
+            payload.setdefault("type", type(event).__name__)
+            await _emit_web_payload(
+                payload,
+                state.current_request_id,
+                state.current_request_session_id,
+            )
         except Exception:
             return
+
+    approval_manager = ToolApprovalManager(_emit_web_payload)
+    app.state.tool_approval_manager = approval_manager
+    previous_tool_approval_handler = harness.tool_approval_handler
+
+    async def _web_tool_approval_handler(context: Any) -> bool:
+        request_id = state.current_request_id
+        if request_id is None:
+            return False
+        request_record = state.active_requests.get(request_id)
+        if request_record is None:
+            return False
+        return await approval_manager.request_approval(
+            request_id=request_id,
+            session_id=request_record.session_id,
+            context=context,
+        )
+
+    # Respect an explicitly configured host handler.  The Web UI fills only the
+    # missing interaction layer and restores it during dispose/shutdown.
+    if previous_tool_approval_handler is None:
+        harness.set_tool_approval_handler(_web_tool_approval_handler)
+    app.state.web_tool_approval_handler = _web_tool_approval_handler
+    app.state.previous_tool_approval_handler = previous_tool_approval_handler
+
+    from ..context_budget import estimate_context
+    from ..loop import ModelCallDecision
+
+    previous_before_model_call = harness.agent.before_model_call
+
+    async def _web_before_model_call(context: Any) -> Any:
+        if previous_before_model_call is not None:
+            previous_result = previous_before_model_call(context)
+            if inspect.isawaitable(previous_result):
+                previous_result = await previous_result
+            if previous_result is False or (
+                isinstance(previous_result, ModelCallDecision)
+                and not previous_result.allow
+            ):
+                return previous_result
+
+        capability_store = state.model_capability_store
+        capabilities = None
+        if capability_store is not None:
+            capabilities = await capability_store.resolve(
+                context.client.provider_id or "legacy",
+                getattr(context.client, "model", "unknown") or "unknown",
+            )
+        estimate = estimate_context(
+            system_prompt=context.system_prompt,
+            messages=context.messages,
+            tools=context.tools,
+            context_window=(capabilities.context_window if capabilities else None),
+            reserved_output_tokens=(
+                capabilities.max_output_tokens if capabilities else None
+            ),
+        )
+        await _emit_web_payload(
+            {
+                "type": "context_budget_updated",
+                "turn_index": context.turn_index,
+                "provider_id": context.client.provider_id or "legacy",
+                "model_id": getattr(context.client, "model", "unknown") or "unknown",
+                "capability_source": capabilities.source if capabilities else "unknown",
+                "estimate": estimate.to_dict(),
+            },
+            state.current_request_id,
+            state.current_request_session_id,
+        )
+        if not estimate.can_send:
+            return ModelCallDecision(
+                allow=False,
+                error_message=(
+                    "context budget exceeded; compact the session before continuing"
+                ),
+            )
+        return ModelCallDecision()
+
+    harness.agent.before_model_call = _web_before_model_call
+    app.state.web_before_model_call = _web_before_model_call
+    app.state.previous_before_model_call = previous_before_model_call
 
     # 把 hook 挂到 harness，并登记到 container / app.state，便于 dispose 精确 remove
     harness.add_on_event_hook(_web_event_hook)
@@ -2035,6 +2140,111 @@ def create_app(
             }
             return None
 
+    async def _estimate_session_context_budget(
+        *,
+        session_id: str,
+        draft_text: str = "",
+        file_ids: list[str] | None = None,
+        skill_selection: SkillSelection | None = None,
+    ) -> dict[str, Any]:
+        """Estimate the canonical Provider input without reading a secret."""
+        if state.running or harness.context.phase != "idle":
+            raise HTTPException(
+                status_code=409,
+                detail="context budget is unavailable while a request is running",
+            )
+        store = state.session_store
+        if store is None:
+            raise HTTPException(status_code=503, detail="session store unavailable")
+        try:
+            messages = list(await store.list_messages(session_id))
+        except Exception as exc:
+            from ..session_sqlite import SessionNotFoundError
+
+            if isinstance(exc, SessionNotFoundError):
+                raise HTTPException(status_code=404, detail="session not found") from None
+            raise
+
+        attached_blocks: list[Any] = []
+        if file_ids:
+            try:
+                attached_blocks, _ = await _resolve_file_blocks(session_id, file_ids)
+            except PromptValidationError as exc:
+                raise HTTPException(
+                    status_code=exc.status_code,
+                    detail=exc.detail,
+                ) from None
+        if draft_text.strip() or attached_blocks:
+            from ..messages import TextContent, UserMessage
+
+            messages.append(UserMessage(content=[
+                TextContent(text=draft_text),
+                *attached_blocks,
+            ]))
+
+        # Rendering helpers annotate Harness metadata for snapshots. A preview is
+        # observational, so restore the prior values after rendering.
+        metadata_before = dict(harness.context.metadata)
+        try:
+            agent_instructions = await _load_session_agent_instructions(session_id)
+            durable_memory = await _load_session_memory(session_id)
+            suffix = "\n\n".join(
+                block for block in (agent_instructions, durable_memory) if block
+            ) or None
+            rendered_prompt, _ = harness._prepare_skill_prompt(skill_selection)
+            if suffix:
+                rendered_prompt = f"{rendered_prompt}\n\n{suffix.strip()}"
+        finally:
+            harness.context.metadata = metadata_before
+
+        from ..context import convert_to_llm
+        from ..context import transform_context as default_transform_context
+        from ..context_budget import estimate_context
+
+        transform = harness.agent.transform_context_fn or default_transform_context
+        transformed = await transform(list(messages))
+        llm_messages = convert_to_llm(transformed)
+
+        provider_id = harness.agent.client.provider_id or "legacy"
+        model_id = getattr(harness.agent.client, "model", "unknown") or "unknown"
+        # Context preview is read-only and must not enter the request-scoped
+        # Provider binding path.  Read only the public, non-secret config
+        # projection; _execute_prompt remains the sole Harness binding site.
+        provider_config_runtime = app.state.provider_config_runtime
+        if provider_config_runtime is not None:
+            binding = await provider_config_runtime.service.get_session_binding(
+                session_id,
+            )
+            if binding is not None:
+                profile = await provider_config_runtime.service.get_profile(
+                    binding.profile_id,
+                )
+                provider_id = profile.provider_id
+                model_id = binding.model_id
+
+        capability_store = state.model_capability_store
+        capabilities = (
+            await capability_store.resolve(provider_id, model_id)
+            if capability_store is not None
+            else None
+        )
+        estimate = estimate_context(
+            system_prompt=rendered_prompt,
+            messages=llm_messages,
+            tools=harness.agent.tools.definitions(),
+            context_window=(capabilities.context_window if capabilities else None),
+            reserved_output_tokens=(
+                capabilities.max_output_tokens if capabilities else None
+            ),
+        )
+        return {
+            "session_id": session_id,
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "capability_source": capabilities.source if capabilities else "unknown",
+            "estimate": estimate.to_dict(),
+        }
+
     async def _execute_prompt(
         validated: _PromptValidated,
         *,
@@ -2186,14 +2396,19 @@ def create_app(
             messages_after[len(messages_before):]
         )
 
-        # snapshot metadata 提取（如果有）
+        # 终态 AssistantMessage 是 stop_reason / usage 的事实来源。RequestSnapshot
+        # metadata 从未承诺包含这两个字段；usage 已随消息和 TurnSnapshot 持久化。
         snapshot = harness.last_snapshot
         snapshot_payload: dict[str, Any] | None = None
-        stop_reason: str | None = None
-        usage: Any | None = None
+        stop_reason: str | None = (
+            assistant_candidate.stop_reason if assistant_candidate is not None else None
+        )
+        usage: Any | None = (
+            assistant_candidate.usage.model_dump(mode="json")
+            if assistant_candidate is not None
+            else None
+        )
         if snapshot is not None:
-            stop_reason = snapshot.metadata.get("stop_reason") if snapshot.metadata else None
-            usage = snapshot.metadata.get("usage") if snapshot.metadata else None
             try:
                 # to_dict 是 dataclass method；可能抛异常——best-effort
                 snapshot_payload = snapshot.to_dict()  # type: ignore[attr-defined]
@@ -2418,6 +2633,9 @@ def create_app(
             "operation": req.operation,
             "regeneration_id": req.regeneration_id,
             "target_message_id": req.target_message_id,
+            "awaiting_approval": approval_manager.pending_count(req.id) > 0,
+            "pending_approval_count": approval_manager.pending_count(req.id),
+            "approvals_url": f"/api/requests/{req.id}/approvals",
         }
 
     def _find_request(request_id: str) -> WebRunRequest | None:
@@ -2677,6 +2895,8 @@ def create_app(
     ) -> dict[str, Any]:
         """abort 共享逻辑——POST /api/abort 别名 + POST /api/requests/{id}/abort 都走这里。"""
         reason_str = reason or "user_requested"
+        # Wake every suspended approval handler before waiting for Agent abort.
+        await approval_manager.cancel_request(req.id)
 
         if req.status == "queued":
             # task 尚未进 running 状态（理论上 create_task 立即调度；保险起见支持）
@@ -3217,6 +3437,119 @@ def create_app(
             for s in sessions
         ]
         return {"count": len(items), "sessions": items}
+
+    @app.get("/api/sessions/{sid}/context-budget")
+    async def get_session_context_budget(sid: str) -> dict[str, Any]:
+        return await _estimate_session_context_budget(session_id=sid)
+
+    @app.post("/api/sessions/{sid}/context-budget/estimate")
+    async def post_session_context_budget_estimate(
+        sid: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        text = (payload or {}).get("text") or ""
+        file_ids = (payload or {}).get("file_ids") or []
+        skill_names = (payload or {}).get("skill_names") or []
+        if not isinstance(text, str):
+            raise HTTPException(status_code=422, detail="text must be a string")
+        if not isinstance(file_ids, list) or any(
+            not isinstance(value, str) or not value for value in file_ids
+        ):
+            raise HTTPException(status_code=422, detail="file_ids must be strings")
+        if not isinstance(skill_names, list) or any(
+            not isinstance(value, str) or not value for value in skill_names
+        ):
+            raise HTTPException(status_code=422, detail="skill_names must be strings")
+        if len(text) > 1_000_000 or len(file_ids) > 100 or len(skill_names) > 100:
+            raise HTTPException(status_code=413, detail="context estimate payload too large")
+        if skill_names and harness.skill_registry is not None:
+            missing = [name for name in skill_names if not harness.skill_registry.has(name)]
+            if missing:
+                raise HTTPException(status_code=400, detail="unknown skill")
+        selection = SkillSelection(names=skill_names) if skill_names else None
+        return await _estimate_session_context_budget(
+            session_id=sid,
+            draft_text=text,
+            file_ids=file_ids,
+            skill_selection=selection,
+        )
+
+    @app.post("/api/sessions/{sid}/context/compact")
+    async def post_session_context_compact(
+        sid: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        keep_turns = (payload or {}).get("keep_last_n_turns", 4)
+        if not isinstance(keep_turns, int) or isinstance(keep_turns, bool):
+            raise HTTPException(status_code=422, detail="keep_last_n_turns must be an integer")
+        if keep_turns < 0 or keep_turns > 20:
+            raise HTTPException(
+                status_code=422,
+                detail="keep_last_n_turns must be between 0 and 20",
+            )
+
+        # Reserve the same single-writer slot as prompt validation. This prevents
+        # a prompt from starting between the idle check and SQLite replacement.
+        _ensure_idle()
+        state.running = True
+        result = None
+        try:
+            store = state.session_store
+            if store is None:
+                raise HTTPException(status_code=503, detail="session store unavailable")
+            from pydantic import TypeAdapter
+
+            from ..compaction import CompactionConfig, compact_messages
+            from ..messages import AgentMessage
+
+            try:
+                messages = list(await store.list_messages(sid))
+                snapshots = list(await store.list_snapshots(sid))
+            except Exception as exc:
+                from ..session_sqlite import SessionNotFoundError
+
+                if isinstance(exc, SessionNotFoundError):
+                    raise HTTPException(status_code=404, detail="session not found") from None
+                raise
+            result = await compact_messages(
+                messages,
+                snapshots=snapshots,
+                config=CompactionConfig(
+                    min_messages_to_compact=2,
+                    boundary_mode="turn",
+                    keep_last_n_turns=keep_turns,
+                    max_summary_chars=4000,
+                    metadata={"trigger": "user"},
+                ),
+            )
+            if not result.applied or result.summary_message is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "nothing_to_compact",
+                        "reason": result.reason,
+                    },
+                )
+            adapter = TypeAdapter(AgentMessage)
+            replacement = [adapter.validate_python(item) for item in result.new_messages]
+            await store.replace_messages(sid, replacement)
+            if state.current_session_id == sid:
+                harness.agent.state.messages = list(replacement)
+        finally:
+            state.running = False
+
+        budget = await _estimate_session_context_budget(session_id=sid)
+        assert result is not None and result.source is not None
+        return {
+            "ok": True,
+            "session_id": sid,
+            "summary_message": result.summary_message.model_dump(mode="json"),
+            "source_message_count": result.source.source_message_count,
+            "compacted_message_count": result.source.compacted_message_count,
+            "retained_message_count": result.source.retained_message_count,
+            "snapshots_retained": len(result.source.source_snapshot_ids),
+            "budget": budget,
+        }
 
     @app.post("/api/sessions", response_model=None)
     async def post_sessions(
@@ -5685,6 +6018,65 @@ def create_app(
             return JSONResponse(status_code=500, content=result)
         return result
 
+    @app.get("/api/requests/{request_id}/approvals", response_model=None)
+    async def list_request_approvals(
+        request_id: str,
+        status: str | None = None,
+    ) -> dict[str, Any] | JSONResponse:
+        """List browser-safe approval records for one owned Web request."""
+        req = _find_request(request_id)
+        if req is None:
+            return JSONResponse(status_code=404, content={"detail": "request not found"})
+        if status not in (None, "pending", "approved", "denied", "cancelled"):
+            return JSONResponse(status_code=400, content={"detail": "invalid approval status"})
+        approvals = approval_manager.list_for_request(
+            request_id,
+            status=cast(Any, status),
+        )
+        return {
+            "request_id": request_id,
+            "session_id": req.session_id,
+            "count": len(approvals),
+            "approvals": approvals,
+        }
+
+    @app.post(
+        "/api/requests/{request_id}/approvals/{approval_id}",
+        response_model=None,
+    )
+    async def resolve_request_approval(
+        request_id: str,
+        approval_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | JSONResponse:
+        """Approve once or deny the immutable ToolCall held by the Agent task."""
+        req = _find_request(request_id)
+        if req is None:
+            return JSONResponse(status_code=404, content={"detail": "approval not found"})
+        decision = payload.get("decision") if isinstance(payload, dict) else None
+        if decision not in ("approve", "deny"):
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "decision must be 'approve' or 'deny'"},
+            )
+        try:
+            approval, idempotent = await approval_manager.resolve(
+                request_id=request_id,
+                approval_id=approval_id,
+                decision=decision,
+            )
+        except KeyError:
+            return JSONResponse(status_code=404, content={"detail": "approval not found"})
+        except ValueError as exc:
+            return JSONResponse(status_code=409, content={"detail": str(exc)})
+        return {
+            "ok": True,
+            "request_id": request_id,
+            "session_id": req.session_id,
+            "approval": approval,
+            "idempotent": idempotent,
+        }
+
     @app.post("/api/abort", response_model=None)
     async def post_abort(payload: dict[str, Any]) -> dict[str, Any] | JSONResponse:
         """兼容别名——转发到当前 active request（如有）；否则直调 harness.abort()。
@@ -5934,6 +6326,22 @@ def dispose_app(app: FastAPI) -> None:
     if hook is not None and harness is not None:
         harness.remove_on_event_hook(hook)
         app.state.web_event_hook = None
+    web_handler = getattr(app.state, "web_tool_approval_handler", None)
+    previous_handler = getattr(app.state, "previous_tool_approval_handler", None)
+    if (
+        harness is not None
+        and web_handler is not None
+        and harness.agent.tool_approval_handler is web_handler
+    ):
+        harness.set_tool_approval_handler(previous_handler)
+    web_model_hook = getattr(app.state, "web_before_model_call", None)
+    previous_model_hook = getattr(app.state, "previous_before_model_call", None)
+    if (
+        harness is not None
+        and web_model_hook is not None
+        and harness.agent.before_model_call is web_model_hook
+    ):
+        harness.agent.before_model_call = previous_model_hook
 
 
 # ============================================================================

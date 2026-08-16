@@ -32,7 +32,7 @@ import json
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -66,6 +66,8 @@ class CompactionConfig(BaseModel):
       metadata                配置级 metadata
     """
     keep_last_n_messages: int = 8
+    boundary_mode: Literal["message", "turn"] = "message"
+    keep_last_n_turns: int = 4
     min_messages_to_compact: int = 12
     include_tool_results: bool = True
     include_snapshot_ids: bool = True
@@ -315,6 +317,10 @@ async def compact_messages(
         raise ValueError(
             f"CompactionConfig.keep_last_n_messages 不能为负，实际：{cfg.keep_last_n_messages}"
         )
+    if cfg.keep_last_n_turns < 0:
+        raise ValueError(
+            f"CompactionConfig.keep_last_n_turns 不能为负，实际：{cfg.keep_last_n_turns}"
+        )
     if cfg.min_messages_to_compact < 1:
         raise ValueError(
             f"CompactionConfig.min_messages_to_compact 必须 >= 1，"
@@ -338,9 +344,28 @@ async def compact_messages(
 
     # Step 3: 切分
     keep_n = cfg.keep_last_n_messages
-    if keep_n == 0:
-        retained: list[Message] = []
-        compacted: list[Message] = list(messages)
+    if cfg.boundary_mode == "turn":
+        user_boundaries = [
+            index
+            for index, message in enumerate(messages)
+            if getattr(message, "role", None) == "user"
+        ]
+        if not user_boundaries:
+            retained = list(messages)
+            compacted = []
+        elif cfg.keep_last_n_turns == 0:
+            retained = []
+            compacted = list(messages)
+        elif len(user_boundaries) <= cfg.keep_last_n_turns:
+            retained = list(messages)
+            compacted = []
+        else:
+            retain_from = user_boundaries[-cfg.keep_last_n_turns]
+            compacted = list(messages[:retain_from])
+            retained = list(messages[retain_from:])
+    elif keep_n == 0:
+        retained = []
+        compacted = list(messages)
     else:
         retained = list(messages[-keep_n:]) if keep_n < len(messages) else list(messages)
         compacted = list(messages[:-keep_n]) if keep_n < len(messages) else []
@@ -383,6 +408,8 @@ async def compact_messages(
     summary_metadata: dict[str, Any] = {
         "summary_title": cfg.summary_title,
         "keep_last_n_messages": cfg.keep_last_n_messages,
+        "boundary_mode": cfg.boundary_mode,
+        "keep_last_n_turns": cfg.keep_last_n_turns,
         "include_tool_results": cfg.include_tool_results,
         **dict(cfg.metadata),
     }

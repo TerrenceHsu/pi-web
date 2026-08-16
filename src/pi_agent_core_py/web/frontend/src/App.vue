@@ -7,6 +7,7 @@ import ChatPanel from "./components/chat/ChatPanel.vue"
 import LoginPage from "./components/auth/LoginPage.vue"
 import { useAuthStore } from "./stores/authStore"
 import { useChatStore } from "./stores/chatStore"
+import { useContextBudgetStore } from "./stores/contextBudgetStore"
 import { useFileStore } from "./stores/fileStore"
 import { useMcpStore } from "./stores/mcpStore"
 import { useProviderStore } from "./stores/providerStore"
@@ -21,6 +22,7 @@ import {
 const authStore = useAuthStore()
 const sessionStore = useSessionStore()
 const chatStore = useChatStore()
+const contextBudgetStore = useContextBudgetStore()
 const fileStore = useFileStore()
 const skillStore = useSkillStore()
 const mcpStore = useMcpStore()
@@ -87,12 +89,14 @@ async function restoreWorkspaceSession(sessionId: string | null): Promise<void> 
   chatStore.resetForSession()
   chatStore.clearRegenerationForSessionSwitch()
   chatStore.setActiveSession(sessionId)
+  contextBudgetStore.resetForSession()
   fileStore.resetForSession()
   if (!sessionId) return
 
   await Promise.all([
     chatStore.loadMessages(sessionId),
     fileStore.loadFiles(sessionId),
+    contextBudgetStore.load(sessionId),
   ])
   if (version !== activationVersion || sessionStore.activeSessionId !== sessionId) return
 
@@ -110,9 +114,12 @@ async function restoreWorkspaceSession(sessionId: string | null): Promise<void> 
   chatStore.resumeActiveRequest(activeRequestId)
   await chatStore.recoverActiveRequestEvents(sessionId, activeRequestId)
   if (version !== activationVersion || sessionStore.activeSessionId !== sessionId) return
+  await chatStore.loadPendingApprovals(sessionId, activeRequestId)
+  if (version !== activationVersion || sessionStore.activeSessionId !== sessionId) return
   void chatStore.pollRequestUntilTerminal(activeRequestId).then(() => {
     if (sessionStore.activeSessionId === sessionId) {
       void fileStore.loadFiles(sessionId)
+      void contextBudgetStore.load(sessionId)
     }
   })
 }
@@ -121,6 +128,7 @@ function resetWorkspaceState(): void {
   activationVersion += 1
   sessionCoordinatorReady.value = false
   chatStore.resetWorkspace()
+  contextBudgetStore.resetWorkspace()
   fileStore.resetWorkspace()
   skillStore.resetWorkspace()
   mcpStore.resetWorkspace()

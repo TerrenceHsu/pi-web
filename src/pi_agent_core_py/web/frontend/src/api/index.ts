@@ -33,6 +33,8 @@ export * from "./state"
 export * from "./regenerate"
 export * from "./providers"
 export * from "./slashCommands"
+export * from "./approvals"
+export * from "./contextBudget"
 
 // ----- 旧 api.ts 兼容签名（让 9 个 .vue 不改一行） -----
 // 注意：旧 .vue 直接 import * as api 然后 api.getState() / api.sendPrompt(text, sel)

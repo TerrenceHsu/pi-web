@@ -42,6 +42,7 @@ class ModelCapabilities:
     reasoning: bool | None = None
     vision: bool | None = None
     context_window: int | None = None
+    max_output_tokens: int | None = None
 
 
 @dataclass(frozen=True)

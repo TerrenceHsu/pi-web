@@ -40,11 +40,14 @@ def _build_test_harness():
 
     from pi_agent_core_py.agent import Agent
     from pi_agent_core_py.harness import AgentHarness
+    from pi_agent_core_py.messages import ToolCall
     from pi_agent_core_py.model_client import (
         DoneEvent,
         FakeClient,
         TextDeltaEvent,
+        ToolCallEvent,
     )
+    from pi_agent_core_py.policy import DefaultToolPermissionPolicy
 
     # P1-B3-4: 默认 delayed（让 async prompt 测试能观察 draft 增长）；
     # 设置 PI_E2E_FAST=1 切回 fast FakeClient
@@ -66,7 +69,35 @@ def _build_test_harness():
                 import asyncio
                 import random
 
-                slow_refresh = "P2A_SLOW_REFRESH" in repr(kwargs.get("messages", ""))
+                messages = kwargs.get("messages", [])
+                messages_repr = repr(messages)
+                approval_marker = None
+                if "P2B_APPROVAL_APPROVE" in messages_repr:
+                    approval_marker = "approved-e2e.md"
+                elif "P2B_APPROVAL_DENY" in messages_repr:
+                    approval_marker = "denied-e2e.md"
+                if approval_marker is not None:
+                    has_tool_result = any(
+                        getattr(message, "role", None) == "toolResult"
+                        for message in messages
+                    )
+                    if has_tool_result:
+                        await asyncio.sleep(0.4)
+                        yield TextDeltaEvent(delta="Approval flow finished")
+                        yield DoneEvent(stop_reason="stop")
+                    else:
+                        yield ToolCallEvent(tool_call=ToolCall(
+                            id=f"call_{approval_marker}",
+                            name="write_file",
+                            arguments={
+                                "filename": approval_marker,
+                                "content": "created after human approval",
+                            },
+                        ))
+                        yield DoneEvent(stop_reason="tool_use")
+                    return
+
+                slow_refresh = "P2A_SLOW_REFRESH" in messages_repr
                 # 调用父类 stream 拿到原 events，但插入 delay
                 # FakeClient.stream 是 async generator——委托
                 async for ev in super().stream(**kwargs):
@@ -91,7 +122,7 @@ def _build_test_harness():
         fake = FakeClient(scripts)
 
     agent = Agent(system_prompt="", client=fake)
-    harness = AgentHarness(agent)
+    harness = AgentHarness(agent, permission_policy=DefaultToolPermissionPolicy())
     # attach 一个空 SkillRegistry——让 /api/skills/upload 走 register 路径而非 422
     harness.attach_skills([])
     return harness

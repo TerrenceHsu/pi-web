@@ -104,6 +104,26 @@ export interface ModelCapabilitiesView {
   reasoning: boolean | null
   vision: boolean | null
   context_window: number | null
+  max_output_tokens?: number | null
+}
+
+export interface ResolvedModelCapabilitiesView {
+  provider_id: string
+  model_id: string
+  context_window: number | null
+  max_output_tokens: number | null
+  source: "user" | "static" | "unknown"
+  updated_at: number | null
+}
+
+export interface ModelCapabilitiesResponse {
+  capabilities: ResolvedModelCapabilitiesView
+}
+
+export interface ModelCapabilitiesPutRequest {
+  model_id: string
+  context_window: number | null
+  max_output_tokens: number | null
 }
 
 export interface ProviderModelOption {

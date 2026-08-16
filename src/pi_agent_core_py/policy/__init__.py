@@ -13,6 +13,8 @@ from .permissions import (
     DefaultToolPermissionPolicy,
     DenyAllToolPermissionPolicy,
     PermissionDecisionType,
+    ToolApprovalContext,
+    ToolApprovalHandler,
     ToolPermissionDecision,
     ToolPermissionPolicy,
     parse_mcp_namespaced_tool,
@@ -26,6 +28,8 @@ __all__ = [
     # permissions
     "PermissionDecisionType",
     "ToolPermissionDecision",
+    "ToolApprovalContext",
+    "ToolApprovalHandler",
     "ToolPermissionPolicy",
     "AllowAllToolPermissionPolicy",
     "DenyAllToolPermissionPolicy",

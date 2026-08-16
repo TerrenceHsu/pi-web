@@ -13,6 +13,8 @@ import SkillUsedCard from "./SkillUsedCard.vue"
 import ToolCallCard from "./ToolCallCard.vue"
 import ToolResultCard from "./ToolResultCard.vue"
 import TurnInfoCard from "./TurnInfoCard.vue"
+import ApprovalCard from "./ApprovalCard.vue"
+import ContextSummaryCard from "./ContextSummaryCard.vue"
 
 const props = withDefaults(
   defineProps<{
@@ -38,6 +40,21 @@ const text = computed(() => {
 const assistantMarkdown = computed(() => {
   if (kind.value !== "assistant_message" || !text.value) return ""
   return renderMarkdown(text.value)
+})
+
+const assistantMetrics = computed(() => {
+  if (kind.value !== "assistant_message") return ""
+  const item = props.item as any
+  const parts: string[] = []
+  if (item.usage && item.generationMetrics?.usage_available) {
+    parts.push(`${Number(item.usage.input || 0).toLocaleString()} in`)
+    parts.push(`${Number(item.usage.output || 0).toLocaleString()} out`)
+  }
+  if (typeof item.generationMetrics?.latency_ms === "number") {
+    const ms = item.generationMetrics.latency_ms
+    parts.push(ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`)
+  }
+  return parts.join(" · ")
 })
 
 const userFiles = computed<FileRef[]>(() => {
@@ -180,6 +197,11 @@ _watch(
       <div v-else-if="(item as any).streaming" class="typing">
         <span></span><span></span><span></span>
       </div>
+      <div
+        v-if="assistantMetrics"
+        class="assistant-metrics"
+        data-testid="assistant-generation-metrics"
+      >{{ assistantMetrics }}</div>
       <!-- D2-7: Regenerate 按钮——仅在最新 persisted assistant + 无 active request 时显示 -->
       <div v-if="canRegenerate" class="regen-actions">
         <button
@@ -213,6 +235,10 @@ _watch(
     <TurnInfoCard :item="item as any" />
   </div>
 
+  <div v-else-if="kind === 'context_summary'" class="row row-card">
+    <ContextSummaryCard :item="item as any" />
+  </div>
+
   <!-- tool_call -->
   <div v-else-if="kind === 'tool_call'" class="row row-card">
     <ToolCallCard :item="item as any" />
@@ -221,6 +247,10 @@ _watch(
   <!-- tool_result -->
   <div v-else-if="kind === 'tool_result'" class="row row-card">
     <ToolResultCard :item="item as any" />
+  </div>
+
+  <div v-else-if="kind === 'tool_approval'" class="row row-card">
+    <ApprovalCard :item="item as any" />
   </div>
 
   <!-- file_read -->
@@ -258,6 +288,11 @@ _watch(
 }
 .row-user {
   justify-content: flex-end;
+}
+.assistant-metrics {
+  margin-top: 5px;
+  color: var(--muted-fg, #8b8fa3);
+  font-size: 11px;
 }
 .bubble-wrap {
   display: flex;

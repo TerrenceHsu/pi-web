@@ -6,7 +6,7 @@
 
 | 项 | 值 |
 |---|---|
-| **Product baseline commit** | `d53f331` — test(d2-8): next-prompt-after-regenerate backend integration test |
+| **Product baseline commit** | `f30da56` — feat(web): restore sessions across page refresh（P2-A committed baseline） |
 | **master HEAD** | (post-M1-7) — docs: mark P1-E M1 runtime complete（P1-E M1 ✅ COMPLETE / FROZEN） |
 | **Documentation governance** | merged into master（commits `51af04d`, `6a344d1`, merge `d7df358`, finalize `834bd1d`） |
 | **Frontend dev/lint maintenance** | merged into master（commits `d8bd2ad`, `b9f4b17`, `7fbd082`, merge `1c2289d`） |
@@ -15,7 +15,7 @@
 | **Backend Foundation HEAD** | `cad7ca7` — feat(web): bind default provider profile on session creation（P1-E2 Backend Foundation ✅ FROZEN @ 3 commits） |
 | **M1 Runtime HEAD** | `8b0fb13` — docs: reconcile P1-E M1 runtime implementation record（M1-1 ~ M1-7 ✅ COMPLETE / FROZEN） |
 | **M2 Frontend Switching HEAD** | `f9dfc1c` — docs: archive P1-E M2 integration validation（M2-0 ~ M2-4 ✅ COMPLETE / FROZEN；含 M2-F1 hotfix） |
-| **Current phase** | **P2-A Session URL Routing + Full Reload Recovery ✅ IMPLEMENTED / LOCAL BASELINE (2026-08-16)**——Session 切换同步 `/chat/{session_id}`；刷新恢复精确 Session、历史、`AGENT.md`、`Memory.md`、文件树及运行中 Prompt/Regenerate 事件；非法/已删除/非当前用户 ID 安全回退；登出清路由并隔离账号前端状态。完整 Backend 3563 passed / 3 skipped / 15 deselected（83.66% coverage）；Frontend 382/382；P2-A Chromium E2E 5/5；typecheck / lint / build / Ruff PASS。底层 P0 Runtime、Checkpointer、Auth 与 Session Workspace 保持有效。 |
+| **Current phase** | **P2-C Context Budget + Compaction UI ✅ IMPLEMENTED / LOCAL BASELINE (2026-08-17)**——真实 LLM 调用前按完整 canonical input 估算预算，70/85/95% 分级提示与 hard stop；模型窗口/输出上限持久化，unknown 安全降级；完整 Turn 边界压缩、SummaryMessage canonical 恢复；消息展示真实 usage/latency。P2-C Backend 83/83；Frontend 393/393；Chromium E2E 1/1；typecheck/lint/build/changed-file Ruff PASS。底层 P2-B、P2-A、P0 Runtime、Checkpointer、Auth 与 Session Workspace 保持有效。 |
 | **R3 Final Freeze** | ✅ COMPLETE / FINAL FROZEN @ `599d754` + correction @ `2342bc2`。详见 [P2_R3_E_FINAL_INTEGRATION_FREEZE.md](docs/validation/p2-r3/P2_R3_E_FINAL_INTEGRATION_FREEZE.md)。 |
 | **R2-B Archive Closure** | ✅ COMPLETE — User decision: **A — RATIFIED** @ 2026-08-03（c2436c7）；Amendment 2 APPROVED。**Historical 8-test discrepancy ✅ RECONCILED @ P2-R2-D-A**（freeze 时点文档误报 2920；实测 2928）。详见 [P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md §7](docs/validation/p2-r2/P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md) + [P2_R2_D_TEST_COUNT_RECONCILIATION.md](docs/validation/p2-r2/P2_R2_D_TEST_COUNT_RECONCILIATION.md) |
 | **R2-C0 Status** | ✅ COMPLETE / FROZEN @ `6476f96` + post-freeze correction `0a8f554`（R2-C terminal = `normalizing`）。Schema Amendment NOT REQUIRED。worker_concurrency=1, queue=32, shutdown_grace=30s。详见 [P2_R2_C0_INGESTION_CONTRACT_AUDIT.md](docs/validation/p2-r2/P2_R2_C0_INGESTION_CONTRACT_AUDIT.md) |
@@ -31,10 +31,13 @@
 
 | 项 | 值 | 命令 |
 |---|---|---|
+| P2-C targeted backend | **83/83**（Estimator / Runtime admission / Model capability / Web API / static security contracts） | targeted `pytest --no-cov` |
+| P2-C frontend / browser | **393/393 Vitest；1/1 P2-C Chromium** | `npm test` / `context-budget-compaction.spec.ts` |
+| All-marker audit | **3580 passed**；随后修正 3 个静态绑定契约，相关 34/34；外部 DDGS timeout + GLM 401 仍失败 | `pytest tests -m "not slow" --no-cov` |
 | Offline pytest | **2585 passed, 1 skipped**（含 M1-1 124 + M1-2 64 + M1-3 64 + M1-4 80 + M1-5 47 + M1-6 67 + M1-7 76 新增） | `pytest tests/ -m "not slow and not integration and not docker" --no-cov` |
 | Coverage | Credential + Profile + Binding + Provider Runtime 子系统 ~95%+；总 coverage 阈值 75% PASS | 同上 |
 | Playwright e2e（默认 + `--workers=1`） | 主仓库 `pi-py` 验证（本精简副本无 e2e/） | `cd tests/e2e && npx playwright test` |
-| Ruff | All checks passed | `ruff check src tests scripts` |
+| Changed-file Ruff | **All checks passed**；full-repo scan 仍有 18 个既有 import-order/unused-import 问题，均不在本次修改文件 | targeted `ruff check` |
 | Frontend prod build | 142.91 KB JS / 40.15 KB CSS（M1-7 build @ 823ms） | `cd src/pi_agent_core_py/web/frontend && npm run build` |
 | Production hooks scan | `__storeHooks` 0 / `__e2eHooks` 0 in `web/static/assets/*.js` | grep build artifacts |
 | Core runtime diff（M1 全程） | 0 modifications to loop/agent/context/events/stream_events/messages | `git diff --name-only` |
@@ -113,6 +116,33 @@
 
 ## 当前阶段
 
+**P2-C Context Budget + Compaction UI — ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-17）**。
+
+- 新增确定性中英混合 token estimator 与 12% 安全余量；按完整 system prompt、`AGENT.md`、`Memory.md`、Skills、canonical messages、Tool schemas 和附件块分项估算
+- 每次真实 Provider 调用前执行 `before_model_call` admission；工具续轮同样重新检查。Web send 前另做 draft 预检，hard stop 保留用户草稿
+- 阈值固定为 warning 70%、建议压缩 85%、hard stop 95%；窗口未知时返回 `unknown`，既不伪造百分比也不阻止请求
+- Provider Profile 可保存 `context_window` / `max_output_tokens`；解析优先级 user override → static metadata → unknown，数据随账号 workspace 持久化
+- 用户触发 compaction 只按完整 Turn 边界切分，parallel ToolCall / ToolResult 批次不被拆散；原子替换 canonical messages，保留 snapshots
+- 压缩产物为可见 Markdown SummaryMessage，进入后续 LLM context；Session 切换与整页刷新恢复摘要、预算和剩余历史
+- AssistantMessage 新增真实 Provider input/output usage、总延迟和首 token 延迟展示；Provider 未给 usage 时明确 unavailable
+- 验证：新增/受影响 Backend 83/83；Frontend 393/393 + typecheck/lint/build；P2-C Chromium E2E 1/1；changed-file Ruff PASS
+- 全 marker audit 运行 3580 passed；修正其中 3 个 Provider Runtime 静态绑定契约后相关测试 34/34。剩余仅真实 DDGS 网络超时、当前 GLM credential 401，不属于 P2-C 回归
+- 边界：当前估算器不是 Provider 官方 tokenizer；压缩摘要为本地规则式且仅用户手动触发，暂不自动压缩或额外调用 LLM
+
+### Previous phase: P2-B
+
+**P2-B Human Approval UI — ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-16）**。
+
+- Core Runtime 新增可选 `ToolApprovalHandler`；只有 policy 返回 `require_approval` 时调用，批准只作用于当前不可替换的精确 ToolCall
+- 未配置 handler 时继续返回既有安全错误 `ToolApprovalRequired`；批准、拒绝、handler 异常分别形成可测试的安全结果
+- Web 为 active request 维护 pending approval，参数仅向浏览器暴露有界、递归脱敏 JSON；认证、Cookie、密码、token、API Key 等字段不回显
+- 前端在当前 Turn 内联显示 Approval Card，提供 `Approve once` / `Deny`；浏览器刷新通过 event replay 与 pending REST fallback 恢复等待卡
+- abort 或应用 shutdown 会先取消 pending approval 并唤醒等待任务，未获批准的工具不会执行
+- 验证：Core/Web 18/18；broader regression 158/158；Frontend 387/387；P2-B Chromium 2/2，P2-A+P2-B 联合 7/7；Offline Backend 3569 passed
+- 边界：pending approval 仅保存在当前后端进程内；浏览器刷新可恢复，后端重启会取消 active request，不做永久授权、RBAC 或跨重启审批持久化
+
+### Previous phase: P2-A
+
 **P2-A Session URL Routing + Full Reload Recovery — ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-16）**。
 
 - Session 激活、创建、删除以及浏览器前进/后退统一由 App 级协调器驱动，地址同步为 `/chat/{session_id}`
@@ -183,15 +213,17 @@ P1-D3 PDF Text Extraction ⏸ **DEFERRED**（2026-07-16 决策，转出主路线
 
 ## 下一步
 
-- 用户审核 P1-E 最终状态（M3 freeze 文档 + M2-4 validation 文档）
-- 用户决定是否 merge 到 master / 打 release tag / push 到远端
-- 用户决定后续阶段（P1-F Markdown Workspace Panel / P2 Web Agent Enhancements）
+- 审核并提交 P2-B + P2-C 当前工作树，形成可回退基线（commit / tag / push 仍需用户分别授权）
+- 后续候选：P2-D Session 搜索/收藏/归档，或为 P2-C 增加 Provider tokenizer 与自动 compaction 策略
 
 ## 已知限制
 
 ### Runtime
 - Request registry 是内存态——server 重启后 active request 丢失
+- Pending approval 同样是进程内状态——浏览器刷新可恢复，server 重启会取消等待中的审批
 - Single harness——不支持多 session 并行执行
+- Context Budget 当前为确定性近似估算；未知模型窗口不执行 hard stop，需在 Provider Profile 中配置后启用百分比阈值
+- Compaction 当前仅手动触发，Summary 为本地规则式；不自动消费 Provider token 生成摘要
 - Localhost only；已有登录与账号工作区隔离，但无 TLS / RBAC / OAuth / 公网部署加固
 - Provider/Model Backend Foundation ✅ frozen（Credential + Profile + Binding 持久化）；**M1 才真正执行 Prompt/Regenerate 切换**
 

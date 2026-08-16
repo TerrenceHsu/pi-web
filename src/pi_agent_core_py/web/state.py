@@ -215,6 +215,7 @@ class WebAppState(BaseModel):
     # extension_store 与 session_store 共享 connection（:memory: 模式必须）
     # skill_mutation_lock 保证 upload/enable/disable/delete/restore 原子性
     extension_store: Any = None
+    model_capability_store: Any = None
     skill_mutation_lock: Any = None  # asyncio.Lock——在 create_app 内 init
     # P1-C3: MCP mutation lock——覆盖 add/enable/disable/delete server + tool
     mcp_mutation_lock: Any = None

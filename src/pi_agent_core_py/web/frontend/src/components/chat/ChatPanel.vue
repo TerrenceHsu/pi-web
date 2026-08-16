@@ -4,6 +4,7 @@ import { computed, onMounted, ref, watch } from "vue"
 import { abortRun, listSlashCommands } from "../../api"
 import type { SlashCommandDefinition } from "../../types"
 import { useChatStore } from "../../stores/chatStore"
+import { useContextBudgetStore } from "../../stores/contextBudgetStore"
 import { useFileStore } from "../../stores/fileStore"
 import { useProviderStore } from "../../stores/providerStore"
 import { useSessionStore } from "../../stores/sessionStore"
@@ -14,9 +15,11 @@ import ProviderSelector from "../providers/ProviderSelector.vue"
 import EmptyState from "../common/EmptyState.vue"
 import ErrorBanner from "../common/ErrorBanner.vue"
 import SessionFolderPanel from "./SessionFolderPanel.vue"
+import ContextBudgetBadge from "./ContextBudgetBadge.vue"
 
 const sessionStore = useSessionStore()
 const chatStore = useChatStore()
+const contextBudgetStore = useContextBudgetStore()
 const fileStore = useFileStore()
 const skillStore = useSkillStore()
 const providerStore = useProviderStore()
@@ -24,7 +27,9 @@ const providerStore = useProviderStore()
 const activeSessionId = computed(() => sessionStore.activeSessionId)
 const hasSession = computed(() => !!activeSessionId.value)
 const items = computed(() => chatStore.streamItems)
-const errorMessage = computed(() => chatStore.error || fileStore.error)
+const errorMessage = computed(() => chatStore.error || fileStore.error || contextBudgetStore.error)
+const contextBudget = computed(() => contextBudgetStore.getBudget(activeSessionId.value))
+const contextBlocked = computed(() => contextBudget.value?.estimate.level === "blocked")
 const pendingAttachments = computed(() => fileStore.pendingAttachments)
 const uploading = computed(() => fileStore.uploading)
 const sessionFiles = computed(() => {
@@ -69,6 +74,7 @@ watch(
       void fileStore
         .loadFiles(activeSessionId.value)
         .catch((e) => console.error("reload session folder failed", e))
+      void contextBudgetStore.load(activeSessionId.value)
     }
   },
 )
@@ -148,6 +154,16 @@ async function onSubmit(text: string) {
   const files = pendingAttachments.value.slice()
 
   try {
+    const preview = await contextBudgetStore.preview(activeSessionId.value!, {
+      text,
+      file_ids: fileIds,
+      skill_names: [...skillStore.selectedSkillNames],
+    })
+    if (preview?.estimate.level === "blocked") {
+      contextBudgetStore.error = "Context budget exceeded. Compact this conversation before sending."
+      chatInputRef.value?.setText(lastFailedText.value)
+      return
+    }
     await chatStore.sendPrompt({
       sessionId: activeSessionId.value!,
       text,
@@ -168,6 +184,14 @@ async function onSubmit(text: string) {
   }
 }
 
+async function onCompactContext() {
+  const sessionId = activeSessionId.value
+  if (!sessionId || chatStore.sending) return
+  const compacted = await contextBudgetStore.compact(sessionId)
+  if (!compacted) return
+  await chatStore.loadMessages(sessionId)
+}
+
 async function onAbort() {
   try {
     await abortRun("user clicked stop")
@@ -179,6 +203,7 @@ async function onAbort() {
 function dismissError() {
   chatStore.error = null
   fileStore.error = null
+  contextBudgetStore.error = null
 }
 </script>
 
@@ -189,6 +214,13 @@ function dismissError() {
         {{ sessionStore.sessions.find((s) => s.id === activeSessionId)?.title || "Conversation" }}
       </span>
       <ProviderSelector />
+      <ContextBudgetBadge
+        :budget="contextBudget"
+        :loading="contextBudgetStore.loadingSessionId === activeSessionId"
+        :compacting="contextBudgetStore.compactingSessionId === activeSessionId"
+        :disabled="chatStore.sending"
+        @compact="onCompactContext"
+      />
       <button
         type="button"
         class="folder-toggle"
@@ -199,6 +231,9 @@ function dismissError() {
         Folder {{ sessionFiles.length }}
       </button>
       <span v-if="chatStore.checkpointing" class="header-status running">checkpointing</span>
+      <span v-else-if="chatStore.pendingApprovalCount" class="header-status approval">
+        approval required
+      </span>
       <span v-else-if="chatStore.sending" class="header-status running">running</span>
       <span v-else-if="chatStore.wsConnected" class="header-status online">online</span>
       <span v-else class="header-status offline">offline</span>
@@ -248,6 +283,7 @@ function dismissError() {
       :session-id="activeSessionId"
       :ws-connected="chatStore.wsConnected"
       :provider-ready="providerStore.canSendPrompt"
+      :context-blocked="contextBlocked"
       :slash-commands="slashCommands"
       @submit="onSubmit"
       @abort="onAbort"
@@ -300,6 +336,10 @@ function dismissError() {
   border-color: var(--accent);
 }
 .header-status.running {
+  background: #fef3c7;
+  color: #92400e;
+}
+.header-status.approval {
   background: #fef3c7;
   color: #92400e;
 }

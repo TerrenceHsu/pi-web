@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -66,9 +67,11 @@ from .hooks import (
     default_after_tool_call,
     default_before_tool_call,
 )
+from .llm_messages import LLMMessage
 from .messages import (
     AgentMessage,
     AssistantMessage,
+    GenerationMetrics,
     Message,
     TextContent,
     ToolCall,
@@ -85,6 +88,8 @@ from .model_client import (
 )
 from .policy import (
     InMemoryToolPermissionAuditLog,
+    ToolApprovalContext,
+    ToolApprovalHandler,
     ToolPermissionAuditRecord,
     ToolPermissionDecision,
     ToolPermissionPolicy,
@@ -139,11 +144,33 @@ class TurnControlContext:
     signal: asyncio.Event | None
 
 
+@dataclass(frozen=True)
+class ModelCallContext:
+    """Exact, read-only input immediately before one Provider call."""
+
+    turn_index: int
+    system_prompt: str
+    messages: tuple[LLMMessage, ...]
+    tools: tuple[Any, ...]
+    client: ModelClient
+    signal: asyncio.Event | None
+
+
+@dataclass(frozen=True)
+class ModelCallDecision:
+    allow: bool = True
+    error_message: str | None = None
+
+
 ShouldStopAfterTurnFn = Callable[
     [TurnControlContext], bool | Awaitable[bool]
 ]
 PrepareNextTurnFn = Callable[
     [TurnControlContext], list[Message] | None | Awaitable[list[Message] | None]
+]
+BeforeModelCallFn = Callable[
+    [ModelCallContext],
+    ModelCallDecision | bool | None | Awaitable[ModelCallDecision | bool | None],
 ]
 
 
@@ -255,6 +282,7 @@ async def _execute_tool_with_hooks(
     on_update: ToolUpdateCallback | None = None,
     permission_policy: ToolPermissionPolicy | None = None,
     permission_audit_log: InMemoryToolPermissionAuditLog | None = None,
+    tool_approval_handler: ToolApprovalHandler | None = None,
 ) -> ToolResult:
     """执行单个工具，含 before / after hooks；所有失败路径都包成 ToolResult。
 
@@ -404,27 +432,69 @@ async def _execute_tool_with_hooks(
                     },
                 )
             if decision.require_approval:
-                # Step 18 没有人工审批 UI——按 deny 行为处理（error_type 区分）
-                return ToolResult(
-                    tool_call_id=effective_tool_call.id,
-                    name=effective_tool_call.name,
-                    content=[TextContent(
-                        text=(
-                            "Tool call requires approval (Step 18 has no approval UI): "
-                            f"{decision.reason or 'no reason'}"
-                        ),
-                    )],
-                    is_error=True,
-                    details={
-                        "error_type": "ToolApprovalRequired",
-                        "policy": {
-                            "decision": "require_approval",
-                            "policy_name": decision.policy_name,
-                            "reason": decision.reason,
-                            "metadata": dict(decision.metadata),
+                policy_details = {
+                    "decision": "require_approval",
+                    "policy_name": decision.policy_name,
+                    "reason": decision.reason,
+                    "metadata": dict(decision.metadata),
+                }
+                if tool_approval_handler is None:
+                    # 保持 Step 18 兼容语义：没有交互层时绝不执行。
+                    return ToolResult(
+                        tool_call_id=effective_tool_call.id,
+                        name=effective_tool_call.name,
+                        content=[TextContent(
+                            text=(
+                                "Tool call requires approval but no approval "
+                                f"handler is available: {decision.reason or 'no reason'}"
+                            ),
+                        )],
+                        is_error=True,
+                        details={
+                            "error_type": "ToolApprovalRequired",
+                            "policy": policy_details,
                         },
-                    },
-                )
+                    )
+                try:
+                    approved = await _await_maybe(tool_approval_handler(
+                        ToolApprovalContext(
+                            tool_call=effective_tool_call,
+                            tool=tool,
+                            decision=decision,
+                            signal=signal,
+                        )
+                    ))
+                    if not isinstance(approved, bool):
+                        raise TypeError(
+                            "tool approval handler must return bool, "
+                            f"got {type(approved).__name__}"
+                        )
+                except Exception as approval_exc:
+                    return ToolResult(
+                        tool_call_id=effective_tool_call.id,
+                        name=effective_tool_call.name,
+                        content=[TextContent(text=(
+                            "Tool approval handler failed: "
+                            f"{type(approval_exc).__name__}: {approval_exc}"
+                        ))],
+                        is_error=True,
+                        details={
+                            "error_type": "ToolApprovalHandlerError",
+                            "policy": policy_details,
+                        },
+                    )
+                if not approved:
+                    return ToolResult(
+                        tool_call_id=effective_tool_call.id,
+                        name=effective_tool_call.name,
+                        content=[TextContent(text="Tool call denied by user.")],
+                        is_error=True,
+                        details={
+                            "error_type": "ToolApprovalDenied",
+                            "policy": policy_details,
+                        },
+                    )
+                # Approve once：只放行当前精确 ToolCall，随后继续 validation/execute。
             # decision="allow" 继续
         except Exception as policy_exc:
             audit_record = ToolPermissionAuditRecord(
@@ -578,6 +648,7 @@ async def _exec_one_tool(
     on_update: ToolUpdateCallback | None = None,
     permission_policy: ToolPermissionPolicy | None = None,
     permission_audit_log: InMemoryToolPermissionAuditLog | None = None,
+    tool_approval_handler: ToolApprovalHandler | None = None,
 ) -> ExecutedToolResult:
     """执行单个工具并包成 ExecutedToolResult（含 message）。
 
@@ -608,6 +679,7 @@ async def _exec_one_tool(
             on_update=on_update,
             permission_policy=permission_policy,
             permission_audit_log=permission_audit_log,
+            tool_approval_handler=tool_approval_handler,
         )
     msg = ToolResultMessage(
         tool_call_id=result.tool_call_id,
@@ -632,6 +704,7 @@ async def _execute_tool_batch(
     signal: asyncio.Event | None = None,
     permission_policy: ToolPermissionPolicy | None = None,
     permission_audit_log: InMemoryToolPermissionAuditLog | None = None,
+    tool_approval_handler: ToolApprovalHandler | None = None,
 ) -> AsyncIterator[Any]:
     """执行一批工具，并遵守上游事件顺序契约。
 
@@ -668,6 +741,7 @@ async def _execute_tool_batch(
                 signal=signal, on_update=on_update,
                 permission_policy=permission_policy,
                 permission_audit_log=permission_audit_log,
+                tool_approval_handler=tool_approval_handler,
             )
             queue.put_nowait(_ToolDoneItem(index=index, executed=executed))
         except Exception as exc:  # 最后一层安全网：单工具不能炸掉整个 batch
@@ -782,8 +856,10 @@ async def run_event_loop(
     signal: asyncio.Event | None = None,
     permission_policy: ToolPermissionPolicy | None = None,
     permission_audit_log: InMemoryToolPermissionAuditLog | None = None,
+    tool_approval_handler: ToolApprovalHandler | None = None,
     should_stop_after_turn: ShouldStopAfterTurnFn | None = None,
     prepare_next_turn: PrepareNextTurnFn | None = None,
+    before_model_call: BeforeModelCallFn | None = None,
     max_turns: int = 50,
 ) -> AsyncIterator[AgentEvent]:
     """事件驱动的 agent loop（Step 9：abort signal；Step 8：initial_messages；Step 7：batch）。
@@ -797,6 +873,8 @@ async def run_event_loop(
                                  保持旧行为（向后兼容）
       permission_audit_log   —— InMemoryToolPermissionAuditLog | None；每次 check
                                  都会 append 一条记录（policy 为 None 时不写）
+      tool_approval_handler  —— 可选一次性审批回调；仅在 require_approval 时调用，
+                                 None 时保持 ToolApprovalRequired 安全错误
 
     Bug-fix 新增参数：
       max_turns              —— 单次 run_event_loop 的最大 LLM 调用轮数（默认 50）；
@@ -887,12 +965,57 @@ async def run_event_loop(
         transformed = await transform(raw_context)
         llm_messages = convert_to_llm(transformed)
 
+        if before_model_call is not None:
+            admission_error: str | None = None
+            try:
+                raw_decision = await _await_maybe(before_model_call(ModelCallContext(
+                    turn_index=turn_count,
+                    system_prompt=system_prompt,
+                    messages=tuple(llm_messages),
+                    tools=tuple(tool_defs),
+                    client=client,
+                    signal=signal,
+                )))
+                if isinstance(raw_decision, ModelCallDecision):
+                    if not raw_decision.allow:
+                        admission_error = (
+                            raw_decision.error_message
+                            or "model call was blocked by the admission policy"
+                        )
+                elif raw_decision is False:
+                    admission_error = "model call was blocked by the admission policy"
+            except Exception as exc:
+                admission_error = f"before_model_call failed: {type(exc).__name__}"
+
+            if admission_error is not None:
+                blocked = AssistantMessage(
+                    content=[],
+                    api=client.api_id,
+                    provider=client.provider_id,
+                    model=getattr(client, "model", "unknown"),
+                    stop_reason="error",
+                    error_message=admission_error,
+                    generation_metrics=GenerationMetrics(
+                        latency_ms=0,
+                        usage_available=False,
+                    ),
+                )
+                yield MessageStartEvent(message=blocked)
+                yield MessageEndEvent(message=blocked)
+                new_messages.append(blocked)
+                yield TurnEndEvent(message=blocked, tool_results=[])
+                yield AgentEndEvent(messages=new_messages)
+                return
+
         # —— 调 LLM ——
         text_buf: list[str] = []
         tool_calls: list[ToolCall] = []
         stop_reason: str = "stop"
         error_message: str | None = None
         final_usage = Usage()
+        generation_started = time.perf_counter()
+        first_response_at: float | None = None
+        generation_metrics: GenerationMetrics | None = None
 
         def make_assistant() -> AssistantMessage:  # noqa: B023
             content: list[Any] = []
@@ -905,6 +1028,7 @@ async def run_event_loop(
                 model=getattr(client, "model", "unknown"),
                 stop_reason=stop_reason, error_message=error_message,  # noqa: B023
                 usage=final_usage,  # noqa: B023
+                generation_metrics=generation_metrics,  # noqa: B023
             )
 
         yield MessageStartEvent(message=make_assistant())
@@ -916,11 +1040,15 @@ async def run_event_loop(
             signal=signal,
         ):
             if isinstance(s_ev, TextDeltaEvent):
+                if first_response_at is None:
+                    first_response_at = time.perf_counter()
                 text_buf.append(s_ev.delta)
                 yield MessageUpdateEvent(
                     message=make_assistant(), assistant_message_event=s_ev,
                 )
             elif isinstance(s_ev, ToolCallEvent):
+                if first_response_at is None:
+                    first_response_at = time.perf_counter()
                 tool_calls.append(s_ev.tool_call)
             elif isinstance(s_ev, DoneEvent):
                 stop_reason = s_ev.stop_reason
@@ -944,6 +1072,19 @@ async def run_event_loop(
                     stop_reason = "error"
                     error_message = s_ev.message
                 break
+
+        generation_ended = time.perf_counter()
+        generation_metrics = GenerationMetrics(
+            latency_ms=max(0, round((generation_ended - generation_started) * 1000)),
+            time_to_first_token_ms=(
+                max(0, round((first_response_at - generation_started) * 1000))
+                if first_response_at is not None
+                else None
+            ),
+            usage_available=bool(
+                final_usage.input or final_usage.output or final_usage.total_tokens
+            ),
+        )
 
         # Step 9：stream 结束后再检一次 signal（覆盖 signal 在 stream 末尾被 set 的情况）
         if signal is not None and signal.is_set() and stop_reason == "stop":
@@ -1023,6 +1164,7 @@ async def run_event_loop(
                 signal=signal,
                 permission_policy=permission_policy,
                 permission_audit_log=permission_audit_log,
+                tool_approval_handler=tool_approval_handler,
             ):
                 if isinstance(ev, _BatchDone):
                     ordered = ev.ordered
@@ -1099,8 +1241,10 @@ async def run_min_loop(
     after_tool_call: AfterToolCallFn | None = None,
     permission_policy: ToolPermissionPolicy | None = None,
     permission_audit_log: InMemoryToolPermissionAuditLog | None = None,
+    tool_approval_handler: ToolApprovalHandler | None = None,
     should_stop_after_turn: ShouldStopAfterTurnFn | None = None,
     prepare_next_turn: PrepareNextTurnFn | None = None,
+    before_model_call: BeforeModelCallFn | None = None,
     max_turns: int = 50,
 ) -> list[Message]:
     """Step 1+ 便捷封装：跑 event loop，返回所有新 messages。
@@ -1116,8 +1260,10 @@ async def run_min_loop(
         after_tool_call=after_tool_call,
         permission_policy=permission_policy,
         permission_audit_log=permission_audit_log,
+        tool_approval_handler=tool_approval_handler,
         should_stop_after_turn=should_stop_after_turn,
         prepare_next_turn=prepare_next_turn,
+        before_model_call=before_model_call,
         max_turns=max_turns,
     ):
         if isinstance(ev, AgentEndEvent):
@@ -1129,4 +1275,5 @@ __all__ = [
     "run_event_loop", "run_min_loop",
     "ExecutedToolResult",
     "TurnControlContext", "ShouldStopAfterTurnFn", "PrepareNextTurnFn",
+    "ModelCallContext", "ModelCallDecision", "BeforeModelCallFn",
 ]
