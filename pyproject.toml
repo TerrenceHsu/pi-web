@@ -44,6 +44,9 @@ dev = [
 web = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
+    # Built-in DDGS web-search MCP server. The protocol wrapper lives in this
+    # project so UI-managed defaults can be enforced server-side.
+    "ddgs>=9.14,<10",
     # WebSocket 协议库——uvicorn 默认安装不带，真实进程需要才能建立 /ws/events。
     # Starlette TestClient 走 ASGI mock 不需要，所以测试全绿不代表线上能跑。
     # 2026-07-07 真实环境激活才发现；详见 docs/RELEASE_NOTES_WEB_CLAUDE_P0.md。

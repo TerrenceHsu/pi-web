@@ -13,11 +13,12 @@ Per P2-R4-A frozen contract §2.1-2.2 / §10 / §36:
 """
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from ...messages import TextContent
-from ...tools import AgentTool, ToolResult
+from ...tools import AgentTool, ToolResult, ToolUpdateCallback
 from .evidence import EvidenceRegistry
 from .search_models import DEFAULT_TOOL_LIMIT, KnowledgeSearchError
 from .search_service import SearchKnowledgeService
@@ -79,7 +80,12 @@ class SearchKnowledgeTool(AgentTool):
         self._evidence_registry_getter = evidence_registry_getter
 
     async def execute(
-        self, tool_call_id: str, args: dict[str, Any]
+        self,
+        tool_call_id: str,
+        args: dict[str, Any],
+        *,
+        signal: asyncio.Event | None = None,
+        on_update: ToolUpdateCallback | None = None,
     ) -> ToolResult:
         query = args.get("query", "")
         limit = args.get("limit", DEFAULT_TOOL_LIMIT)

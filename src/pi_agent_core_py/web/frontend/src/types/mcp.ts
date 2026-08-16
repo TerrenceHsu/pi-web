@@ -17,9 +17,26 @@ export interface MCPServerSummary {
   command: string
   args: string[]
   enabled: boolean
+  desired_enabled?: boolean
+  attached?: boolean
+  restore_status?: string
+  missing_env_keys?: string[]
   last_error: string | null
   tool_count: number
   env_keys: string[]
+  builtin?: boolean
+  deletable?: boolean
+  settings?: DDGSSearchSettings | Record<string, never>
+}
+
+/** Built-in DDGS defaults. These values are enforced by the MCP process. */
+export interface DDGSSearchSettings {
+  max_results: number
+  region: string
+  safesearch: "on" | "moderate" | "off"
+  timelimit: "d" | "w" | "m" | "y" | null
+  timeout_seconds: number
+  backend: "auto" | "duckduckgo"
 }
 
 /** POST /api/mcp/servers body——允许传 env values。 */

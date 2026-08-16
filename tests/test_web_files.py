@@ -25,7 +25,13 @@ from fastapi.testclient import TestClient
 
 from pi_agent_core_py.agent import Agent
 from pi_agent_core_py.harness import AgentHarness
-from pi_agent_core_py.model_client import DoneEvent, FakeClient, TextDeltaEvent
+from pi_agent_core_py.messages import ToolCall
+from pi_agent_core_py.model_client import (
+    DoneEvent,
+    FakeClient,
+    TextDeltaEvent,
+    ToolCallEvent,
+)
 from pi_agent_core_py.web.app import create_app, dispose_app
 
 # ============================================================================
@@ -64,6 +70,16 @@ def _upload_payload(content: bytes, filename: str = "test.txt", content_type: st
     return ("files", (filename, io.BytesIO(content), content_type))
 
 
+def _ordinary_files(payload):
+    return [f for f in payload["files"] if f.get("purpose") != "agent_instructions"]
+
+
+def _agent_instructions_file(payload):
+    matches = [f for f in payload["files"] if f.get("purpose") == "agent_instructions"]
+    assert len(matches) == 1
+    return matches[0]
+
+
 # ============================================================================
 # 1-2: upload single / multiple
 # ============================================================================
@@ -86,6 +102,187 @@ def test_upload_single_file(web_client):
     assert ref["mime"] == "text/plain"
     assert ref["sha256"]
     assert ref["id"].startswith("file-")
+
+
+def test_default_and_new_sessions_have_eager_folders(web_client):
+    client, _, app, tmp_path = web_client
+    default_sid = app.state.web.current_session_id
+    assert default_sid
+    assert (tmp_path / "uploads" / default_sid).is_dir()
+
+    sid = _make_session(client, "folder-backed")
+    assert (tmp_path / "uploads" / sid).is_dir()
+    listed = client.get(f"/api/sessions/{sid}/files").json()
+    assert listed["count"] == 1
+    agent_md = _agent_instructions_file(listed)
+    assert agent_md["logical_path"] == "AGENT.md"
+    assert agent_md["origin"] == "system"
+    assert "path" not in agent_md
+
+
+def test_agent_md_is_editable_versioned_and_protected(web_client):
+    client, _, _, _ = web_client
+    sid = _make_session(client, "agent-instructions")
+    listed = client.get(f"/api/sessions/{sid}/files").json()
+    agent_md = _agent_instructions_file(listed)
+
+    original = client.get(
+        f"/api/sessions/{sid}/files/{agent_md['id']}"
+    )
+    assert original.status_code == 200
+    assert b"# AGENT.md" in original.content
+
+    custom = "# AGENT.md\n\nAlways answer with a concise checklist.\n"
+    updated = client.put(
+        f"/api/sessions/{sid}/files/{agent_md['id']}/content",
+        json={"content": custom, "expected_sha256": agent_md["sha256"]},
+    )
+    assert updated.status_code == 200
+    updated_file = updated.json()["file"]
+    assert updated_file["sha256"] != agent_md["sha256"]
+    assert updated_file["origin"] == "user"
+
+    stale = client.put(
+        f"/api/sessions/{sid}/files/{agent_md['id']}/content",
+        json={"content": "stale", "expected_sha256": agent_md["sha256"]},
+    )
+    assert stale.status_code == 409
+    assert client.delete(
+        f"/api/sessions/{sid}/files/{agent_md['id']}"
+    ).status_code == 409
+
+    ordinary = client.post(
+        f"/api/sessions/{sid}/files",
+        files=[_upload_payload(b"read only", "ordinary.txt")],
+    ).json()["files"][0]
+    forbidden = client.put(
+        f"/api/sessions/{sid}/files/{ordinary['id']}/content",
+        json={"content": "changed", "expected_sha256": ordinary["sha256"]},
+    )
+    assert forbidden.status_code == 403
+    assert forbidden.json()["detail"] == (
+        "only AGENT.md and Memory.md are editable here"
+    )
+
+
+def test_agent_md_is_loaded_into_the_current_session_prompt(tmp_path):
+    fake = FakeClient([[TextDeltaEvent(delta="ok"), DoneEvent(stop_reason="stop")]])
+    harness = AgentHarness(Agent(system_prompt="", client=fake))
+    app = create_app(
+        harness,
+        db_path=tmp_path / "workspace.sqlite",
+        uploads_dir=tmp_path / "uploads",
+    )
+    with TestClient(app) as client:
+        sid = client.post("/api/sessions", json={"title": "prompt-agent-md"}).json()["id"]
+        agent_md = _agent_instructions_file(
+            client.get(f"/api/sessions/{sid}/files").json()
+        )
+        instruction = "Use the marker SESSION_AGENT_MD_MARKER in your reasoning."
+        edited = client.put(
+            f"/api/sessions/{sid}/files/{agent_md['id']}/content",
+            json={
+                "content": f"# AGENT.md\n\n{instruction}\n",
+                "expected_sha256": agent_md["sha256"],
+            },
+        )
+        assert edited.status_code == 200
+        assert client.post(
+            "/api/prompt",
+            json={"session_id": sid, "text": "hello"},
+        ).status_code == 200
+        assert fake.last_system_prompt is not None
+        assert instruction in fake.last_system_prompt
+        assert "<session_agent_md>" in fake.last_system_prompt
+        assert "对话助手" in fake.last_system_prompt
+    dispose_app(app)
+
+
+def test_conversation_and_agent_md_persist_across_workspace_reopen(tmp_path):
+    db_path = tmp_path / "workspace.sqlite"
+    uploads_dir = tmp_path / "uploads"
+    first_fake = FakeClient([
+        [TextDeltaEvent(delta="persisted answer"), DoneEvent(stop_reason="stop")]
+    ])
+    first_app = create_app(
+        AgentHarness(Agent(system_prompt="", client=first_fake)),
+        db_path=db_path,
+        uploads_dir=uploads_dir,
+    )
+    with TestClient(first_app) as client:
+        sid = client.post("/api/sessions", json={"title": "persistent"}).json()["id"]
+        agent_md = _agent_instructions_file(
+            client.get(f"/api/sessions/{sid}/files").json()
+        )
+        custom = "# AGENT.md\n\nPersist this instruction across login and restart.\n"
+        assert client.put(
+            f"/api/sessions/{sid}/files/{agent_md['id']}/content",
+            json={"content": custom, "expected_sha256": agent_md["sha256"]},
+        ).status_code == 200
+        assert client.post(
+            "/api/prompt",
+            json={"session_id": sid, "text": "remember this conversation"},
+        ).status_code == 200
+    dispose_app(first_app)
+
+    second_app = create_app(
+        AgentHarness(Agent(system_prompt="", client=FakeClient([]))),
+        db_path=db_path,
+        uploads_dir=uploads_dir,
+    )
+    with TestClient(second_app) as client:
+        sessions = client.get("/api/sessions").json()["sessions"]
+        assert any(session["id"] == sid for session in sessions)
+        messages = client.get(f"/api/messages?session_id={sid}").json()
+        assert messages["count"] == 2
+        assert "persisted answer" in str(messages["messages"])
+        listed = client.get(f"/api/sessions/{sid}/files").json()
+        agent_md = _agent_instructions_file(listed)
+        assert listed["count"] == 1
+        downloaded = client.get(f"/api/sessions/{sid}/files/{agent_md['id']}")
+        assert downloaded.text == custom
+    dispose_app(second_app)
+
+
+def test_agent_can_create_file_in_active_session_and_user_can_download(tmp_path):
+    fake = FakeClient([
+        [
+            ToolCallEvent(tool_call=ToolCall(
+                id="tc-write",
+                name="write_file",
+                arguments={
+                    "filename": "agent-result.md",
+                    "content": "# Agent result\n\nCreated inside this Session.",
+                },
+            )),
+            DoneEvent(stop_reason="tool_use"),
+        ],
+        [TextDeltaEvent(delta="Created the file."), DoneEvent(stop_reason="stop")],
+    ])
+    harness = AgentHarness(Agent(system_prompt="", client=fake))
+    app = create_app(
+        harness,
+        db_path=None,
+        uploads_dir=tmp_path / "agent-uploads",
+    )
+    with TestClient(app) as client:
+        sid = client.post("/api/sessions", json={"title": "agent-files"}).json()["id"]
+        response = client.post(
+            "/api/prompt",
+            json={"session_id": sid, "text": "Create a markdown result file."},
+        )
+        assert response.status_code == 200
+
+        listed = client.get(f"/api/sessions/{sid}/files").json()
+        assert listed["count"] == 2
+        generated = _ordinary_files(listed)[0]
+        assert generated["name"] == "agent-result.md"
+        downloaded = client.get(
+            f"/api/sessions/{sid}/files/{generated['id']}"
+        )
+        assert downloaded.status_code == 200
+        assert b"Created inside this Session" in downloaded.content
+    dispose_app(app)
 
 
 def test_upload_multiple_files(web_client):
@@ -122,9 +319,9 @@ def test_list_session_files(web_client):
     r = client.get(f"/api/sessions/{sid}/files")
     assert r.status_code == 200
     data = r.json()
-    assert data["count"] == 2
+    assert data["count"] == 3
     names = [f["name"] for f in data["files"]]
-    assert set(names) == {"a.txt", "b.txt"}
+    assert set(names) == {"AGENT.md", "a.txt", "b.txt"}
 
 
 def test_list_files_isolated_by_session(web_client):
@@ -141,8 +338,10 @@ def test_list_files_isolated_by_session(web_client):
     )
     r1 = client.get(f"/api/sessions/{sid1}/files").json()
     r2 = client.get(f"/api/sessions/{sid2}/files").json()
-    assert r1["count"] == 1 and r1["files"][0]["name"] == "a.txt"
-    assert r2["count"] == 1 and r2["files"][0]["name"] == "b.txt"
+    assert [f["name"] for f in _ordinary_files(r1)] == ["a.txt"]
+    assert [f["name"] for f in _ordinary_files(r2)] == ["b.txt"]
+    assert _agent_instructions_file(r1)["session_id"] == sid1
+    assert _agent_instructions_file(r2)["session_id"] == sid2
 
 
 # ============================================================================
@@ -211,7 +410,9 @@ def test_delete_via_compat_endpoint(web_client):
     assert r.json()["deleted"] is True
 
     # 再列出应为空
-    assert client.get(f"/api/sessions/{sid}/files").json()["count"] == 0
+    remaining = client.get(f"/api/sessions/{sid}/files").json()
+    assert remaining["count"] == 1
+    _agent_instructions_file(remaining)
 
 
 def test_delete_via_session_endpoint(web_client):
@@ -335,7 +536,7 @@ def test_upload_session_total_over_limit_returns_413(web_client):
     assert r2.status_code == 413
     assert r2.json()["errors"][0]["error_type"] == "SessionStorageLimitError"
     # 第一次的文件应仍在
-    assert client.get(f"/api/sessions/{sid}/files").json()["count"] == 1
+    assert client.get(f"/api/sessions/{sid}/files").json()["count"] == 2
 
 
 # ============================================================================
@@ -355,9 +556,11 @@ def test_upload_path_traversal_filename_sanitized(web_client):
     ref = r.json()["files"][0]
     assert ref["name"] == "evil.txt"
 
-    # path 应在 uploads/sid/file_id/ 下
+    # API 不暴露物理 path；磁盘内容仍限制在 uploads/sid/file_id/ 下。
     from pathlib import Path
-    target = Path(ref["path"]).resolve()
+    assert "path" not in ref
+    target = Path(tmp_path / "uploads" / sid / ref["id"] / "evil.txt").resolve()
+    assert target.is_file()
     uploads_root = (tmp_path / "uploads").resolve()
     assert target.is_relative_to(uploads_root)
     # 不应逃出 uploads_root
@@ -397,12 +600,12 @@ def test_delete_session_cascades_uploads(web_client):
         f"/api/sessions/{sid}/files",
         files=[_upload_payload(b"b", "b.txt")],
     )
-    assert client.get(f"/api/sessions/{sid}/files").json()["count"] == 2
+    assert client.get(f"/api/sessions/{sid}/files").json()["count"] == 3
 
     # 删 session
     r = client.delete(f"/api/sessions/{sid}")
     assert r.status_code == 200
-    assert r.json()["deleted_files"] == 2
+    assert r.json()["deleted_files"] == 3
 
     # uploads/sid 目录应被删
     session_dir = tmp_path / "uploads" / sid

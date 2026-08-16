@@ -20,10 +20,15 @@ export interface FileRef {
   mime: string
   size: number
   sha256: string
+  /** Session 文件树中的逻辑路径；不会暴露后端物理路径。 */
+  logical_path?: string
+  origin?: "system" | "upload" | "agent" | "user" | "legacy"
+  purpose?: "file" | "agent_instructions" | "memory"
   /** 后端通过 _classify_format 推断——前端 FileChip 据此显示是否支持。 */
   format: FileFormat
   /** 上传时间（ms） */
   created_at?: number
+  updated_at?: number
   session_id?: string
 }
 
@@ -52,6 +57,11 @@ export interface FileUploadResponse {
 export interface DeleteFileResponse {
   deleted: boolean
   file_id: string
+}
+
+/** PUT /api/sessions/{sid}/files/{fid}/content response。 */
+export interface UpdateTextFileResponse {
+  file: FileRef
 }
 
 /**

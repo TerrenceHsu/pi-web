@@ -125,3 +125,44 @@ describe("providerReady gating", () => {
     // payload 只是 text——不含 providerReady / provider 信息
   })
 })
+
+describe("slash command menu", () => {
+  const commands = [
+    {
+      name: "/checkpointer",
+      description: "Save memory and clear this conversation.",
+      requires_provider: true,
+      accepts_arguments: false,
+    },
+  ]
+
+  it("shows matching commands when the user types slash", async () => {
+    const wrapper = mountInput({ slashCommands: commands })
+    await wrapper.get('[data-testid="chat-input-field"]').setValue("/")
+    expect(wrapper.find('[role="listbox"]').exists()).toBe(true)
+    expect(wrapper.get('[data-testid="slash-command-checkpointer"]').text()).toContain(
+      "/checkpointer",
+    )
+  })
+
+  it("selects a command without sending it immediately", async () => {
+    const wrapper = mountInput({ slashCommands: commands })
+    await wrapper.get('[data-testid="chat-input-field"]').setValue("/check")
+    await wrapper.get('[data-testid="slash-command-checkpointer"]').trigger("mousedown")
+    expect((wrapper.get('[data-testid="chat-input-field"]').element as HTMLTextAreaElement).value)
+      .toBe("/checkpointer")
+    expect(wrapper.emitted("submit")).toBeUndefined()
+  })
+
+  it("submits an exact checkpointer command with Enter", async () => {
+    const wrapper = mountInput({ slashCommands: commands })
+    const field = wrapper.get('[data-testid="chat-input-field"]')
+    await field.setValue("/checkpointer")
+    await field.trigger("keydown", {
+      key: "Enter",
+      shiftKey: false,
+      isComposing: false,
+    })
+    expect(wrapper.emitted("submit")?.[0]).toEqual(["/checkpointer"])
+  })
+})

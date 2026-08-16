@@ -18,7 +18,7 @@
 
 Step 9 **不实现**：
 - AgentHarness（Step 10）/ Turn Snapshot（Step 11）/ Session（Step 12）
-- 工具内部感知 signal——只能在上层检查点中止
+- signal 会透传到 Tool、before hook 与 after hook
 - 强制 cancel running task——只用 signal 协作
 """
 from __future__ import annotations
@@ -49,7 +49,7 @@ from .hooks import (
     AfterToolCallFn,
     BeforeToolCallFn,
 )
-from .loop import run_event_loop
+from .loop import PrepareNextTurnFn, ShouldStopAfterTurnFn, run_event_loop
 from .messages import Message
 from .model_client import ModelClient
 from .policy import (
@@ -132,6 +132,8 @@ class Agent:
         after_tool_call: AfterToolCallFn | None = None,
         permission_policy: ToolPermissionPolicy | None = None,
         permission_audit_log: InMemoryToolPermissionAuditLog | None = None,
+        should_stop_after_turn: ShouldStopAfterTurnFn | None = None,
+        prepare_next_turn: PrepareNextTurnFn | None = None,
         max_turns: int = 50,
     ):
         self.system_prompt = system_prompt
@@ -149,6 +151,8 @@ class Agent:
         # Agent 只做"持有 + 透传"，不做决策；Harness 可在运行期替换。
         self.permission_policy: ToolPermissionPolicy | None = permission_policy
         self.permission_audit_log: InMemoryToolPermissionAuditLog | None = permission_audit_log
+        self.should_stop_after_turn = should_stop_after_turn
+        self.prepare_next_turn = prepare_next_turn
         # Bug-fix：max_turns 安全网——透传给 run_event_loop
         self.max_turns: int = max_turns
 
@@ -380,6 +384,8 @@ class Agent:
             signal=signal,
             permission_policy=self.permission_policy,
             permission_audit_log=self.permission_audit_log,
+            should_stop_after_turn=self.should_stop_after_turn,
+            prepare_next_turn=self.prepare_next_turn,
             max_turns=self.max_turns,
         ):
             await self._handle_event(ev)

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue"
 
+import { useAuthStore } from "../../stores/authStore"
 import { useChatStore } from "../../stores/chatStore"
 import { useFileStore } from "../../stores/fileStore"
 import { useSessionStore } from "../../stores/sessionStore"
@@ -10,6 +11,7 @@ import MCPManagerModal from "../mcp/MCPManagerModal.vue"
 import ProviderSettingsModal from "../providers/ProviderSettingsModal.vue"
 import SkillManagerModal from "../skills/SkillManagerModal.vue"
 
+const authStore = useAuthStore()
 const sessionStore = useSessionStore()
 const chatStore = useChatStore()
 const fileStore = useFileStore()
@@ -116,6 +118,11 @@ async function exportSession(id: string) {
     chatStore.error = e?.message ? `Export failed: ${e.message}` : "Export failed"
   }
 }
+
+async function signOut(): Promise<void> {
+  await authStore.logout()
+  window.location.reload()
+}
 </script>
 
 <template>
@@ -136,6 +143,42 @@ async function exportSession(id: string) {
         New chat
       </button>
     </div>
+
+    <nav class="sidebar-tools" aria-label="Workspace tools">
+      <button
+        class="sidebar-tool-btn"
+        data-testid="skills-button"
+        title="Skills manager"
+        @click="skillsOpen = true"
+      >
+        Skills
+      </button>
+      <button
+        class="sidebar-tool-btn"
+        data-testid="knowledge-button"
+        title="Knowledge libraries manager"
+        @click="knowledgeOpen = true"
+      >
+        Knowledge
+      </button>
+      <button
+        class="sidebar-tool-btn"
+        data-testid="mcp-button"
+        title="MCP manager"
+        @click="mcpOpen = true"
+      >
+        MCP
+      </button>
+      <button
+        class="sidebar-tool-btn"
+        data-testid="provider-settings-button"
+        :disabled="providerEntryDisabled"
+        :title="providerEntryTitle"
+        @click="providerOpen = true"
+      >
+        Providers
+      </button>
+    </nav>
 
     <div class="sidebar-section-title">Sessions</div>
     <div class="session-list">
@@ -189,41 +232,18 @@ async function exportSession(id: string) {
       </div>
     </div>
 
-    <div class="sidebar-spacer"></div>
-
-    <div class="sidebar-footer">
+    <div class="account-panel">
+      <div class="account-identity">
+        <span class="account-label">Signed in as</span>
+        <span class="account-name">{{ authStore.user?.name }}</span>
+      </div>
       <button
-        class="footer-btn"
-        data-testid="skills-button"
-        title="Skills manager"
-        @click="skillsOpen = true"
+        class="sign-out-btn"
+        data-testid="sign-out-button"
+        :disabled="authStore.submitting"
+        @click="signOut"
       >
-        Skills
-      </button>
-      <button
-        class="footer-btn"
-        data-testid="knowledge-button"
-        title="Knowledge libraries manager"
-        @click="knowledgeOpen = true"
-      >
-        Knowledge
-      </button>
-      <button
-        class="footer-btn"
-        data-testid="mcp-button"
-        title="MCP manager"
-        @click="mcpOpen = true"
-      >
-        MCP
-      </button>
-      <button
-        class="footer-btn"
-        data-testid="provider-settings-button"
-        :disabled="providerEntryDisabled"
-        :title="providerEntryTitle"
-        @click="providerOpen = true"
-      >
-        Providers
+        Sign out
       </button>
     </div>
 
@@ -292,6 +312,32 @@ async function exportSession(id: string) {
 .plus {
   font-size: 16px;
   line-height: 1;
+}
+
+.sidebar-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px;
+}
+.sidebar-tool-btn {
+  width: 100%;
+  padding: 8px 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  text-align: left;
+}
+.sidebar-tool-btn:hover:not(:disabled) {
+  background: var(--border);
+  color: var(--fg);
+}
+.sidebar-tool-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 .sidebar-section-title {
   padding: 8px 12px 4px;
@@ -370,31 +416,39 @@ async function exportSession(id: string) {
 .icon-btn.danger:hover {
   color: var(--danger);
 }
-.sidebar-spacer {
-  flex: 0 0 auto;
-}
-.sidebar-footer {
+.account-panel {
   display: flex;
-  gap: 6px;
-  padding: 8px 4px 4px;
-  border-top: 1px solid var(--sidebar-border);
+  align-items: center;
+  gap: 8px;
+  padding: 10px 8px 2px;
+  border-top: 1px solid var(--border);
 }
-.footer-btn {
+.account-identity {
+  min-width: 0;
   flex: 1;
-  padding: 6px 8px;
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+}
+.account-label {
   color: var(--muted);
+  font-size: 10px;
 }
-.footer-btn:hover:not(:disabled) {
-  background: var(--border);
+.account-name {
+  overflow: hidden;
   color: var(--fg);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.footer-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.sign-out-btn {
+  padding: 5px 8px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+}
+.sign-out-btn:hover:not(:disabled) {
+  color: var(--fg);
 }
 </style>

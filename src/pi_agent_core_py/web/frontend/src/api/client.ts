@@ -65,6 +65,13 @@ function safeErrorDetail(payload: unknown, statusText: string, fallback: string)
     if (typeof obj.message === "string" && obj.message.length > 0) return obj.message
     // FastAPI HTTPException(detail="...") 模式
     if (typeof obj.detail === "string" && obj.detail.length > 0) return obj.detail
+    // 稳定领域错误：{detail: {code, message}}。只展示服务端脱敏 message。
+    if (obj.detail && typeof obj.detail === "object") {
+      const detailMessage = (obj.detail as Record<string, unknown>).message
+      if (typeof detailMessage === "string" && detailMessage.length > 0) {
+        return detailMessage
+      }
+    }
     // detail 数组（FastAPI validation 列表）——故意不渲染
   }
   if (typeof statusText === "string" && statusText.length > 0) return statusText

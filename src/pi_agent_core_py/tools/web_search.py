@@ -14,13 +14,14 @@ https://api.tavily.com/search，把 title/url/content 喂回 LLM。
 """
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any, cast
 
 import httpx
 
 from ..messages import TextContent
-from . import AgentTool, ToolResult
+from . import AgentTool, ToolResult, ToolUpdateCallback
 
 
 class WebSearchTool(AgentTool):
@@ -98,7 +99,14 @@ class WebSearchTool(AgentTool):
         resp.raise_for_status()
         return cast("dict[str, Any]", resp.json())
 
-    async def execute(self, tool_call_id: str, args: dict[str, Any]) -> ToolResult:
+    async def execute(
+        self,
+        tool_call_id: str,
+        args: dict[str, Any],
+        *,
+        signal: asyncio.Event | None = None,
+        on_update: ToolUpdateCallback | None = None,
+    ) -> ToolResult:
         query = args.get("query") or ""
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query 不能为空")

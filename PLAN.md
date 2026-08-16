@@ -20,6 +20,6 @@ The original Web Claude P0 plan is also archived:
 - [API reference](docs/api/web-api.md)
 - [Testing guide](docs/guides/web-testing.md)
 
-> 当前主线：**P1-E Multi-Provider Switching**——M1 Runtime / M2 Frontend / M3 Unified Freeze。
-> Backend Foundation（P1-E1 Credentials + P1-E2 Profile/Binding）已 ✅ FROZEN @ `cad7ca7`，不单独 merge / tag。
-> 详见 [ROADMAP.md](ROADMAP.md) § P1-E 与 [docs/design/p1-e2-provider-profiles.md](docs/design/p1-e2-provider-profiles.md) §19 Pivot 附录。
+> 当前本地基线主线：**P0-AGENT-RUNTIME Upstream Contract Alignment** 已实施；底层 P2-CHECKPOINTER、P2-AUTH、P2-SESSION-WORKSPACE 与 P1-E Provider Runtime 保持有效。
+> 当前首个命令 `/checkpointer` 把本 Session 对话累计总结到 `Memory.md`，文件提交后清空消息，失败保留并回滚；后续请求自动加载该记忆。
+> 实施状态与验证基线见 [STATUS.md](STATUS.md)，后续优先级见 [ROADMAP.md](ROADMAP.md)。

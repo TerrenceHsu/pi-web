@@ -81,6 +81,41 @@ export const useFileStore = defineStore("files", () => {
     }
   }
 
+  async function readTextFile(sessionId: string, fileId: string) {
+    error.value = null
+    try {
+      return await filesApi.readTextFile(sessionId, fileId)
+    } catch (e: any) {
+      error.value = e instanceof ApiError ? e.detail : String(e?.message ?? e)
+      throw e
+    }
+  }
+
+  async function updateTextFile(
+    sessionId: string,
+    fileId: string,
+    content: string,
+    expectedSha256: string,
+  ) {
+    error.value = null
+    try {
+      const resp = await filesApi.updateTextFile(
+        sessionId,
+        fileId,
+        content,
+        expectedSha256,
+      )
+      const existing = filesBySession.value[sessionId] ?? []
+      filesBySession.value[sessionId] = existing.map((file) =>
+        file.id === fileId ? resp.file : file,
+      )
+      return resp.file
+    } catch (e: any) {
+      error.value = e instanceof ApiError ? e.detail : String(e?.message ?? e)
+      throw e
+    }
+  }
+
   /** session 切换时调用——清空当前 pending 避免跨 session 污染。 */
   function resetForSession() {
     pendingAttachments.value = []
@@ -97,6 +132,8 @@ export const useFileStore = defineStore("files", () => {
     removePendingAttachment,
     clearPendingAttachments,
     deleteFile,
+    readTextFile,
+    updateTextFile,
     resetForSession,
   }
 })

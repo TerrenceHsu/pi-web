@@ -1,4 +1,4 @@
-"""view_file 工具——读取当前会话上传文件的内容或结构摘要（P0-3）。
+"""view_file 工具——读取当前会话文件夹内容或结构摘要（P0-3）。
 
 支持的格式：
 - markdown / text / code / json / xml / yaml / toml / ini / log → utf-8 前 max_bytes
@@ -27,6 +27,7 @@ web/__init__.py（FastAPI 链）形成 import 循环（agent → tools → web �
 """
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 from collections.abc import Callable
@@ -35,7 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from ..messages import TextContent
-from . import AgentTool, ToolResult
+from . import AgentTool, ToolResult, ToolUpdateCallback
 
 if TYPE_CHECKING:
     from ..web.files import FileRef, VirtualFileStore
@@ -355,13 +356,14 @@ def _read_csv_summary(
 
 
 class ViewFileTool(AgentTool):
-    """读取当前会话上传文件的内容或结构摘要。"""
+    """读取当前会话中用户上传或 Agent 创建文件的内容。"""
 
     name = "view_file"
     label = "View File"
     description = (
-        "Read the content or structural summary of an uploaded file in the "
-        "current session. Supports markdown, html, csv, parquet, and common "
+        "Read the content or structural summary of a file in the current session "
+        "folder. Supports user uploads and agent-created files in markdown, html, "
+        "csv, parquet, and common "
         "text/code files. Image understanding is not supported—images and "
         "other unsupported types return a clear message."
     )
@@ -399,7 +401,14 @@ class ViewFileTool(AgentTool):
         self._file_store = file_store
         self._session_id_getter = session_id_getter
 
-    async def execute(self, tool_call_id: str, args: dict[str, Any]) -> ToolResult:
+    async def execute(
+        self,
+        tool_call_id: str,
+        args: dict[str, Any],
+        *,
+        signal: asyncio.Event | None = None,
+        on_update: ToolUpdateCallback | None = None,
+    ) -> ToolResult:
         file_id = args.get("file_id") or ""
         if not isinstance(file_id, str) or not file_id:
             return _error(

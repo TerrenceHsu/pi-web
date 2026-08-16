@@ -174,7 +174,7 @@ async def test_loop_passes_mcp_tool_definition_to_llm() -> None:
 
 @pytest.mark.asyncio
 async def test_loop_mcp_tool_execution_order() -> None:
-    """ToolExecutionStartEvent → toolResult message_start/end → ToolExecutionEndEvent。"""
+    """工具生命周期先 end，随后才发布最终 toolResult message。"""
     mcp_tool = _make_echo_mcp_tool()
     await mcp_tool.client.connect()
 
@@ -197,7 +197,7 @@ async def test_loop_mcp_tool_execution_order() -> None:
     msg_end_after = types_seen.index("message_end", tool_start + 1)
     tool_end = types_seen.index("tool_execution_end")
 
-    assert tool_start < msg_start_after < msg_end_after < tool_end
+    assert tool_start < tool_end < msg_start_after < msg_end_after
     await mcp_tool.client.close()
 
 

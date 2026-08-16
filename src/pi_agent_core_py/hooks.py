@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -30,11 +31,11 @@ from .tools import AgentTool, ToolResult
 
 
 BeforeToolCallFn = Callable[
-    ["BeforeToolCallContext"],
+    ["BeforeToolCallContext", asyncio.Event | None],
     Awaitable["BeforeToolCallResult"],
 ]
 AfterToolCallFn = Callable[
-    ["AfterToolCallContext"],
+    ["AfterToolCallContext", asyncio.Event | None],
     Awaitable[ToolResult],
 ]
 
@@ -95,12 +96,18 @@ class AfterToolCallContext(BaseModel):
 # ============================================================================
 
 
-async def default_before_tool_call(ctx: BeforeToolCallContext) -> BeforeToolCallResult:
+async def default_before_tool_call(
+    ctx: BeforeToolCallContext,
+    signal: asyncio.Event | None = None,
+) -> BeforeToolCallResult:
     """默认放行，不修改 ToolCall。"""
     return BeforeToolCallResult(allow=True)
 
 
-async def default_after_tool_call(ctx: AfterToolCallContext) -> ToolResult:
+async def default_after_tool_call(
+    ctx: AfterToolCallContext,
+    signal: asyncio.Event | None = None,
+) -> ToolResult:
     """默认原样返回 result。"""
     return ctx.result
 

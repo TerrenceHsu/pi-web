@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue"
 
-import type { FileRef } from "../../types"
+import type { FileRef, SlashCommandDefinition } from "../../types"
 import AttachmentBar from "./AttachmentBar.vue"
 import LoadingSpinner from "../common/LoadingSpinner.vue"
 
@@ -15,6 +15,7 @@ const props = withDefaults(
     /** Provider 是否就绪——由父组件从 providerStore.canSendPrompt 传入。
      * 默认 true 保持向后兼容（不传则不阻止发送）。 */
     providerReady?: boolean
+    slashCommands?: SlashCommandDefinition[]
   }>(),
   {
     uploading: false,
@@ -22,6 +23,7 @@ const props = withDefaults(
     sessionId: null,
     wsConnected: false,
     providerReady: true,
+    slashCommands: () => [],
   },
 )
 
@@ -34,6 +36,19 @@ const emit = defineEmits<{
 
 const text = ref("")
 const fileInput = ref<HTMLInputElement | null>(null)
+const selectedCommandIndex = ref(0)
+
+const matchingCommands = computed(() => {
+  const query = text.value.trimStart().toLocaleLowerCase()
+  if (!query.startsWith("/") || query.includes("\n")) return []
+  return props.slashCommands.filter((command) =>
+    command.name.toLocaleLowerCase().startsWith(query),
+  )
+})
+
+const showCommandMenu = computed(
+  () => !props.sending && matchingCommands.value.length > 0,
+)
 
 const canSend = computed(() => {
   // Provider 未就绪——阻止所有发送路径（按钮 / Enter / submit / 附件 send）
@@ -61,10 +76,33 @@ function setText(t: string) {
 defineExpose({ setText })
 
 function onKey(e: KeyboardEvent) {
+  if (showCommandMenu.value && e.key === "ArrowDown") {
+    e.preventDefault()
+    selectedCommandIndex.value =
+      (selectedCommandIndex.value + 1) % matchingCommands.value.length
+    return
+  }
+  if (showCommandMenu.value && e.key === "ArrowUp") {
+    e.preventDefault()
+    selectedCommandIndex.value =
+      (selectedCommandIndex.value - 1 + matchingCommands.value.length) %
+      matchingCommands.value.length
+    return
+  }
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault()
+    const selected = matchingCommands.value[selectedCommandIndex.value]
+    if (showCommandMenu.value && selected && text.value.trim() !== selected.name) {
+      chooseCommand(selected)
+      return
+    }
     submit()
   }
+}
+
+function chooseCommand(command: SlashCommandDefinition) {
+  text.value = command.name
+  selectedCommandIndex.value = 0
 }
 
 function pickFiles() {
@@ -103,6 +141,23 @@ function onDragOver(e: DragEvent) {
       @remove="emit('remove-attachment', $event)"
     />
 
+    <div v-if="showCommandMenu" class="slash-menu" role="listbox" aria-label="Slash commands">
+      <button
+        v-for="(command, index) in matchingCommands"
+        :key="command.name"
+        type="button"
+        class="slash-option"
+        :class="{ selected: index === selectedCommandIndex }"
+        role="option"
+        :aria-selected="index === selectedCommandIndex"
+        :data-testid="`slash-command-${command.name.slice(1)}`"
+        @mousedown.prevent="chooseCommand(command)"
+      >
+        <strong>{{ command.name }}</strong>
+        <span>{{ command.description }}</span>
+      </button>
+    </div>
+
     <div class="input-row">
       <input
         ref="fileInput"
@@ -130,7 +185,7 @@ function onDragOver(e: DragEvent) {
         class="input-field"
         rows="1"
         data-testid="chat-input-field"
-        :placeholder="sending ? 'Running…' : 'Message…  (Enter to send, Shift+Enter for newline)'"
+        :placeholder="sending ? 'Running…' : 'Message or / command…  (Enter to send)'"
         :disabled="sending"
         @keydown="onKey"
       ></textarea>
@@ -175,6 +230,40 @@ function onDragOver(e: DragEvent) {
   width: 100%;
   margin: 0 auto;
   padding: 8px 24px 16px;
+  position: relative;
+}
+.slash-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 6px;
+  padding: 5px;
+  background: white;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgb(15 23 42 / 12%);
+}
+.slash-option {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+}
+.slash-option span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.slash-option.selected,
+.slash-option:hover {
+  background: var(--border);
 }
 .file-input-hidden {
   display: none;

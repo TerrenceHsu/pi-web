@@ -11,14 +11,11 @@ Step 7 的核心变化（相对 Step 6）：
 - 新增 `ExecutedToolResult`（index + tool_call + result + message）
 - terminate 早停规则：**本批所有工具 terminate=True 才早停**
 
-事件顺序契约（Step 7）：
-- sequential 模式：tool_execution_start → message_start/end → tool_execution_end
-  按 ToolCall 原始顺序逐个发出
-- parallel 模式：
-  - tool_execution_start：按原始 ToolCall 顺序批量发出
-  - 工具执行：asyncio.gather 并发
-  - message_start/end + tool_execution_end：按**实际完成顺序**发出
-  - ToolResultMessage 追加到 new_messages：**按原始 ToolCall 顺序**（index 排序）
+事件顺序契约：
+- 工具生命周期：tool_execution_start → update* → tool_execution_end
+- 最终 ToolResultMessage 的 message_start/end 在 execution_end 之后
+- parallel 模式 start 按源序，update/end 按实际完成序，result message 按源序
+- 每次 LLM 调用及其当批工具构成一个 turn，下一次调用前重新发 turn_start
 
 Hook 契约（继承 Step 6）：
 - before_tool_call / after_tool_call 对每个工具独立生效
@@ -35,7 +32,8 @@ Step 9 新增（Queue / Abort）：
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Iterable, Sequence
+import inspect
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -55,6 +53,7 @@ from .events import (
     MessageUpdateEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
+    ToolExecutionUpdateEvent,
     TurnEndEvent,
     TurnStartEvent,
 )
@@ -63,6 +62,7 @@ from .hooks import (
     AfterToolCallFn,
     BeforeToolCallContext,
     BeforeToolCallFn,
+    BeforeToolCallResult,
     default_after_tool_call,
     default_before_tool_call,
 )
@@ -98,6 +98,7 @@ from .tools import (
     ToolNotFoundError,
     ToolRegistry,
     ToolResult,
+    ToolUpdateCallback,
 )
 
 # ============================================================================
@@ -125,6 +126,84 @@ class _BatchDone:
     非公开 AgentEvent；只在 loop.py 内部用作 async generator 的"返回值"。
     """
     ordered: list[ExecutedToolResult]
+
+
+@dataclass(frozen=True)
+class TurnControlContext:
+    """传给 turn 控制回调的只读运行时视图。"""
+
+    turn_index: int
+    messages: tuple[Message, ...]
+    message: AssistantMessage
+    tool_results: tuple[ToolResultMessage, ...]
+    signal: asyncio.Event | None
+
+
+ShouldStopAfterTurnFn = Callable[
+    [TurnControlContext], bool | Awaitable[bool]
+]
+PrepareNextTurnFn = Callable[
+    [TurnControlContext], list[Message] | None | Awaitable[list[Message] | None]
+]
+
+
+@dataclass
+class _ToolUpdateItem:
+    index: int
+    tool_call: ToolCall
+    result: ToolResult
+
+
+@dataclass
+class _ToolDoneItem:
+    index: int
+    executed: ExecutedToolResult | None = None
+    error: BaseException | None = None
+
+
+async def _await_maybe(value: Any) -> Any:
+    """同时支持 sync / async 的控制回调。"""
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+def _accepts_parameter(fn: Callable[..., Any], name: str) -> bool:
+    """签名探测失败时采用新版契约；可探测时兼容旧版实现。"""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return True
+    return name in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
+
+async def _call_tool_hook(
+    hook: Callable[..., Any],
+    context: BeforeToolCallContext | AfterToolCallContext,
+    signal: asyncio.Event | None,
+) -> Any:
+    """调用新版 ``hook(context, signal=...)``，并兼容旧的一参数 hook。"""
+    if _accepts_parameter(hook, "signal"):
+        return await _await_maybe(hook(context, signal=signal))
+    return await _await_maybe(hook(context))
+
+
+async def _call_tool_execute(
+    tool: AgentTool,
+    tool_call: ToolCall,
+    *,
+    signal: asyncio.Event | None,
+    on_update: ToolUpdateCallback | None,
+) -> ToolResult:
+    """调用完整工具契约，并让旧版二参数工具平滑迁移。"""
+    kwargs: dict[str, Any] = {}
+    if _accepts_parameter(tool.execute, "signal"):
+        kwargs["signal"] = signal
+    if _accepts_parameter(tool.execute, "on_update"):
+        kwargs["on_update"] = on_update
+    return await tool.execute(tool_call.id, tool_call.arguments, **kwargs)
 
 
 # ============================================================================
@@ -173,6 +252,7 @@ async def _execute_tool_with_hooks(
     before_tool_call: BeforeToolCallFn,
     after_tool_call: AfterToolCallFn,
     signal: asyncio.Event | None = None,
+    on_update: ToolUpdateCallback | None = None,
     permission_policy: ToolPermissionPolicy | None = None,
     permission_audit_log: InMemoryToolPermissionAuditLog | None = None,
 ) -> ToolResult:
@@ -225,7 +305,9 @@ async def _execute_tool_with_hooks(
         before_ctx = BeforeToolCallContext(
             tool_call=tool_call, tool=tool, messages=list(messages),
         )
-        before_result = await before_tool_call(before_ctx)
+        before_result = BeforeToolCallResult.model_validate(
+            await _call_tool_hook(before_tool_call, before_ctx, signal)
+        )
     except Exception as e:
         return ToolResult(
             tool_call_id=tool_call.id,
@@ -420,8 +502,11 @@ async def _execute_tool_with_hooks(
 
     # 6. 执行
     try:
-        result = await tool.execute(
-            effective_tool_call.id, effective_tool_call.arguments,
+        result = await _call_tool_execute(
+            tool,
+            effective_tool_call,
+            signal=signal,
+            on_update=on_update,
         )
     except Exception as e:
         result = ToolResult(
@@ -456,7 +541,9 @@ async def _execute_tool_with_hooks(
             result=result,
             messages=list(messages),
         )
-        final_result = await after_tool_call(after_ctx)
+        final_result = ToolResult.model_validate(
+            await _call_tool_hook(after_tool_call, after_ctx, signal)
+        )
     except Exception as e:
         return ToolResult(
             tool_call_id=effective_tool_call.id,
@@ -488,6 +575,7 @@ async def _exec_one_tool(
     before_fn: BeforeToolCallFn,
     after_fn: AfterToolCallFn,
     signal: asyncio.Event | None = None,
+    on_update: ToolUpdateCallback | None = None,
     permission_policy: ToolPermissionPolicy | None = None,
     permission_audit_log: InMemoryToolPermissionAuditLog | None = None,
 ) -> ExecutedToolResult:
@@ -517,6 +605,7 @@ async def _exec_one_tool(
             before_tool_call=before_fn,
             after_tool_call=after_fn,
             signal=signal,
+            on_update=on_update,
             permission_policy=permission_policy,
             permission_audit_log=permission_audit_log,
         )
@@ -544,33 +633,66 @@ async def _execute_tool_batch(
     permission_policy: ToolPermissionPolicy | None = None,
     permission_audit_log: InMemoryToolPermissionAuditLog | None = None,
 ) -> AsyncIterator[Any]:
-    """执行一批工具，按模式 yield 事件；末尾 yield `_BatchDone`。
+    """执行一批工具，并遵守上游事件顺序契约。
 
-    事件契约（两种模式的事件**形状不同**）：
-
-      sequential 模式——每个工具形成完整闭环再动下一个：
-        for each tc:
-          if signal set: break       ← Step 9 加
-          tool_execution_start(tc)
-          _exec_one_tool
-          message_start(tr_msg) / message_end(tr_msg)
-          tool_execution_end(tc, result)
-
-      parallel 模式——先批量声明意图，再按完成序上报进度：
-        1. if signal set: 立即返回（不发任何事件） ← Step 9 加
-        2. 按原序批量 yield tool_execution_start
-        3. asyncio.ensure_future 创建并发 task
-        4. asyncio.as_completed 按完成序迭代
-        5. 每完成一个：message_start/end + tool_execution_end
-
-    末尾必 yield `_BatchDone(ordered=[源序 ExecutedToolResult])`。
-
-    signal 行为：
-      - sequential：在每个工具开始前检查；set 后跳出循环，**不再执行后续工具**
-      - parallel：在批量 start 前检查一次；set 后直接返回空 ordered（一旦 task 已发出，
-        无法收回——它们会跑完；但 run_event_loop 上层会在 batch 后检测 signal 并终止）
+    ``tool_execution_start → update* → tool_execution_end`` 描述工具生命周期；
+    最终 ToolResultMessage 一律在 end 之后发出。并行模式的 start 保持源序、
+    update/end 保持实际到达/完成序、result message 保持源序。
     """
     is_sequential = _should_run_sequential(registry, tool_calls)
+
+    async def produce(
+        index: int,
+        tc: ToolCall,
+        queue: asyncio.Queue[_ToolUpdateItem | _ToolDoneItem],
+    ) -> None:
+        loop = asyncio.get_running_loop()
+
+        def on_update(partial_result: ToolResult) -> Awaitable[None]:
+            future: asyncio.Future[None] = loop.create_future()
+            try:
+                partial = ToolResult.model_validate(partial_result)
+                queue.put_nowait(_ToolUpdateItem(
+                    index=index, tool_call=tc, result=partial,
+                ))
+                future.set_result(None)
+            except Exception as exc:
+                future.set_exception(exc)
+            return future
+
+        try:
+            executed = await _exec_one_tool(
+                index=index, tool_call=tc,
+                registry=registry, messages=list(messages),
+                before_fn=before_fn, after_fn=after_fn,
+                signal=signal, on_update=on_update,
+                permission_policy=permission_policy,
+                permission_audit_log=permission_audit_log,
+            )
+            queue.put_nowait(_ToolDoneItem(index=index, executed=executed))
+        except Exception as exc:  # 最后一层安全网：单工具不能炸掉整个 batch
+            queue.put_nowait(_ToolDoneItem(index=index, error=exc))
+
+    def failed_execution(index: int, tc: ToolCall, exc: BaseException) -> ExecutedToolResult:
+        result = ToolResult(
+            tool_call_id=tc.id,
+            name=tc.name,
+            content=[TextContent(text=f"{type(exc).__name__}: {exc}")],
+            is_error=True,
+            details={"error_type": type(exc).__name__},
+        )
+        return ExecutedToolResult(
+            index=index,
+            tool_call=tc,
+            result=result,
+            message=ToolResultMessage(
+                tool_call_id=tc.id,
+                name=tc.name,
+                content=result.content,
+                is_error=True,
+                details=result.details,
+            ),
+        )
 
     if is_sequential:
         ordered: list[ExecutedToolResult] = []
@@ -579,18 +701,27 @@ async def _execute_tool_batch(
             if signal is not None and signal.is_set():
                 break
             yield ToolExecutionStartEvent(tool_call=tc)
-            executed = await _exec_one_tool(
-                index=i, tool_call=tc,
-                registry=registry, messages=list(messages),
-                before_fn=before_fn, after_fn=after_fn,
-                signal=signal,
-                permission_policy=permission_policy,
-                permission_audit_log=permission_audit_log,
-            )
+            queue: asyncio.Queue[_ToolUpdateItem | _ToolDoneItem] = asyncio.Queue()
+            task = asyncio.create_task(produce(i, tc, queue))
+            executed: ExecutedToolResult | None = None
+            while executed is None:
+                item = await queue.get()
+                if isinstance(item, _ToolUpdateItem):
+                    yield ToolExecutionUpdateEvent(
+                        tool_call=item.tool_call,
+                        partial_result=item.result,
+                    )
+                    continue
+                executed = (
+                    item.executed
+                    if item.executed is not None
+                    else failed_execution(i, tc, item.error or RuntimeError("tool failed"))
+                )
+            await task
             ordered.append(executed)
+            yield ToolExecutionEndEvent(tool_call=tc, result=executed.result)
             yield MessageStartEvent(message=executed.message)
             yield MessageEndEvent(message=executed.message)
-            yield ToolExecutionEndEvent(tool_call=tc, result=executed.result)
     else:
         # Step 9：parallel 模式 batch 开始前检查 signal——已 abort 就不发 start
         if signal is not None and signal.is_set():
@@ -600,28 +731,35 @@ async def _execute_tool_batch(
         for tc in tool_calls:
             yield ToolExecutionStartEvent(tool_call=tc)
 
-        tasks = [
-            asyncio.ensure_future(_exec_one_tool(
-                index=i, tool_call=tc,
-                registry=registry, messages=list(messages),
-                before_fn=before_fn, after_fn=after_fn,
-                signal=signal,
-                permission_policy=permission_policy,
-                permission_audit_log=permission_audit_log,
-            ))
-            for i, tc in enumerate(tool_calls)
-        ]
+        queue = asyncio.Queue()
+        tasks = [asyncio.create_task(produce(i, tc, queue)) for i, tc in enumerate(tool_calls)]
         results_by_index: dict[int, ExecutedToolResult] = {}
-        for done_coro in asyncio.as_completed(tasks):
-            executed = await done_coro
+        while len(results_by_index) < len(tool_calls):
+            item = await queue.get()
+            if isinstance(item, _ToolUpdateItem):
+                yield ToolExecutionUpdateEvent(
+                    tool_call=item.tool_call,
+                    partial_result=item.result,
+                )
+                continue
+            if item.executed is not None:
+                executed = item.executed
+            else:
+                executed = failed_execution(
+                    item.index,
+                    tool_calls[item.index],
+                    item.error or RuntimeError("tool failed"),
+                )
             results_by_index[executed.index] = executed
-            yield MessageStartEvent(message=executed.message)
-            yield MessageEndEvent(message=executed.message)
             yield ToolExecutionEndEvent(
                 tool_call=executed.tool_call, result=executed.result,
             )
+        await asyncio.gather(*tasks)
         # 按原 index 排序——保证 new_messages 顺序稳定
         ordered = [results_by_index[i] for i in range(len(tool_calls))]
+        for executed in ordered:
+            yield MessageStartEvent(message=executed.message)
+            yield MessageEndEvent(message=executed.message)
 
     yield _BatchDone(ordered=ordered)
 
@@ -644,6 +782,8 @@ async def run_event_loop(
     signal: asyncio.Event | None = None,
     permission_policy: ToolPermissionPolicy | None = None,
     permission_audit_log: InMemoryToolPermissionAuditLog | None = None,
+    should_stop_after_turn: ShouldStopAfterTurnFn | None = None,
+    prepare_next_turn: PrepareNextTurnFn | None = None,
     max_turns: int = 50,
 ) -> AsyncIterator[AgentEvent]:
     """事件驱动的 agent loop（Step 9：abort signal；Step 8：initial_messages；Step 7：batch）。
@@ -697,32 +837,46 @@ async def run_event_loop(
         yield MessageEndEvent(message=user_msg)
         new_messages.append(user_msg)
 
-    last_tool_results: list[ToolResultMessage] = []
-    turn_count = 0
+    # P0：一个 turn 严格对应一次 LLM 调用及该调用产生的整批工具。
+    turn_count = 1
+
+    async def apply_turn_controls(
+        message: AssistantMessage,
+        tool_results: list[ToolResultMessage],
+    ) -> bool:
+        """turn_end 后依次 prepare → should_stop；返回是否应停止。"""
+        nonlocal new_messages
+        control = TurnControlContext(
+            turn_index=turn_count,
+            messages=tuple(new_messages),
+            message=message,
+            tool_results=tuple(tool_results),
+            signal=signal,
+        )
+        if prepare_next_turn is not None:
+            prepared = await _await_maybe(prepare_next_turn(control))
+            if prepared is not None:
+                new_messages = list(prepared)
+                control = TurnControlContext(
+                    turn_index=turn_count,
+                    messages=tuple(new_messages),
+                    message=message,
+                    tool_results=tuple(tool_results),
+                    signal=signal,
+                )
+        return bool(
+            should_stop_after_turn is not None
+            and await _await_maybe(should_stop_after_turn(control))
+        )
 
     while True:
-        # —— max_turns 安全网：超出即收敛为 error assistant ——
-        if turn_count >= max_turns:
-            over_assistant = AssistantMessage(
-                content=[TextContent(text="")],
-                api=client.api_id, provider=client.provider_id,
-                model=getattr(client, "model", "unknown"),
-                stop_reason="error",
-                error_message=f"max_turns exceeded ({max_turns})",
-            )
-            yield MessageStartEvent(message=over_assistant)
-            yield MessageEndEvent(message=over_assistant)
-            new_messages.append(over_assistant)
-            yield TurnEndEvent(message=over_assistant, tool_results=last_tool_results)
-            yield AgentEndEvent(messages=new_messages)
-            return
-        turn_count += 1
+        current_tool_results: list[ToolResultMessage] = []
         # —— Step 9 检查点 1：while iter 开始 ——
         if signal is not None and signal.is_set():
             async for ev in _finalize_abort(
                 client=client,
                 new_messages=new_messages,
-                last_tool_results=last_tool_results,
+                tool_results=current_tool_results,
             ):
                 yield ev
             return
@@ -804,64 +958,117 @@ async def run_event_loop(
 
         # 错误或被中断：直接结束
         if assistant.stop_reason in ("error", "aborted"):
-            yield TurnEndEvent(message=assistant, tool_results=last_tool_results)
+            yield TurnEndEvent(message=assistant, tool_results=current_tool_results)
             yield AgentEndEvent(messages=new_messages)
             return
 
         # 没 ToolCall：本轮 turn 自然结束
         if not tool_calls:
-            yield TurnEndEvent(message=assistant, tool_results=last_tool_results)
+            yield TurnEndEvent(message=assistant, tool_results=current_tool_results)
+            await apply_turn_controls(assistant, current_tool_results)
             yield AgentEndEvent(messages=new_messages)
             return
 
-        # —— Step 9 检查点 3：tool batch 之前 ——
-        # abort 来了：跳过 batch，发 aborted assistant + 收敛
-        if signal is not None and signal.is_set():
-            async for ev in _finalize_abort(
-                client=client,
-                new_messages=new_messages,
-                last_tool_results=last_tool_results,
-            ):
-                yield ev
-            return
+        # Provider 因长度限制截断时，tool call 可能是不完整 JSON。绝不执行这些
+        # 调用；为每个 call 生成可回喂 LLM 的安全错误结果。
+        if assistant.stop_reason == "length":
+            ordered = []
+            for index, tc in enumerate(tool_calls):
+                result = ToolResult(
+                    tool_call_id=tc.id,
+                    name=tc.name,
+                    content=[TextContent(text=(
+                        "Tool call was not executed because the model response "
+                        "ended at the length limit. Retry with complete arguments."
+                    ))],
+                    is_error=True,
+                    details={
+                        "error_type": "IncompleteToolCall",
+                        "stop_reason": "length",
+                    },
+                )
+                message = ToolResultMessage(
+                    tool_call_id=tc.id,
+                    name=tc.name,
+                    content=result.content,
+                    is_error=True,
+                    details=result.details,
+                )
+                ordered.append(ExecutedToolResult(
+                    index=index, tool_call=tc, result=result, message=message,
+                ))
+                yield MessageStartEvent(message=message)
+                yield MessageEndEvent(message=message)
+        else:
+            # —— Step 9 检查点 3：tool batch 之前 ——
+            # abort 来了：跳过 batch，发 aborted assistant + 收敛
+            if signal is not None and signal.is_set():
+                async for ev in _finalize_abort(
+                    client=client,
+                    new_messages=new_messages,
+                    tool_results=current_tool_results,
+                ):
+                    yield ev
+                return
 
-        # —— Step 7：多工具 batch 执行 ——
-        batch_messages_snapshot = list(new_messages)
-        ordered: list[ExecutedToolResult] = []
-        async for ev in _execute_tool_batch(
-            registry=registry,
-            tool_calls=tool_calls,
-            messages=batch_messages_snapshot,
-            before_fn=before_fn,
-            after_fn=after_fn,
-            signal=signal,
-            permission_policy=permission_policy,
-            permission_audit_log=permission_audit_log,
-        ):
-            if isinstance(ev, _BatchDone):
-                ordered = ev.ordered
-                break
-            yield ev
+            # —— Step 7：多工具 batch 执行 ——
+            batch_messages_snapshot = list(new_messages)
+            ordered = []
+            async for ev in _execute_tool_batch(
+                registry=registry,
+                tool_calls=tool_calls,
+                messages=batch_messages_snapshot,
+                before_fn=before_fn,
+                after_fn=after_fn,
+                signal=signal,
+                permission_policy=permission_policy,
+                permission_audit_log=permission_audit_log,
+            ):
+                if isinstance(ev, _BatchDone):
+                    ordered = ev.ordered
+                    break
+                yield ev
 
         # 按原序追加 ToolResultMessage
         for executed in ordered:
             new_messages.append(executed.message)
-            last_tool_results.append(executed.message)
+            current_tool_results.append(executed.message)
 
-        # terminate 早停：本批所有工具 terminate=True 才生效
-        if ordered and all(ex.result.terminate for ex in ordered):
-            yield TurnEndEvent(message=assistant, tool_results=last_tool_results)
+        terminate = bool(ordered) and all(ex.result.terminate for ex in ordered)
+        maxed = turn_count >= max_turns
+        turn_message = assistant
+        if maxed and not terminate:
+            # 不创建无 LLM 调用的“伪 turn”；把本次真实调用标为安全上限终止。
+            turn_message = assistant.model_copy(update={
+                "stop_reason": "error",
+                "error_message": f"max_turns exceeded ({max_turns})",
+            })
+
+        yield TurnEndEvent(message=turn_message, tool_results=current_tool_results)
+
+        stop_requested = await apply_turn_controls(
+            turn_message, current_tool_results,
+        )
+
+        if (
+            stop_requested
+            or maxed
+            or terminate
+            or (signal is not None and signal.is_set())
+        ):
             yield AgentEndEvent(messages=new_messages)
             return
 
-        # 否则继续下一轮 LLM 调用（while 循环）
+        turn_count += 1
+        yield TurnStartEvent()
+        # 继续下一次 LLM 调用。
 
 
 async def _finalize_abort(
     *,
     client: ModelClient,
     new_messages: list[Message],
-    last_tool_results: list[ToolResultMessage],
+    tool_results: list[ToolResultMessage],
 ) -> AsyncIterator[AgentEvent]:
     """Step 9 abort 终化——生成空的 aborted assistant 并正常收敛。
 
@@ -877,7 +1084,7 @@ async def _finalize_abort(
     yield MessageStartEvent(message=aborted)
     yield MessageEndEvent(message=aborted)
     new_messages.append(aborted)
-    yield TurnEndEvent(message=aborted, tool_results=last_tool_results)
+    yield TurnEndEvent(message=aborted, tool_results=tool_results)
     yield AgentEndEvent(messages=new_messages)
 
 
@@ -892,6 +1099,8 @@ async def run_min_loop(
     after_tool_call: AfterToolCallFn | None = None,
     permission_policy: ToolPermissionPolicy | None = None,
     permission_audit_log: InMemoryToolPermissionAuditLog | None = None,
+    should_stop_after_turn: ShouldStopAfterTurnFn | None = None,
+    prepare_next_turn: PrepareNextTurnFn | None = None,
     max_turns: int = 50,
 ) -> list[Message]:
     """Step 1+ 便捷封装：跑 event loop，返回所有新 messages。
@@ -907,6 +1116,8 @@ async def run_min_loop(
         after_tool_call=after_tool_call,
         permission_policy=permission_policy,
         permission_audit_log=permission_audit_log,
+        should_stop_after_turn=should_stop_after_turn,
+        prepare_next_turn=prepare_next_turn,
         max_turns=max_turns,
     ):
         if isinstance(ev, AgentEndEvent):
@@ -917,4 +1128,5 @@ async def run_min_loop(
 __all__ = [
     "run_event_loop", "run_min_loop",
     "ExecutedToolResult",
+    "TurnControlContext", "ShouldStopAfterTurnFn", "PrepareNextTurnFn",
 ]

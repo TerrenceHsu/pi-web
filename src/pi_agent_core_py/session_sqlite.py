@@ -38,7 +38,7 @@ from .messages import (
     ToolResultMessage,
     UserMessage,
 )
-from .snapshot import TurnSnapshot
+from .snapshot import RequestSnapshot
 
 # ============================================================================
 # 异常
@@ -91,7 +91,7 @@ class SQLiteStoredSnapshot(BaseModel):
     id: str
     session_id: str
     turn_id: str | None
-    snapshot: TurnSnapshot
+    snapshot: RequestSnapshot
     created_at: int
 
 
@@ -170,13 +170,13 @@ def _deserialize_message(content_json: str) -> AgentMessage:
         ) from e
 
 
-def _serialize_snapshot(snapshot: TurnSnapshot) -> str:
-    """TurnSnapshot → JSON 字符串（走 to_dict，已是 JSON-safe）。"""
+def _serialize_snapshot(snapshot: RequestSnapshot) -> str:
+    """RequestSnapshot → JSON 字符串（走 to_dict，已是 JSON-safe）。"""
     return json.dumps(snapshot.to_dict(), ensure_ascii=False)
 
 
-def _deserialize_snapshot(content_json: str) -> TurnSnapshot:
-    """JSON 字符串 → TurnSnapshot。"""
+def _deserialize_snapshot(content_json: str) -> RequestSnapshot:
+    """JSON 字符串 → RequestSnapshot。"""
     try:
         payload = json.loads(content_json)
     except json.JSONDecodeError as e:
@@ -188,10 +188,10 @@ def _deserialize_snapshot(content_json: str) -> TurnSnapshot:
             f"snapshot JSON 不是 object：{type(payload).__name__}"
         )
     try:
-        return TurnSnapshot.model_validate(payload)
+        return RequestSnapshot.model_validate(payload)
     except Exception as e:
         raise SessionSerializationError(
-            f"TurnSnapshot 反序列化失败：{type(e).__name__}: {e}"
+            f"RequestSnapshot 反序列化失败：{type(e).__name__}: {e}"
         ) from e
 
 
@@ -660,7 +660,7 @@ class SQLiteSessionStore:
     # ------------------------------------------------------------------
 
     async def append_snapshot(
-        self, session_id: str, snapshot: TurnSnapshot,
+        self, session_id: str, snapshot: RequestSnapshot,
     ) -> SQLiteStoredSnapshot:
         """追加 snapshot；不存在 session 抛 SessionNotFoundError。"""
         db = self._require_db()
@@ -684,7 +684,7 @@ class SQLiteSessionStore:
             snapshot=snapshot, created_at=now,
         )
 
-    async def list_snapshots(self, session_id: str) -> list[TurnSnapshot]:
+    async def list_snapshots(self, session_id: str) -> list[RequestSnapshot]:
         """列出 session 所有 snapshots，按 created_at 升序；返回强类型对象。
 
         不存在 session 抛 SessionNotFoundError。

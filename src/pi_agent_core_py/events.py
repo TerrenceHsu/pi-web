@@ -4,7 +4,8 @@
     agent_start / agent_end           — run 级
     turn_start / turn_end             — turn 级
     message_start / message_update / message_end — 消息级
-    tool_execution_start / tool_execution_end   — 工具执行级（Step 5 新增）
+    tool_execution_start / tool_execution_update / tool_execution_end
+                                           — 工具执行级
 
 时序（Step 5 含工具的典型一次 run）：
     agent_start
@@ -15,9 +16,12 @@
     [message_update (assistant) × N]    ← 若有 text_delta
     message_end   (assistant with ToolCall)
     tool_execution_start
+    [tool_execution_update × N]
+    tool_execution_end
     message_start (toolResult)
     message_end   (toolResult)
-    tool_execution_end
+    turn_end
+    turn_start
     message_start (assistant)            ← 第二轮 LLM
     message_update (assistant) × N
     message_end   (assistant)
@@ -92,13 +96,20 @@ class MessageEndEvent(BaseModel):
 
 
 class ToolExecutionStartEvent(BaseModel):
-    """单个工具开始执行。
-
-    Step 5 不实现 update 事件（流式工具输出在 Step 7+ 加）。
-    Step 5 不实现 batch（多个工具同时执行在 Step 7 加）。
-    """
+    """单个工具开始执行。后续可以有零到多个 update，最后必须有 end。"""
     type: Literal["tool_execution_start"] = "tool_execution_start"
     tool_call: ToolCall
+
+
+class ToolExecutionUpdateEvent(BaseModel):
+    """工具执行中的增量结果。
+
+    ``partial_result`` 只用于 UI / observability，不会写入对话上下文；最终
+    ``ToolResultMessage`` 仍由 :class:`ToolExecutionEndEvent` 的 result 生成。
+    """
+    type: Literal["tool_execution_update"] = "tool_execution_update"
+    tool_call: ToolCall
+    partial_result: ToolResult
 
 
 class ToolExecutionEndEvent(BaseModel):
@@ -165,6 +176,7 @@ AgentEvent = Annotated[
         MessageUpdateEvent,
         MessageEndEvent,
         ToolExecutionStartEvent,
+        ToolExecutionUpdateEvent,
         ToolExecutionEndEvent,
         # Step 9 新增
         RequestQueuedEvent,
@@ -180,7 +192,7 @@ __all__ = [
     "AgentStartEvent", "AgentEndEvent",
     "TurnStartEvent", "TurnEndEvent",
     "MessageStartEvent", "MessageUpdateEvent", "MessageEndEvent",
-    "ToolExecutionStartEvent", "ToolExecutionEndEvent",
+    "ToolExecutionStartEvent", "ToolExecutionUpdateEvent", "ToolExecutionEndEvent",
     # Step 9
     "AgentRequestType", "RequestEndStatus",
     "RequestQueuedEvent", "RequestStartEvent", "RequestEndEvent", "AgentAbortEvent",

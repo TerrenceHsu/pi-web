@@ -48,6 +48,7 @@ from .events import (
     RequestStartEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
+    ToolExecutionUpdateEvent,
     TurnEndEvent,
     TurnStartEvent,
 )
@@ -83,7 +84,13 @@ from .llm_messages import (
 )
 
 # Loop
-from .loop import run_event_loop, run_min_loop
+from .loop import (
+    PrepareNextTurnFn,
+    ShouldStopAfterTurnFn,
+    TurnControlContext,
+    run_event_loop,
+    run_min_loop,
+)
 
 # MCP tools（Step 16 新增）
 from .mcp import (
@@ -248,6 +255,7 @@ from .skills import (
 # Turn Snapshot（Step 11）
 from .snapshot import (
     EventSnapshot,
+    RequestSnapshot,
     SnapshotBuilder,
     SnapshotStatus,
     ToolCallSnapshot,
@@ -273,6 +281,7 @@ from .tools import (
     ToolRegistrationError,
     ToolRegistry,
     ToolResult,
+    ToolUpdateCallback,
     WebSearchTool,
 )
 
@@ -299,7 +308,7 @@ __all__ = [
     "AgentStartEvent", "AgentEndEvent",
     "TurnStartEvent", "TurnEndEvent",
     "MessageStartEvent", "MessageUpdateEvent", "MessageEndEvent",
-    "ToolExecutionStartEvent", "ToolExecutionEndEvent",
+    "ToolExecutionStartEvent", "ToolExecutionUpdateEvent", "ToolExecutionEndEvent",
     # Step 9 events
     "RequestQueuedEvent", "RequestStartEvent", "RequestEndEvent", "AgentAbortEvent",
     "AgentRequestType", "RequestEndStatus",
@@ -313,6 +322,7 @@ __all__ = [
     "default_before_tool_call", "default_after_tool_call",
     # loop
     "run_event_loop", "run_min_loop",
+    "TurnControlContext", "ShouldStopAfterTurnFn", "PrepareNextTurnFn",
     # agent
     "Agent", "AgentRequest", "AgentState", "AgentStatus", "Subscriber",
     # harness
@@ -320,7 +330,7 @@ __all__ = [
     "BeforeRequestHook", "AfterRequestHook",
     "OnEventHook", "OnErrorHook",
     # snapshot (Step 11)
-    "SnapshotStatus", "SnapshotBuilder", "TurnSnapshot",
+    "SnapshotStatus", "SnapshotBuilder", "RequestSnapshot", "TurnSnapshot",
     "EventSnapshot", "ToolCallSnapshot", "ToolResultSnapshot",
     # session (Step 12)
     "SessionState", "SessionMemory",
@@ -354,7 +364,7 @@ __all__ = [
     "compact_messages", "create_branch_summary",
     # tools
     "AgentTool", "ToolDef", "ToolExecutionMode",
-    "ToolRegistry", "ToolResult",
+    "ToolRegistry", "ToolResult", "ToolUpdateCallback",
     "ToolRegistrationError", "ToolNotFoundError",
     # built-in tools (Step 5.5)
     "WebSearchTool",

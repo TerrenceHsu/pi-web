@@ -6,8 +6,8 @@
 > P0 MVP 的 release notes 见 [v0.0.23-web-claude-p0-mvp](../releases/v0.0.23-web-claude-p0-mvp.md)；
 > P0 改造计划（已归档）见 [archived Web Claude plan](../archive/legacy-plans/WEB_CLAUDE_PLAN_ORIGINAL.md)。
 >
-> ⚠️ Web app **仅 localhost 使用**——无鉴权 / 无多用户隔离 / 无 rate limit；
-> **Localhost-first, no authentication, not suitable for public exposure.**
+> ⚠️ Web app **仅 localhost 使用**——当前已有本地账号登录、Cookie 网关与账号工作区隔离，但无 TLS / RBAC / OAuth / 公网部署加固；
+> **Localhost-first, authenticated local workspaces, not suitable for public exposure.**
 
 ## P1 当前状态（相对 P0 的增量）
 
@@ -146,9 +146,73 @@ Agent 当前 messages。**P0-1 起支持 `?session_id=`**：
 
 ---
 
+## Slash Commands
+
+Slash command 是独立的 Session 操作；命令文本不会作为 UserMessage 写入 canonical history。
+
+### `GET /api/slash-commands`
+
+返回 Composer 可展示的命令目录。当前只包含无参数命令 `/checkpointer`。
+
+```json
+{
+  "count": 1,
+  "commands": [
+    {
+      "name": "/checkpointer",
+      "description": "Summarize this conversation to Memory.md, then clear it.",
+      "requires_provider": true,
+      "accepts_arguments": false
+    }
+  ]
+}
+```
+
+### `POST /api/sessions/{sid}/slash-commands`
+
+异步启动 Session slash command。`/checkpointer` 对启动时的 canonical messages 建立不可变快照，使用当前 Session 绑定的 Provider/Model 直接生成累计摘要；该调用不启用 Tools、Skills 或 MCP。
+
+**Request**:
+
+```json
+{"command": "/checkpointer"}
+```
+
+命令大小写不敏感，但必须是精确的无参数命令；未知命令或附带参数返回 400。
+
+**Response 202**:
+
+```json
+{
+  "ok": true,
+  "command": "/checkpointer",
+  "request_id": "req_...",
+  "session_id": "sess-...",
+  "status": "queued",
+  "request_url": "/api/requests/req_...",
+  "abort_url": "/api/requests/req_.../abort"
+}
+```
+
+客户端通过 `GET /api/requests/{request_id}` 轮询终态。成功时 `result_summary` 包含 `memory_file_id`、`memory_logical_path=Memory.md`、`source_message_count`、`source_sha256` 和 `idempotent_recovery`。
+
+提交语义为“先写入或更新 `Memory.md`，再清空当前 Session messages”。Provider 或文件写入失败不会清空消息；消息清空失败会补偿删除新 Memory 或恢复旧版本。进程在两个步骤之间意外退出时，原消息仍存在，重复执行会凭 source SHA-256 跳过重复 LLM 总结并完成清空。
+
+成功仅清空当前 Session 的 canonical messages 与当前 UI 消息流；Session、`AGENT.md`、其它文件和 snapshots 保留。后续 Prompt/Regenerate 自动加载最多 32 KiB `Memory.md`，并将其标记为不可信历史事实而非行为指令。
+
+**Response 400**: `invalid_command` / `unknown_slash_command` / `slash_command_arguments_not_supported`。
+
+**Response 404**: Session 不存在。
+
+**Response 409**: 当前工作区忙、该 Session 已有 active request，或没有消息可总结（`nothing_to_checkpoint`）。
+
+**Response 503**: 服务关闭中，或 Session/File store 不可用。
+
+---
+
 ## Files（P0-2 VirtualFileStore）
 
-会话级文件上传，强 session 隔离。
+会话级 managed workspace，强 session 隔离。新建 Session 与应用启动时都会幂等确保唯一根 `AGENT.md`；已有内容不会被覆盖。文件 metadata 只公开逻辑路径，不公开服务器物理路径。
 
 ### `POST /api/sessions/{sid}/files`
 
@@ -171,11 +235,14 @@ Agent 当前 messages。**P0-1 起支持 `?session_id=`**：
       "id": "f-...",
       "session_id": "sess-...",
       "name": "doc.md",
+      "logical_path": "references/doc.md",
+      "origin": "upload",
+      "purpose": "file",
       "size": 1234,
       "mime": "text/markdown",
       "sha256": "abc...",
-      "path": "uploads/sess-.../f-.../doc.md",
-      "created_at": ...
+      "created_at": ...,
+      "updated_at": ...
     }
   ],
   "errors": []
@@ -205,6 +272,8 @@ Agent 当前 messages。**P0-1 起支持 `?session_id=`**：
 
 **Response 200**: `{"count": N, "files": [FileRef, ...]}`
 
+`FileRef.logical_path` 使用 `/` 分隔虚拟目录；`origin` 为 `system | upload | agent | user | legacy`，`purpose` 为 `file | agent_instructions | memory`。响应中没有物理 `path`。`Memory.md` 使用 `purpose=memory`。
+
 ### `GET /api/sessions/{sid}/files/{fid}`
 
 下载单个文件。**强校验 fid 属于该 sid**——跨 session 访问返回 403。
@@ -218,6 +287,33 @@ Agent 当前 messages。**P0-1 起支持 `?session_id=`**：
 删除 session 内单文件。
 
 **Response 200**: `{"deleted": true, "file_id": "..."}`
+
+根 `AGENT.md`（`purpose=agent_instructions`）不可删除，返回 409；只能通过 content endpoint 编辑。
+
+### `PUT /api/sessions/{sid}/files/{fid}/content`
+
+更新根 `AGENT.md` 或 `Memory.md` 的 UTF-8 正文。只允许编辑 `purpose=agent_instructions | memory` 的受管文件；普通上传或 Agent 创建文件返回 403。保存结果从该 Session 下一轮 Agent 请求起生效。
+
+**Request**:
+
+```json
+{
+  "content": "# AGENT.md\n\nAnswer concisely.\n",
+  "expected_sha256": "current-file-sha256"
+}
+```
+
+`expected_sha256` 是必填的乐观并发版本；文件已被其它请求修改时返回 409，前端应重新加载后再保存。
+
+**Response 200**: `{"file": FileRef}`
+
+**Response 403**: 目标不是根 `AGENT.md` 或 `Memory.md`。
+
+**Response 404**: Session 或文件不存在。
+
+**Response 409**: SHA-256 版本冲突。
+
+**Response 413**: 超出文件或 Session 配额。
 
 ### `GET /api/files/{fid}`（兼容入口）
 

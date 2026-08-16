@@ -31,6 +31,7 @@ def test_default_prompt_base_is_non_empty():
     assert "对话助手" in p or "助手" in p
     assert "list_files" in p  # file_tools_enabled 默认 True
     assert "view_file" in p
+    assert "write_file" in p
 
 
 def test_default_prompt_supports_md_html_csv_parquet():

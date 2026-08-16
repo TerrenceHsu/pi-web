@@ -12,8 +12,14 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
+
+    from pi_agent_core_py.harness import AgentHarness
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
@@ -21,7 +27,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 
-def _build_harness():
+def _build_harness() -> AgentHarness:
     import asyncio
     import random
 
@@ -30,15 +36,16 @@ def _build_harness():
     from pi_agent_core_py.model_client import (
         DoneEvent,
         FakeClient,
+        StreamEvent,
         TextDeltaEvent,
     )
 
     deltas = ["Hello", " from", " delayed", " fake", " backend"]
-    script = [TextDeltaEvent(delta=d) for d in deltas]
+    script: list[StreamEvent] = [TextDeltaEvent(delta=d) for d in deltas]
     script.append(DoneEvent(stop_reason="stop"))
 
     class _DelayedFakeClient(FakeClient):
-        async def stream(self, **kwargs):
+        async def stream(self, **kwargs: Any) -> AsyncIterator[StreamEvent]:
             async for ev in super().stream(**kwargs):
                 if not isinstance(ev, DoneEvent):
                     await asyncio.sleep(random.uniform(0.075, 0.150))
@@ -56,14 +63,16 @@ def main() -> None:
     import uvicorn
 
     from pi_agent_core_py.web.app import create_app
+    from pi_agent_core_py.web.auth import AuthUser, create_authenticated_app
 
     port = int(os.environ.get("PORT", "8000"))
     host = os.environ.get("HOST", "127.0.0.1")
 
-    tmp_root = Path(tempfile.mkdtemp(prefix="pi-dev-"))
-    db_path = tmp_root / "dev.sqlite"
-    uploads_dir = tmp_root / "uploads"
-    uploads_dir.mkdir(parents=True, exist_ok=True)
+    data_root = Path(
+        os.environ.get("PI_AGENT_DATA_DIR", str(REPO_ROOT / ".pi-agent-data"))
+    ).resolve()
+    auth_db_path = data_root / "auth.sqlite"
+    user_data_root = data_root / "users"
 
     default_origins = "http://localhost:5173 http://127.0.0.1:5173"
     extra_origins_env = os.environ.get("EXTRA_UI_ORIGINS", default_origins)
@@ -71,19 +80,29 @@ def main() -> None:
 
     print(
         f"[dev] starting on http://{host}:{port} "
-        f"(db={db_path}, uploads={uploads_dir})\n"
+        f"(auth_db={auth_db_path}, user_data={user_data_root})\n"
         f"[dev] allowed_ui_origins={extra_ui_origins}",
         flush=True,
     )
 
-    harness = _build_harness()
-    app = create_app(
-        harness,
-        db_path=str(db_path),
-        uploads_dir=str(uploads_dir),
-        allow_prompt_preview=True,
-        enable_trusted_host=True,
-        credential_extra_ui_origins=extra_ui_origins,
+    def _workspace_app(user: AuthUser, workspace_root: Path) -> FastAPI:
+        del user  # The stable user id is already encoded in workspace_root.
+        return create_app(
+            _build_harness(),
+            db_path=str(workspace_root / "workspace.sqlite"),
+            uploads_dir=str(workspace_root / "uploads"),
+            knowledge_root=str(workspace_root / "knowledge"),
+            allow_prompt_preview=True,
+            enable_trusted_host=True,
+            credential_extra_ui_origins=extra_ui_origins,
+            enable_builtin_ddgs=True,
+        )
+
+    app = create_authenticated_app(
+        _workspace_app,
+        auth_db_path=auth_db_path,
+        user_data_root=user_data_root,
+        extra_ui_origins=extra_ui_origins,
     )
 
     uvicorn.run(app, host=host, port=port, log_level="info", access_log=False)

@@ -1,7 +1,9 @@
-"""VirtualFileStore —— 会话级文件上传存储（P0-2）。
+"""VirtualFileStore —— 会话级工作目录与文件存储（P0-2）。
 
 设计要点：
+- 每个 session 初始化一个目录：`uploads/{session_id}/`
 - 按 session_id 分桶：`uploads/{session_id}/{file_id}/{safe_filename}`
+- 用户上传和 Agent 创建的文件使用同一份 metadata / 容量 / 隔离规则
 - 文件 metadata 用独立 `metadata.json`（每文件一个），避免单 manifest 并发写
 - 文件名 sanitize + Path.resolve 边界检查双重防路径穿越
 - 单文件 25 MB / session 总量 100 MB（可配置）
@@ -20,16 +22,18 @@
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import mimetypes
 import re
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import Literal
 
 from fastapi import UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 # ============================================================================
 # 常量
@@ -41,6 +45,27 @@ DEFAULT_MAX_FILE_SIZE = 25 * 1024 * 1024
 
 #: 默认单 session 总上传上限：100 MB
 DEFAULT_MAX_SESSION_SIZE = 100 * 1024 * 1024
+
+#: Session 根目录中的 Agent 指令文件（用户明确要求使用单数文件名）。
+AGENT_INSTRUCTIONS_PATH = "AGENT.md"
+
+#: 新 Session 的安全模板；已有内容不会在登录或重启时被覆盖。
+DEFAULT_AGENT_INSTRUCTIONS = """# AGENT.md
+
+This file contains instructions for the agent in this conversation.
+
+## Objective
+
+Describe the objective of this session here.
+
+## Constraints
+
+- Add session-specific constraints here.
+
+## Output preferences
+
+- Add preferred output formats or folders here.
+"""
 
 #: 流式读 chunk 大小：64 KB
 _CHUNK_SIZE = 64 * 1024
@@ -98,6 +123,10 @@ class UnsafeFilenameError(FileStoreError):
     """文件名不安全（路径穿越 / 控制字符）。"""
 
 
+class FileVersionConflictError(FileStoreError):
+    """文件更新时 expected sha256 与当前版本不一致。"""
+
+
 # ============================================================================
 # FileRef
 # ============================================================================
@@ -114,6 +143,19 @@ class FileRef(BaseModel):
     sha256: str
     path: str
     created_at: int
+    logical_path: str = ""
+    origin: Literal["system", "upload", "agent", "user", "legacy"] = "legacy"
+    purpose: Literal["file", "agent_instructions", "memory"] = "file"
+    updated_at: int | None = None
+
+    @model_validator(mode="after")
+    def _fill_backward_compatible_fields(self) -> FileRef:
+        """旧 metadata 按原文件名和创建时间补齐新增字段。"""
+        if not self.logical_path:
+            self.logical_path = self.name
+        if self.updated_at is None:
+            self.updated_at = self.created_at
+        return self
 
 
 # ============================================================================
@@ -158,6 +200,22 @@ def sanitize_filename(name: str) -> str:
     return cleaned
 
 
+def normalize_logical_path(filename: str, folder: str | None = None) -> str:
+    """构造安全的 Session 内逻辑路径，不映射为物理磁盘路径。"""
+    safe_name = sanitize_filename(filename)
+    if folder is None or not folder.strip():
+        return safe_name
+
+    normalized = folder.replace("\\", "/").strip()
+    if normalized.startswith("/") or re.match(r"^[A-Za-z]:", normalized):
+        raise UnsafeFilenameError("logical folder must be relative")
+    raw_parts = normalized.split("/")
+    if any(part in ("", ".", "..") for part in raw_parts):
+        raise UnsafeFilenameError("logical folder contains an unsafe segment")
+    safe_parts = [sanitize_filename(part) for part in raw_parts]
+    return "/".join([*safe_parts, safe_name])
+
+
 def _guess_mime(filename: str, content_type: str | None) -> str:
     """MIME：优先 content_type，否则 mimetypes.guess_type，否则 octet-stream。"""
     if content_type:
@@ -189,7 +247,9 @@ class VirtualFileStore:
     生命周期：
         store = VirtualFileStore(root_dir="./uploads")
         await store.init()                          # 创建 root_dir
+        await store.ensure_session_folder(sid)     # 初始化 session 工作目录
         ref = await store.save(session_id, upload)  # 流式读取 upload
+        ref = await store.write_text(sid, name, content)  # Agent 创建文本文件
         ref2 = await store.get_for_session(sid, fid)
         await store.delete(fid)
         await store.delete_session_files(sid)
@@ -209,6 +269,7 @@ class VirtualFileStore:
         self._max_file_size = max_file_size
         self._max_session_size = max_session_size
         self._initialized = False
+        self._session_locks: dict[str, asyncio.Lock] = {}
 
     # ------------------------------------------------------------------
     # 属性
@@ -236,6 +297,25 @@ class VirtualFileStore:
             return
         self._root_dir.mkdir(parents=True, exist_ok=True)
         self._initialized = True
+
+    async def ensure_session_folder(self, session_id: str) -> Path:
+        """创建并返回 session 工作目录（幂等且强制限制在 root_dir 内）。"""
+        if not self._initialized:
+            await self.init()
+        session_dir = self._session_dir(session_id)
+        resolved = self._resolve_and_check(
+            session_dir,
+            expect_under=self._root_dir,
+        )
+        resolved.mkdir(parents=True, exist_ok=True)
+        return resolved
+
+    def _session_lock(self, session_id: str) -> asyncio.Lock:
+        lock = self._session_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[session_id] = lock
+        return lock
 
     # ------------------------------------------------------------------
     # 内部辅助：路径构造 + 边界检查
@@ -294,6 +374,31 @@ class VirtualFileStore:
             encoding="utf-8",
         )
 
+    async def _unique_logical_path(
+        self,
+        session_id: str,
+        requested_path: str,
+    ) -> str:
+        """为逻辑树分配不冲突的路径（Windows 语义下大小写不敏感）。"""
+        existing = {
+            ref.logical_path.casefold()
+            for ref in await self.list_session(session_id)
+        }
+        if requested_path.casefold() not in existing:
+            return requested_path
+
+        path = PurePosixPath(requested_path)
+        parent = "" if str(path.parent) == "." else str(path.parent)
+        stem = path.stem
+        suffix = path.suffix
+        index = 2
+        while True:
+            filename = f"{stem} ({index}){suffix}"
+            candidate = f"{parent}/{filename}" if parent else filename
+            if candidate.casefold() not in existing:
+                return candidate
+            index += 1
+
     # ------------------------------------------------------------------
     # save：上传文件
     # ------------------------------------------------------------------
@@ -321,6 +426,10 @@ class VirtualFileStore:
         # 文件名 sanitize
         original_name = upload.filename or "upload.bin"
         safe_name = sanitize_filename(original_name)
+        logical_path = await self._unique_logical_path(
+            session_id,
+            normalize_logical_path(safe_name),
+        )
 
         # 预检 session 总量
         current_size = await self.session_total_size(session_id)
@@ -403,6 +512,7 @@ class VirtualFileStore:
 
         # 构造 FileRef + 写 metadata
         mime = _guess_mime(safe_name, upload.content_type)
+        now = _now_ms()
         ref = FileRef(
             id=file_id,
             session_id=session_id,
@@ -411,7 +521,11 @@ class VirtualFileStore:
             mime=mime,
             sha256=sha.hexdigest(),
             path=str(target_path),
-            created_at=_now_ms(),
+            created_at=now,
+            logical_path=logical_path,
+            origin="upload",
+            purpose="file",
+            updated_at=now,
         )
         try:
             self._write_metadata(file_dir, ref)
@@ -434,6 +548,230 @@ class VirtualFileStore:
             ) from e
 
         return ref
+
+    async def write_text(
+        self,
+        session_id: str,
+        filename: str,
+        content: str,
+        *,
+        content_type: str | None = None,
+        folder: str | None = None,
+        origin: Literal["system", "agent", "user"] = "agent",
+        purpose: Literal["file", "agent_instructions", "memory"] = "file",
+    ) -> FileRef:
+        """在 session 工作目录创建一个新的 UTF-8 文本文件。
+
+        该入口供 Agent 的 ``write_file`` 工具使用。它不会接受或暴露物理路径，
+        每次调用都生成新的 file_id，因此不会覆盖用户上传或之前生成的文件。
+        文件名清理、路径边界、单文件大小和 session 总容量与上传路径一致。
+        """
+        safe_name = sanitize_filename(filename)
+        requested_path = normalize_logical_path(safe_name, folder)
+        async with self._session_lock(session_id):
+            logical_path = await self._unique_logical_path(
+                session_id,
+                requested_path,
+            )
+            return await self._write_text_unlocked(
+                session_id,
+                safe_name,
+                content,
+                logical_path=logical_path,
+                content_type=content_type,
+                origin=origin,
+                purpose=purpose,
+            )
+
+    async def _write_text_unlocked(
+        self,
+        session_id: str,
+        safe_name: str,
+        content: str,
+        *,
+        logical_path: str,
+        content_type: str | None,
+        origin: Literal["system", "agent", "user"],
+        purpose: Literal["file", "agent_instructions", "memory"],
+    ) -> FileRef:
+        if not isinstance(content, str):
+            raise FileStoreError("content must be a string")
+
+        raw = content.encode("utf-8")
+        size = len(raw)
+        if size > self._max_file_size:
+            raise FileTooLargeError(size=size, limit=self._max_file_size)
+
+        session_dir = await self.ensure_session_folder(session_id)
+        current_size = await self.session_total_size(session_id)
+        if current_size + size > self._max_session_size:
+            raise SessionStorageLimitError(
+                current=current_size,
+                new=size,
+                limit=self._max_session_size,
+            )
+
+        file_id = _gen_file_id()
+        file_dir = self._file_dir(session_id, file_id)
+        self._resolve_and_check(file_dir, expect_under=session_dir)
+        file_dir.mkdir(parents=True, exist_ok=False)
+
+        target_path = file_dir / safe_name
+        self._resolve_and_check(target_path, expect_under=file_dir)
+        temp_path = file_dir / f".{safe_name}.{uuid.uuid4().hex}.tmp"
+        self._resolve_and_check(temp_path, expect_under=file_dir)
+
+        now = _now_ms()
+        ref = FileRef(
+            id=file_id,
+            session_id=session_id,
+            name=safe_name,
+            size=size,
+            mime=_guess_mime(safe_name, content_type),
+            sha256=hashlib.sha256(raw).hexdigest(),
+            path=str(target_path),
+            created_at=now,
+            logical_path=logical_path,
+            origin=origin,
+            purpose=purpose,
+            updated_at=now,
+        )
+        try:
+            temp_path.write_bytes(raw)
+            temp_path.replace(target_path)
+            self._write_metadata(file_dir, ref)
+        except Exception as e:
+            for child in (temp_path, target_path, file_dir / "metadata.json"):
+                try:
+                    child.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            try:
+                file_dir.rmdir()
+            except Exception:
+                pass
+            raise FileStoreError(
+                f"write_text failed for {safe_name!r}: {type(e).__name__}: {e}"
+            ) from e
+
+        return ref
+
+    async def ensure_session_workspace(
+        self,
+        session_id: str,
+    ) -> tuple[Path, FileRef]:
+        """幂等初始化 Session 目录和唯一根 ``AGENT.md``。"""
+        session_dir = await self.ensure_session_folder(session_id)
+        async with self._session_lock(session_id):
+            existing = await self.get_by_logical_path(
+                session_id,
+                AGENT_INSTRUCTIONS_PATH,
+            )
+            if existing is not None:
+                if (
+                    existing.purpose != "agent_instructions"
+                    or existing.logical_path != AGENT_INSTRUCTIONS_PATH
+                ):
+                    existing = existing.model_copy(update={
+                        "logical_path": AGENT_INSTRUCTIONS_PATH,
+                        "purpose": "agent_instructions",
+                    })
+                    self._write_metadata(
+                        self._file_dir(session_id, existing.id),
+                        existing,
+                    )
+                return session_dir, existing
+
+            created = await self._write_text_unlocked(
+                session_id,
+                AGENT_INSTRUCTIONS_PATH,
+                DEFAULT_AGENT_INSTRUCTIONS,
+                logical_path=AGENT_INSTRUCTIONS_PATH,
+                content_type="text/markdown",
+                origin="system",
+                purpose="agent_instructions",
+            )
+            return session_dir, created
+
+    async def update_text(
+        self,
+        session_id: str,
+        file_id: str,
+        content: str,
+        *,
+        expected_sha256: str | None = None,
+        origin: Literal["system", "upload", "agent", "user", "legacy"] | None = "user",
+        purpose: Literal["file", "agent_instructions", "memory"] | None = None,
+    ) -> FileRef:
+        """用 sha256 乐观锁原子更新一个托管 UTF-8 文本文件。"""
+        if not isinstance(content, str):
+            raise FileStoreError("content must be a string")
+        raw = content.encode("utf-8")
+        if len(raw) > self._max_file_size:
+            raise FileTooLargeError(size=len(raw), limit=self._max_file_size)
+
+        async with self._session_lock(session_id):
+            ref = await self.get_for_session(session_id, file_id)
+            if expected_sha256 is not None and expected_sha256 != ref.sha256:
+                raise FileVersionConflictError("file changed since it was opened")
+            current_size = await self.session_total_size(session_id)
+            if current_size - ref.size + len(raw) > self._max_session_size:
+                raise SessionStorageLimitError(
+                    current=current_size - ref.size,
+                    new=len(raw),
+                    limit=self._max_session_size,
+                )
+
+            target_path = Path(ref.path)
+            file_dir = self._file_dir(session_id, file_id)
+            self._resolve_and_check(target_path, expect_under=file_dir)
+            temp_path = file_dir / f".{ref.name}.{uuid.uuid4().hex}.tmp"
+            backup_path = file_dir / f".{ref.name}.{uuid.uuid4().hex}.bak"
+            meta_path = file_dir / "metadata.json"
+            meta_temp = file_dir / f".metadata.{uuid.uuid4().hex}.tmp"
+            for candidate in (temp_path, backup_path, meta_temp):
+                self._resolve_and_check(candidate, expect_under=file_dir)
+
+            updated = ref.model_copy(update={
+                "size": len(raw),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "origin": origin or ref.origin,
+                "purpose": purpose or ref.purpose,
+                "updated_at": _now_ms(),
+            })
+            try:
+                temp_path.write_bytes(raw)
+                meta_temp.write_text(
+                    json.dumps(
+                        updated.model_dump(mode="json"),
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                target_path.replace(backup_path)  # noqa: ASYNC240
+                temp_path.replace(target_path)
+                meta_temp.replace(meta_path)
+                try:
+                    backup_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            except Exception as e:
+                try:
+                    if backup_path.exists():
+                        target_path.unlink(missing_ok=True)  # noqa: ASYNC240
+                        backup_path.replace(target_path)
+                except Exception:
+                    pass
+                for candidate in (temp_path, meta_temp):
+                    try:
+                        candidate.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                raise FileStoreError(
+                    f"update_text failed for {ref.name!r}: {type(e).__name__}: {e}"
+                ) from e
+            return updated
 
     # ------------------------------------------------------------------
     # get / list
@@ -517,6 +855,18 @@ class VirtualFileStore:
         # 按 created_at 升序，便于 UI 稳定排序
         out.sort(key=lambda r: r.created_at)
         return out
+
+    async def get_by_logical_path(
+        self,
+        session_id: str,
+        logical_path: str,
+    ) -> FileRef | None:
+        """按大小写不敏感的 Session 逻辑路径查找文件。"""
+        target = logical_path.replace("\\", "/").casefold()
+        for ref in await self.list_session(session_id):
+            if ref.logical_path.casefold() == target:
+                return ref
+        return None
 
     async def session_total_size(self, session_id: str) -> int:
         """当前 session 所有文件总字节数。"""
@@ -605,6 +955,8 @@ __all__ = [
     # 常量
     "DEFAULT_MAX_FILE_SIZE",
     "DEFAULT_MAX_SESSION_SIZE",
+    "AGENT_INSTRUCTIONS_PATH",
+    "DEFAULT_AGENT_INSTRUCTIONS",
     # 异常
     "FileStoreError",
     "VirtualFileNotFoundError",
@@ -612,10 +964,12 @@ __all__ = [
     "FileTooLargeError",
     "SessionStorageLimitError",
     "UnsafeFilenameError",
+    "FileVersionConflictError",
     # 数据模型
     "FileRef",
     # 工具函数
     "sanitize_filename",
+    "normalize_logical_path",
     # 主类
     "VirtualFileStore",
 ]

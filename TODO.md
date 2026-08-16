@@ -6,6 +6,63 @@
 
 ## Current phase
 
+**P0-AGENT-RUNTIME Upstream Contract Alignment — ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-16）**。
+
+- [x] Turn 改为一次 LLM 调用及其当批工具；每次继续调用前重新发 `turn_start`
+- [x] 拆分 `RequestSnapshot` / `TurnSnapshot`；SQLite 与旧版 request-shaped JSON 兼容
+- [x] `length + tool_calls` 不执行工具，为每个调用生成 `IncompleteToolCall` 安全错误结果
+- [x] request signal 传入 Tool、before hook、after hook；旧二参数 Tool / 单参数 Hook 保持兼容
+- [x] 新增实时 `tool_execution_update`，前端在 running tool card 中展示 partial result
+- [x] 新增 `prepare_next_turn` / `should_stop_after_turn`，严格在每个 `turn_end` 后依次执行
+- [x] 建立单工具、多 Turn、parallel 完成序、length、signal、snapshot 的 golden contract tests
+- [x] 提交前审核修正 DDGS 公共调用签名；敏感信息、认证、Session 路径、Checkpointer 补偿与内置 MCP 边界审核无阻塞项
+- [x] 验证：核心相关 188/188；新增/受影响契约最终 16/16；完整离线 3555 passed / 3 skipped / 15 deselected；Frontend 375/375 + typecheck / lint / build；changed-file Ruff / targeted mypy PASS
+
+### Previous phase: P2-CHECKPOINTER
+
+**P2-CHECKPOINTER Slash Command — ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-15）**。
+
+- [x] 建立 slash command catalog/parser；当前精确支持无参数 `/checkpointer`，命令本身不进入消息历史
+- [x] 使用当前 Session Provider 直接调用 LLM，总结过程中禁用 Tools / Skills / MCP；长历史分块后累计归并
+- [x] 在当前 Session 根目录创建或更新唯一 `Memory.md`，记录 source SHA-256 并支持崩溃后幂等重试
+- [x] 两阶段提交：先保存 Memory，再清空 canonical messages；Provider/文件/清空失败均保留对话，提交失败补偿回滚 Memory
+- [x] 下一轮 Prompt/Regenerate 自动加载有界 `Memory.md`，并标记为不可信事实上下文而非行为指令
+- [x] 前端 `/` 菜单、键盘选择、checkpoint 运行状态、成功清屏/刷新文件树、失败保留消息并恢复命令
+- [x] Folder 支持打开、查看和修改 `Memory.md`；保存使用 SHA-256 乐观锁，下一轮加载用户修改后的内容，普通文件保持不可编辑
+- [x] Memory 编辑验证：Backend extended 204/204（其中 files+checkpointer 32/32）；Frontend full 368/368；typecheck / lint / build / changed-file Ruff PASS
+- [x] Checkpointer 后端全量基线：3539 passed / 3 skipped / 14 deselected
+
+### Previous phase: P2-SESSION-WORKSPACE
+
+**P2-SESSION-WORKSPACE Conversation + Folder + AGENT.md — ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-15）**。
+
+- [x] 应用启动时为已有 Session 补齐目录；创建 Session 时在返回前初始化目录
+- [x] 每个 Session 根目录幂等初始化唯一 `AGENT.md`；已有内容不覆盖，重新登录/重启应用后继续保留
+- [x] 每轮 Agent 请求自动读取当前 Session 的 `AGENT.md`；编辑采用 SHA-256 乐观并发检查，保存后下一轮生效
+- [x] FileRef 增加 `logical_path` / `origin` / `purpose`，API 不暴露物理路径；前端以可展开文件树展示
+- [x] 用户上传文件继续保存到当前 Session 目录并沿用 FileRef metadata / 配额 / 删除级联
+- [x] 新增 `write_file(filename, content, folder?)` AgentTool；仅创建 UTF-8 managed file，不接受物理路径、不覆盖已有文件
+- [x] `list_files` / `view_file` / `write_file` 绑定请求 Session，而非仅依赖 UI 默认 Session
+- [x] 聊天标题栏新增 `Folder N` 面板：文件树查看、下载、删除、刷新和 `AGENT.md` 编辑；Agent 请求结束后自动刷新
+- [x] 退出再登录与应用关闭后重建均保留同账号 Session、历史消息、文件和编辑后的 `AGENT.md`
+- [x] Backend related 211/211；Frontend 362/362；typecheck / lint / build / Ruff / mypy PASS
+
+### Previous phase: P2-AUTH
+
+**P2-AUTH Local Login + Account Workspace Isolation — ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-15）**。
+
+- [x] 独立 SQLite `auth_users` / `auth_sessions` schema；空库幂等创建 `admin / 123456`
+- [x] PBKDF2-SHA256 随机盐密码哈希；服务端只保存登录 token SHA-256
+- [x] HttpOnly + SameSite=Strict Cookie；登录 / Session 恢复 / 退出 API；登录失败限流
+- [x] 登录 Session 绑定后端运行周期：运行期间免重复登录，后端重启后强制重新认证；用户与工作区数据保持持久化
+- [x] 未登录只显示 LoginPage；工作区 API 返回 401；WebSocket 返回 4401
+- [x] 每账号独立 Session / Upload / Skills / MCP / Knowledge / Provider Settings 工作区
+- [x] 删除 Users Modal、Users CRUD API 与侧栏 Users 入口；侧栏新增当前账号和 Sign out
+- [x] Frontend auth baseline 358/358；typecheck / lint / build PASS；Backend auth 8/8（含历史消息与 `AGENT.md` 重新登录持久化）+ compatibility 36/36；Full 3514 passed，唯一 ingestion worker 时序抖动用例独立复跑 3/3 PASS
+- [ ] RBAC / OAuth / 企业级多租户 / 公网部署——不在本阶段
+
+### Historical current phase
+
 **P1-E Multi-Provider Switching — ✅ COMPLETE / FROZEN**（M1 Runtime + M2 Frontend + M3 Unified Freeze）。
 
 - 路线：[ROADMAP.md](ROADMAP.md) § P1-E
@@ -269,7 +326,7 @@ R5 阶段总目标：把 R2/R3/R4 已交付的 Knowledge backend 能力 Web 产�
 
 - OCR / Image understanding（marker 配置 `force_ocr=False`；扫描 PDF 进 `status=needs_ocr` 终态）
 - Long-term user memory / 跨 Session 用户偏好（区别于 RAG——RAG 已在 P2-R 系列重启）
-- Multi-Agent / 多用户 / RBAC / OAuth
+- Multi-Agent / RBAC / OAuth / 企业级多租户（本地登录与账号工作区隔离已完成）
 - 公网部署 / 横向扩展
 - CLI（仅 Web UI 入口）
 - 本地文件系统操作工具

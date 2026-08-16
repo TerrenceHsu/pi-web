@@ -20,7 +20,7 @@ from pi_agent_core_py import (
     ToolPermissionAuditRecord,
     UserMessage,
 )
-from pi_agent_core_py.snapshot import SnapshotBuilder, TurnSnapshot
+from pi_agent_core_py.snapshot import RequestSnapshot, SnapshotBuilder
 from pi_agent_core_py.web.serializers import (
     serialize_event,
     serialize_mcp_server_state,
@@ -103,7 +103,7 @@ def test_serialize_event_done_event() -> None:
 # ============================================================================
 
 
-def _build_snapshot() -> TurnSnapshot:
+def _build_snapshot() -> RequestSnapshot:
     builder = SnapshotBuilder()
     builder.start(
         request_type="prompt",
@@ -130,6 +130,7 @@ def test_serialize_snapshot_summary_counts() -> None:
     assert summary["messages_before_count"] == 1
     assert summary["messages_after_count"] == 1
     assert summary["events_count"] >= 1
+    assert summary["turns_count"] == 0
     assert summary["metadata"] == {"k": "v"}
     # summary 不应含完整 messages / events
     assert "messages_before" not in summary

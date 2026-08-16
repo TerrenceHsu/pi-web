@@ -3,6 +3,7 @@ import { computed } from "vue"
 
 import { useMcpStore } from "../../stores/mcpStore"
 import LoadingSpinner from "../common/LoadingSpinner.vue"
+import DDGSSettingsForm from "./DDGSSettingsForm.vue"
 
 const mcpStore = useMcpStore()
 
@@ -66,6 +67,7 @@ async function onDelete(name: string) {
     >
       <div class="server-head">
         <span class="server-name">{{ s.name }}</span>
+        <span v-if="s.builtin" class="badge badge-builtin">built-in · fixed</span>
         <span
           class="badge"
           :class="s.enabled ? 'badge-on' : 'badge-off'"
@@ -82,7 +84,7 @@ async function onDelete(name: string) {
         >attach error</span>
         <span v-else class="badge badge-muted">off</span>
       </div>
-      <div class="server-cmd">
+      <div v-if="!s.builtin" class="server-cmd">
         <code>{{ s.command }}</code>
         <span v-if="s.args && s.args.length" class="server-args">
           {{ s.args.join(" ") }}
@@ -93,6 +95,7 @@ async function onDelete(name: string) {
         <span class="muted">(values hidden)</span>
       </div>
       <p v-if="s.last_error" class="server-error">{{ s.last_error }}</p>
+      <DDGSSettingsForm v-if="s.builtin && s.name === 'ddgs'" :server="s" />
       <div v-if="lastTest(s.name)" class="server-test" data-testid="mcp-server-test-result">
         <span
           v-if="lastTest(s.name)?.error == null && lastTest(s.name)?.toolCount != null"
@@ -128,6 +131,7 @@ async function onDelete(name: string) {
           @click="onDisable(s.name)"
         >Disable</button>
         <button
+          v-if="s.deletable !== false"
           type="button"
           class="danger"
           data-testid="mcp-server-delete-btn"
@@ -201,6 +205,10 @@ async function onDelete(name: string) {
 .badge-muted {
   background: var(--code-bg);
   color: var(--muted);
+}
+.badge-builtin {
+  background: #dbeafe;
+  color: #1d4ed8;
 }
 .server-cmd {
   font-size: 12px;

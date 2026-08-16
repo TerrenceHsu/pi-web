@@ -286,3 +286,93 @@ describe("canSendPrompt gating", () => {
     expect(wrapper.find('[data-testid="message-regenerate-btn"]').exists()).toBe(false)
   })
 })
+
+// ============================================================================
+// Assistant Markdown
+// ============================================================================
+
+describe("assistant Markdown rendering", () => {
+  it("renders common Markdown structures", () => {
+    const wrapper = mountBubble(
+      makeAssistantItem({
+        persisted: false,
+        content: [
+          "# Result",
+          "",
+          "**bold** and `inline`",
+          "",
+          "- first",
+          "- second",
+          "",
+          "```ts",
+          "const answer = 42",
+          "```",
+          "",
+          "| name | value |",
+          "| --- | --- |",
+          "| answer | 42 |",
+        ].join("\n"),
+      }),
+    )
+
+    const markdown = wrapper.get('[data-testid="assistant-markdown"]')
+    expect(markdown.get("h1").text()).toBe("Result")
+    expect(markdown.get("strong").text()).toBe("bold")
+    expect(markdown.get("p code").text()).toBe("inline")
+    expect(markdown.findAll("li").map((item) => item.text())).toEqual(["first", "second"])
+    expect(markdown.get("pre code").text()).toContain("const answer = 42")
+    expect(markdown.get("table").text()).toContain("answer")
+  })
+
+  it("does not execute raw HTML or unsafe links", () => {
+    const wrapper = mountBubble(
+      makeAssistantItem({
+        persisted: false,
+        content: '<script>alert("xss")</script>\n\n[unsafe](javascript:alert(1))',
+      }),
+    )
+
+    const markdown = wrapper.get('[data-testid="assistant-markdown"]')
+    expect(markdown.find("script").exists()).toBe(false)
+    expect(markdown.text()).toContain('<script>alert("xss")</script>')
+    expect(markdown.find('a[href^="javascript:"]').exists()).toBe(false)
+  })
+
+  it("opens generated links safely in a new tab", () => {
+    const wrapper = mountBubble(
+      makeAssistantItem({
+        persisted: false,
+        content: "[OpenAI](https://openai.com)",
+      }),
+    )
+
+    const link = wrapper.get('[data-testid="assistant-markdown"] a')
+    expect(link.attributes("href")).toBe("https://openai.com")
+    expect(link.attributes("target")).toBe("_blank")
+    expect(link.attributes("rel")).toBe("noopener noreferrer")
+  })
+
+  it("keeps user messages as literal text", () => {
+    const wrapper = mountBubble({
+      kind: "user_message",
+      content: "**not bold**",
+      files: [],
+    })
+
+    expect(wrapper.get('[data-testid="user-message"]').text()).toContain("**not bold**")
+    expect(wrapper.find('[data-testid="user-message"] strong').exists()).toBe(false)
+  })
+
+  it("keeps the streaming cursor while rendering partial Markdown", () => {
+    const wrapper = mountBubble(
+      makeAssistantItem({
+        persisted: false,
+        streaming: true,
+        content: "**partial**",
+      }),
+    )
+
+    expect(wrapper.get('[data-testid="assistant-markdown"] strong').text()).toBe("partial")
+    expect(wrapper.find(".stream-cursor").exists()).toBe(true)
+  })
+})

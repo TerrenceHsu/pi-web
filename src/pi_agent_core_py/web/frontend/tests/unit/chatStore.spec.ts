@@ -29,7 +29,13 @@ vi.mock("../../src/api/client", () => ({
   requestJson: vi.fn(),
 }))
 
+vi.mock("../../src/api/slashCommands", () => ({
+  executeSlashCommand: vi.fn(),
+  listSlashCommands: vi.fn(),
+}))
+
 import * as messagesApi from "../../src/api/messages"
+import * as slashCommandsApi from "../../src/api/slashCommands"
 
 import { useChatStore } from "../../src/stores/chatStore"
 import type { ChatStreamItem } from "../../src/types"
@@ -84,6 +90,15 @@ const FAKE_RESP = {
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.mocked(messagesApi.sendPromptAsync).mockResolvedValue(FAKE_RESP)
+  vi.mocked(slashCommandsApi.executeSlashCommand).mockResolvedValue({
+    ok: true,
+    command: "/checkpointer",
+    request_id: "req-checkpoint",
+    session_id: "sess-1",
+    status: "queued",
+    request_url: "/api/requests/req-checkpoint",
+    abort_url: "/api/requests/req-checkpoint/abort",
+  })
 })
 
 async function flushAll() {
@@ -148,5 +163,55 @@ describe("G2: sendPrompt clears stale turn_info cards", () => {
     const turnCards = store.streamItems.filter((it) => it.kind === "turn_info")
     expect(turnCards.length).toBe(1)
     expect((turnCards[0] as any).status).toBe("running")
+  })
+})
+
+describe("checkpointer state", () => {
+  it("clears every stream item only after the server reports completion", async () => {
+    vi.useFakeTimers()
+    try {
+      vi.mocked(messagesApi.getRequestStatus).mockResolvedValue({
+        request_id: "req-checkpoint",
+        session_id: "sess-1",
+        status: "completed",
+        created_at: null,
+        started_at: null,
+        ended_at: null,
+        error: null,
+        error_type: null,
+        abort_reason: null,
+        result_summary: {
+          command: "/checkpointer",
+          memory_file_id: "file-memory",
+        },
+        event_start_sequence: null,
+        event_end_sequence: null,
+        operation: "checkpointer",
+      })
+      const store = useChatStore()
+      store.streamItems = [makeAssistant("a-before"), makeTurnInfo("t-before", "done")]
+      const pending = store.executeCheckpointer("sess-1")
+      await vi.advanceTimersByTimeAsync(300)
+      await pending
+      expect(store.streamItems).toEqual([])
+      expect(store.checkpointNotice).toBe("Checkpoint saved to Memory.md")
+      expect(store.checkpointing).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("keeps current items when command startup fails", async () => {
+    vi.mocked(slashCommandsApi.executeSlashCommand).mockRejectedValue(
+      new Error("provider unavailable"),
+    )
+    const store = useChatStore()
+    store.streamItems = [makeAssistant("a-keep")]
+    await expect(store.executeCheckpointer("sess-1")).rejects.toThrow(
+      "provider unavailable",
+    )
+    expect(store.streamItems.map((item) => item.id)).toEqual(["a-keep"])
+    expect(store.error).toBe("provider unavailable")
+    expect(store.checkpointing).toBe(false)
   })
 })

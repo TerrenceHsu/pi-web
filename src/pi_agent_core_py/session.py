@@ -1,10 +1,10 @@
 """Session Memory —— 会话级长期上下文（Step 12）。
 
-TurnSnapshot 记录"一次请求发生了什么"；SessionMemory 记录"一个会话到目前为止
+RequestSnapshot 记录"一次请求发生了什么"；SessionMemory 记录"一个会话到目前为止
 积累了什么"。两者职责分离：
 
 ```text
-TurnSnapshot    ：一次请求的不可变快照（Step 11）
+RequestSnapshot ：一次请求的不可变快照（内含 TurnSnapshot 切片）
 SessionMemory   ：跨多次请求的累计状态——messages + snapshots + metadata
 ```
 
@@ -53,7 +53,7 @@ from .messages import (
     ToolResultMessage,
     UserMessage,
 )
-from .snapshot import TurnSnapshot
+from .snapshot import RequestSnapshot
 
 # ============================================================================
 # 时间戳 / ID 生成
@@ -128,9 +128,9 @@ def deserialize_messages(items: list[dict[str, Any]]) -> list[Message]:
 # ============================================================================
 
 
-def deserialize_snapshot(data: dict[str, Any]) -> TurnSnapshot:
-    """dict → TurnSnapshot。"""
-    return TurnSnapshot.model_validate(data)
+def deserialize_snapshot(data: dict[str, Any]) -> RequestSnapshot:
+    """dict → RequestSnapshot；旧版 request-shaped TurnSnapshot 自动兼容。"""
+    return RequestSnapshot.model_validate(data)
 
 
 # ============================================================================
@@ -199,7 +199,7 @@ class SessionMemory:
     - `append_snapshot(snapshot)` ——请求结束后追加；自动更新 messages / turn_count
     - `set_messages(messages)`    ——手动同步当前 messages
     - `get_messages()`            ——返回反序列化后的 list[Message]
-    - `get_snapshots()`           ——返回反序列化后的 list[TurnSnapshot]
+    - `get_snapshots()`           ——返回反序列化后的 list[RequestSnapshot]
     - `clear()`                   ——清空 messages / snapshots，保留 id / created_at / title
     - `update_metadata(values)`   ——合并写入 metadata
     - `set_title(title)`          ——改标题
@@ -249,7 +249,7 @@ class SessionMemory:
     # 写入：append_snapshot / set_messages
     # ------------------------------------------------------------------
 
-    def append_snapshot(self, snapshot: TurnSnapshot) -> None:
+    def append_snapshot(self, snapshot: RequestSnapshot) -> None:
         """追加一次 turn 的 snapshot。
 
         - snapshots 列表 append snapshot.to_dict()
@@ -287,8 +287,8 @@ class SessionMemory:
         """
         return deserialize_messages(self._state.messages)
 
-    def get_snapshots(self) -> list[TurnSnapshot]:
-        """返回反序列化后的 list[TurnSnapshot]。"""
+    def get_snapshots(self) -> list[RequestSnapshot]:
+        """返回反序列化后的 list[RequestSnapshot]。"""
         return [deserialize_snapshot(d) for d in self._state.snapshots]
 
     # ------------------------------------------------------------------

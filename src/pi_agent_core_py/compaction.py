@@ -41,7 +41,7 @@ from .messages import (
     SummaryMessage,
     TextContent,
 )
-from .snapshot import TurnSnapshot
+from .snapshot import RequestSnapshot
 
 
 def _now_ms() -> int:
@@ -287,7 +287,7 @@ def default_summary_generator(input: CompactionInput) -> str:
 async def compact_messages(
     messages: list[Message],
     *,
-    snapshots: list[TurnSnapshot] | None = None,
+    snapshots: list[RequestSnapshot] | None = None,
     config: CompactionConfig | None = None,
     summary_generator: SummaryGenerator | None = None,
 ) -> CompactionResult:
@@ -492,7 +492,7 @@ async def create_branch_summary(
     *,
     session: Any | None = None,  # SessionMemory，避免硬 import 循环
     messages: list[Message] | None = None,
-    snapshots: list[TurnSnapshot] | None = None,
+    snapshots: list[RequestSnapshot] | None = None,
     config: BranchSummaryConfig | None = None,
     summary_generator: SummaryGenerator | None = None,
 ) -> BranchSummary:

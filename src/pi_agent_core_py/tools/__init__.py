@@ -20,7 +20,9 @@ run_event_loop 的工具执行链路在 Step 5 实现：
 from __future__ import annotations
 
 import abc
+import asyncio
 import typing
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -103,6 +105,11 @@ class ToolResult(BaseModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
+#: 工具可在执行期间调用 ``on_update(partial_result)``。callback 返回一个已完成
+#: Awaitable，因此同步工具可以忽略返回值，异步工具也可以 ``await`` 它。
+ToolUpdateCallback = Callable[[ToolResult], Awaitable[None]]
+
+
 # ============================================================================
 # AgentTool：抽象基类
 # ============================================================================
@@ -119,7 +126,7 @@ class AgentTool(abc.ABC):
         execution_mode —— "parallel"（默认）或 "sequential"
 
     并实现：
-        async execute(tool_call_id, args) -> ToolResult
+        async execute(tool_call_id, args, *, signal=None, on_update=None) -> ToolResult
 
     Step 4 不做 JSON Schema 校验；后续 step 视情况加 validate_arguments。
     """
@@ -135,11 +142,17 @@ class AgentTool(abc.ABC):
         self,
         tool_call_id: str,
         args: dict[str, Any],
+        *,
+        signal: asyncio.Event | None = None,
+        on_update: ToolUpdateCallback | None = None,
     ) -> ToolResult:
         """执行工具。
 
-        契约：抛异常表示失败。Step 5 的 run_event_loop 会捕获并包成
-        is_error=True 的 ToolResult，避免单工具失败让整个 agent 崩溃。
+        ``signal`` 是 request 的协作式中止信号；``on_update`` 用于报告增量
+        ToolResult。契约：抛异常表示失败，run_event_loop 会捕获并包成安全的
+        ``is_error=True`` ToolResult，避免单工具失败让整个 agent 崩溃。
+
+        runtime 对旧版二参数 execute 实现保留兼容；新工具应实现完整签名。
         """
         ...
 
@@ -256,8 +269,8 @@ class ToolRegistry:
 
 
 # 内置工具实现（Step 5.5 新增）
-# P0-3 内置工具（list_files / view_file）——工厂在底部分别注册到 ToolRegistry。
-# 这两个工具需要 VirtualFileStore + session_id_getter，不直接 instantiated。
+# Session 文件工具（list_files / view_file / write_file）由 Web composition root
+# 绑定 VirtualFileStore + session_id_getter 后注册。
 # ruff: noqa: E402, I001
 from .list_files import ListFilesTool, create_list_files_tool
 from .view_file import (
@@ -267,15 +280,17 @@ from .view_file import (
     create_view_file_tool,
 )
 from .web_search import WebSearchTool
+from .write_file import WriteFileTool, create_write_file_tool
 
 __all__ = [
     "ToolExecutionMode",
     "ToolRegistrationError", "ToolNotFoundError",
-    "ToolDef", "ToolResult", "AgentTool", "ToolRegistry",
+    "ToolDef", "ToolResult", "ToolUpdateCallback", "AgentTool", "ToolRegistry",
     # 内置工具
     "WebSearchTool",
     # P0-3 内置工具
     "ListFilesTool", "create_list_files_tool",
     "ViewFileTool", "create_view_file_tool",
+    "WriteFileTool", "create_write_file_tool",
     "VIEW_FILE_DEFAULT_MAX_BYTES", "VIEW_FILE_DEFAULT_MAX_ROWS",
 ]

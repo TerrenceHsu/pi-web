@@ -3,6 +3,7 @@
 // 重要：response 类型（MCPServerSummary 等）不含 env values——只有 create request 允许 env。
 
 import type {
+  DDGSSearchSettings,
   MCPServerCreateRequest,
   MCPServerDeleteResponse,
   MCPServerListResponse,
@@ -23,6 +24,14 @@ export function listMCPServers() {
 export function createMCPServer(payload: MCPServerCreateRequest) {
   return requestJson<MCPServerSummary>("/api/mcp/servers", {
     method: "POST",
+    body: payload,
+  })
+}
+
+/** PUT /api/mcp/servers/ddgs/settings——更新当前用户的内置搜索参数。 */
+export function updateDDGSSettings(payload: DDGSSearchSettings) {
+  return requestJson<MCPServerSummary>("/api/mcp/servers/ddgs/settings", {
+    method: "PUT",
     body: payload,
   })
 }

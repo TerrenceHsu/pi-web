@@ -122,6 +122,9 @@ class WebMCPServerConfig(BaseModel):
                         attach 成功 True / 失败 False；不持久化
         last_error      最近一次 attach/test/refresh 错误描述；None 表示无错误
         tool_count      最近一次成功 attach 后看到的工具数
+        builtin         是否为应用提供的内置 server
+        deletable       前端与 API 是否允许删除
+        settings        内置 server 的可编辑非敏感参数
 
     **兼容映射**（P1-C3）：API response 的 `enabled` = `desired_enabled`；
     新增 `attached` 字段表示运行时连接状态。现有前端 / E2E 的 `enabled` 语义不变。
@@ -144,6 +147,9 @@ class WebMCPServerConfig(BaseModel):
     # error: attach 失败 / timeout / 命令不存在等
     restore_status: str = "not_requested"
     missing_env_keys: list[str] = Field(default_factory=list)
+    builtin: bool = False
+    deletable: bool = True
+    settings: dict[str, Any] = Field(default_factory=dict)
 
 
 class WebAppState(BaseModel):
@@ -240,8 +246,8 @@ class WebAppState(BaseModel):
 
 RequestStatus = Literal["queued", "running", "completed", "error", "aborted"]
 
-# D2-5：request operation 类型——区分普通 prompt 与 regenerate
-RequestOperation = Literal["prompt", "regenerate"]
+# D2-5 + slash commands：区分普通 prompt、regenerate 与 checkpointer
+RequestOperation = Literal["prompt", "regenerate", "checkpointer"]
 
 
 @dataclass
@@ -287,7 +293,7 @@ class WebRunRequest:
     regeneration_id: str | None = None  # revision.id（regenerate 路径）
     target_message_id: str | None = None  # assistant_message_id（regenerate 路径）
     # 仅内存——不进 JSON
-    task: asyncio.Task | None = field(default=None, repr=False)
+    task: asyncio.Task[Any] | None = field(default=None, repr=False)
     payload: dict[str, Any] | None = field(default=None, repr=False)
 
 

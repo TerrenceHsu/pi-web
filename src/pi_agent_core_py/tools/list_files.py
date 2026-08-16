@@ -1,4 +1,4 @@
-"""list_files 工具——列出当前会话已上传的文件（P0-3）。
+"""list_files 工具——列出当前会话文件夹中的文件（P0-3）。
 
 设计要点：
 - factory pattern：`create_list_files_tool(file_store=..., session_id_getter=...)`
@@ -16,11 +16,12 @@
 """
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from ..messages import TextContent
-from . import AgentTool, ToolResult
+from . import AgentTool, ToolResult, ToolUpdateCallback
 from .view_file import _classify_format
 
 if TYPE_CHECKING:
@@ -29,12 +30,13 @@ if TYPE_CHECKING:
 
 
 class ListFilesTool(AgentTool):
-    """列出当前会话已上传的文件。"""
+    """列出当前会话文件夹中的用户上传与 Agent 创建文件。"""
 
     name = "list_files"
     label = "List Files"
     description = (
-        "List files uploaded to the current conversation session. "
+        "List user-uploaded and agent-created files in the current conversation "
+        "session folder. "
         "Returns metadata (id / name / mime / size / sha256 / format) for each file. "
         "Does not return file paths or content—use view_file to read content."
     )
@@ -54,7 +56,14 @@ class ListFilesTool(AgentTool):
         self._file_store = file_store
         self._session_id_getter = session_id_getter
 
-    async def execute(self, tool_call_id: str, args: dict[str, Any]) -> ToolResult:
+    async def execute(
+        self,
+        tool_call_id: str,
+        args: dict[str, Any],
+        *,
+        signal: asyncio.Event | None = None,
+        on_update: ToolUpdateCallback | None = None,
+    ) -> ToolResult:
         sid = self._session_id_getter()
         if not sid:
             return ToolResult(
@@ -93,12 +102,12 @@ class ListFilesTool(AgentTool):
 
         # 同时给一段简短文本——LLM 单步读得到结果（不必解析 JSON 也能聊）
         if not items:
-            text = "当前会话暂无已上传文件。"
+            text = "当前会话文件夹暂无文件。"
         else:
             lines = [f"当前会话共 {len(items)} 个文件："]
             for it in items:
                 lines.append(
-                    f"- {it['name']} ({it['format']}, {it['size']} bytes) "
+                    f"- {it['logical_path']} ({it['format']}, {it['size']} bytes) "
                     f"id={it['id']}"
                 )
             text = "\n".join(lines)
@@ -116,6 +125,9 @@ def _ref_to_summary(ref: FileRef) -> dict[str, Any]:
     return {
         "id": ref.id,
         "name": ref.name,
+        "logical_path": ref.logical_path,
+        "origin": ref.origin,
+        "purpose": ref.purpose,
         "mime": ref.mime,
         "format": _classify_format(ref.name, ref.mime),
         "size": ref.size,

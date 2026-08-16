@@ -1,7 +1,7 @@
 """P0-2: VirtualFileStore 单元测试。
 
 覆盖纯 store 行为（不走 FastAPI）：
-- init / save / get / list / delete
+- init / ensure session folder / save / write_text / get / list / delete
 - sanitize_filename
 - 路径穿越防护
 - 大小 / 总量限制
@@ -16,15 +16,18 @@ import pytest
 from fastapi import UploadFile
 
 from pi_agent_core_py.web.files import (
+    AGENT_INSTRUCTIONS_PATH,
     DEFAULT_MAX_FILE_SIZE,
     DEFAULT_MAX_SESSION_SIZE,
     FileAccessDeniedError,
     FileRef,
     FileTooLargeError,
+    FileVersionConflictError,
     SessionStorageLimitError,
     UnsafeFilenameError,
     VirtualFileNotFoundError,
     VirtualFileStore,
+    normalize_logical_path,
     sanitize_filename,
 )
 
@@ -96,6 +99,14 @@ def test_sanitize_filename_keeps_chinese():
     assert "测试文件" in cleaned
 
 
+def test_normalize_logical_path_accepts_relative_folders_only():
+    assert normalize_logical_path("report.md", "outputs/2026") == "outputs/2026/report.md"
+    with pytest.raises(UnsafeFilenameError):
+        normalize_logical_path("report.md", "../escape")
+    with pytest.raises(UnsafeFilenameError):
+        normalize_logical_path("report.md", "C:\\escape")
+
+
 # ============================================================================
 # init
 # ============================================================================
@@ -116,6 +127,49 @@ async def test_init_idempotent(tmp_path):
     s = VirtualFileStore(tmp_path / "uploads")
     await s.init()
     await s.init()  # 不抛错
+
+
+@pytest.mark.asyncio
+async def test_ensure_session_folder_is_eager_and_idempotent(store, tmp_path):
+    session_dir = await store.ensure_session_folder("sess-1")
+    assert session_dir == (tmp_path / "uploads" / "sess-1").resolve()
+    assert session_dir.is_dir()
+    assert await store.ensure_session_folder("sess-1") == session_dir
+
+
+@pytest.mark.asyncio
+async def test_ensure_session_folder_rejects_path_traversal(store):
+    with pytest.raises(UnsafeFilenameError):
+        await store.ensure_session_folder("../escape")
+
+
+@pytest.mark.asyncio
+async def test_ensure_session_workspace_seeds_one_persistent_agent_md(store):
+    _, first = await store.ensure_session_workspace("sess-1")
+    _, second = await store.ensure_session_workspace("sess-1")
+    assert first.id == second.id
+    assert first.logical_path == AGENT_INSTRUCTIONS_PATH
+    assert first.purpose == "agent_instructions"
+    assert first.origin == "system"
+    assert len(await store.list_session("sess-1")) == 1
+
+    custom = "# AGENT.md\n\nKeep this.\n"
+    await store.update_text(
+        "sess-1",
+        first.id,
+        custom,
+        expected_sha256=first.sha256,
+    )
+    _, after_reopen = await store.ensure_session_workspace("sess-1")
+    assert after_reopen.id == first.id
+    assert __import__("pathlib").Path(after_reopen.path).read_text() == custom
+    with pytest.raises(FileVersionConflictError):
+        await store.update_text(
+            "sess-1",
+            first.id,
+            "stale",
+            expected_sha256=first.sha256,
+        )
 
 
 # ============================================================================
@@ -145,6 +199,59 @@ async def test_save_computes_sha256(store):
     expected_sha = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
     ref = await store.save("sess-1", _upload(content, "hello.txt"))
     assert ref.sha256 == expected_sha
+
+
+@pytest.mark.asyncio
+async def test_write_text_creates_managed_file_readable_by_existing_apis(store):
+    ref = await store.write_text("sess-1", "report.md", "# 报告\n\n完成")
+    assert ref.name == "report.md"
+    assert ref.mime == "text/markdown"
+    assert ref.size == len("# 报告\n\n完成".encode())
+    assert "完成" in __import__("pathlib").Path(ref.path).read_text(encoding="utf-8")
+    assert (await store.get_for_session("sess-1", ref.id)).id == ref.id
+    assert [item.id for item in await store.list_session("sess-1")] == [ref.id]
+
+
+@pytest.mark.asyncio
+async def test_write_text_creates_unique_logical_tree_paths(store):
+    first = await store.write_text(
+        "sess-1",
+        "report.md",
+        "one",
+        folder="outputs/2026",
+    )
+    second = await store.write_text(
+        "sess-1",
+        "report.md",
+        "two",
+        folder="outputs/2026",
+    )
+    assert first.logical_path == "outputs/2026/report.md"
+    assert second.logical_path == "outputs/2026/report (2).md"
+
+
+@pytest.mark.asyncio
+async def test_write_text_never_overwrites_same_named_file(store):
+    first = await store.write_text("sess-1", "result.txt", "one")
+    second = await store.write_text("sess-1", "result.txt", "two")
+    assert first.id != second.id
+    assert len(await store.list_session("sess-1")) == 2
+
+
+@pytest.mark.asyncio
+async def test_write_text_honours_file_and_session_limits(tmp_path):
+    file_limited = VirtualFileStore(tmp_path / "file-limit", max_file_size=3)
+    with pytest.raises(FileTooLargeError):
+        await file_limited.write_text("sess-1", "large.txt", "four")
+
+    session_limited = VirtualFileStore(
+        tmp_path / "session-limit",
+        max_file_size=10,
+        max_session_size=5,
+    )
+    await session_limited.write_text("sess-1", "a.txt", "123")
+    with pytest.raises(SessionStorageLimitError):
+        await session_limited.write_text("sess-1", "b.txt", "456")
 
 
 @pytest.mark.asyncio

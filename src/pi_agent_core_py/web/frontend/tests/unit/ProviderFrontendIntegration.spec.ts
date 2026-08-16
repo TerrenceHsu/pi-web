@@ -77,6 +77,7 @@ vi.mock("../../src/api/client", () => ({
 
 vi.mock("../../src/api", () => ({
   abortRun: vi.fn().mockResolvedValue(undefined),
+  listSlashCommands: vi.fn().mockResolvedValue({ count: 0, commands: [] }),
 }))
 
 import ChatPanel from "../../src/components/chat/ChatPanel.vue"

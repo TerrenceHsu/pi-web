@@ -98,14 +98,12 @@ AgentHarness(agent)
 - harness 不是线程安全——同一时刻只能跑一个 prompt / continue
 - abort 通过 `agent.state.phase = aborting` + signal 通知 loop；loop 在下个 yield 点退出
 
-**Snapshot**：每轮 `TurnSnapshot`（frozen）保存：
-- 入参（prompt / context 摘要）
-- 输出 messages
-- active tools（本轮调用的）
-- stop_reason
-- usage
+**Snapshot**：每次 prompt / continue 保存一个 `RequestSnapshot`；内部的
+`turns[]` 每项对应一次真实 LLM 调用及其当批工具，保存该 turn 的前后消息、
+assistant 输出、工具调用/结果和事件切片。
 
-`harness.last_snapshot` 永远是最近一轮；历史 snapshot 由 web 层写入 SQLite。
+`harness.last_snapshot` 永远是最近一次 request；历史 RequestSnapshot 由 Web 层
+写入 SQLite，旧版无 `turns` 的记录仍可读取。
 
 **MCP 生命周期**：
 - `attach_mcp_servers`：stdio transport 启动 + register tools into `ToolRegistry`

@@ -1,7 +1,7 @@
 // WebSocket / SSE 事件 + ChatStreamItem 类型。
 //
 // /ws/events 是推荐实时通道；后端发过来的 event 形状宽松——前端按 type 字段分发。
-// AgentEvent 的 13 种 type 来自 src/pi_agent_core_py/events.py。
+// AgentEvent 的 type 来自 src/pi_agent_core_py/events.py。
 //
 // P1-B2: 后端统一用 WebEventEnvelope 包装事件——event_id / sequence / request_id /
 // session_id / type / timestamp / payload 7 字段。chatStore.handleEvent 按这些字段
@@ -37,10 +37,10 @@ export interface WebEventEnvelope {
  * 后端会发：
  *   - hello：连接建立时第一个事件（protocol-level）
  *   - shutdown：服务端关闭通知（protocol-level）
- *   - 13 种 AgentEvent：均被 envelope 包装，type 字段对应后端事件类型
+ *   - AgentEvent：均被 envelope 包装，type 字段对应后端事件类型
  *     agent_start / agent_end / turn_start / turn_end
  *     message_start / message_update / message_end
- *     tool_execution_start / tool_execution_end
+ *     tool_execution_start / tool_execution_update / tool_execution_end
  *     request_queued / request_start / request_end / agent_abort
  */
 export type WebEvent = WebEventEnvelope | LegacyWebEvent
@@ -149,8 +149,8 @@ export interface ToolResultItem {
 export interface FileReadItem {
   kind: "file_read"
   id: string
-  /** view_file / list_files */
-  toolName: "view_file" | "list_files" | string
+  /** view_file / list_files / write_file */
+  toolName: "view_file" | "list_files" | "write_file" | string
   toolCallId?: string
   fileName?: string
   fileId?: string

@@ -29,11 +29,12 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
 from ..messages import TextContent
-from ..tools import AgentTool, ToolExecutionMode, ToolResult
+from ..tools import AgentTool, ToolExecutionMode, ToolResult, ToolUpdateCallback
 from .client import MCPClient, MCPToolInfo
 from .naming import make_namespaced_tool_name
 
@@ -159,6 +160,9 @@ class MCPAgentTool(AgentTool):
         self,
         tool_call_id: str,
         args: dict[str, Any],
+        *,
+        signal: asyncio.Event | None = None,
+        on_update: ToolUpdateCallback | None = None,
     ) -> ToolResult:
         """调用 MCP tool 并转成 ToolResult。
 

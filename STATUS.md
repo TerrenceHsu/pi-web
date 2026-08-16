@@ -15,7 +15,7 @@
 | **Backend Foundation HEAD** | `cad7ca7` — feat(web): bind default provider profile on session creation（P1-E2 Backend Foundation ✅ FROZEN @ 3 commits） |
 | **M1 Runtime HEAD** | `8b0fb13` — docs: reconcile P1-E M1 runtime implementation record（M1-1 ~ M1-7 ✅ COMPLETE / FROZEN） |
 | **M2 Frontend Switching HEAD** | `f9dfc1c` — docs: archive P1-E M2 integration validation（M2-0 ~ M2-4 ✅ COMPLETE / FROZEN；含 M2-F1 hotfix） |
-| **Current phase** | **P2-R5-D Final Knowledge Manager E2E ✅ COMPLETE / FROZEN**（working tree, pending commit on top of `f2750e3`；+19 E2E tests across 9 classes；production diff = 0；Full Backend #1 3511/0 failed delta +19 reconciled；R5 series complete）。**P2-R5-C Knowledge Manager Frontend ✅ COMPLETE / FROZEN** @ `4215413 + fdec068 + f2750e3`（+1834 frontend + 80 vitest；347/347；typecheck/lint/build PASS；frontend-only）。**P2-R5-B Knowledge REST API ✅ COMPLETE / FROZEN** @ `d099185 + 134094a + 041801c`（+1 Search REST endpoint；35 targeted tests）。**P2-R5-A Web API + UI Contract ✅ COMPLETE / FROZEN** @ `1c1f519`。**P2-R4 ✅ COMPLETE / FINAL FROZEN** @ 7faf635。**Agent-facing Knowledge RAG ✅ AVAILABLE**；**User-facing Knowledge Manager ✅ AVAILABLE**。 |
+| **Current phase** | **P0-AGENT-RUNTIME Upstream Contract Alignment ✅ IMPLEMENTED / LOCAL BASELINE (2026-08-16)**——Turn=一次 LLM 调用+当批工具；RequestSnapshot/TurnSnapshot 分层；length 工具安全失败；signal 贯穿 Tool/Hooks；tool update；turn controls；golden event tests。提交前审核修正 DDGS 公共调用签名；完整离线 3555 passed / 3 skipped / 15 deselected；Frontend 375/375；typecheck / lint / build / changed-file Ruff / targeted mypy PASS。底层 P2-CHECKPOINTER、P2-AUTH 与 P2-SESSION-WORKSPACE 保持有效。 |
 | **R3 Final Freeze** | ✅ COMPLETE / FINAL FROZEN @ `599d754` + correction @ `2342bc2`。详见 [P2_R3_E_FINAL_INTEGRATION_FREEZE.md](docs/validation/p2-r3/P2_R3_E_FINAL_INTEGRATION_FREEZE.md)。 |
 | **R2-B Archive Closure** | ✅ COMPLETE — User decision: **A — RATIFIED** @ 2026-08-03（c2436c7）；Amendment 2 APPROVED。**Historical 8-test discrepancy ✅ RECONCILED @ P2-R2-D-A**（freeze 时点文档误报 2920；实测 2928）。详见 [P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md §7](docs/validation/p2-r2/P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md) + [P2_R2_D_TEST_COUNT_RECONCILIATION.md](docs/validation/p2-r2/P2_R2_D_TEST_COUNT_RECONCILIATION.md) |
 | **R2-C0 Status** | ✅ COMPLETE / FROZEN @ `6476f96` + post-freeze correction `0a8f554`（R2-C terminal = `normalizing`）。Schema Amendment NOT REQUIRED。worker_concurrency=1, queue=32, shutdown_grace=30s。详见 [P2_R2_C0_INGESTION_CONTRACT_AUDIT.md](docs/validation/p2-r2/P2_R2_C0_INGESTION_CONTRACT_AUDIT.md) |
@@ -113,6 +113,48 @@
 
 ## 当前阶段
 
+**P2-CHECKPOINTER Slash Command — ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-15）**。
+
+- 新增命令目录与 Session 命令执行 API；当前只接受无参数的精确命令 `/checkpointer`，命令文本不写入 canonical messages
+- 直接使用当前 Session 绑定的 Provider/Model 生成结构化 Markdown 摘要，不开放 Tool、Skill 或 MCP 调用；长对话分块归并
+- 根 `Memory.md` 单文件累计更新，包含 source SHA-256 审计标记；重复提交可幂等恢复
+- `Memory.md` 与 `AGENT.md` 均可从 Folder 文件树打开、查看和修改；保存沿用 SHA-256 乐观锁，普通文件仍不可通过受管内容接口编辑
+- 提交顺序为“写 Memory → 清消息”；Provider/文件失败不清空，数据库清空失败会删除新文件或恢复旧版本
+- 清空仅影响当前 Session 的 messages 与前端消息流；保留 `AGENT.md`、其它文件、Session 本身和 snapshots
+- 后续 Prompt/Regenerate 自动把最多 32 KiB `Memory.md` 作为不可信事实上下文注入；不扩展为跨 Session 用户记忆
+- 前端输入 `/` 显示可键盘选择的命令菜单；执行期间显示 checkpoint 状态，成功后刷新文件树，失败保留对话并恢复输入
+- 本次 Memory 编辑验证：Backend extended 204/204（其中 files+checkpointer 32/32）；Frontend full 368/368；typecheck / lint / build / changed-file Ruff PASS
+- Checkpointer 后端全量基线：3539 passed / 3 skipped / 14 deselected
+
+### Previous phase: P2-SESSION-WORKSPACE
+
+**P2-SESSION-WORKSPACE Conversation + Folder — ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-15）**。
+
+- 已有 Session 在应用启动时补齐独立目录，新建 Session 返回前完成目录初始化
+- 每个 Session 根目录幂等创建唯一 `AGENT.md`；文件可在 Folder 面板编辑，保存后从下一轮开始自动注入该 Session 的 system prompt
+- 文件 metadata 使用不暴露物理磁盘路径的 `logical_path`；前端按逻辑目录展示可展开文件树，Agent `write_file` 支持相对文件夹
+- 用户上传和 Agent 创建文件统一进入当前 Session 的 VirtualFileStore，继续受 25 MB 单文件 / 100 MB Session 总量限制
+- 新增 `write_file(filename, content)`：只创建 UTF-8 managed file，不接受物理路径、不覆盖已有文件、不返回路径或正文到 details
+- `list_files` / `view_file` / `write_file` 优先绑定 `current_request_session_id`，修复请求 sid 与 UI 默认 sid 不一致时的目录串写风险
+- 前端聊天标题栏新增 `Folder N`，支持文件树查看、下载、删除、刷新与 `AGENT.md` 编辑；请求 terminal 后自动刷新 Agent 新建文件
+- 登录恢复核查：同一账号退出后重新登录，以及应用关闭后重建，Session、历史消息与编辑后的 `AGENT.md` 均保持不变
+- 验证：Backend related 211/211；Frontend 362/362；typecheck / lint / build / Ruff / mypy PASS
+
+### 前一阶段：P2-AUTH
+
+**P2-AUTH Local Login + Account Workspace Isolation — ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-15）**。
+
+- Web 层新增 `auth_users` / `auth_sessions`、登录网关与懒加载账号工作区；不修改 Core Runtime 或冻结 Provider/RAG 内部语义
+- 空用户表幂等创建 `admin / 123456`；密码只保存 PBKDF2-SHA256 随机盐哈希，Session token 只保存 SHA-256
+- 未登录只显示 LoginPage；除 `/api/auth/*` 外的 API 与 `/ws/*` 均校验 HttpOnly Cookie
+- 后端网关每次启动撤销旧登录 Session；运行期间页面刷新/重开仍恢复登录，重启后必须重新输入账号密码；账号与工作区数据不受影响
+- 每账号拥有独立 Session/上传、Skills、MCP、Knowledge、Provider/Credential Settings 数据库与目录
+- Users Modal、CRUD API 和侧栏 Users 入口已删除；侧栏保留纵向工具入口，底部显示账号与 Sign out
+- 验证：Frontend 358/358 + typecheck + lint + build PASS；Backend auth 8/8（含重新登录后的历史消息与 `AGENT.md` 持久化）+ compatibility 36/36；Full 3514 passed，唯一既有 ingestion worker 时序抖动用例独立连续复跑 3/3 PASS；Ruff/mypy PASS
+- 边界：localhost-only；不含 RBAC / OAuth / 企业级多租户 / 公网部署
+
+### 历史当前阶段：P1-E
+
 **P1-E Multi-Provider Switching — ✅ COMPLETE / FROZEN**（M1 Runtime + M2 Frontend + M3 Unified Freeze）。
 
 - 路线：[ROADMAP.md](ROADMAP.md) § P1-E
@@ -138,7 +180,7 @@ P1-D3 PDF Text Extraction ⏸ **DEFERRED**（2026-07-16 决策，转出主路线
 ### Runtime
 - Request registry 是内存态——server 重启后 active request 丢失
 - Single harness——不支持多 session 并行执行
-- Localhost only / no auth——不适合公网部署
+- Localhost only；已有登录与账号工作区隔离，但无 TLS / RBAC / OAuth / 公网部署加固
 - Provider/Model Backend Foundation ✅ frozen（Credential + Profile + Binding 持久化）；**M1 才真正执行 Prompt/Regenerate 切换**
 
 ### Web UI
@@ -166,7 +208,7 @@ P1-D3 PDF Text Extraction ⏸ **DEFERRED**（2026-07-16 决策，转出主路线
 - OCR / Image understanding
 
 ### 不在范围内
-- Multi-Agent / 多用户 / RBAC / OAuth
+- Multi-Agent / RBAC / OAuth / 企业级多租户（本地登录与账号工作区隔离已完成）
 - 公网部署 / 横向扩展
 - CLI（仅 Web UI 入口）
 - 自动 provider fallback / 模型负载均衡

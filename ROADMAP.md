@@ -280,12 +280,34 @@ P1-E M1 之前的配置后端已 frozen，不再扩展。
 - OCR / 主动开启 marker OCR（扫描 PDF 进 `status=needs_ocr` 终态，不自动重试）
 - Long-term user memory / 跨 Session 用户偏好 / 用户画像
 - **Embedding provider / Vector DB / Reranker / Hybrid retrieval / Re-embedding**（**永久不做 @ 2026-08-03**，per [decisions-log §3.1](docs/design/p2-r0-decisions-log.md)；用户决策"PDF→MD 即可，让 LLM 直读 MD，不再进行向量化"；R3 = pure FTS5 BM25）
-- 多用户 RBAC / OAuth（Session Library ACL 是单进程内访问隔离，不是用户级权限）
+- RBAC / OAuth / 企业级多租户（本地登录与账号工作区隔离已在 P2-AUTH 实现）
 - 长期后台任务调度（与 ROADMAP "不做" 列表一致）
 
 ---
 
 ## P2 — Web Agent Product Enhancements（⚪ PLANNED）
+
+### P2-AUTH — Local Login + Account Workspace Isolation（✅ IMPLEMENTED / LOCAL BASELINE，2026-08-15）
+
+本地登录与账号数据隔离已交付：未登录首屏、HttpOnly + SameSite=Strict Cookie、服务端登录 Session、PBKDF2-SHA256 随机盐密码哈希、空库 bootstrap `admin`、退出登录和失败尝试限流。登录 Session 绑定后端运行周期：运行期间刷新/重开无需重输，网关重启后撤销旧 Session 并强制重新认证，账号和工作区数据继续保留。
+
+每个账号被路由到独立 FastAPI 工作区，拥有专属 Session/上传、Skills、MCP、Knowledge、Provider/Credential Settings 数据库与文件目录；HTTP API 和 WebSocket 均要求有效登录 Cookie。
+
+**边界**：仍是 localhost-only 应用；不提供 Users 管理界面、RBAC、OAuth、企业级多租户或公网部署。
+
+**验证**：Frontend 358/358 + typecheck/lint/build；Backend auth 8/8（新增退出再登录后保留历史消息与 `AGENT.md`）以及 auth+Provider compatibility 36/36；Full Backend 3514 passed，唯一既有 ingestion worker 时序用例首轮抖动失败后独立连续复跑 3/3 PASS；Ruff/mypy PASS。
+
+### P2-SESSION-WORKSPACE — Conversation + Folder（✅ IMPLEMENTED / LOCAL BASELINE，2026-08-15）
+
+每个 Session 现在同时拥有持久对话历史和独立 managed folder。应用启动会为已有 Session 补齐目录，新建 Session 会在返回前初始化目录与唯一根 `AGENT.md`；已有指令内容绝不覆盖，删除 Session 继续级联删除整个目录。退出再登录或重启网关只撤销认证 Session，不会删除对话、文件或 `AGENT.md`。
+
+用户上传与 Agent 生成文件共用 VirtualFileStore、FileRef metadata、单文件/Session 配额和跨 Session 边界。FileRef 通过 `logical_path` 表达虚拟目录且 API 不暴露物理路径；`write_file(filename, content, folder?)` 可在 Session 内创建 UTF-8 文本。`list_files/view_file/write_file` 优先绑定请求 Session，避免 UI 默认 Session 与请求 sid 不一致时串读写。
+
+前端聊天标题栏提供 `Folder N` 文件树，可展开逻辑目录、查看、下载、删除与刷新，并直接编辑受保护的根 `AGENT.md`。每轮执行前读取当前内容并追加到 system prompt，采用大小限制与 SHA-256 乐观并发检查；保存后下一轮生效。Agent 请求 terminal 后自动刷新文件树。验证：Backend related 211/211；Frontend 362/362；typecheck/lint/build/Ruff/mypy PASS。
+
+### P2-CHECKPOINTER — Slash Command + Session Memory（✅ IMPLEMENTED / LOCAL BASELINE，2026-08-15）
+
+首个 slash command `/checkpointer` 已交付：命令目录驱动前端 `/` 菜单；后端以 managed async request 使用当前 Session Provider 总结 canonical messages，累计保存到唯一根 `Memory.md`，保存成功后才清空当前消息。Provider/文件失败不改原消息，数据库清空失败补偿回滚文件；source hash 支持重复提交幂等恢复。后续 Prompt/Regenerate 自动加载最多 32 KiB 记忆，明确作为不可信事实而非指令。Folder 文件树允许用户打开、查看和修改 `Memory.md`，保存使用 SHA-256 乐观锁，普通文件仍不可通过该接口编辑。范围只限当前 Session，不提供跨 Session 用户画像。验证：Backend extended 204/204（full baseline 3539 passed / 3 skipped / 14 deselected）；Frontend full 368/368；typecheck/lint/build/changed-file Ruff PASS。
 
 按优先级排序——独立设计、独立测试、独立冻结。**不**要求按字母顺序执行。
 
@@ -371,7 +393,7 @@ PDF / Vector RAG 已在 P2-R 系列正式重启——见上方 §P2-R 章节。�
 - Long-term user memory / 跨 Session 用户偏好 / 用户画像（区别于 RAG——RAG 已在 P2-R 系列重启）
 - Multi-Agent 编排
 - CLI / RPC mode
-- 多用户账号 / OAuth / RBAC / 企业 secret vault
+- OAuth / RBAC / 企业级多租户 / 企业 secret vault（本地登录与账号工作区隔离已完成）
 - 公网部署 / 横向扩展
 - MCP marketplace / Skill marketplace
 - Skill 在线编辑 / 跨项目共享 / 热加载

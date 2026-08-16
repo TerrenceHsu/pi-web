@@ -9,6 +9,7 @@ import { ref } from "vue"
 import * as mcpApi from "../api/mcp"
 import { ApiError } from "../api/client"
 import type {
+  DDGSSearchSettings,
   MCPServerCreateRequest,
   MCPServerSummary,
   MCPToolSummary,
@@ -117,6 +118,21 @@ export const useMcpStore = defineStore("mcp", () => {
     }
   }
 
+  async function updateDDGSSettings(payload: DDGSSearchSettings) {
+    error.value = null
+    try {
+      const server = await mcpApi.updateDDGSSettings(payload)
+      const idx = servers.value.findIndex((item) => item.name === server.name)
+      if (idx >= 0) servers.value[idx] = server
+      await loadTools()
+      return server
+    } catch (e: any) {
+      error.value = e instanceof ApiError ? e.detail : String(e?.message ?? e)
+      await reloadServersSilent()
+      throw e
+    }
+  }
+
   async function enableServer(name: string) {
     error.value = null
     try {
@@ -218,6 +234,7 @@ export const useMcpStore = defineStore("mcp", () => {
     loadServers,
     createServer,
     testServer,
+    updateDDGSSettings,
     enableServer,
     disableServer,
     deleteServer,

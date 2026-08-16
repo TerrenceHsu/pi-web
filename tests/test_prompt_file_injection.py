@@ -363,10 +363,11 @@ def test_file_tools_auto_registered_when_uploads_dir_set(web_client):
     tools = harness.agent.tools
     assert tools.has("list_files")
     assert tools.has("view_file")
+    assert tools.has("write_file")
 
 
 def test_file_tools_not_registered_when_no_uploads_dir(tmp_path):
-    """uploads_dir=None 时不应注册 list_files / view_file。"""
+    """uploads_dir=None 时不应注册任何 Session 文件工具。"""
     fake = FakeClient([[TextDeltaEvent(delta="ok"), DoneEvent(stop_reason="stop")]])
     agent = Agent(system_prompt="", client=fake)
     harness = AgentHarness(agent)
@@ -381,4 +382,5 @@ def test_file_tools_not_registered_when_no_uploads_dir(tmp_path):
         # 工具不应注册
         assert not harness.agent.tools.has("list_files")
         assert not harness.agent.tools.has("view_file")
+        assert not harness.agent.tools.has("write_file")
     dispose_app(app)

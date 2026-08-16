@@ -17,6 +17,7 @@ import { computed, ref } from "vue"
 import * as messagesApi from "../api/messages"
 import * as eventsApi from "../api/events"
 import * as regenerateApi from "../api/regenerate"
+import * as slashCommandsApi from "../api/slashCommands"
 import { ApiError } from "../api/client"
 import { createEventSocket, type EventSocket } from "../api/websocket"
 import type {
@@ -115,7 +116,7 @@ function assistantTextOf(message: any): string {
 
 /** 判断 toolName 是否是文件工具。 */
 function isFileTool(name: string | undefined): boolean {
-  return name === "view_file" || name === "list_files"
+  return name === "view_file" || name === "list_files" || name === "write_file"
 }
 
 /** 判断 toolName 是否是 MCP 工具（mcp__server__tool）。 */
@@ -145,6 +146,8 @@ export const useChatStore = defineStore("chat", () => {
   const wsConnected = ref(false)
   const wsReconnecting = ref(false)
   const error = ref<string | null>(null)
+  const checkpointing = ref(false)
+  const checkpointNotice = ref<string | null>(null)
 
   // P1-B2: 事件去重 / 隔离 state
   /**
@@ -252,7 +255,10 @@ export const useChatStore = defineStore("chat", () => {
    */
   const requestMetadataById = new Map<
     string,
-    { operation: "prompt" | "regenerate"; targetMessageId?: string | null }
+    {
+      operation: "prompt" | "regenerate" | "checkpointer"
+      targetMessageId?: string | null
+    }
   >()
 
   /** turn-control 事件——会修改当前 turn 的 draft / sending / streaming 状态；
@@ -260,7 +266,7 @@ export const useChatStore = defineStore("chat", () => {
   const TURN_CONTROL_TYPES = new Set([
     "message_start", "message_update", "message_end",
     "request_end", "agent_end", "error", "agent_abort",
-    "tool_execution_start", "tool_execution_end",
+    "tool_execution_start", "tool_execution_update", "tool_execution_end",
     "turn_end", "turn_start", "agent_start",
     "request_start", "request_queued",
   ])
@@ -448,15 +454,16 @@ export const useChatStore = defineStore("chat", () => {
    * 间隔 250ms → 500ms；总超时 10s。terminal 后调 reconcileMessagesFromServer。
    */
   async function pollRequestUntilTerminal(requestId: string) {
-    const MAX_TIMEOUT_MS = 10_000
     const startedAt = Date.now()
     let delay = 250
 
-    // D2-7: 判断 request operation（regenerate vs prompt）——决定 terminal 后处理
+    // request operation 决定 terminal 后的 UI 收敛策略。
     const meta = requestMetadataById.get(requestId)
     const isRegenerate = meta?.operation === "regenerate"
+    const isCheckpointer = meta?.operation === "checkpointer"
+    const maxTimeoutMs = isCheckpointer ? 120_000 : 10_000
 
-    while (Date.now() - startedAt < MAX_TIMEOUT_MS) {
+    while (Date.now() - startedAt < maxTimeoutMs) {
       await new Promise((r) => setTimeout(r, delay))
       delay = Math.min(delay * 2, 500)
       try {
@@ -466,8 +473,19 @@ export const useChatStore = defineStore("chat", () => {
           r.status === "error" ||
           r.status === "aborted"
         ) {
+          if (isCheckpointer) {
+            if (r.status === "completed") {
+              // Server has already committed Memory.md and cleared canonical messages.
+              // Clear every transient turn card as well so the current window is empty.
+              streamItems.value = []
+              currentTurnEvents.value = []
+              checkpointNotice.value = "Checkpoint saved to Memory.md"
+            } else {
+              error.value = r.error || "Checkpoint was not completed"
+            }
+            checkpointing.value = false
           // D2-7: regenerate 路径——completed 先 syncing 再 reconcile
-          if (isRegenerate && r.status === "completed") {
+          } else if (isRegenerate && r.status === "completed") {
             regeneration.value = {
               ...regeneration.value,
               status: "syncing",
@@ -539,14 +557,16 @@ export const useChatStore = defineStore("chat", () => {
           currentRequestId.value = null
           // 清 metadata（避免长期累积）
           requestMetadataById.delete(requestId)
-          return
+          return r
         }
       } catch {
         // 404 / 网络——继续 poll，由 timeout 兜底
       }
     }
     // timeout——保留 draft + 显示轻量错误
+    checkpointing.value = false
     error.value = "Request finalization timeout — please refresh to sync"
+    return null
   }
 
   /**
@@ -617,8 +637,9 @@ export const useChatStore = defineStore("chat", () => {
     currentRequestId.value = requestId
     pendingRequest.value = false
     sending.value = true
-    streaming.value = true
+    streaming.value = meta?.operation !== "checkpointer"
     terminalEventSeen.value = false
+    checkpointing.value = meta?.operation === "checkpointer"
 
     // D2-7: 恢复 regeneration draft——审核 §8 reload 顺序
     if (meta?.operation === "regenerate") {
@@ -769,6 +790,52 @@ export const useChatStore = defineStore("chat", () => {
       })
       finalizeTurnInfo("error")
       // **不**自动 fallback 同步 POST /api/prompt（用户原指令 §3：避免双发）
+      throw e
+    }
+  }
+
+  async function executeCheckpointer(sessionId: string) {
+    if (sending.value) return null
+
+    activeSessionId.value = sessionId
+    sending.value = true
+    streaming.value = false
+    checkpointing.value = true
+    checkpointNotice.value = null
+    error.value = null
+    pendingRequest.value = true
+    currentRequestId.value = null
+    aborting.value = false
+
+    try {
+      const response = await slashCommandsApi.executeSlashCommand(
+        sessionId,
+        "/checkpointer",
+      )
+      currentRequestId.value = response.request_id
+      pendingRequest.value = false
+      requestMetadataById.set(response.request_id, {
+        operation: "checkpointer",
+      })
+      const terminal = await pollRequestUntilTerminal(response.request_id)
+      if (!terminal || terminal.status !== "completed") {
+        throw new Error(terminal?.error || "Checkpoint was not completed")
+      }
+      return terminal
+    } catch (e: any) {
+      const nestedMessage = e instanceof ApiError
+        ? e.payload?.detail?.message
+        : undefined
+      error.value = typeof nestedMessage === "string"
+        ? nestedMessage
+        : e instanceof ApiError
+          ? e.detail
+          : String(e?.message ?? e)
+      pendingRequest.value = false
+      sending.value = false
+      streaming.value = false
+      checkpointing.value = false
+      currentRequestId.value = null
       throw e
     }
   }
@@ -1321,6 +1388,10 @@ export const useChatStore = defineStore("chat", () => {
       upsertToolCallStart(event)
       return
     }
+    if (t === "tool_execution_update") {
+      upsertToolCallUpdate(event)
+      return
+    }
     if (t === "tool_execution_end") {
       upsertToolCallEnd(event)
       return
@@ -1460,7 +1531,7 @@ export const useChatStore = defineStore("chat", () => {
         id,
         toolName,
         toolCallId,
-        fileName: args.file_id || args.name || args.path,
+        fileName: args.file_id || args.filename || args.name || args.path,
         fileId: args.file_id,
         format: args.format,
         status: "running",
@@ -1565,6 +1636,36 @@ export const useChatStore = defineStore("chat", () => {
     }
   }
 
+  function upsertToolCallUpdate(event: any) {
+    const tc = extractToolCall(event)
+    const toolCallId = tc.id
+    const partial: any = (event as any).partial_result
+    const existingId = toolCallId ? toolItemIds[toolCallId] : undefined
+    if (!existingId) {
+      upsertToolCallStart(event)
+    }
+    const targetId = toolCallId ? toolItemIds[toolCallId] : undefined
+    if (!targetId) return
+    const preview = partial
+      ? previewOf(
+          Array.isArray(partial.content)
+            ? partial.content
+                .map((c: any) => (c?.type === "text" ? c.text : ""))
+                .filter(Boolean)
+                .join("\n")
+            : partial,
+        )
+      : undefined
+    updateItem(targetId, (it: any) => {
+      it.status = "running"
+      if (preview) {
+        if (it.kind === "file_read") it.preview = preview
+        else it.resultPreview = preview
+      }
+      it.details = partial
+    })
+  }
+
   function appendError(message: string, details?: unknown) {
     streamItems.value.push({
       kind: "error",
@@ -1639,6 +1740,8 @@ export const useChatStore = defineStore("chat", () => {
     terminalEventSeen.value = false
     needsFinalResync.value = false
     aborting.value = false
+    checkpointing.value = false
+    checkpointNotice.value = null
     pendingEventsByRequest.clear()
   }
 
@@ -1713,6 +1816,8 @@ export const useChatStore = defineStore("chat", () => {
     wsConnected,
     wsReconnecting,
     error,
+    checkpointing,
+    checkpointNotice,
     itemCount,
     // P1-B2: envelope-aware state（暴露给调试 / 后续 UI）
     lastSequenceBySession,
@@ -1733,6 +1838,7 @@ export const useChatStore = defineStore("chat", () => {
     latestPersistedAssistantMessageId,
     loadMessages,
     sendPrompt,
+    executeCheckpointer,
     // D2-7: regenerate action
     regenerateAssistantMessage,
     clearRegenerationForSessionSwitch,

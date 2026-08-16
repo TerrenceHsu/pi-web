@@ -135,7 +135,7 @@ def serialize_event(event: Any) -> dict[str, Any]:
 
 
 def serialize_snapshot_summary(snapshot: Any) -> dict[str, Any]:
-    """TurnSnapshot → 紧凑 summary（不带 messages / events 详情）。
+    """RequestSnapshot → 紧凑 summary（不带 messages / events 详情）。
 
     用于 /api/snapshots 列表——避免一次返回几十个 snapshot 的全部 messages。
     想看详情调 /api/snapshots/{index} → serialize_snapshot_full。
@@ -155,19 +155,20 @@ def serialize_snapshot_summary(snapshot: Any) -> dict[str, Any]:
             "events_count": len(getattr(snapshot, "events", []) or []),
             "tool_calls_count": len(getattr(snapshot, "tool_calls", []) or []),
             "tool_results_count": len(getattr(snapshot, "tool_results", []) or []),
+            "turns_count": len(getattr(snapshot, "turns", []) or []),
             "metadata": to_json_safe(getattr(snapshot, "metadata", {}) or {}),
         }
     return cast("dict[str, Any]", to_json_safe(snapshot))
 
 
 def serialize_snapshot_full(snapshot: Any) -> dict[str, Any]:
-    """TurnSnapshot → 完整 dict（含 messages / events / tool_calls / results）。
+    """RequestSnapshot → 完整 dict（含嵌套 turns 与事件详情）。
 
-    用于 /api/snapshots/{index} 详情页。TurnSnapshot.to_dict() 已经做了
+    用于 /api/snapshots/{index} 详情页。RequestSnapshot.to_dict() 已经做了
     JSON-safe 转换（model_dump mode=json）；这里只是统一入口。
     """
     if isinstance(snapshot, BaseModel):
-        # 优先用 snapshot.to_dict()（TurnSnapshot 自带这个方法）
+        # 优先用 snapshot.to_dict()（RequestSnapshot 自带这个方法）
         to_dict = getattr(snapshot, "to_dict", None)
         if callable(to_dict):
             return cast("dict[str, Any]", to_dict())

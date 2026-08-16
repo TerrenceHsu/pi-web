@@ -8,7 +8,7 @@
 > Web Claude P0 MVP + P1-A 真实环境验证 + P1-B 异步架构 + P1-C 持久化 + P1-D1 Export Markdown + P1-D2 Regenerate 全部完成 ✅。
 > 当前状态见 [`STATUS.md`](STATUS.md)；未来计划见 [`ROADMAP.md`](ROADMAP.md)；版本历史见 [`CHANGELOG.md`](CHANGELOG.md)。
 >
-> **Web Claude P0 MVP is complete for local development. Localhost-first, no authentication, not suitable for public exposure.**
+> **Web UI now requires local login. Each account is routed to a private workspace; it remains localhost-only and is not suitable for public exposure.**
 
 ---
 
@@ -29,8 +29,8 @@
 
 1. **垂直切片**：每个 Step 端到端跑通（demo + 测试 + 文档），不做半成品。
 2. **事件驱动**：Agent / Harness / Tool 的所有行为都通过 `AgentEvent` 流式广播，可观察、可序列化、可重放。
-3. **不可变语义**：Pydantic v2 模型 + 快照（`TurnSnapshot`），running 期间不会被订阅者 mutate。
-4. **本地优先**：Web UI 仅用于本地调试（不实现认证 / 多用户 / 公网部署），MCP / Skill / Policy 都在进程内编排。
+3. **不可变语义**：Pydantic v2 模型 + `RequestSnapshot` / `TurnSnapshot`，运行时对象不会被订阅者反向修改。
+4. **本地优先**：Web UI 使用本地账号登录和隔离工作区；不实现 RBAC / OAuth / 公网部署，MCP / Skill / Policy 仍在各用户进程内工作区编排。
 5. **Provider 无关**：`ModelClient` 抽象层；当前默认 GLM-5.0（智谱 Anthropic 兼容协议），未来拆 Anthropic / OpenAI / Fake 多 provider。
 
 ---
@@ -63,11 +63,11 @@
 下面这些是整个项目当前阶段**明确不做**的，无论组合哪个模块都拿不到：
 
 - **RAG**——P2-R 系列引入（marker + heading-aware chunk + SQLite FTS5 + Session-scoped Library ACL）；不引入外部 vector DB。详见 [ROADMAP §P2-R](ROADMAP.md)
-- **Long-term user memory / 跨 Session 用户记忆**——仍不做（区别于 RAG）
-- **多用户 / 认证 / RBAC / OAuth**——Web 仅本地调试，policy 仅单进程决策
+- **Long-term user memory / 跨 Session 用户记忆**——仍不做；`/checkpointer` 只维护当前 Session 的 `Memory.md`（区别于用户画像与 RAG）
+- **RBAC / OAuth / 企业级多租户**——已有本地登录与账号工作区隔离，但没有角色权限、第三方登录或跨节点租户能力
 - **公网部署 / 横向扩展**——FastAPI 状态在内存，SSE 单机广播
 - **CLI**——只做 Web UI（Step 20）
-- **真 LLM 摘要器**——`default_summary_generator` 是规则式
+- **自动 compaction 的真 LLM 摘要器**——`default_summary_generator` 仍是规则式；显式 `/checkpointer` 使用当前 Session 绑定的 LLM
 - **Skill 热加载 / 跨项目共享**——文件改了要重启
 
 按代码组织划分，每块对应一个或多个 Step。
@@ -152,17 +152,20 @@
 
 **边界**：Harness **不替代** Agent，是外层协调；`require_approval` 决策按 deny 处理（Step 18 不做交互式 human approval UI）；`on_error` hook 抛异常追加进 metadata，不递归；compaction **不删除** snapshots（历史永久保留）。
 
-### 9. Turn Snapshot `snapshot.py`
+### 9. Request / Turn Snapshot `snapshot.py`
 
-每个 turn 完成后构建不可变 `TurnSnapshot`：
+每次 Harness 请求构建一个 `RequestSnapshot`，其中 `turns[]` 保存真实
+`TurnSnapshot`。一个 turn 严格等于“一次 LLM 调用 + 该调用产生的当批工具”：
 
 - `messages_before` / `messages_after`
 - `events`（事件快照）
 - `tool_calls` / `tool_results`（工具调用明细）
-- `metadata` / `status` / `error` / `duration_ms`
-- `SnapshotBuilder` 在 running 期间累积，turn 结束 freeze
+- Request 级 `metadata` / `status` / `error` / `duration_ms`
+- Turn 级 assistant `message`、独立事件区间和工具明细
+- `SnapshotBuilder` 在 request 期间累积，按 `turn_start` / `turn_end` 切片
 
-**边界**：仅内存对象——**不**持久化（Session 负责）；不带 Session / Memory / Durable Storage（Step 12）/ Skills / CLI；freeze 后字段不可变。
+**兼容性**：Session / SQLite 持久化 RequestSnapshot；旧版 request-shaped
+TurnSnapshot JSON 会按 `turns=[]` 兼容读取。Web 完整详情会返回嵌套 turns。
 
 ### 10. Session Memory `session.py`
 
@@ -240,7 +243,7 @@
 - `InMemoryToolPermissionAuditLog` + `ToolPermissionAuditRecord`：审计日志
 - `sandbox.py`：路径沙箱（`is_path_within_roots` / `extract_candidate_paths` / `parse_mcp_namespaced_tool`）
 
-**边界**：`permission_policy=None` 关闭检查（向后兼容）；policy 抛异常 / 返回非法对象时**不让 loop 崩**，转成 `error_type="ToolPermissionPolicyError"` 的 ToolResult；audit log **仅内存**（无文件 / DB 持久化）；`require_approval` 按 deny 处理（Step 18 不做 human approval UI）；不做 OAuth / RBAC / 多用户 / 企业 secret vault。
+**边界**：`permission_policy=None` 关闭检查（向后兼容）；policy 抛异常 / 返回非法对象时**不让 loop 崩**，转成 `error_type="ToolPermissionPolicyError"` 的 ToolResult；audit log **仅内存**（无文件 / DB 持久化）；`require_approval` 按 deny 处理（Step 18 不做 human approval UI）；不做 OAuth / RBAC / 多租户授权 / 企业 secret vault。
 
 ### 18. Skill File Loader `skill_loader.py`
 
@@ -256,11 +259,12 @@
 本地调试 UI（FastAPI + Vue 3）：
 
 - `app.py`：`create_app(harness)` 工厂，注册 REST API + SSE + 静态资源
+- `auth/`：登录会话、HttpOnly Cookie 网关与每账号独立工作区路由
 - `state.py`：`WebAppState` + `TraceEventBuffer`（最近 500 事件）
 - `serializers.py`：Pydantic 模型 → JSON-safe dict
 - `frontend/`：Vue 3 + Vite + TypeScript 单页应用
 
-**边界**：**仅本地调试**——不实现认证 / 多用户 / 公网部署；状态全在内存（重启丢失，SSE 客户端掉线不补推）；event buffer 最多 500 条（FIFO 丢弃）；并发请求由 `_ensure_idle()` 拒绝（POST `/api/prompt` 在 running 时直接 409）。
+**边界**：**仅本地调试**——`create_authenticated_app(...)` 提供本地登录与账号级工作区隔离，但不实现 RBAC / OAuth / 公网部署；每个用户工作区 event buffer 有界，并发请求仍由 `_ensure_idle()` 拒绝。
 
 **REST API**（均同源，前缀 `/api`）：
 
@@ -332,6 +336,7 @@ pi-py/
 │   └── web/                      # Web UI 子包
 │       ├── __init__.py
 │       ├── app.py                # FastAPI 工厂
+│       ├── auth/                 # 账号、登录 Session、认证网关与工作区隔离
 │       ├── serializers.py
 │       ├── state.py
 │       ├── static/               # Vue build 产物
@@ -350,7 +355,9 @@ pi-py/
 │               └── components/
 │                   ├── layout/
 │                   │   ├── AppShell.vue        # 两栏 shell（sidebar + main slots）
-│                   │   └── SessionSidebar.vue  # New chat / 会话列表 / Skills / MCP footer 按钮
+│                   │   └── SessionSidebar.vue  # New chat / 会话列表 / 工具 / 当前账号与退出
+│                   ├── auth/
+│                   │   └── LoginPage.vue       # 未登录首屏
 │                   ├── chat/                   # 中间对话流 + Inline Turn Cards
 │                   │   ├── ChatPanel.vue
 │                   │   ├── MessageList.vue
@@ -452,49 +459,39 @@ python steps/step-XX-name/demo.py
 
 **Web Claude P0 MVP 完成（2026-07-07）**——claude.ai 风格的两栏聊天界面，支持文件上传、Skills、MCP server。
 
-> ⚠️ **Web Claude P0 MVP is complete for local development. Localhost-first, no authentication, not suitable for public exposure.**
+> ⚠️ **本地账号登录与工作区隔离已启用，但没有 RBAC / OAuth / 公网部署防护，仍不可暴露到公网。**
 >
-> 默认 `include_prompt=true` 返回 403 防止 prompt 模板泄露；MCP env values 严格不回显（response 只有 `env_keys`）；MCP/Skill 配置 P0 不持久化（重启即丢）。
+> 默认 `include_prompt=true` 返回 403 防止 prompt 模板泄露；MCP env values 严格不回显（response 只有 `env_keys`）；MCP/Skill 配置由 P1-C 持久化到当前账号的 `workspace.sqlite`。
 
 ### 功能
 
-- **左侧 SessionSidebar**：New chat / 会话列表 / 重命名 / 删除；底部 Skills / MCP 按钮挂载 modal
+- **登录首屏**：未认证时只显示 Username / Password；成功后才启动该账号的 Agent 工作区
+- **重启重新认证**：后端网关启动时撤销上一次运行留下的登录 Session；当前进程运行期间刷新或重新打开页面无需重复输入密码
+- **工作区持久化**：退出再登录或重启网关后，同账号此前的 Session、历史消息、文件及 `AGENT.md` 原样保留
+- **左侧 SessionSidebar**：New chat / 会话列表 / 重命名 / 删除；纵向 Skills / Knowledge / MCP / Providers；底部显示当前账号与 Sign out
 - **中间 ChatPanel**：header 状态 + 消息流 + ChatInput（拖放 + 文件选择 + Enter 发送 / Shift+Enter 换行；running 时 Send → Stop）
 - **Inline Turn Cards**（淡化、不抢主舞台）：
   - `UserMessage` / `AssistantMessage`（streaming draft + 光标动画）
   - `TurnInfo`（本轮 turn 信息折叠块）
   - `ToolCall` / `ToolResult`（普通工具）
-  - `FileRead`（list_files / view_file）
+  - `FileRead`（list_files / view_file / write_file）
   - `MCPToolCall`（mcp__server__tool）
   - `SkillUsed`（本轮启用 skill 提示）
   - `Error`
-- **文件上传**：md / html / csv / parquet / 文本；**图片明确 unsupported**（不做 OCR / 不做视觉理解）；**PDF 正文不解析**
+- **Session 文件夹**：每个 Session 创建时立即初始化独立目录及唯一根 `AGENT.md`；用户上传和 Agent 生成文件都只属于当前 Session
+- **文件树、指令与记忆**：Folder 面板按逻辑路径展示可展开文件树；根 `AGENT.md` 与 `/checkpointer` 生成的 `Memory.md` 均可查看、编辑并使用 SHA-256 乐观锁保存；两者从下一轮请求开始加载
+- **Slash Command**：输入 `/` 显示命令菜单；`/checkpointer` 用当前 Session Provider 总结现有对话到累计 `Memory.md`，成功保存后清空消息窗口，后续请求自动加载该记忆
+- **文件读写**：`list_files` / `view_file` 查阅 Session 文件；`write_file(filename, content, folder?)` 让 Agent 在逻辑目录创建新的 UTF-8 文本文件（不接受物理路径、不覆盖已有文件）
+- **文件上传**：上传文件直接保存到当前 Session 文件夹；支持 md / html / csv / parquet / 文本；**图片明确 unsupported**；**PDF 正文不解析**
 - **Skills Modal**：上传 SKILL.md + enable/disable + Use-this-turn 选择（selected 必须是 enabled 子集）
 - **MCP Modal**：add server（args JSON + env key/value）+ Test / Enable / Disable / Delete + tools enable/disable
+- **用户数据隔离**：Session、上传文件、Skills、MCP、Knowledge、Provider/Credential Settings 均使用账号专属 SQLite 与目录
 
 ### 启动
 
 ```bash
-# 后端（FastAPI on :8000）—— 最小内嵌示例
-PYTHONPATH=src /d/miniconda/envs/pipy/python.exe -c "
-from pi_agent_core_py.agent import Agent
-from pi_agent_core_py.harness import AgentHarness
-from pi_agent_core_py.model_client import FakeClient, TextDeltaEvent, DoneEvent
-from pi_agent_core_py.web.app import create_app
-import uvicorn
-
-fake = FakeClient([[TextDeltaEvent(delta='ok'), DoneEvent(stop_reason='stop')]])
-agent = Agent(system_prompt='demo', client=fake)
-harness = AgentHarness(agent)
-# 启用文件上传 + sqlite 多会话 + prompt preview（仅本地调试）
-app = create_app(
-    harness,
-    db_path=':memory:',
-    uploads_dir='uploads',
-    allow_prompt_preview=True,
-)
-uvicorn.run(app, host='127.0.0.1', port=8000)
-"
+# 后端（FastAPI 登录网关 on :8000）
+PYTHONPATH=src /d/miniconda/envs/pipy/python.exe scripts/dev_web_app.py
 
 # 前端开发（热重载，:5173，proxy /api → :8000）
 cd src/pi_agent_core_py/web/frontend
@@ -505,14 +502,18 @@ npm run dev
 npm run build
 ```
 
-`create_app` 关键参数（全部可选）：
+开发脚本默认把认证库与账号工作区持久化到 `.pi-agent-data/`；可用
+`PI_AGENT_DATA_DIR` 改位置。初始账号为 `admin / 123456`。账号与工作区数据跨重启
+保留，但后端重启后旧登录 Cookie 失效，必须重新登录一次。
+
+单工作区 `create_app` 的关键参数（全部可选）：
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `event_buffer_max_size` | 1000 | TraceEventBuffer 容量，超过丢最旧 |
 | `allow_prompt_preview` | False | `?include_prompt=true` 是否暴露 Skill prompt；True 也只接受 localhost |
 | `db_path` | None（`:memory:` 内部 fallback） | SQLiteSessionStore 路径；None → 内存库 |
-| `uploads_dir` | None | VirtualFileStore 根目录；None → 不启用文件上传路径（相关 endpoint 返回 503） |
+| `uploads_dir` | None | Session 文件夹根目录；None → 不启用上传、Agent 文件读写路径（相关 endpoint 返回 503） |
 | `max_file_size` | 25 MB | 单文件大小上限 |
 | `max_session_upload_size` | 100 MB | 单 session 总上传上限 |
 
@@ -526,6 +527,7 @@ npm run build
 │  - Sessions │  Message List                       │
 │  - Skills ▼ │   - user 气泡（右）                  │
 │  - MCP    ▼ │   - assistant 流式（左）             │
+│  - Providers│   - 当前账号独立工作区                 │
 │             │   - inline Turn / ToolCall /         │
 │             │     FileRead / MCPTool /             │
 │             │     SkillUsed / Error cards          │
@@ -534,29 +536,38 @@ npm run build
 └─────────────┴─────────────────────────────────────┘
 ```
 
-**无右栏 / 无 Drawer / 无 DeveloperDrawer 主入口**——Skills 和 MCP 通过 footer 按钮打开居中 Modal。
+**无右栏 / 无 Drawer / 无 DeveloperDrawer 主入口**——管理入口通过左侧纵向按钮打开居中 Modal。
 
 ### 使用流程
 
-1. 打开 `http://127.0.0.1:8000`，自动加载 default session
-2. **新建 session**：左栏顶部 `+ New chat`
-3. **发送消息**：底部输入框 → Enter
-4. **上传文件**：📎 按钮或拖放到输入框 → AttachmentBar 显示 FileChip → Send 时携带 `file_ids`
-5. **使用 Skills**：左栏底部 `Skills` → 上传 SKILL.md → enable → 勾选 "Use this turn" → 发送时携带 `skill_names`
-6. **使用 MCP**：左栏底部 `MCP` → Add server（填 name / command / args JSON / env）→ Test connection → Enable → 在 Tools 区 Enable 单个工具
+1. 打开 `http://127.0.0.1:8000`，输入 `admin / 123456` 登录
+2. 登录成功后加载 admin 专属的 Session / Skills / MCP / Knowledge / Provider Settings
+3. **新建 session**：左栏顶部 `+ New chat`
+4. **发送消息**：底部输入框 → Enter
+5. **上传文件**：📎 按钮或拖放到输入框 → 文件保存到当前 Session 文件夹 → Send 时携带 `file_ids`
+6. **查看文件夹**：聊天标题栏点击 `Folder N`，展开文件树后可查看、下载、刷新或删除普通文件
+7. **编辑 Session 指令**：选择根 `AGENT.md`，编辑并保存；新内容从下一轮对话开始生效
+8. **让 Agent 创建文件**：例如“把结论保存到 reports/report.md”；Agent 调用 `write_file` 后文件会出现在当前 Folder
+9. **创建或修改记忆**：输入 `/checkpointer` 生成 `Memory.md`；在 Folder 中点击 `Memory.md` 可查看和修改，保存内容从下一轮开始生效
+10. **使用 Skills**：左栏 `Skills` → 上传 SKILL.md → enable → 勾选 "Use this turn"
+11. **使用 MCP**：左栏 `MCP` → Add server → Test connection → Enable
+12. **退出**：左栏底部 `Sign out`，退出后所有工作区 API 重新返回 401；再次登录仍恢复原工作区
 
 ### 安全说明（重要）
 
-- **localhost only / no auth**：无鉴权 / 无多用户隔离 / 无 rate limit；不建议公网暴露
+- **localhost only**：虽有登录、失败尝试限流和账号工作区隔离，但无 TLS / RBAC / OAuth / 公网部署加固，不建议公网暴露
+- **密码与会话不存明文**：密码使用 PBKDF2-SHA256 + 随机盐；登录 Cookie 为 HttpOnly + SameSite=Strict，服务端只保存 token SHA-256
+- **登录 Session 绑定后端运行周期**：后端重启会清空 `auth_sessions`，但不会删除 `auth_users` 或任何账号工作区数据
 - **MCP command / env 是本地开发能力**：用户可填任意 stdio command；env values 在 server memory 中（用于子进程）
 - **MCP env values 不回显**：response 类型只有 `env_keys`，没有任何 endpoint 返回 env value；前端表单提交后立即清空，`type=password + autocomplete=new-password` 防浏览器回填
 - **Prompt preview 默认禁用**：`?include_prompt=true` 默认 403；需 `create_app(allow_prompt_preview=True)` + localhost
-- **不做 RBAC / 多用户 / OAuth**
+- **不做 RBAC / OAuth / 企业级多租户或公网部署**
 
 ### 当前限制
 
 - `POST /api/prompt` **同步阻塞**——LLM 调用结束才返回；当前没有 `/api/prompt/async`；前端通过 WS `/ws/events` 展示实时事件，但 prompt 请求本身仍等待后端完成
-- MCP / Skill 配置**不持久化**——重启即丢
+- 单账号工作区仍是 single harness，不支持同一账号内多个 Session 并行执行
+- Agent `write_file` 当前只创建 UTF-8 文本文件；同一逻辑目录的同名文件会自动生成唯一名称和独立 file id
 - 不支持图片理解（不做 OCR / 不做视觉理解）
 - PDF 正文不解析
 - 无 Regenerate
@@ -578,6 +589,9 @@ Playwright E2E smoke（5 核心用例 + 1 skip）位于 `tests/e2e/`，覆盖真
 | `/api/sessions/{sid}` | PATCH / DELETE | 重命名 / 删除 |
 | `/api/sessions/{sid}/files` | GET / POST | 列出 / 上传 session 文件 |
 | `/api/sessions/{sid}/files/{fid}` | GET / DELETE | 下载 / 删除单文件 |
+| `/api/sessions/{sid}/files/{fid}/content` | PUT | 保存根 `AGENT.md` 或 `Memory.md`（SHA-256 乐观并发检查） |
+| `/api/slash-commands` | GET | Composer 可用命令目录 |
+| `/api/sessions/{sid}/slash-commands` | POST | 异步执行 `/checkpointer` 等 Session 命令 |
 | `/api/skills` | GET | attached skills（`include_prompt=true` 默认 403） |
 | `/api/skills/upload` | POST | multipart 上传 SKILL.md |
 | `/api/skills/{name}/enable` `/disable` | POST | 启用 / 禁用 |
@@ -586,6 +600,9 @@ Playwright E2E smoke（5 核心用例 + 1 skip）位于 `tests/e2e/`，覆盖真
 | `/api/mcp/servers/{name}/enable` `/disable` | POST | 启用 / 禁用 |
 | `/api/mcp/servers/{name}` | DELETE | 删除 |
 | `/api/mcp/tools/{name}/enable` `/disable` | POST | 启用 / 禁用（真实 unregister/register） |
+| `/api/auth/login` | POST | 用户名密码登录并签发 HttpOnly Cookie |
+| `/api/auth/session` | GET | 恢复当前登录身份 |
+| `/api/auth/logout` | POST | 吊销登录 Session 并清除 Cookie |
 | `/api/prompt` | POST | 同步触发 prompt（支持 session_id / file_ids / skill_names） |
 | `/api/abort` | POST | 中止当前请求 |
 | `/api/reset` | POST | 重置 agent / clear events / snapshots / audit |
@@ -634,6 +651,8 @@ Playwright E2E smoke（5 核心用例 + 1 skip）位于 `tests/e2e/`，覆盖真
 - ✅ **Step 20.5** ChatGPT-like Chat UI 重构（流式显示）
 - ✅ **Step 21** Provider Adapter Refactor（GLM / Anthropic / OpenAI / Fake 拆分）
 - ✅ **Web Claude P0 MVP**（P0-1 sqlite 多会话 + P0-2 VirtualFileStore + P0-3 view_file/list_files + P0-4 Claude-like Web UI Step 1–8 + P0-5 默认 system prompt）
+- ✅ **Session Folder Workspace**（Session 创建即初始化目录与 `AGENT.md` + 持久历史 + 逻辑文件树 + list/view/write Agent 工具 + 指令编辑与逐轮加载）
+- ✅ **Slash Command `/checkpointer`**（LLM 累计总结到 Session `Memory.md` + 保存后清空 + 失败回滚 + 后续逐轮加载）
 
 ### 后续 step（不在本副本）
 
@@ -641,10 +660,10 @@ Playwright E2E smoke（5 核心用例 + 1 skip）位于 `tests/e2e/`，覆盖真
 
 - Step 22 — Sandbox Execution (Docker)
 - Step 23 — Sandbox Git Integration
-- Step 24 — Slash Command System
-- Step 25+ — Plan Mode / Auto Compaction / LLM Summary / Multi-Agent
+- Step 24 — Slash Command System（本副本已先实现首个 `/checkpointer`，并非完整主仓库 Step 24）
+- Step 25+ — Plan Mode / Auto Compaction / Multi-Agent
 
-本副本（`D:\LLMTutorial\test\`）**只到 Step 21**——主仓库的 Step 22+ 内容不在这里。
+本副本（`D:\LLMTutorial\test\`）核心移植仍以 Step 21 为边界，但 Web 产品层已先实现 `/checkpointer`；主仓库 Step 22+ 的其余内容不在这里。
 
 > 主仓库 Python 路径（不在本副本）：`../pi-py/PLAN.md`
 

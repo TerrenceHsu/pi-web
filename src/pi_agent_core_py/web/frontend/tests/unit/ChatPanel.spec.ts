@@ -52,6 +52,17 @@ vi.mock("../../src/api/client", () => ({
 // mock abortRun——ChatPanel 用它做 stop
 vi.mock("../../src/api", () => ({
   abortRun: vi.fn().mockResolvedValue(undefined),
+  listSlashCommands: vi.fn().mockResolvedValue({
+    count: 1,
+    commands: [
+      {
+        name: "/checkpointer",
+        description: "Save memory and clear this conversation.",
+        requires_provider: true,
+        accepts_arguments: false,
+      },
+    ],
+  }),
 }))
 
 import ChatPanel from "../../src/components/chat/ChatPanel.vue"

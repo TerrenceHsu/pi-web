@@ -22,6 +22,7 @@ import * as stateApi from "./state"
 
 // ----- 新模块细粒度 re-export -----
 export * from "./client"
+export * from "./auth"
 export * from "./sessions"
 export * from "./messages"
 export * from "./files"
@@ -31,6 +32,7 @@ export * from "./websocket"
 export * from "./state"
 export * from "./regenerate"
 export * from "./providers"
+export * from "./slashCommands"
 
 // ----- 旧 api.ts 兼容签名（让 9 个 .vue 不改一行） -----
 // 注意：旧 .vue 直接 import * as api 然后 api.getState() / api.sendPrompt(text, sel)

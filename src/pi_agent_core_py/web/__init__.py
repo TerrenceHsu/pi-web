@@ -19,6 +19,7 @@ from pi_agent_core_py.web import create_app
 from __future__ import annotations
 
 from .app import create_app
+from .auth import create_authenticated_app
 from .serializers import (
     serialize_event,
     serialize_mcp_server_state,
@@ -34,6 +35,7 @@ from .state import TraceEventBuffer, WebAppState
 
 __all__ = [
     "create_app",
+    "create_authenticated_app",
     "WebAppState",
     "TraceEventBuffer",
     "to_json_safe",

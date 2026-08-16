@@ -197,10 +197,16 @@ export interface RequestSummary {
     message_count?: number
     applied_skill_names?: string[]
     session_id?: string | null
+    command?: string
+    memory_file_id?: string
+    memory_logical_path?: string
+    source_message_count?: number
+    source_sha256?: string
+    idempotent_recovery?: boolean
   } | null
   event_start_sequence: number | null
   event_end_sequence: number | null
-  /** D2-5：操作类型——prompt / regenerate */
+  /** 操作类型——prompt / regenerate / checkpointer */
   operation?: RequestOperation
   /** D2-5：regenerate 路径下的 revision.id（== regeneration_id） */
   regeneration_id?: string | null
@@ -209,7 +215,7 @@ export interface RequestSummary {
 }
 
 /** D2-5：request operation 类型。 */
-export type RequestOperation = "prompt" | "regenerate"
+export type RequestOperation = "prompt" | "regenerate" | "checkpointer"
 
 /** GET /api/requests?session_id=&status=active&limit=N response（P1-B3-3） */
 export interface RequestListResponse {

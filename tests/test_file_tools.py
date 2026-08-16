@@ -1,4 +1,4 @@
-"""P0-3: list_files / view_file 工具单元测试。
+"""Session file tools: list_files / view_file / write_file unit tests.
 
 覆盖：
 - list_files 返回当前 session 文件列表
@@ -29,6 +29,7 @@ from starlette.datastructures import Headers
 from pi_agent_core_py.tools import (
     create_list_files_tool,
     create_view_file_tool,
+    create_write_file_tool,
 )
 from pi_agent_core_py.web.files import VirtualFileStore
 
@@ -64,6 +65,95 @@ def _make_tool_pair(file_store, current_sid: str | None = "sess-1"):
 async def _save(file_store, sid: str, content: bytes, name: str, mime: str | None = None):
     """保存一个文件，返回 FileRef。"""
     return await file_store.save(sid, _upload(content, name, mime))
+
+
+def _make_write_tool(file_store, current_sid: str | None = "sess-1"):
+    return create_write_file_tool(
+        file_store=file_store,
+        session_id_getter=lambda: current_sid,
+    )
+
+
+# ============================================================================
+# write_file
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_write_file_creates_file_for_current_session(file_store):
+    write_tool = _make_write_tool(file_store)
+    result = await write_tool.execute(
+        "tc-write",
+        {"filename": "agent-notes.md", "content": "# Notes\nCreated by agent."},
+    )
+
+    assert result.is_error is False
+    assert result.details["name"] == "agent-notes.md"
+    assert result.details["format"] == "markdown"
+    assert "path" not in result.details
+    assert "content" not in result.details
+
+    ref = await file_store.get_for_session("sess-1", result.details["file_id"])
+    assert __import__("pathlib").Path(ref.path).read_text(encoding="utf-8") == (
+        "# Notes\nCreated by agent."
+    )
+
+
+@pytest.mark.asyncio
+async def test_write_file_output_is_visible_to_list_and_view(file_store):
+    write_tool = _make_write_tool(file_store)
+    list_tool, view_tool, _ = _make_tool_pair(file_store)
+    written = await write_tool.execute(
+        "tc-write",
+        {"filename": "answer.txt", "content": "session-local content"},
+    )
+
+    listed = await list_tool.execute("tc-list", {})
+    assert [item["id"] for item in listed.details["files"]] == [
+        written.details["file_id"]
+    ]
+    viewed = await view_tool.execute(
+        "tc-view",
+        {"file_id": written.details["file_id"]},
+    )
+    assert viewed.details["content"] == "session-local content"
+
+
+@pytest.mark.asyncio
+async def test_write_file_rejects_invalid_arguments_and_missing_session(file_store):
+    write_tool = _make_write_tool(file_store)
+    assert (await write_tool.execute("tc-1", {})).details["error_type"] == (
+        "InvalidArguments"
+    )
+    assert (
+        await write_tool.execute("tc-2", {"filename": "x.txt", "content": 1})
+    ).details["error_type"] == "InvalidArguments"
+
+    no_session_tool = _make_write_tool(file_store, None)
+    missing = await no_session_tool.execute(
+        "tc-3",
+        {"filename": "x.txt", "content": "x"},
+    )
+    assert missing.is_error is True
+    assert missing.details["error_type"] == "NoActiveSession"
+
+
+@pytest.mark.asyncio
+async def test_write_file_isolated_to_active_session(file_store):
+    result = await _make_write_tool(file_store, "sess-1").execute(
+        "tc-write",
+        {"filename": "private.txt", "content": "private"},
+    )
+    assert len(await file_store.list_session("sess-1")) == 1
+    assert await file_store.list_session("sess-2") == []
+
+    _, other_view, _ = _make_tool_pair(file_store, "sess-2")
+    denied = await other_view.execute(
+        "tc-view",
+        {"file_id": result.details["file_id"]},
+    )
+    assert denied.is_error is True
+    assert denied.details["error_type"] == "AccessDenied"
 
 
 # ============================================================================

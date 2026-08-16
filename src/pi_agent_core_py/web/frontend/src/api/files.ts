@@ -4,8 +4,9 @@ import type {
   DeleteFileResponse,
   FileListResponse,
   FileUploadResponse,
+  UpdateTextFileResponse,
 } from "../types"
-import { requestJson, uploadForm } from "./client"
+import { requestBlob, requestJson, uploadForm } from "./client"
 
 /** GET /api/sessions/{sid}/files——列出 session 内所有文件 metadata。 */
 export function listFiles(sessionId: string) {
@@ -49,5 +50,30 @@ export function deleteFile(sessionId: string, fileId: string) {
   return requestJson<DeleteFileResponse>(
     `/api/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(fileId)}`,
     { method: "DELETE" },
+  )
+}
+
+/** 读取托管文本文件；当前用于 AGENT.md / Memory.md 编辑器。 */
+export async function readTextFile(sessionId: string, fileId: string): Promise<string> {
+  const { blob } = await requestBlob(
+    `/api/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(fileId)}`,
+  )
+  return blob.text()
+}
+
+/** 使用 sha256 乐观锁更新 AGENT.md / Memory.md。 */
+export function updateTextFile(
+  sessionId: string,
+  fileId: string,
+  content: string,
+  expectedSha256: string,
+) {
+  return requestJson<UpdateTextFileResponse>(
+    `/api/sessions/${encodeURIComponent(sessionId)}` +
+      `/files/${encodeURIComponent(fileId)}/content`,
+    {
+      method: "PUT",
+      body: { content, expected_sha256: expectedSha256 },
+    },
   )
 }

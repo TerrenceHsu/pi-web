@@ -9,7 +9,7 @@ AgentHarness **不替代** Agent，是 Agent 外层的执行协调层：
 Agent        ：状态机 / queue / abort / event stream / messages（不感知 skill / MCP / policy）
 AgentHarness ：请求生命周期编排 / 外部 hook / 事件观察 / 共享上下文 / skill 注入 /
                MCP lifecycle / 工具权限策略与审计
-TurnSnapshot ：一次请求的完整快照（Step 11）
+RequestSnapshot：一次请求快照；内部 turns 是逐次 LLM 调用快照
 SessionMemory：一个会话累计的 messages + snapshots + metadata（Step 12）
 Skill        ：可复用行为提示单元（Step 14）
 MCPRegistry  ：多 MCP server 管理（Step 16/17）
@@ -144,7 +144,7 @@ from .skills import (
     SkillSelection,
     render_skill_block,
 )
-from .snapshot import SnapshotBuilder, SnapshotStatus, TurnSnapshot
+from .snapshot import RequestSnapshot, SnapshotBuilder, SnapshotStatus, TurnSnapshot
 
 # ============================================================================
 # HarnessPhase / HarnessContext
@@ -178,7 +178,7 @@ class HarnessContext(BaseModel):
     started_at: int | None = None
     ended_at: int | None = None
     # Step 11：当前/最近一次请求的 snapshot（finish 后保持引用；新请求会替换）
-    snapshot: TurnSnapshot | None = None
+    snapshot: RequestSnapshot | None = None
     # Step 14：本次请求 skill 注入信息
     selected_skills: list[str] = Field(default_factory=list)
     skill_metadata: dict[str, Any] = Field(default_factory=dict)
@@ -256,8 +256,8 @@ class AgentHarness:
         )
 
         # Step 11：snapshot 状态
-        self.last_snapshot: TurnSnapshot | None = None
-        self.snapshots: list[TurnSnapshot] = []
+        self.last_snapshot: RequestSnapshot | None = None
+        self.snapshots: list[RequestSnapshot] = []
         self._snapshot_builder: SnapshotBuilder | None = None
 
         # Step 12：session 状态
@@ -312,6 +312,7 @@ class AgentHarness:
         user_text: str,
         *,
         skill_selection: SkillSelection | None = None,
+        system_prompt_suffix: str | None = None,
     ) -> list[Message]:
         """包装 agent.prompt(user_text)，前后跑 hooks。
 
@@ -321,6 +322,7 @@ class AgentHarness:
             request_type="prompt",
             user_text=user_text,
             skill_selection=skill_selection,
+            system_prompt_suffix=system_prompt_suffix,
             agent_call=lambda: self.agent.prompt(user_text),
         )
 
@@ -328,6 +330,7 @@ class AgentHarness:
         self,
         *,
         skill_selection: SkillSelection | None = None,
+        system_prompt_suffix: str | None = None,
     ) -> list[Message]:
         """包装 agent.continue_()，前后跑 hooks。
 
@@ -337,6 +340,7 @@ class AgentHarness:
             request_type="continue",
             user_text=None,
             skill_selection=skill_selection,
+            system_prompt_suffix=system_prompt_suffix,
             agent_call=lambda: self.agent.continue_(),
         )
 
@@ -347,6 +351,7 @@ class AgentHarness:
         user_text: str | None,
         agent_call: Callable[[], Awaitable[list[Message]]],
         skill_selection: SkillSelection | None = None,
+        system_prompt_suffix: str | None = None,
     ) -> list[Message]:
         """run_prompt / run_continue 共用主流程。"""
         if self.context.phase != "idle":
@@ -368,6 +373,12 @@ class AgentHarness:
         self.context.skill_metadata = {}
         self.context.rendered_system_prompt = None
         self.context.metadata.pop("skills", None)
+        self.context.metadata.pop("system_prompt_suffix", None)
+        if system_prompt_suffix and system_prompt_suffix.strip():
+            self.context.metadata["system_prompt_suffix"] = {
+                "included": True,
+                "characters": len(system_prompt_suffix),
+            }
 
         # Step 17：注入当前 MCP 状态——snapshot / session 自动捕获
         self._inject_mcp_metadata()
@@ -394,6 +405,10 @@ class AgentHarness:
                 rendered_prompt, selected_skills = self._prepare_skill_prompt(
                     skill_selection
                 )
+                if system_prompt_suffix and system_prompt_suffix.strip():
+                    rendered_prompt = (
+                        f"{rendered_prompt}\n\n{system_prompt_suffix.strip()}"
+                    )
                 # skill 信息写入 context.metadata["skills"]——snapshot 会自动捕获
                 self.context.selected_skills = [s.name for s in selected_skills]
                 self.context.skill_metadata = {
@@ -844,7 +859,7 @@ class AgentHarness:
     # Step 11：Snapshot 接口
     # ----------------------------------------------------------------------
 
-    def get_snapshot(self, index: int = -1) -> TurnSnapshot | None:
+    def get_snapshot(self, index: int = -1) -> RequestSnapshot | None:
         """取第 index 个 snapshot（默认 -1 = 最近一次）。
 
         snapshots 为空时返回 None。索引越界抛 IndexError。
@@ -1479,10 +1494,13 @@ class AgentHarness:
         self.context.metadata["system_prompt_source"] = "explicit"
         if self.skill_registry is not None and self.skill_injection_config.enabled:
             selection = skill_selection or SkillSelection()
-            selected = self.skill_registry.select(
-                names=selection.names,
-                tags=selection.tags,
-                enabled_only=True,
+            selected = typing.cast(
+                list[Skill],
+                self.skill_registry.select(
+                    names=selection.names,
+                    tags=selection.tags,
+                    enabled_only=True,
+                ),
             )
             self.context.metadata["enabled_skill_names"] = [s.name for s in selected]
         else:
@@ -1676,7 +1694,7 @@ class AgentHarness:
         status: SnapshotStatus,
         messages_after: list[Message],
         error: str | None = None,
-    ) -> TurnSnapshot | None:
+    ) -> RequestSnapshot | None:
         """ finalize 当前 builder 的 snapshot，存入 last_snapshot / snapshots。
 
         Step 12：若 session 已 attach，自动调 session.append_snapshot。
@@ -1703,7 +1721,7 @@ class AgentHarness:
 
         return snapshot
 
-    async def _post_finish_snapshot(self, snapshot: TurnSnapshot | None) -> None:
+    async def _post_finish_snapshot(self, snapshot: RequestSnapshot | None) -> None:
         """Step 13：_finish_snapshot 之后的 sync + consistency + auto-save。
 
         顺序：
@@ -1744,7 +1762,7 @@ class AgentHarness:
             if self.session_sync_config.sync_harness_metadata:
                 self.sync_session_metadata()
 
-    async def _maybe_auto_save_session(self, snapshot: TurnSnapshot) -> None:
+    async def _maybe_auto_save_session(self, snapshot: RequestSnapshot) -> None:
         """根据 policy 决定是否自动保存 session 到 session_store。
 
         - 没有 session 或 session_store：直接 return
@@ -1829,7 +1847,7 @@ __all__ = [
     "OnEventHook", "OnErrorHook",
     "AgentHarness",
     # Step 11 重导出（方便 from .harness import ...）
-    "SnapshotBuilder", "SnapshotStatus", "TurnSnapshot",
+    "SnapshotBuilder", "SnapshotStatus", "RequestSnapshot", "TurnSnapshot",
     # Step 12 重导出
     "SessionMemory", "SessionStore",
     # Step 13 重导出

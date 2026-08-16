@@ -4,6 +4,7 @@ import { computed } from "vue"
 import type { ChatStreamItem, FileRef } from "../../types"
 import { useChatStore } from "../../stores/chatStore"
 import { useProviderStore } from "../../stores/providerStore"
+import { renderMarkdown } from "../../utils/markdown"
 import ErrorCard from "./ErrorCard.vue"
 import FileChip from "./FileChip.vue"
 import FileReadCard from "./FileReadCard.vue"
@@ -32,6 +33,11 @@ const text = computed(() => {
     return it.content || ""
   }
   return ""
+})
+
+const assistantMarkdown = computed(() => {
+  if (kind.value !== "assistant_message" || !text.value) return ""
+  return renderMarkdown(text.value)
 })
 
 const userFiles = computed<FileRef[]>(() => {
@@ -161,7 +167,15 @@ _watch(
     <div class="avatar">AI</div>
     <div class="body">
       <div v-if="text" class="text">
-        {{ text }}<span v-if="(item as any).streaming" class="stream-cursor">▋</span>
+        <!-- markdown-it 已关闭原始 HTML；此处只渲染解析后的安全 HTML。 -->
+        <!-- eslint-disable vue/no-v-html -->
+        <div
+          class="markdown-body"
+          data-testid="assistant-markdown"
+          v-html="assistantMarkdown"
+        ></div>
+        <!-- eslint-enable vue/no-v-html -->
+        <span v-if="(item as any).streaming" class="stream-cursor">▋</span>
       </div>
       <div v-else-if="(item as any).streaming" class="typing">
         <span></span><span></span><span></span>
@@ -274,6 +288,7 @@ _watch(
 }
 .row-assistant .body {
   max-width: var(--content-max-width);
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -295,11 +310,109 @@ _watch(
   margin-top: 2px;
 }
 .text {
+  width: 100%;
+  min-width: 0;
   color: var(--assistant-fg);
   font-size: 14px;
   line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.markdown-body :deep(> :first-child) {
+  margin-top: 0;
+}
+.markdown-body :deep(> :last-child) {
+  margin-bottom: 0;
+}
+.markdown-body :deep(p) {
+  margin: 0 0 0.75em;
+}
+.markdown-body :deep(h1),
+.markdown-body :deep(h2),
+.markdown-body :deep(h3),
+.markdown-body :deep(h4),
+.markdown-body :deep(h5),
+.markdown-body :deep(h6) {
+  margin: 1em 0 0.45em;
+  color: var(--fg);
+  line-height: 1.3;
+  font-weight: 650;
+}
+.markdown-body :deep(h1) {
+  font-size: 1.55em;
+}
+.markdown-body :deep(h2) {
+  font-size: 1.35em;
+}
+.markdown-body :deep(h3) {
+  font-size: 1.18em;
+}
+.markdown-body :deep(ul),
+.markdown-body :deep(ol) {
+  margin: 0.5em 0 0.8em;
+  padding-left: 1.6em;
+}
+.markdown-body :deep(li + li) {
+  margin-top: 0.25em;
+}
+.markdown-body :deep(blockquote) {
+  margin: 0.75em 0;
+  padding: 0.1em 0 0.1em 0.9em;
+  border-left: 3px solid var(--border-strong);
+  color: var(--muted);
+}
+.markdown-body :deep(blockquote > :last-child) {
+  margin-bottom: 0;
+}
+.markdown-body :deep(code) {
+  padding: 0.15em 0.35em;
+  border-radius: 4px;
+  background: var(--code-bg);
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 0.92em;
+}
+.markdown-body :deep(pre) {
+  max-width: 100%;
+  margin: 0.75em 0;
+  padding: 12px 14px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--code-bg);
+  line-height: 1.5;
+}
+.markdown-body :deep(pre code) {
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  white-space: pre;
+}
+.markdown-body :deep(a) {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.markdown-body :deep(hr) {
+  margin: 1em 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+.markdown-body :deep(table) {
+  display: block;
+  max-width: 100%;
+  margin: 0.75em 0;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+.markdown-body :deep(th),
+.markdown-body :deep(td) {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+.markdown-body :deep(th) {
+  background: var(--code-bg);
+  font-weight: 600;
 }
 .stream-cursor {
   display: inline-block;
