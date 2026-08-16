@@ -344,6 +344,14 @@ def create_authenticated_app(
             return FileResponse(index_html)
         return HTMLResponse(_FALLBACK_HTML, media_type="text/html")
 
+    @app.get("/chat", include_in_schema=False)
+    @app.get("/chat/", include_in_schema=False)
+    @app.get("/chat/{session_path:path}", include_in_schema=False)
+    async def chat_route(session_path: str | None = None) -> Response:
+        """Serve the SPA shell; the client validates and normalizes the route."""
+        del session_path
+        return await index()
+
     @app.get("/assets/{path:path}", include_in_schema=False)
     async def assets(path: str) -> Response:
         asset_root = (_STATIC_DIR / "assets").resolve()

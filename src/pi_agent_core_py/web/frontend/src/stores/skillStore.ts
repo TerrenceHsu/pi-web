@@ -104,6 +104,13 @@ export const useSkillStore = defineStore("skills", () => {
     selectedSkillNames.value = []
   }
 
+  function resetWorkspace() {
+    skills.value = []
+    selectedSkillNames.value = []
+    loading.value = false
+    error.value = null
+  }
+
   return {
     skills,
     selectedSkillNames,
@@ -117,5 +124,6 @@ export const useSkillStore = defineStore("skills", () => {
     toggleSelectedSkill,
     setSelectedSkillNames,
     clearSelected,
+    resetWorkspace,
   }
 })

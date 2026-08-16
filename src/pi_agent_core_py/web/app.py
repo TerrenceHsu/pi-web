@@ -2991,6 +2991,14 @@ def create_app(
             return FileResponse(index_html)
         return HTMLResponse(_FALLBACK_HTML, media_type="text/html")
 
+    @app.get("/chat", include_in_schema=False)
+    @app.get("/chat/", include_in_schema=False)
+    @app.get("/chat/{session_path:path}", include_in_schema=False)
+    async def chat_route(session_path: str | None = None) -> Any:
+        """Serve the SPA shell; the client validates and normalizes the route."""
+        del session_path
+        return await index()
+
     @app.get("/assets/{path:path}", include_in_schema=False)
     async def assets(path: str) -> Any:
         # 只允许相对文件名，禁止 .. 逃逸

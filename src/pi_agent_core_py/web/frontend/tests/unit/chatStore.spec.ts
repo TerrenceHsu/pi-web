@@ -34,6 +34,11 @@ vi.mock("../../src/api/slashCommands", () => ({
   listSlashCommands: vi.fn(),
 }))
 
+vi.mock("../../src/api/events", () => ({
+  getEvents: vi.fn(),
+}))
+
+import * as eventsApi from "../../src/api/events"
 import * as messagesApi from "../../src/api/messages"
 import * as slashCommandsApi from "../../src/api/slashCommands"
 
@@ -98,6 +103,14 @@ beforeEach(() => {
     status: "queued",
     request_url: "/api/requests/req-checkpoint",
     abort_url: "/api/requests/req-checkpoint/abort",
+  })
+  vi.mocked(eventsApi.getEvents).mockResolvedValue({
+    count: 0,
+    events: [],
+    first_available_sequence: null,
+    last_available_sequence: null,
+    has_more: false,
+    gap: false,
   })
 })
 
@@ -213,5 +226,131 @@ describe("checkpointer state", () => {
     expect(store.streamItems.map((item) => item.id)).toEqual(["a-keep"])
     expect(store.error).toBe("provider unavailable")
     expect(store.checkpointing).toBe(false)
+  })
+})
+
+describe("full reload active request recovery", () => {
+  it("replays only the owned session/request event stream", async () => {
+    vi.mocked(messagesApi.listActiveRequests).mockResolvedValue({
+      count: 1,
+      requests: [{
+        request_id: "req-running",
+        session_id: "sess-1",
+        status: "running",
+        operation: "prompt",
+      }],
+    } as any)
+    vi.mocked(eventsApi.getEvents).mockResolvedValue({
+      count: 2,
+      events: [
+        {
+          event_id: "evt-owned",
+          request_id: "req-running",
+          session_id: "sess-1",
+          sequence: 10,
+          type: "message_update",
+          timestamp: "2026-08-16T00:00:00Z",
+          payload: {
+            assistant_message_event: {
+              type: "text_delta",
+              delta: "recovered text",
+            },
+          },
+        },
+        {
+          event_id: "evt-foreign",
+          request_id: "req-running",
+          session_id: "sess-foreign",
+          sequence: 11,
+          type: "message_update",
+          timestamp: "2026-08-16T00:00:01Z",
+          payload: {
+            assistant_message_event: {
+              type: "text_delta",
+              delta: "must not render",
+            },
+          },
+        },
+      ],
+      first_available_sequence: 10,
+      last_available_sequence: 11,
+      has_more: false,
+      gap: false,
+    } as any)
+
+    const store = useChatStore()
+    store.setActiveSession("sess-1")
+    const requestId = await store.findActiveRequest("sess-1")
+    expect(requestId).toBe("req-running")
+    store.resumeActiveRequest(requestId!)
+    await store.recoverActiveRequestEvents("sess-1", requestId!)
+
+    expect(eventsApi.getEvents).toHaveBeenCalledWith({
+      afterSequence: 0,
+      limit: 200,
+      sessionId: "sess-1",
+      requestId: "req-running",
+    })
+    const rendered = JSON.stringify(store.streamItems)
+    expect(rendered).toContain("recovered text")
+    expect(rendered).not.toContain("must not render")
+  })
+
+  it("does not let a stale Session recovery steal the current live buffer", async () => {
+    let resolveFirst!: (value: any) => void
+    let resolveSecond!: (value: any) => void
+    vi.mocked(eventsApi.getEvents).mockImplementation(({ sessionId }) => (
+      new Promise((resolve) => {
+        if (sessionId === "sess-1") resolveFirst = resolve
+        else resolveSecond = resolve
+      })
+    ))
+
+    const store = useChatStore()
+    store.setActiveSession("sess-1")
+    store.resumeActiveRequest("req-1")
+    const firstRecovery = store.recoverActiveRequestEvents("sess-1", "req-1")
+
+    store.resetForSession()
+    store.setActiveSession("sess-2")
+    store.resumeActiveRequest("req-2")
+    const secondRecovery = store.recoverActiveRequestEvents("sess-2", "req-2")
+
+    resolveFirst({
+      count: 0,
+      events: [],
+      first_available_sequence: null,
+      last_available_sequence: null,
+      has_more: false,
+      gap: false,
+    })
+    await firstRecovery
+
+    store.handleEvent({
+      event_id: "evt-current-live",
+      request_id: "req-2",
+      session_id: "sess-2",
+      sequence: 20,
+      type: "message_update",
+      timestamp: "2026-08-16T00:00:02Z",
+      payload: {
+        assistant_message_event: {
+          type: "text_delta",
+          delta: "current live text",
+        },
+      },
+    } as any)
+    expect(JSON.stringify(store.streamItems)).not.toContain("current live text")
+
+    resolveSecond({
+      count: 0,
+      events: [],
+      first_available_sequence: null,
+      last_available_sequence: null,
+      has_more: false,
+      gap: false,
+    })
+    await secondRecovery
+    expect(JSON.stringify(store.streamItems)).toContain("current live text")
   })
 })

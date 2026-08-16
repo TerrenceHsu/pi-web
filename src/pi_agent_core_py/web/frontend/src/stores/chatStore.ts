@@ -258,8 +258,10 @@ export const useChatStore = defineStore("chat", () => {
     {
       operation: "prompt" | "regenerate" | "checkpointer"
       targetMessageId?: string | null
+      sessionId?: string | null
     }
   >()
+  const terminalPolls = new Map<string, Promise<any>>()
 
   /** turn-control 事件——会修改当前 turn 的 draft / sending / streaming 状态；
    * 必须属于 currentRequestId 才能处理。 */
@@ -276,6 +278,9 @@ export const useChatStore = defineStore("chat", () => {
   const replaying = ref(false)
   /** replay 期间 WS 收到的 live envelope——合并到 replay events 后清空 */
   let liveEventsDuringReplay: any[] = []
+  let activeRecoveryToken = 0
+  let recoveringActiveRequestId: string | null = null
+  let liveEventsDuringActiveRecovery: WebEventEnvelope[] = []
 
   let socket: EventSocket | null = null
 
@@ -378,6 +383,7 @@ export const useChatStore = defineStore("chat", () => {
           if (item) items.push(item)
         }
       })
+      if (sessionId && activeSessionId.value !== sessionId) return
       streamItems.value = items
       // reset turn-tracking 状态
       currentTurnInfoId = null
@@ -404,6 +410,7 @@ export const useChatStore = defineStore("chat", () => {
   async function reconcileMessagesFromServer(sessionId: string) {
     try {
       const resp = await messagesApi.getMessages(sessionId)
+      if (activeSessionId.value !== sessionId) return
       // 收集服务端的 user_message / assistant_message item（顺序敏感）
       // D2-7: 优先用 persisted DTO 的 message_id；fallback 到 index
       const persistedItems: ChatStreamItem[] = []
@@ -453,7 +460,7 @@ export const useChatStore = defineStore("chat", () => {
    *
    * 间隔 250ms → 500ms；总超时 10s。terminal 后调 reconcileMessagesFromServer。
    */
-  async function pollRequestUntilTerminal(requestId: string) {
+  async function pollRequestUntilTerminalCore(requestId: string) {
     const startedAt = Date.now()
     let delay = 250
 
@@ -473,6 +480,13 @@ export const useChatStore = defineStore("chat", () => {
           r.status === "error" ||
           r.status === "aborted"
         ) {
+          const ownsActiveView =
+            currentRequestId.value === requestId &&
+            (!r.session_id || activeSessionId.value === r.session_id)
+          if (!ownsActiveView) {
+            requestMetadataById.delete(requestId)
+            return r
+          }
           if (isCheckpointer) {
             if (r.status === "completed") {
               // Server has already committed Memory.md and cleared canonical messages.
@@ -564,9 +578,21 @@ export const useChatStore = defineStore("chat", () => {
       }
     }
     // timeout——保留 draft + 显示轻量错误
-    checkpointing.value = false
-    error.value = "Request finalization timeout — please refresh to sync"
+    if (currentRequestId.value === requestId) {
+      checkpointing.value = false
+      error.value = "Request finalization timeout — please refresh to sync"
+    }
     return null
+  }
+
+  function pollRequestUntilTerminal(requestId: string): Promise<any> {
+    const existing = terminalPolls.get(requestId)
+    if (existing) return existing
+    const pending = pollRequestUntilTerminalCore(requestId).finally(() => {
+      terminalPolls.delete(requestId)
+    })
+    terminalPolls.set(requestId, pending)
+    return pending
   }
 
   /**
@@ -616,6 +642,7 @@ export const useChatStore = defineStore("chat", () => {
         requestMetadataById.set(r.request_id, {
           operation: op,
           targetMessageId: r.target_message_id ?? null,
+          sessionId,
         })
         return r.request_id
       }
@@ -660,6 +687,99 @@ export const useChatStore = defineStore("chat", () => {
         draftItemId: draftId,
         status: "running",
         errorMessage: null,
+      }
+    }
+  }
+
+  /**
+   * 完整页面刷新后，从服务端事件缓冲重放当前 active request 已发生的事件。
+   * 查询同时带 session_id + request_id，避免其它 Session 的事件写入视图；
+   * 查询期间同一 request 的 WebSocket live 事件先缓冲，最后按 sequence 合并。
+   */
+  async function recoverActiveRequestEvents(
+    sessionId: string,
+    requestId: string,
+  ): Promise<void> {
+    if (
+      activeSessionId.value !== sessionId ||
+      currentRequestId.value !== requestId
+    ) {
+      return
+    }
+
+    const recoveryToken = ++activeRecoveryToken
+    recoveringActiveRequestId = requestId
+    liveEventsDuringActiveRecovery = []
+    const recovered: WebEventEnvelope[] = []
+    let recoveryNeedsFinalResync = false
+    let afterSequence = 0
+
+    try {
+      for (let page = 0; page < 20; page++) {
+        const response = await eventsApi.getEvents({
+          afterSequence,
+          limit: 200,
+          sessionId,
+          requestId,
+        })
+        if (response.gap) recoveryNeedsFinalResync = true
+        if (response.events.length === 0) break
+        recovered.push(...response.events)
+        afterSequence = response.events[response.events.length - 1].sequence
+        if (!response.has_more) break
+        if (page === 19) recoveryNeedsFinalResync = true
+      }
+    } catch {
+      recoveryNeedsFinalResync = true
+    } finally {
+      // Session 切换或另一次恢复开始后，旧请求不得清空新请求的缓冲区，
+      // 也不得推进新工作区的事件 cursor。
+      if (activeRecoveryToken === recoveryToken) {
+        const live = liveEventsDuringActiveRecovery
+        liveEventsDuringActiveRecovery = []
+        recoveringActiveRequestId = null
+
+        const stillOwnsRecovery =
+          activeSessionId.value === sessionId &&
+          currentRequestId.value === requestId
+        if (stillOwnsRecovery) {
+          if (recoveryNeedsFinalResync) needsFinalResync.value = true
+
+          const merged: WebEventEnvelope[] = []
+          for (const envelope of recovered) {
+            if (
+              envelope.session_id !== sessionId ||
+              envelope.request_id !== requestId ||
+              !rememberEventId(envelope.event_id)
+            ) {
+              continue
+            }
+            lastGlobalSequence.value = Math.max(
+              lastGlobalSequence.value,
+              envelope.sequence,
+            )
+            const previous = lastSequenceBySession.value[sessionId] ?? 0
+            lastSequenceBySession.value = {
+              ...lastSequenceBySession.value,
+              [sessionId]: Math.max(previous, envelope.sequence),
+            }
+            merged.push(envelope)
+          }
+          merged.push(...live)
+          merged.sort((left, right) => left.sequence - right.sequence)
+
+          const unique = new Map<string, WebEventEnvelope>()
+          for (const envelope of merged) unique.set(envelope.event_id, envelope)
+        for (const envelope of unique.values()) {
+          if (
+            envelope.session_id !== sessionId ||
+            envelope.request_id !== requestId
+          ) {
+            continue
+          }
+          applyEventToStreamItems({ ...envelope.payload, type: envelope.type })
+        }
+        }
       }
     }
   }
@@ -754,7 +874,10 @@ export const useChatStore = defineStore("chat", () => {
       currentRequestId.value = resp.request_id
       pendingRequest.value = false
       // D2-7: 记录 metadata——assistant delta 路由用
-      requestMetadataById.set(resp.request_id, { operation: "prompt" })
+      requestMetadataById.set(resp.request_id, {
+        operation: "prompt",
+        sessionId: input.sessionId ?? activeSessionId.value,
+      })
 
       // flush 该 request 的 pending envelopes（按 sequence 排序，已通过 event_id 去重）
       const pending = pendingEventsByRequest.get(resp.request_id) ?? []
@@ -816,6 +939,7 @@ export const useChatStore = defineStore("chat", () => {
       pendingRequest.value = false
       requestMetadataById.set(response.request_id, {
         operation: "checkpointer",
+        sessionId,
       })
       const terminal = await pollRequestUntilTerminal(response.request_id)
       if (!terminal || terminal.status !== "completed") {
@@ -916,6 +1040,7 @@ export const useChatStore = defineStore("chat", () => {
       requestMetadataById.set(resp.request_id, {
         operation: "regenerate",
         targetMessageId: input.assistantMessageId,
+        sessionId: input.sessionId,
       })
 
       // 更新 regeneration state
@@ -1176,6 +1301,14 @@ export const useChatStore = defineStore("chat", () => {
         activeSessionId.value &&
         envelope.session_id !== activeSessionId.value
       ) {
+        return
+      }
+
+      if (
+        recoveringActiveRequestId !== null &&
+        envelope.request_id === recoveringActiveRequestId
+      ) {
+        liveEventsDuringActiveRecovery.push(envelope)
         return
       }
 
@@ -1743,6 +1876,32 @@ export const useChatStore = defineStore("chat", () => {
     checkpointing.value = false
     checkpointNotice.value = null
     pendingEventsByRequest.clear()
+    activeRecoveryToken += 1
+    recoveringActiveRequestId = null
+    liveEventsDuringActiveRecovery = []
+  }
+
+  function resetWorkspace() {
+    disconnectEvents()
+    resetForSession()
+    activeSessionId.value = null
+    lastGlobalSequence.value = 0
+    lastSequenceBySession.value = {}
+    seenEventIds.clear()
+    seenEventQueue.splice(0)
+    requestMetadataById.clear()
+    terminalPolls.clear()
+    replaying.value = false
+    liveEventsDuringReplay = []
+    regeneration.value = {
+      regenerationId: null,
+      requestId: null,
+      targetMessageId: null,
+      draftItemId: null,
+      status: "idle",
+      errorMessage: null,
+    }
+    _regenerateInFlight = false
   }
 
   /**
@@ -1854,5 +2013,7 @@ export const useChatStore = defineStore("chat", () => {
     pollRequestUntilTerminal,
     findActiveRequest,
     resumeActiveRequest,
+    recoverActiveRequestEvents,
+    resetWorkspace,
   }
 })

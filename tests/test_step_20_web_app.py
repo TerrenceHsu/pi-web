@@ -93,6 +93,13 @@ def test_index_returns_html(client: TestClient) -> None:
     assert "html" in resp.text.lower()
 
 
+@pytest.mark.parametrize("path", ["/chat", "/chat/", "/chat/sess-safe", "/chat/bad/path"])
+def test_chat_routes_return_spa_shell(client: TestClient, path: str) -> None:
+    resp = client.get(path)
+    assert resp.status_code == 200
+    assert "html" in resp.text.lower()
+
+
 # ============================================================================
 # /api/state
 # ============================================================================

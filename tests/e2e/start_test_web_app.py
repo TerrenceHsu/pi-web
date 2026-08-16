@@ -66,12 +66,14 @@ def _build_test_harness():
                 import asyncio
                 import random
 
+                slow_refresh = "P2A_SLOW_REFRESH" in repr(kwargs.get("messages", ""))
                 # 调用父类 stream 拿到原 events，但插入 delay
                 # FakeClient.stream 是 async generator——委托
                 async for ev in super().stream(**kwargs):
                     # 每个 event 前 delay（除 DoneEvent）
                     if not isinstance(ev, DoneEvent):
-                        await asyncio.sleep(random.uniform(0.075, 0.150))
+                        delay = 0.4 if slow_refresh else random.uniform(0.075, 0.150)
+                        await asyncio.sleep(delay)
                     yield ev
 
         # D2-8.0: 20 scripts 不够支撑 37 个 E2E（含 regenerate 多次 prompt）
@@ -96,9 +98,15 @@ def _build_test_harness():
 
 
 def main() -> None:
+    import asyncio
+
     import uvicorn
 
     from pi_agent_core_py.web.app import create_app
+    from pi_agent_core_py.web.auth.gateway import create_authenticated_app
+    from pi_agent_core_py.web.auth.passwords import hash_password
+    from pi_agent_core_py.web.auth.service import AuthService
+    from pi_agent_core_py.web.auth.store import AuthStore
 
     port = int(os.environ.get("PORT", "8000"))
     host = os.environ.get("HOST", "127.0.0.1")
@@ -117,16 +125,24 @@ def main() -> None:
         # 临时 sqlite + uploads_dir——脚本退出时随临时目录清理
         tmp_root = Path(tempfile.mkdtemp(prefix="pi-e2e-"))
         db_path = tmp_root / "e2e.sqlite"
-    uploads_dir = tmp_root / "uploads"
-    uploads_dir.mkdir(parents=True, exist_ok=True)
-
     print(
         f"[e2e] starting on http://{host}:{port} "
-        f"(db={db_path}, uploads={uploads_dir})",
+        f"(workspace_root={tmp_root})",
         flush=True,
     )
 
-    harness = _build_test_harness()
+    async def seed_accounts() -> None:
+        store = await AuthStore.open(str(tmp_root / "auth.sqlite"))
+        try:
+            service = AuthService(store)
+            await service.ensure_initial_admin()
+            if await store.get_user_by_name("alice") is None:
+                await store.create_user("alice", hash_password("alice-pass"))
+        finally:
+            await store.close()
+
+    asyncio.run(seed_accounts())
+
     # P1-B3-4: E2E 可通过环境变量调整 buffer size——Test 6 buffer gap fallback 用
     # E2E_EVENT_BUFFER_MAX_SIZE=2 让 buffer 快速满，触发 gap=true
     buffer_max_size = int(os.environ.get("E2E_EVENT_BUFFER_MAX_SIZE", "1000"))
@@ -136,13 +152,35 @@ def main() -> None:
     # 不开则 /api/sessions/{sid}/model-binding 返回 404，前端
     # bindingLoadState=error，ChatInput.providerReady 永远 false，
     # 依赖 send-button 的 E2E 都会 timeout。
-    app = create_app(
-        harness,
-        db_path=str(db_path),
-        uploads_dir=str(uploads_dir),
-        allow_prompt_preview=True,
-        event_buffer_max_size=buffer_max_size,
-        enable_trusted_host=True,
+    def workspace_factory(user, workspace_root):
+        """Build the real per-user app behind the authentication gateway."""
+        workspace_root.mkdir(parents=True, exist_ok=True)
+        workspace_db = (
+            db_path
+            if fixed_db and user.name == "admin"
+            else workspace_root / "workspace.sqlite"
+        )
+        uploads_dir = workspace_root / "uploads"
+        knowledge_root = workspace_root / "knowledge"
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+        knowledge_root.mkdir(parents=True, exist_ok=True)
+        return create_app(
+            _build_test_harness(),
+            db_path=str(workspace_db),
+            uploads_dir=str(uploads_dir),
+            knowledge_root=str(knowledge_root),
+            allow_prompt_preview=True,
+            event_buffer_max_size=buffer_max_size,
+            enable_trusted_host=True,
+            enable_builtin_ddgs=False,
+        )
+
+    app = create_authenticated_app(
+        workspace_factory,
+        auth_db_path=tmp_root / "auth.sqlite",
+        user_data_root=tmp_root / "users",
+        extra_hosts=(host, "localhost", "testserver"),
+        extra_ui_origins=(f"http://{host}:{port}",),
     )
 
     # uvicorn 日志降到 warning——避免淹没 Playwright webServer 输出

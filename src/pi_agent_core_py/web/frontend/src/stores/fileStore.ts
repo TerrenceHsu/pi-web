@@ -121,6 +121,14 @@ export const useFileStore = defineStore("files", () => {
     pendingAttachments.value = []
   }
 
+  function resetWorkspace() {
+    filesBySession.value = {}
+    pendingAttachments.value = []
+    loading.value = false
+    uploading.value = false
+    error.value = null
+  }
+
   return {
     filesBySession,
     pendingAttachments,
@@ -135,5 +143,6 @@ export const useFileStore = defineStore("files", () => {
     readTextFile,
     updateTextFile,
     resetForSession,
+    resetWorkspace,
   }
 })

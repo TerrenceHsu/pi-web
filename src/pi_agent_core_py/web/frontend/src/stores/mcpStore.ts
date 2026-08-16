@@ -224,6 +224,15 @@ export const useMcpStore = defineStore("mcp", () => {
     }
   }
 
+  function resetWorkspace() {
+    servers.value = []
+    tools.value = []
+    loading.value = false
+    testingServerName.value = null
+    lastTestResultByServer.value = {}
+    error.value = null
+  }
+
   return {
     servers,
     tools,
@@ -241,5 +250,6 @@ export const useMcpStore = defineStore("mcp", () => {
     loadTools,
     enableTool,
     disableTool,
+    resetWorkspace,
   }
 })

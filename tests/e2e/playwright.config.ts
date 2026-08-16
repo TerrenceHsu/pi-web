@@ -4,6 +4,8 @@ import path from "node:path"
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
+const e2ePort = process.env.E2E_PORT ?? "8000"
+const e2eBaseURL = process.env.E2E_BASE_URL ?? `http://127.0.0.1:${e2ePort}`
 
 /**
  * Playwright config —— Web Claude P0 MVP E2E smoke。
@@ -20,6 +22,7 @@ const __dirname = path.dirname(__filename)
  *   cd src/pi_agent_core_py/web/frontend && npm install && npm run build
  */
 export default defineConfig({
+  globalSetup: "./global-setup.ts",
   testDir: ".",
   testMatch: ["*.spec.ts"],
   fullyParallel: false, // 共享一个 webServer 进程 + 共享 in-memory skill registry
@@ -32,7 +35,8 @@ export default defineConfig({
     timeout: 8_000,
   },
   use: {
-    baseURL: process.env.E2E_BASE_URL ?? "http://127.0.0.1:8000",
+    baseURL: e2eBaseURL,
+    storageState: path.resolve(__dirname, ".auth/admin.json"),
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
@@ -53,7 +57,8 @@ export default defineConfig({
     // 如需 fast FakeClient，设 PI_E2E_FAST=1。
     command: `${process.env.E2E_PYTHON ?? "D:/miniconda/envs/pipy/python.exe"} start_test_web_app.py`,
     cwd: __dirname,
-    url: "http://127.0.0.1:8000/api/state",
+    env: { PORT: e2ePort },
+    url: `${e2eBaseURL}/`,
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,
     stdout: "pipe",

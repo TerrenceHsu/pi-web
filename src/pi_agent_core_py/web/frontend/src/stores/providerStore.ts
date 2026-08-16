@@ -510,6 +510,26 @@ export const useProviderStore = defineStore("providers", () => {
     }
   }
 
+  function resetWorkspace(): void {
+    bindingLoadToken += 1
+    definitions.value = []
+    profiles.value = []
+    credentials.value = []
+    currentBinding.value = null
+    bindingSessionId.value = null
+    bindingLoadState.value = "idle"
+    definitionsLoading.value = false
+    profilesLoading.value = false
+    credentialsLoading.value = false
+    savingCredential.value = false
+    savingProfile.value = false
+    savingBinding.value = false
+    loadError.value = null
+    bindingLoadError.value = null
+    mutationError.value = null
+    initialized.value = false
+  }
+
   return {
     // 全局数据
     definitions,
@@ -561,5 +581,6 @@ export const useProviderStore = defineStore("providers", () => {
     deleteProfile,
     setSessionBinding,
     loadProfileModels,
+    resetWorkspace,
   }
 })

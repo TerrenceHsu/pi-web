@@ -285,7 +285,7 @@ P1-E M1 之前的配置后端已 frozen，不再扩展。
 
 ---
 
-## P2 — Web Agent Product Enhancements（⚪ PLANNED）
+## P2 — Web Agent Product Enhancements（🟡 IN PROGRESS）
 
 ### P2-AUTH — Local Login + Account Workspace Isolation（✅ IMPLEMENTED / LOCAL BASELINE，2026-08-15）
 
@@ -311,14 +311,15 @@ P1-E M1 之前的配置后端已 frozen，不再扩展。
 
 按优先级排序——独立设计、独立测试、独立冻结。**不**要求按字母顺序执行。
 
-### P2-A — Session URL Routing + Full Reload Recovery（优先级 1）
+### P2-A — Session URL Routing + Full Reload Recovery（✅ IMPLEMENTED / LOCAL BASELINE，2026-08-16）
 
-> 当前最明确的产品可靠性缺口。
+Session 激活现同步为 `/chat/{session_id}`，浏览器前进/后退、直接打开和整页刷新都通过同一 App 级协调器恢复。恢复范围包括 persisted messages、`AGENT.md`、`Memory.md`、文件树、Provider binding，以及运行中的 Prompt/Regenerate UI 状态。
 
-**范围**：
-- URL-based session routing（`/chat/{session_id}` 或 `?sid=...`）
-- 浏览器 reload → 解析 session_id → 加载 persisted messages → 查询 active request → 恢复 Prompt/Regenerate 状态
-- 兼容现有 WS reconnect recovery（`regenerate.spec.ts:243-290`）
+刷新时先用当前账号的 Session 列表验证路由。非法、已删除或不属于当前用户的 ID 不会被用于 Session API 请求，而会替换为有效 Session。运行中请求通过 request-scoped event replay 补齐刷新前事件，并与新 WebSocket live 事件按 sequence 合并、按 event ID 去重；terminal polling 受 Session 所有权保护，旧 Session 的迟到结果不会污染新窗口。
+
+登出先清除旧路由并重置 Session/chat/files/skills/MCP/provider 前端状态；重新登录另一个账号时只加载该账号工作区。FastAPI 与认证网关支持 `/chat` 和 `/chat/{path}` 的 SPA 直达，由登录后的前端统一校验与规范化。
+
+**验证**：Frontend 382/382 + typecheck/lint/build；Backend route/auth 42/42；Full Backend 3563 passed / 3 skipped / 15 deselected（83.66% coverage）；完整 Chromium refresh E2E 5/5（URL/history、历史+AGENT+Memory+树、active Prompt/Regenerate、invalid/deleted、admin→alice）；应用内浏览器直达刷新无 console error。
 
 ### P2-B — Human Approval UI（优先级 2）
 

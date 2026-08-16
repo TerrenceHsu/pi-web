@@ -5,7 +5,9 @@
   "type": "module",
   "description": "Playwright E2E smoke tests for Web Claude P0 MVP. Independent npm env — does not pollute frontend build.",
   "scripts": {
+    "pretest:e2e": "npm --prefix ../../src/pi_agent_core_py/web/frontend run build:e2e",
     "test:e2e": "playwright test",
+    "posttest:e2e": "npm --prefix ../../src/pi_agent_core_py/web/frontend run build",
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:debug": "playwright test --debug",
     "install:browsers": "playwright install chromium"

@@ -74,6 +74,14 @@ def _build_gateway(tmp_path: Path) -> FastAPI:
     )
 
 
+@pytest.mark.parametrize("path", ["/chat", "/chat/", "/chat/sess-safe", "/chat/bad/path"])
+def test_gateway_chat_routes_return_spa_shell(tmp_path: Path, path: str) -> None:
+    with TestClient(_build_gateway(tmp_path)) as client:
+        response = client.get(path)
+        assert response.status_code == 200
+        assert "html" in response.text.lower()
+
+
 def test_password_hash_never_contains_plaintext() -> None:
     encoded = hash_password("123456", salt=b"0123456789abcdef")
     assert verify_password("123456", encoded) is True

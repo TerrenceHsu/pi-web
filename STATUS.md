@@ -15,7 +15,7 @@
 | **Backend Foundation HEAD** | `cad7ca7` — feat(web): bind default provider profile on session creation（P1-E2 Backend Foundation ✅ FROZEN @ 3 commits） |
 | **M1 Runtime HEAD** | `8b0fb13` — docs: reconcile P1-E M1 runtime implementation record（M1-1 ~ M1-7 ✅ COMPLETE / FROZEN） |
 | **M2 Frontend Switching HEAD** | `f9dfc1c` — docs: archive P1-E M2 integration validation（M2-0 ~ M2-4 ✅ COMPLETE / FROZEN；含 M2-F1 hotfix） |
-| **Current phase** | **P0-AGENT-RUNTIME Upstream Contract Alignment ✅ IMPLEMENTED / LOCAL BASELINE (2026-08-16)**——Turn=一次 LLM 调用+当批工具；RequestSnapshot/TurnSnapshot 分层；length 工具安全失败；signal 贯穿 Tool/Hooks；tool update；turn controls；golden event tests。提交前审核修正 DDGS 公共调用签名；完整离线 3555 passed / 3 skipped / 15 deselected；Frontend 375/375；typecheck / lint / build / changed-file Ruff / targeted mypy PASS。底层 P2-CHECKPOINTER、P2-AUTH 与 P2-SESSION-WORKSPACE 保持有效。 |
+| **Current phase** | **P2-A Session URL Routing + Full Reload Recovery ✅ IMPLEMENTED / LOCAL BASELINE (2026-08-16)**——Session 切换同步 `/chat/{session_id}`；刷新恢复精确 Session、历史、`AGENT.md`、`Memory.md`、文件树及运行中 Prompt/Regenerate 事件；非法/已删除/非当前用户 ID 安全回退；登出清路由并隔离账号前端状态。完整 Backend 3563 passed / 3 skipped / 15 deselected（83.66% coverage）；Frontend 382/382；P2-A Chromium E2E 5/5；typecheck / lint / build / Ruff PASS。底层 P0 Runtime、Checkpointer、Auth 与 Session Workspace 保持有效。 |
 | **R3 Final Freeze** | ✅ COMPLETE / FINAL FROZEN @ `599d754` + correction @ `2342bc2`。详见 [P2_R3_E_FINAL_INTEGRATION_FREEZE.md](docs/validation/p2-r3/P2_R3_E_FINAL_INTEGRATION_FREEZE.md)。 |
 | **R2-B Archive Closure** | ✅ COMPLETE — User decision: **A — RATIFIED** @ 2026-08-03（c2436c7）；Amendment 2 APPROVED。**Historical 8-test discrepancy ✅ RECONCILED @ P2-R2-D-A**（freeze 时点文档误报 2920；实测 2928）。详见 [P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md §7](docs/validation/p2-r2/P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md) + [P2_R2_D_TEST_COUNT_RECONCILIATION.md](docs/validation/p2-r2/P2_R2_D_TEST_COUNT_RECONCILIATION.md) |
 | **R2-C0 Status** | ✅ COMPLETE / FROZEN @ `6476f96` + post-freeze correction `0a8f554`（R2-C terminal = `normalizing`）。Schema Amendment NOT REQUIRED。worker_concurrency=1, queue=32, shutdown_grace=30s。详见 [P2_R2_C0_INGESTION_CONTRACT_AUDIT.md](docs/validation/p2-r2/P2_R2_C0_INGESTION_CONTRACT_AUDIT.md) |
@@ -113,6 +113,18 @@
 
 ## 当前阶段
 
+**P2-A Session URL Routing + Full Reload Recovery — ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-16）**。
+
+- Session 激活、创建、删除以及浏览器前进/后退统一由 App 级协调器驱动，地址同步为 `/chat/{session_id}`
+- 刷新严格按当前账号 Session 列表解析路由，再恢复历史消息、`AGENT.md`、`Memory.md` 与完整文件树
+- 运行中 Prompt/Regenerate 会恢复 request metadata、按钮状态及已发生事件；HTTP replay 与 WebSocket live 事件按 sequence 合并并按 event ID 去重
+- 非法、已删除或不属于当前账号的 Session ID 不触发对应 Session API，安全替换为当前账号的有效 Session
+- 登出先清除路由并重置 Session/chat/files/skills/MCP/provider 状态；跨账号登录不会继承前一账号的工作区或缓存
+- FastAPI 与认证网关均支持 `/chat` 及 `/chat/{path}` SPA 直达，最终合法性由登录后的前端账号列表验证
+- 验证：Frontend 382/382 + typecheck/lint/build；Backend route/auth 42/42；Full Backend 3563 passed / 3 skipped / 15 deselected，coverage 83.66%；P2-A Chromium refresh E2E 5/5；应用内浏览器直达刷新无控制台错误
+
+### Previous phase: P2-CHECKPOINTER
+
 **P2-CHECKPOINTER Slash Command — ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-15）**。
 
 - 新增命令目录与 Session 命令执行 API；当前只接受无参数的精确命令 `/checkpointer`，命令文本不写入 canonical messages
@@ -184,8 +196,8 @@ P1-D3 PDF Text Extraction ⏸ **DEFERRED**（2026-07-16 决策，转出主路线
 - Provider/Model Backend Foundation ✅ frozen（Credential + Profile + Binding 持久化）；**M1 才真正执行 Prompt/Regenerate 切换**
 
 ### Web UI
-- 完整浏览器 reload 后恢复原 session 依赖 URL routing（**未实现**）——P2-A 处理
-- WebSocket reconnect recovery 已支持（`regenerate.spec.ts:243-290`）
+- 完整浏览器 reload 已按 `/chat/{session_id}` 恢复 Session、持久内容与运行中 Prompt/Regenerate
+- WebSocket reconnect 与刷新 replay/live 合并恢复均已支持
 - `POST /api/prompt/async` 单 active request——不支持并发 prompt
 - Markdown 文件预览依赖下载或 `view_file` 工具——P1-F 实施后支持侧栏预览
 - 前端 Provider/Model 选择器未实现——M2 Frontend Switching

@@ -63,3 +63,5 @@ tests/e2e/test-results/
 
 # Claude Code local state (CLAUDE.md at repo root IS committed)
 .claude/settings.local.json
+# Playwright authentication state contains an active session cookie.
+tests/e2e/.auth/

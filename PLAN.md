@@ -20,6 +20,7 @@ The original Web Claude P0 plan is also archived:
 - [API reference](docs/api/web-api.md)
 - [Testing guide](docs/guides/web-testing.md)
 
-> 当前本地基线主线：**P0-AGENT-RUNTIME Upstream Contract Alignment** 已实施；底层 P2-CHECKPOINTER、P2-AUTH、P2-SESSION-WORKSPACE 与 P1-E Provider Runtime 保持有效。
+> 当前本地基线主线：**P2-A Session URL Routing + Full Reload Recovery** 已实施；底层 P0-AGENT-RUNTIME、P2-CHECKPOINTER、P2-AUTH、P2-SESSION-WORKSPACE 与 P1-E Provider Runtime 保持有效。
+> Session 切换同步 `/chat/{session_id}`；整页刷新恢复精确 Session、历史、`AGENT.md`、`Memory.md`、文件树及运行中 Prompt/Regenerate，非法/越权 ID 安全回退，登出不跨账号串状态。
 > 当前首个命令 `/checkpointer` 把本 Session 对话累计总结到 `Memory.md`，文件提交后清空消息，失败保留并回滚；后续请求自动加载该记忆。
 > 实施状态与验证基线见 [STATUS.md](STATUS.md)，后续优先级见 [ROADMAP.md](ROADMAP.md)。

@@ -230,12 +230,12 @@ P1-E Multi-Provider Switching 已 ✅ COMPLETE / FROZEN。**等待用户决定**
 
 M3 是 docs-only 归档阶段，未自动执行上述任一动作。
 
-## Deferred
+## Post-P1-E Web Enhancements
 
 - P1-D3 PDF Text Extraction ✅ RESTARTED via P2-R（2026-07-27；见 [ROADMAP §P2-R](ROADMAP.md) + [docs/design/p2-r0-rag-contract.md](docs/design/p2-r0-rag-contract.md)）
-- P2-A URL Routing + Full Reload Recovery
-- P2-B Human Approval UI
-- P2-C Context Budget + Compaction UI
+- [x] **P2-A URL Routing + Full Reload Recovery** —— ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-16）；`/chat/{session_id}`、精确刷新恢复、active Prompt/Regenerate replay、非法/越权 ID 回退、登出跨账号隔离；Frontend 382/382；Chromium E2E 5/5；Full Backend 3563 passed。
+- [ ] P2-B Human Approval UI
+- [ ] P2-C Context Budget + Compaction UI
 
 ## P2-R — Knowledge / RAG Subsystem（🟡 IN PROGRESS）
 

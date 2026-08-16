@@ -3,8 +3,8 @@ import { computed, ref } from "vue"
 
 import { useAuthStore } from "../../stores/authStore"
 import { useChatStore } from "../../stores/chatStore"
-import { useFileStore } from "../../stores/fileStore"
 import { useSessionStore } from "../../stores/sessionStore"
+import { clearSessionRoute } from "../../utils/sessionRoute"
 import LoadingSpinner from "../common/LoadingSpinner.vue"
 import KnowledgeManagerModal from "../knowledge/KnowledgeManagerModal.vue"
 import MCPManagerModal from "../mcp/MCPManagerModal.vue"
@@ -14,7 +14,6 @@ import SkillManagerModal from "../skills/SkillManagerModal.vue"
 const authStore = useAuthStore()
 const sessionStore = useSessionStore()
 const chatStore = useChatStore()
-const fileStore = useFileStore()
 
 const sessions = computed(() => sessionStore.sessions)
 const activeId = computed(() => sessionStore.activeSessionId)
@@ -51,25 +50,11 @@ function formatTime(ts?: number): string {
 async function activateSession(id: string) {
   if (id === activeId.value) return
   sessionStore.setActiveSession(id)
-  // P1-B2.1: 同步 chatStore.activeSessionId + reset turn cards
-  chatStore.setActiveSession(id)
-  chatStore.resetForSession()
-  // D2-7: 清当前 session 的 regeneration draft（不串流到新 session）
-  chatStore.clearRegenerationForSessionSwitch()
-  await Promise.all([chatStore.loadMessages(id), fileStore.loadFiles(id)])
-  fileStore.resetForSession()
 }
 
 async function newChat() {
   try {
-    const s = await sessionStore.createNewSession()
-    if (s) {
-      // P1-B2.1: 新建 session 后同步 chatStore.activeSessionId
-      chatStore.setActiveSession(s.id)
-      chatStore.resetForSession()
-      fileStore.resetForSession()
-      await Promise.all([chatStore.loadMessages(s.id), fileStore.loadFiles(s.id)])
-    }
+    await sessionStore.createNewSession()
   } catch (e) {
     console.error("newChat failed", e)
   }
@@ -92,15 +77,6 @@ async function deleteSession(id: string) {
     // 删的是 active → 切到剩余第一个；没有则创建新的
     if (!sessionStore.activeSessionId) {
       await newChat()
-    } else if (sessionStore.activeSessionId) {
-      // P1-B2.1: 同步 chatStore.activeSessionId 到新的 active session
-      chatStore.setActiveSession(sessionStore.activeSessionId)
-      chatStore.resetForSession()
-      fileStore.resetForSession()
-      await Promise.all([
-        chatStore.loadMessages(sessionStore.activeSessionId),
-        fileStore.loadFiles(sessionStore.activeSessionId),
-      ])
     }
   } catch (e) {
     console.error("deleteSession failed", e)
@@ -120,6 +96,7 @@ async function exportSession(id: string) {
 }
 
 async function signOut(): Promise<void> {
+  clearSessionRoute()
   await authStore.logout()
   window.location.reload()
 }
