@@ -353,12 +353,16 @@ class KnowledgeStore:
             if str(parent) and not parent.exists():
                 parent.mkdir(parents=True, exist_ok=True)
         conn = await aiosqlite.connect(db_path, isolation_level=None)
-        conn.row_factory = aiosqlite.Row
-        await conn.execute("PRAGMA journal_mode=WAL")
-        await conn.execute("PRAGMA foreign_keys=ON")
-        await conn.execute("PRAGMA busy_timeout=5000")
-        store = cls(connection=conn, owns_connection=True)
-        await store._initialize_schema()
+        try:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA journal_mode=WAL")
+            await conn.execute("PRAGMA foreign_keys=ON")
+            await conn.execute("PRAGMA busy_timeout=5000")
+            store = cls(connection=conn, owns_connection=True)
+            await store._initialize_schema()
+        except BaseException:
+            await conn.close()
+            raise
         return store
 
     @classmethod

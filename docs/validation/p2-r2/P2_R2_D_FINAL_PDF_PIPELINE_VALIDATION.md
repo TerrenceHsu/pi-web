@@ -5,6 +5,7 @@
 > **D-B commit**：本提交（自引用；hash 由 git 在提交时生成）
 > **归档日期**：2026-08-08
 > **范围**：归档并冻结 P2-R2-A / B / C / D-A / D-Fix / D-B 全链最终验证结论；正式关闭 P2-R2；打开 P2-R3 阶段门。**不**实现 Chunk / FTS5 / search_knowledge / OCR / embedding / vector / reranker。
+> **Post-freeze maintenance（2026-08-18）**：本文件归档时标记 pending 的 B7 已在后续本地工作树中修复；历史状态文字保留，当前结论见 §17 修复附录。
 
 ---
 
@@ -505,6 +506,8 @@ G1 Assistant Markdown Rendering
 
 ## 17. B7 独立缺陷（不阻塞 D-B）
 
+> **2026-08-18 修复附录：✅ RESOLVED / LOCAL BASELINE。** 以下 `IDENTIFIED / PENDING / NOT AUTHORIZED` 是 2026-08-08 freeze 时的历史状态。
+
 ```
 B7 SQLite Store Open-Failure Cleanup
 ```
@@ -526,6 +529,14 @@ Blocks P2-R3     = NO
 ```
 
 仅在出现完整 Backend 稳定 failure 时升级为阻塞；当前 3113 passed ×2 fresh process 不触发该路径。
+
+### 17.1 后续修复记录（2026-08-18）
+
+- `KnowledgeStore.open` 与 `SQLiteCredentialStore.open`：连接创建后，把 PRAGMA 与 schema 初始化纳入 `try/except BaseException`；失败或取消时关闭连接后原样抛出
+- `SQLiteSessionStore.init`：初始化失败时先清除 `self._db`，再关闭本次创建的连接；成功重试恢复 `_closed = False`
+- `ExtensionSQLiteStore.init`：schema、migration 与 validation 失败时释放自有连接并清除引用；调用方注入的共享连接保持打开，避免破坏连接所有权
+- 新增 6 个故障注入测试，覆盖普通异常、`CancelledError`、内部引用清理、失败后重试和共享连接不关闭
+- 验证：Store 定向回归 **196 passed**；restart / web app / lifecycle 扩展回归 **109 passed, 1 skipped**；合计 **305 passed, 1 skipped**；changed-file Ruff clean
 
 ---
 

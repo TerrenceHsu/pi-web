@@ -239,13 +239,22 @@ class SQLiteSessionStore:
             if str(parent) and not parent.exists():
                 parent.mkdir(parents=True, exist_ok=True)
 
-        self._db = await aiosqlite.connect(db_path)
-        self._db.row_factory = aiosqlite.Row
-        await self._db.execute("PRAGMA journal_mode=WAL")
-        await self._db.execute("PRAGMA foreign_keys=ON")
-        await self._db.execute("PRAGMA busy_timeout=5000")
-        await self._exec_schema()
-        await self._db.commit()
+        db = await aiosqlite.connect(db_path)
+        self._db = db
+        try:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA journal_mode=WAL")
+            await db.execute("PRAGMA foreign_keys=ON")
+            await db.execute("PRAGMA busy_timeout=5000")
+            await self._exec_schema()
+            await db.commit()
+        except BaseException:
+            # Reset first so a close failure cannot leave a half-initialized
+            # connection exposed through ``connection`` / ``_require_db``.
+            self._db = None
+            await db.close()
+            raise
+        self._closed = False
 
     async def _exec_schema(self) -> None:
         assert self._db is not None

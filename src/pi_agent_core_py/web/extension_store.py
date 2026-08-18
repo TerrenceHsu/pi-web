@@ -394,31 +394,44 @@ class ExtensionSQLiteStore:
                 if str(parent) and not parent.exists():
                     parent.mkdir(parents=True, exist_ok=True)
             self._db = await aiosqlite.connect(db_path)
-            self._db.row_factory = aiosqlite.Row
-            await self._db.execute("PRAGMA foreign_keys=ON")
-            await self._db.execute("PRAGMA busy_timeout=5000")
 
-        # 先确保 schema_meta 表存在（独立 executescript——此时还没读 version）
-        await self._db.executescript(_SCHEMA_META_DDL)
-        await self._db.commit()
+        db = self._db
+        assert db is not None
+        try:
+            if self._owns_connection:
+                db.row_factory = aiosqlite.Row
+                await db.execute("PRAGMA foreign_keys=ON")
+                await db.execute("PRAGMA busy_timeout=5000")
 
-        version = await self.get_schema_version()
+            # 先确保 schema_meta 表存在（独立 executescript——此时还没读 version）
+            await db.executescript(_SCHEMA_META_DDL)
+            await db.commit()
 
-        if version is None:
-            await self._initialize_fresh_v2_schema()
-        elif version == 1:
-            await self._migrate_v1_to_v2()
-        elif version == SCHEMA_VERSION:
-            await self._validate_v2_schema()
-        elif version > SCHEMA_VERSION:
-            # 关键：在任何 DDL 前失败——防止把未来版本的 DB 当成旧版重建
-            raise ExtensionStoreError(
-                "Extension database schema is newer than this application."
-            )
-        else:
-            raise ExtensionStoreError(
-                f"Unsupported extension database schema version: {version}"
-            )
+            version = await self.get_schema_version()
+
+            if version is None:
+                await self._initialize_fresh_v2_schema()
+            elif version == 1:
+                await self._migrate_v1_to_v2()
+            elif version == SCHEMA_VERSION:
+                await self._validate_v2_schema()
+            elif version > SCHEMA_VERSION:
+                # 关键：在任何 DDL 前失败——防止把未来版本的 DB 当成旧版重建
+                raise ExtensionStoreError(
+                    "Extension database schema is newer than this application."
+                )
+            else:
+                raise ExtensionStoreError(
+                    f"Unsupported extension database schema version: {version}"
+                )
+        except BaseException:
+            # Injected connections are shared with SessionStore and remain the
+            # caller's responsibility.  Always detach the failed Store state.
+            self._db = None
+            if self._owns_connection:
+                await db.close()
+            raise
+        self._closed = False
 
     # ------------------------------------------------------------------
     # schema 初始化 / migration 内部方法
