@@ -53,6 +53,10 @@
    ```bash
    /d/miniconda/envs/pipy/python.exe -m pytest tests/ -v -m "not slow"
    ```
+5. **启动 Web 后端**时必须使用当前 Windows 交互式登录用户会话，让 Windows
+   Credential Manager 可写。`scripts/dev_web_app.py` 会在监听端口前执行 Keyring
+   写入→读取→删除探针；探针失败必须修正启动上下文，不能绕过。仅在明确接受 API Key
+   不持久化时才设置 `PI_AGENT_SECRET_BACKEND=memory`。
 
 ### 项目快速参考
 

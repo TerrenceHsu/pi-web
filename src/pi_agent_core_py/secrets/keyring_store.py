@@ -14,8 +14,11 @@ OS keyring backend——Windows Credential Manager / macOS Keychain / Linux Secr
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
+import secrets
 from typing import Any
+from uuid import uuid4
 
 from .errors import SecretStoreError, SecretStoreUnavailableError
 
@@ -27,6 +30,7 @@ _LOGGER = logging.getLogger(__name__)
 # 固定 service name——keyring 按 (service, account) 寻址
 # service 是非敏感字符串
 _SERVICE_NAME = "pi-agent-core-py"
+_WRITE_PROBE_REF_PREFIX = "__pi_agent_keyring_probe__-"
 
 
 class OSKeyringSecretStore:
@@ -93,6 +97,60 @@ class OSKeyringSecretStore:
             return False
 
         return True
+
+    async def probe_write_access(self) -> bool:
+        """Verify that the active backend can persist secrets in this process.
+
+        Backend discovery alone is insufficient on Windows: ``WinVaultKeyring``
+        can be installed and report a positive priority while ``CredWrite`` still
+        fails for a process without a usable interactive logon session.  This
+        probe writes a random non-user value under a reserved, unique reference,
+        verifies the round trip, and then removes it.
+
+        The method never raises and returns ``True`` only when write, read, and
+        cleanup all succeed.  It must be used for startup/readiness checks, not
+        per-credential status reads.
+        """
+        if not await self.is_available():
+            return False
+
+        probe_ref = f"{_WRITE_PROBE_REF_PREFIX}{uuid4().hex}"
+        probe_value = secrets.token_urlsafe(32)
+        roundtrip_ok = False
+        cleanup_ok = False
+
+        try:
+            await self._call_sync(
+                "set_password",
+                self._SERVICE_NAME_FOR_CALL(),
+                probe_ref,
+                probe_value,
+            )
+            persisted = await self._call_sync(
+                "get_password",
+                self._SERVICE_NAME_FOR_CALL(),
+                probe_ref,
+            )
+            roundtrip_ok = isinstance(persisted, str) and hmac.compare_digest(
+                persisted,
+                probe_value,
+            )
+        except Exception:
+            roundtrip_ok = False
+        finally:
+            # Always attempt cleanup: a backend may persist the value and still
+            # raise while returning from set_password/get_password.
+            try:
+                await self._call_sync(
+                    "delete_password",
+                    self._SERVICE_NAME_FOR_CALL(),
+                    probe_ref,
+                )
+                cleanup_ok = True
+            except Exception:
+                cleanup_ok = False
+
+        return roundtrip_ok and cleanup_ok
 
     async def set(self, secret_ref: str, value: str) -> None:
         if not isinstance(secret_ref, str) or not secret_ref or not secret_ref.strip():

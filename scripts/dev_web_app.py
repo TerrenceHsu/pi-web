@@ -27,6 +27,31 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 
+async def _require_persistent_keyring(secret_backend: str) -> None:
+    """Fail fast unless the selected persistent Keyring is really writable."""
+    if secret_backend == "memory":
+        return
+    if secret_backend not in {"auto", "keyring"}:
+        raise RuntimeError(
+            "PI_AGENT_SECRET_BACKEND must be 'keyring', 'auto', or 'memory'."
+        )
+
+    from pi_agent_core_py.secrets import OSKeyringSecretStore
+
+    try:
+        store = OSKeyringSecretStore()
+        available = await store.probe_write_access()
+    except Exception:
+        available = False
+    if not available:
+        raise RuntimeError(
+            "Persistent Keyring preflight failed. Start the backend from the "
+            "interactive Windows login session so Credential Manager is "
+            "available, or explicitly set PI_AGENT_SECRET_BACKEND=memory to "
+            "run without persistent API keys."
+        )
+
+
 def _build_harness() -> AgentHarness:
     import asyncio
     import random
@@ -61,6 +86,8 @@ def _build_harness() -> AgentHarness:
 
 
 def main() -> None:
+    import asyncio
+
     import uvicorn
 
     from pi_agent_core_py.web.app import create_app
@@ -68,6 +95,12 @@ def main() -> None:
 
     port = int(os.environ.get("PORT", "8000"))
     host = os.environ.get("HOST", "127.0.0.1")
+    secret_backend = os.environ.get("PI_AGENT_SECRET_BACKEND", "keyring").strip().lower()
+
+    try:
+        asyncio.run(_require_persistent_keyring(secret_backend))
+    except RuntimeError as exc:
+        raise SystemExit(f"[dev] startup refused: {exc}") from None
 
     data_root = Path(
         os.environ.get("PI_AGENT_DATA_DIR", str(REPO_ROOT / ".pi-agent-data"))
@@ -82,7 +115,8 @@ def main() -> None:
     print(
         f"[dev] starting on http://{host}:{port} "
         f"(auth_db={auth_db_path}, user_data={user_data_root})\n"
-        f"[dev] allowed_ui_origins={extra_ui_origins}",
+        f"[dev] allowed_ui_origins={extra_ui_origins}\n"
+        f"[dev] credential_backend={secret_backend} (write probe passed)",
         flush=True,
     )
 
@@ -96,6 +130,7 @@ def main() -> None:
             allow_prompt_preview=True,
             enable_trusted_host=True,
             credential_extra_ui_origins=extra_ui_origins,
+            credential_secret_backend=secret_backend,
             enable_builtin_ddgs=True,
         )
 

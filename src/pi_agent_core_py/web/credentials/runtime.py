@@ -34,13 +34,13 @@ from ...secrets import (
     OSKeyringSecretStore,
     SecretStore,
 )
-from .service import CredentialService
-from .store import SQLiteCredentialStore
 from ..local_web_security import WebSecurityConfig
 from ..providers.validation import (
     get_default_validation_strategy_registry,
 )
 from .secret_store import SecretStoreRouter
+from .service import CredentialService
+from .store import SQLiteCredentialStore
 
 __all__ = [
     "CredentialRuntimeConfigError",
@@ -289,17 +289,20 @@ def _resolve_db_path(configured: str | Path) -> Path:
 
 
 async def _probe_keyring_available() -> bool:
-    """Try to construct OSKeyringSecretStore and probe is_available().
+    """Verify Keyring discovery and real write/read/delete capability.
 
-    Returns False if keyring module missing / backend unavailable / any
-    other failure. Never raises.
+    A backend type check is not sufficient on Windows because Credential
+    Manager can reject ``CredWrite`` for restricted/non-interactive process
+    tokens.  Returns False for package/backend failures, write failures,
+    round-trip mismatches, cleanup failures, or any unexpected exception.
+    Never raises.
     """
     try:
         store = OSKeyringSecretStore()
     except Exception:
         return False
     try:
-        return bool(await store.is_available())
+        return bool(await store.probe_write_access())
     except Exception:
         return False
 

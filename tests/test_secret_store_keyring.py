@@ -190,6 +190,37 @@ async def test_usable_backend_available() -> None:
     assert await store.is_available() is True
 
 
+async def test_write_access_probe_roundtrips_and_leaves_no_entry() -> None:
+    backend = _FakeKeyringBackend()
+    store = OSKeyringSecretStore(keyring_backend=backend)
+
+    assert await store.probe_write_access() is True
+    assert backend.store == {}
+
+
+async def test_write_access_probe_rejects_backend_that_only_looks_available() -> None:
+    backend = _FakeKeyringBackend()
+    backend.fail_mode = True
+    store = OSKeyringSecretStore(keyring_backend=backend)
+
+    assert await store.is_available() is True
+    assert await store.probe_write_access() is False
+    assert backend.store == {}
+
+
+async def test_write_access_probe_rejects_roundtrip_mismatch_and_cleans_up() -> None:
+    class _MismatchBackend(_FakeKeyringBackend):
+        def get_password(self, service: str, account: str) -> str | None:
+            value = super().get_password(service, account)
+            return "wrong-value" if value is not None else None
+
+    backend = _MismatchBackend()
+    store = OSKeyringSecretStore(keyring_backend=backend)
+
+    assert await store.probe_write_access() is False
+    assert backend.store == {}
+
+
 async def test_set_get_roundtrip_with_fake_backend() -> None:
     backend = _FakeKeyringBackend()
     store = OSKeyringSecretStore(keyring_backend=backend)

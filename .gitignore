@@ -38,6 +38,7 @@ src/pi_agent_core_py/web/static/index.html
 # Real-env dev data (persistent sqlite + uploads from local dev runs)
 dev_data/
 /.pi-agent-data/
+/.run-logs/
 
 # Runtime uploads from local web runs (root-anchored to avoid hitting test fixtures)
 /uploads/

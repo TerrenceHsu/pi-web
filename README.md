@@ -507,6 +507,13 @@ npm run build
 `PI_AGENT_DATA_DIR` 改位置。初始账号为 `admin / 123456`。账号与工作区数据跨重启
 保留，但后端重启后旧登录 Cookie 失效，必须重新登录一次。
 
+开发启动器默认使用持久化 `Keyring`，并在绑定 8000 端口前执行一次无用户秘密的
+写入→读取→删除探针。探针失败时启动器会直接退出，避免页面运行后才发现 API Key
+无法保存。Windows 上必须从当前交互式登录用户会话启动后端；受限 sandbox、无登录
+会话的服务进程或失效的 Credential Manager token 会被拒绝。只有明确不需要持久化
+API Key 时，才可显式设置 `PI_AGENT_SECRET_BACKEND=memory`；此模式不会把 Keyring
+凭据降级保存到 SQLite。
+
 单工作区 `create_app` 的关键参数（全部可选）：
 
 | 参数 | 默认 | 说明 |
