@@ -207,6 +207,94 @@ describe("G2: sendPrompt clears stale turn_info cards", () => {
   })
 })
 
+describe("terminal message reconciliation", () => {
+  it("keeps a previous tool result anchored inside its original turn", async () => {
+    const persisted = (
+      messageId: string,
+      idx: number,
+      role: "user" | "assistant",
+      text: string,
+    ) => ({
+      message_id: messageId,
+      session_id: "sess-1",
+      idx,
+      role,
+      content: [{ type: "text", text }],
+      created_at: idx,
+      message: { role, content: [{ type: "text", text }] },
+    })
+    vi.mocked(messagesApi.getMessages).mockResolvedValue({
+      count: 4,
+      session_id: "sess-1",
+      messages: [
+        persisted("u-old", 0, "user", "first question"),
+        persisted("a-old", 2, "assistant", "first answer"),
+        persisted("u-new", 3, "user", "second question"),
+        persisted("a-new", 4, "assistant", "second answer"),
+      ],
+    })
+
+    const store = useChatStore()
+    store.setActiveSession("sess-1")
+    store.streamItems = [
+      {
+        kind: "user_message",
+        id: "u-old",
+        messageId: "u-old",
+        persisted: true,
+        content: "first question",
+      } as any,
+      {
+        kind: "turn_info",
+        id: "tr-old",
+        title: "toolResult",
+        summary: "search result",
+        muted: true,
+      } as any,
+      {
+        kind: "assistant_message",
+        id: "a-old",
+        messageId: "a-old",
+        persisted: true,
+        content: "first answer",
+      } as any,
+      {
+        kind: "user_message",
+        id: "optimistic-user",
+        content: "second question",
+      } as any,
+      {
+        kind: "turn_info",
+        id: "turn-new",
+        title: "This turn",
+        summary: "Done",
+        status: "done",
+        muted: true,
+      } as any,
+      {
+        kind: "assistant_message",
+        id: "draft-new",
+        content: "second answer",
+        streaming: false,
+      } as any,
+    ]
+
+    await store.reconcileMessagesFromServer("sess-1")
+
+    expect(store.streamItems.map((item) => item.id)).toEqual([
+      "u-old",
+      "tr-old",
+      "a-old",
+      "u-new",
+      "turn-new",
+      "a-new",
+    ])
+    expect(store.streamItems.findIndex((item) => item.id === "tr-old")).toBeLessThan(
+      store.streamItems.findIndex((item) => item.id === "a-old"),
+    )
+  })
+})
+
 describe("checkpointer state", () => {
   it("clears every stream item only after the server reports completion", async () => {
     vi.useFakeTimers()

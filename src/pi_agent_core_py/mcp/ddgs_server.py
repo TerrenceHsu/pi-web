@@ -25,6 +25,18 @@ DDGS_SERVER_NAME = "ddgs"
 DDGS_SERVER_MODULE = "pi_agent_core_py.mcp.ddgs_server"
 
 
+def _configure_utf8_stdio() -> None:
+    """Pin the built-in server to MCP's UTF-8 stdio contract on Windows."""
+
+    # StdioMCPTransport also sets the Python encoding environment before spawn.
+    # Reconfiguring here protects direct/module launches and makes both directions
+    # (Chinese query input and non-ASCII search output) explicit.
+    for stream in (sys.stdin, sys.stdout):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="strict")
+
+
 class DDGSSearchSettings(BaseModel):
     """User-editable, server-enforced defaults for DuckDuckGo searches."""
 
@@ -254,6 +266,7 @@ def _argument_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    _configure_utf8_stdio()
     namespace = _argument_parser().parse_args()
     settings = DDGSSearchSettings.model_validate(vars(namespace))
     server = DDGSMCPServer(settings)

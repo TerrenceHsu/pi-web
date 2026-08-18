@@ -467,21 +467,68 @@ export const useChatStore = defineStore("chat", () => {
         }
       })
 
-      // 保留当前 streamItems 中的 turn cards（tool_call / tool_result / file_read /
-      // skill_used / mcp_tool_call / turn_info / error）——它们由 WS event 创建，
-      // 服务端 messages 不可重建。删除 user_message / assistant_message（避免重复）。
-      // D2-7: 必须删除**所有** assistant_message（包括 persisted 和 regeneration draft）——
-      // persistedItems 已包含全部 SQLite canonical assistant，turnCards 再保留旧的会
-      // 产生重复 message_id（regenerate 后同 ID 出现两条）。
-      const turnCards = streamItems.value.filter(
-        (it: any) =>
-          it.kind !== "user_message" && it.kind !== "assistant_message",
-      )
+      // 就地校正 message bubble，绝不能把非消息卡片抽出后统一拼到尾部。
+      //
+      // 旧实现 `[...persistedItems, ...turnCards]` 会在每次请求终结时，把历史
+      // toolResult / MCP / file 卡片全部搬到最新回答后面。这里按现有 timeline
+      // 槽位替换消息：已有 persisted bubble 依 message_id 精确更新；本轮乐观
+      // user / streaming assistant 则按 role 匹配尚未出现在视图中的 canonical
+      // message。所有 turn card 保持原索引和相对顺序。
+      const persistedById = new Map<string, ChatStreamItem>()
+      for (const item of persistedItems) {
+        const messageId = (item as any).messageId
+        if (typeof messageId === "string") persistedById.set(messageId, item)
+      }
 
-      // 合并：服务端 messages 在前（历史 + 本轮 user/assistant 最终文本）；
-      // turn cards 在后（按出现顺序保留）。这意味着本轮 turn cards 会出现在
-      // 历史 user_message 之后——这是 UI 期望的（用户先看到历史消息，再看本轮）。
-      streamItems.value = [...persistedItems, ...turnCards]
+      const representedIds = new Set<string>()
+      for (const item of streamItems.value) {
+        const messageId = (item as any).messageId
+        if (typeof messageId === "string" && persistedById.has(messageId)) {
+          representedIds.add(messageId)
+        }
+      }
+      const unmatched = persistedItems.filter((item) => {
+        const messageId = (item as any).messageId
+        return typeof messageId !== "string" || !representedIds.has(messageId)
+      })
+      const consumedUnmatched = new Set<number>()
+
+      const reconciled: ChatStreamItem[] = []
+      for (const existing of streamItems.value) {
+        if (existing.kind !== "user_message" && existing.kind !== "assistant_message") {
+          reconciled.push(existing)
+          continue
+        }
+
+        const existingMessageId = (existing as any).messageId
+        if (typeof existingMessageId === "string") {
+          const canonical = persistedById.get(existingMessageId)
+          // Persisted rows deleted by a server-side rewrite must disappear; otherwise
+          // the same assistant can survive beside its canonical replacement.
+          if (canonical) reconciled.push(canonical)
+          continue
+        }
+
+        const matchingIndex = unmatched.findIndex(
+          (candidate, index) => !consumedUnmatched.has(index) && candidate.kind === existing.kind,
+        )
+        if (matchingIndex >= 0) {
+          consumedUnmatched.add(matchingIndex)
+          reconciled.push(unmatched[matchingIndex])
+        } else if (!(existing as any).streaming && !(existing as any).isRegenerationDraft) {
+          // A non-streaming legacy item has no stable message_id. Keep it rather than
+          // deleting visible history solely because an older API omitted identifiers.
+          reconciled.push(existing)
+        }
+      }
+
+      // Missing WS message events can leave no local bubble slot. Append only those
+      // canonical messages that could not be matched; normal complete streams consume
+      // every item above and retain their tool-card anchors.
+      unmatched.forEach((item, index) => {
+        if (!consumedUnmatched.has(index)) reconciled.push(item)
+      })
+      streamItems.value = reconciled
 
       // reset turn-tracking 部分（保留 currentTurnInfoId/currentAssistantItemId）
       Object.keys(toolItemIds).forEach((k) => delete toolItemIds[k])

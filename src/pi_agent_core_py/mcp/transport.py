@@ -95,10 +95,17 @@ class StdioMCPTransport(MCPTransport):
         if self._closed:
             raise MCPTransportClosedError("StdioMCPTransport: already closed")
 
-        env: dict[str, str] | None = None
+        # MCP stdio is a UTF-8 JSON protocol.  On Windows, a piped Python child
+        # otherwise inherits the active ANSI code page (for example cp936), so
+        # non-ASCII tool results are encoded as GBK and then irreversibly become
+        # replacement characters when the parent reads them as UTF-8.
+        env = dict(os.environ)
         if self._env:
-            env = dict(os.environ)
             env.update(self._env)
+        # Protocol encoding is not user-configurable.  Override conflicting values
+        # from either the parent or MCP config rather than silently corrupting data.
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
 
         try:
             self._proc = await asyncio.create_subprocess_exec(
@@ -146,7 +153,15 @@ class StdioMCPTransport(MCPTransport):
         if not line_b:
             raise MCPTransportClosedError("StdioMCPTransport: stdout EOF (server exited)")
 
-        line = line_b.decode("utf-8", errors="replace").strip()
+        try:
+            line = line_b.decode("utf-8", errors="strict").strip()
+        except UnicodeDecodeError as e:
+            # Never pass U+FFFD replacement characters into ToolResult persistence.
+            # Invalid protocol bytes are a safe tool error and can be retried after
+            # fixing the server encoding; corrupted text cannot be recovered later.
+            raise MCPProtocolError(
+                "StdioMCPTransport: response is not valid UTF-8"
+            ) from e
         if not line:
             raise MCPProtocolError("StdioMCPTransport: empty line from server")
         try:

@@ -242,7 +242,7 @@ P1-E2 配置后端已 frozen，作为 M1/M2/M3 的持久化基础。**不再扩�
 - ❌ **M1/M2/M3 内不引入 remote `ModelOption` source**（静态建议 + 用户手动填写）
 - ❌ **M1/M2/M3 内不复制第二套安全中间件**（全复用 E1）
 - ✅ M1 起：执行 Prompt/Regenerate 时**会**读 Secret + 构造 HTTP client（仅对 Session 选中的 Profile）
-- ✅ keyring 为 web optional dependency；不可用时不阻塞 app 启动
+- ✅ keyring 为 web optional dependency；通用 `create_app(auto)` 不可用时保持 degraded；持久化优先的 `scripts/dev_web_app.py` 必须通过真实写读删探针，否则 fail-fast 拒绝启动
 - ✅ 请求启动后 provider/model 不可变（运行中切换只影响下次请求）
 - ✅ Regenerate 使用当前 session 当前模型（不动 D2 不变量）
 
@@ -331,7 +331,9 @@ M3 是 docs-only 归档阶段，未自动执行上述任一动作。
 - [x] **P2-R4-C3 Validation Freeze** —— ✅ COMPLETE / FROZEN @ `<this commit>`（docs-only；41 targeted tests；full Backend ×2 = 3443/0 failed consecutive；27/27 exit gate；[cite:E1]→[1]+Sources footer pipeline verified）。详见 [docs/validation/p2-r4/P2_R4_C_CITATION_AGENT_INTEGRATION.md](docs/validation/p2-r4/P2_R4_C_CITATION_AGENT_INTEGRATION.md)。
 - [x] **P2-R4-D Final RAG Integration Freeze** —— ✅ COMPLETE / FINAL FROZEN @ `<this commit>`（6 E2E tests：full PDF→ready→search→evidence→citation pipeline + empty binding + cross-session isolation + invalid citation + source SHA；full Backend ×2 = 3455/0 failed consecutive；19/19 exit gate；**Agent-facing Knowledge RAG ✅ AVAILABLE**）。详见 [docs/validation/p2-r4/P2_R4_D_FINAL_RAG_FREEZE.md](docs/validation/p2-r4/P2_R4_D_FINAL_RAG_FREEZE.md)。
 - [ ] **P2-R4 Session-scoped search_knowledge + Page Marker Citation** —— ⛔ BLOCKED BY P2-R3。
-- [ ] **B7 SQLite Store Open-Failure Cleanup** —— ⏸ PENDING / NOT AUTHORIZED（独立缺陷；4 个 Store `open()` 缺 try/except close 保护；不阻塞 P2-R2-D-B / 不阻塞 P2-R3；仅在完整 Backend 出现稳定 failure 时升级）。详见 [P2_R2_D_FINAL_PDF_PIPELINE_VALIDATION.md §17](docs/validation/p2-r2/P2_R2_D_FINAL_PDF_PIPELINE_VALIDATION.md)。
+- [x] **B7 SQLite Store Open-Failure Cleanup** —— ✅ RESOLVED / COMMITTED BASELINE（2026-08-18，`688cf08`；`KnowledgeStore.open`、`SQLiteCredentialStore.open`、`SQLiteSessionStore.init`、`ExtensionSQLiteStore.init` 的初始化失败路径均释放自有连接并清除内部引用；覆盖 `CancelledError`；注入的共享 Extension 连接不越权关闭；305 passed + 1 skipped，changed-file Ruff clean）。详见 [P2_R2_D_FINAL_PDF_PIPELINE_VALIDATION.md §17](docs/validation/p2-r2/P2_R2_D_FINAL_PDF_PIPELINE_VALIDATION.md)。
+- [x] **Keyring Persistent Startup Preflight** —— ✅ RESOLVED / COMMITTED BASELINE（2026-08-18，`ada31fc`；真实 write/read/delete capability probe；WinVault `CredWrite` 受限登录会话假阳性被识别；开发启动器默认持久化并在监听端口前 fail-fast；显式 `memory` 才跳过；155 passed + 1 skipped related regressions）。
+- [x] **ToolResult Ordering + MCP UTF-8** —— ✅ RESOLVED / COMMITTED BASELINE（2026-08-18；终态消息就地对账保留跨轮工具卡顺序；MCP 子进程和 DDGS stdio 强制 UTF-8；非法字节 fail-closed 为协议错误；Frontend 394/394 + Backend targeted 106/106）。
 
 ## P2-R5 — Web Knowledge Management + REST + E2E（🟡 IN PROGRESS）
 

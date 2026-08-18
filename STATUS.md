@@ -31,6 +31,9 @@
 
 | 项 | 值 | 命令 |
 |---|---|---|
+| ToolResult ordering + MCP UTF-8 | **394/394 Vitest；106/106 backend targeted**（stable terminal reconciliation + strict UTF-8 stdio） | `npm test` / targeted `pytest --no-cov` |
+| Keyring persistent startup preflight | **155 passed, 1 skipped**（write/read/delete probe + no-residue + Runtime readiness + launcher fail-fast + API/provider restart） | targeted `pytest --no-cov` |
+| B7 SQLite open-failure cleanup | **305 passed, 1 skipped**（4 Store failure cleanup + retry/shared-ownership + restart/lifecycle regressions） | targeted `pytest --no-cov` |
 | P2-C targeted backend | **83/83**（Estimator / Runtime admission / Model capability / Web API / static security contracts） | targeted `pytest --no-cov` |
 | P2-C frontend / browser | **393/393 Vitest；1/1 P2-C Chromium** | `npm test` / `context-budget-compaction.spec.ts` |
 | All-marker audit | **3580 passed**；随后修正 3 个静态绑定契约，相关 34/34；外部 DDGS timeout + GLM 401 仍失败 | `pytest tests -m "not slow" --no-cov` |
@@ -115,6 +118,27 @@
 测试基线（post-M1-7）：2585 full pytest + 1 skipped（keyring API path 不在本副本验证）+ ruff clean + 0 Core Runtime diff + 0 providers/* diff（仅新增 `openai_compat.py` / `factory.py`）+ 0 network + 0 secret reads + frontend build clean（142.91 KB JS / 40.15 KB CSS）。
 
 ## 当前阶段
+
+**B7 SQLite Store Open-Failure Cleanup — ✅ RESOLVED / COMMITTED BASELINE（2026-08-18，`688cf08`）**。
+
+- `KnowledgeStore.open`、`SQLiteCredentialStore.open`、`SQLiteSessionStore.init`、`ExtensionSQLiteStore.init` 在 schema / migration / validation 初始化异常和任务取消时关闭自有 SQLite 连接，并清除未完成的内部引用
+- `ExtensionSQLiteStore` 保留连接所有权边界：初始化失败不会关闭调用方注入的共享连接
+- 失败后的 Session / Extension Store 可重新初始化；新增 6 个故障注入用例，连同相关 store、restart、web app 和 lifecycle 回归共 **305 passed, 1 skipped**
+- changed-file Ruff clean；已形成独立可回退提交
+
+**Keyring Persistent Startup Preflight — ✅ RESOLVED / COMMITTED BASELINE（2026-08-18，`ada31fc`）**。
+
+- `OSKeyringSecretStore.probe_write_access()` 使用随机非用户值执行真实 write/read/delete，并且只有三步全部成功才报告持久化可用
+- Credential Runtime 不再仅凭 `WinVaultKeyring` 类型存在判定可用，可识别受限进程 `CredWrite` 的 `WinError 1312` 假阳性
+- `scripts/dev_web_app.py` 默认选择持久化 Keyring，在监听端口前 fail-fast；Windows 必须从交互式登录用户会话启动；仅显式 `PI_AGENT_SECRET_BACKEND=memory` 才允许跳过
+- 新增探针无残留、写失败、round-trip mismatch、Runtime 强探测和启动器拒绝/放行测试；相关 Runtime / API / Provider restart 回归 **155 passed, 1 skipped**
+
+**ToolResult Ordering + MCP UTF-8 — ✅ RESOLVED / COMMITTED BASELINE（2026-08-18）**。
+
+- Session 终态消息对账改为就地替换 canonical message，保留 ToolCall / ToolResult / TurnCard 的原始相对位置，不再把前一轮工具结果追加到新一轮末尾
+- MCP stdio 子进程强制 `PYTHONIOENCODING=utf-8` 与 `PYTHONUTF8=1`；接收端严格解码 UTF-8，非法字节转为协议错误，不再静默写入 `U+FFFD`
+- DDGS MCP 在进程入口显式配置 UTF-8 stdio；新增真实 Python 子进程中文 round-trip、非法字节拒绝和前端终态对账回归测试
+- 验证基线：Frontend **394/394**；Backend ToolResult / DDGS / MCP targeted **106/106**；TypeScript、Ruff 与差异检查通过
 
 **P2-C Context Budget + Compaction UI — ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-17）**。
 
@@ -213,8 +237,8 @@ P1-D3 PDF Text Extraction ⏸ **DEFERRED**（2026-07-16 决策，转出主路线
 
 ## 下一步
 
-- 审核并提交 P2-B + P2-C 当前工作树，形成可回退基线（commit / tag / push 仍需用户分别授权）
 - 后续候选：P2-D Session 搜索/收藏/归档，或为 P2-C 增加 Provider tokenizer 与自动 compaction 策略
+- tag / push 尚未执行，仍需用户分别授权
 
 ## 已知限制
 
