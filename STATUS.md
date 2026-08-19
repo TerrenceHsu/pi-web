@@ -6,7 +6,7 @@
 
 | 项 | 当前事实 |
 |---|---|
-| 代码基线 | `b6baea8` — `feat(tools): preserve result usage metadata` |
+| 代码基线 | `8a5c569` — `feat(session): add durable operation recovery` |
 | 分支 | `master` |
 | 最新 release tag | `v0.0.27-secure-credentials` @ `de05c66`；当前代码基线尚未打新 tag |
 | Python / API 版本 | `0.0.28`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
@@ -39,6 +39,7 @@
 | Thinking 与细粒度流生命周期 | ✅ 完成 | `c214d28`；text/thinking/tool-call start/delta/end |
 | Agent 公开运行时状态 | ✅ 完成 | `848ae1d`；model / thinking level / streaming message / pending tool calls / error message |
 | ToolResult usage 与 deferred-tool metadata | ✅ 完成 | `b6baea8`；事件、LLM 边界、Snapshot、Session/SQLite 与 Web JSON 全链路保留 |
+| Durable operation / recovery | ✅ 完成 | `8a5c569`；append-only operation records、Checkpointer restart recovery、原子文件 generation、JSON journal |
 | 全仓 Ruff / strict Mypy / CI 收敛 | ✅ 完成 | Ruff 0；Mypy 114 files / 0 issues；Python CI timeout 30 分钟 |
 | Release metadata 与 MIT License | ✅ 完成 | `8a6ff2e`；Python/API/前端统一 `0.0.28`，wheel 携带根许可证 |
 | 当前发布前浏览器/联网门禁 | ✅ 完成 | `51ce3c7`；Playwright 45/45，DDGS + GLM 真实 smoke 3/3 |
@@ -49,7 +50,7 @@
 - 每个账号拥有独立的 Session、消息、文件、Skills、MCP、Knowledge、Provider/Credential 配置
 - Session 路由为 `/chat/{session_id}`；刷新恢复准确 Session、历史、文件树、`AGENT.md`、`Memory.md` 及当前请求状态
 - 每个 Session 初始化独立文件夹和唯一根 `AGENT.md`；Agent 可 `list_files`、`view_file`、`write_file`
-- `/checkpointer` 使用当前 Session Provider 把对话累计总结到 `Memory.md`，成功后清空当前消息窗口
+- `/checkpointer` 使用当前 Session Provider 把对话累计总结到 `Memory.md`；接受时持久化 source leaf/hash，文件发布后原子清空原 lane，进程退出可幂等前滚
 - 支持 Prompt、Stop、Regenerate 最新 Assistant、Markdown Export、实时事件、请求恢复和精确 ToolCall 审批
 - Provider Profile、Session Model Binding、Context Window 与 Max Output Tokens 持久化；UI 管理 GLM/Qwen/Kimi
 - 持久化凭证默认进入 OS Keyring；开发启动器在监听端口前执行 write/read/delete 探针
@@ -63,6 +64,7 @@
 - `AgentState` 公开 secret-free model 身份、thinking level、请求流状态、当前 partial message、执行中 tool-call ID 与最近 assistant error；Web `/api/state` 使用同一事实源
 - ToolResult 可携带工具自身 usage 与 `added_tool_names`；usage 不并入主 LLM 上下文计费，added names 只标记 `Context.tools` 的 provider 加载点且不能由 after hook 伪造
 - SQLite Session 使用 append-only parent-entry tree；命名 lane 持久化 active leaf，支持 branch、fork、append-only label fact 与重启恢复；`messages` 是 active lane 的兼容投影
+- Session lane operation 使用 append-only intent/effect/finish records；`Memory.md` 更新以 immutable generation + 原子 metadata pointer 发布，旧 JSON Session save 使用可修复 torn tail 的 append-only journal
 
 ## 数据与生命周期
 
@@ -72,7 +74,7 @@
 |---|---|
 | 账号与登录 Session | `.pi-agent-data/auth.sqlite`；账号保留，登录 Session 在后端重启时撤销 |
 | 账号工作区 | `.pi-agent-data/users/{user_id}/` |
-| Session/消息/Skills/MCP/Provider metadata | 用户目录下 `workspace.sqlite` |
+| Session/消息/operation records/Skills/MCP/Provider metadata | 用户目录下 `workspace.sqlite` |
 | Session 文件 | 用户目录下 `uploads/{session_id}/` |
 | Knowledge | 用户目录下 `knowledge/knowledge.db` 与 `knowledge/libraries/` |
 | API Key | OS Keyring、显式 session-only memory 或显式 env；不写入 SQLite 明文 |
@@ -80,7 +82,7 @@
 
 ## 2026-08-20 当前验证基线
 
-Backend 全量数字基于 `43c1d0a` 实际复跑；版本/许可证提交 `8a6ff2e`
+Backend 全量数字基于 `8a5c569` 等价工作区实际复跑；版本/许可证提交 `8a6ff2e`
 另行通过 wheel 元数据验证；`51ce3c7` 的等价内容通过完整 Playwright 与最终
 真实网络 smoke：
 
@@ -88,7 +90,8 @@ Backend 全量数字基于 `43c1d0a` 实际复跑；版本/许可证提交 `8a6f
 |---|---|---|
 | Ruff 全量 | **PASS** | `ruff check src tests`；0 errors |
 | strict Mypy 全量 | **PASS** | `mypy src/pi_agent_core_py`；114 files / 0 issues |
-| Backend CI 全量 + coverage | **3681 passed, 6 skipped, 12 deselected** | `pytest tests -m "not slow" --tb=short -q`；83.84% coverage；499.69s；58 warnings；工作区 `basetemp` + cacheprovider disabled |
+| Backend CI 全量 + coverage | **3692 passed, 6 skipped, 12 deselected** | `pytest tests -m "not slow" --tb=short -q`；83.70% coverage；513.86s；58 warnings；工作区 `basetemp` + cacheprovider disabled |
+| Durable recovery 定向回归 | **PASS** | operation intent/effect/finish、同进程无模型重试、启动前滚、source-leaf conflict 保留消息、文件 pointer rollback、JSON torn-tail / legacy migration |
 | Session tree 定向回归 | **69 passed** | immutable entry/lane、旧库迁移、branch/fork/label/active leaf、重启、Web API、revision sibling 与 trailing suffix |
 | ToolResult metadata 定向回归 | **173 passed** | usage / added names、hook 边界、消息/事件、provider context、Snapshot、Session/SQLite、Web serializer 与旧数据默认值 |
 | Agent 公开状态定向回归 | **137 passed** | Agent、Harness、stream、Provider runtime 与 Web state；系统 temp ACL 阻断项改用工作区 `basetemp` 后通过 |
@@ -123,7 +126,7 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 ### Runtime / Web
 
 - 每账号单 harness、单 active request；不支持同账号多个 Session 并行生成
-- active request 与 pending approval 不跨后端重启恢复；浏览器刷新只恢复仍在当前进程运行的请求
+- 普通 Prompt/Regenerate active request 与 pending approval 不跨后端重启恢复；浏览器刷新只恢复仍在当前进程运行的请求。Checkpointer 是当前例外：已接受 intent 与文件发布状态可在启动时收敛
 - Human Approval 只有 Approve once / Deny；没有永久授权
 - Context Budget 是带安全余量的确定性近似，不是 Provider 官方 tokenizer
 - Context compaction 由用户手动触发，默认摘要器为本地规则式；`/checkpointer` 才调用当前 LLM
@@ -151,7 +154,7 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 ## 建议下一步
 
-1. 继续 pi-agent 对齐：引入 durable operation/recovery，避免整份 JSON 覆盖和跨资源非原子发布。
+1. 继续 pi-agent 对齐：将 compaction 默认边界改为完整 turn，并补齐 token/window、前缀摘要和重试语义。
 2. `0.0.28` tag/push 仍需单独决定；仓库当前尚无 remote。
 
 未完成事项的唯一清单见 [`TODO.md`](TODO.md)。使用与架构说明见 [`README.md`](README.md)。

@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Durable operation / recovery（2026-08-20）
+
+- SQLite Session 新增 lane-scoped durable operation identity 与 append-only `operation_started` / `effect_committed` / `operation_finished` records；相同 intent 重试复用，lane reset 与 completed 在同一事务提交
+- `/checkpointer` 在外部 effect 前固定 immutable source leaf/hash；Memory 已发布但 SQLite 收尾失败时不再反向覆盖，重试或启动 recovery 无需再次调用 LLM，source leaf 变化则保留消息并终止为 conflict
+- `VirtualFileStore` 文本更新改为 immutable content generation + 原子 metadata pointer；启动修复旧协议 backup/hash mismatch 并清理孤儿 generation
+- `JsonFileSessionStore` 从整文件覆盖改为 append-only snapshot journal；旧单对象 JSON 首次写入一次性迁移，malformed final record 可作为 torn tail 截断恢复
+- 完整门禁中修复 Ingestion Worker claim 后、内存 active job 更新前的 idle 误判竞态；新判断以单条 SQLite 快照同时观察 uploaded document 与 durable running job
+- 验证：完整后端 3692 passed、6 skipped、12 deselected、coverage 83.70%；Ruff 0、strict Mypy 114 files / 0 issues；前端 399/399，lint/typecheck/build 全部通过
+
 ### Append-only Session tree 与 lanes（2026-08-20）
 
 - SQLite Session 从单一线性历史迁移为 immutable parent-entry tree；每个命名 lane 持久化 active leaf，旧库按 `messages.idx` 幂等回填 `main` lane

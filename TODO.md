@@ -39,7 +39,7 @@
 ### 4. P2 — Session、Compaction 与持久化
 
 - [x] 评估并迁移 append-only 会话树或 lane-based Session；支持 branch、fork、label 和 active leaf（完成：独立 immutable parent-entry tree + 命名 lane leaf；旧 `messages` 保留为 active lane 兼容投影；旧线性库幂等回填 `main`；Regenerate 创建 sibling branch 并兼容 trailing ToolResult suffix；Core/Web/前端 API、设计文档与重启回归齐备；提交 `43c1d0a`；完整后端 3681 passed / 83.84%，前端 399/399）
-- [ ] 引入 durable operation/recovery，避免整份 JSON 覆盖和非原子发布
+- [x] 引入 durable operation/recovery，避免整份 JSON 覆盖和非原子发布（完成：SQLite lane operation 使用 append-only intent/effect/finish records；Checkpointer 固定 immutable source leaf/hash，Memory 以 immutable generation + 原子 metadata pointer 发布，lane reset 与 completed 同事务；启动/同进程重试可无 LLM 前滚，leaf 变化时保留消息并标记 conflict；旧 `JsonFileSessionStore` 迁移为 append-only journal + torn-tail recovery；完整后端 3692 passed / 83.70%，前端 399/399；提交 `8a5c569`）
 - [ ] 将 compaction 默认边界改为完整 turn，并补齐 token/window、前缀摘要和重试语义
 
 ## P0 — Release 与文档卫生
