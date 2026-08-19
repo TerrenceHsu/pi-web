@@ -578,7 +578,7 @@ class SQLiteSessionStore:
                 "ORDER BY idx ASC",
                 (session_id,),
             )
-            old_rows = await cur.fetchall()
+            old_rows = list(await cur.fetchall())
             await cur.close()
             old_count = len(old_rows)
             common_len = min(old_count, new_count)

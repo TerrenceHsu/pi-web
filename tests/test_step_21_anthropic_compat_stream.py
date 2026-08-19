@@ -12,6 +12,7 @@
 - 非法 tool input JSON → ProviderProtocolError（被 ModelClient 转 ErrorEvent）
 - provider 端抛异常 → ErrorEvent
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -29,7 +30,15 @@ from pi_agent_core_py import (
     ModelClient,
     ProviderRequest,
     TextDeltaEvent,
+    TextEndEvent,
+    TextStartEvent,
+    ThinkingDeltaEvent,
+    ThinkingEndEvent,
+    ThinkingStartEvent,
+    ToolCallDeltaEvent,
+    ToolCallEndEvent,
     ToolCallEvent,
+    ToolCallStartEvent,
 )
 from pi_agent_core_py.messages import TextContent
 
@@ -187,6 +196,132 @@ async def test_text_delta_yields_text_delta_event() -> None:
 
 
 @pytest.mark.asyncio
+async def test_anthropic_content_blocks_map_to_balanced_lifecycles() -> None:
+    raw = _FakeRawStream(
+        events=[
+            _RawEvent(
+                type_="content_block_start",
+                index=0,
+                content_block=_ContentBlock(type_="thinking", thinking="", signature=""),
+            ),
+            _RawEvent(
+                type_="content_block_delta",
+                index=0,
+                delta=_Delta(type_="thinking_delta", thinking="reason"),
+            ),
+            _RawEvent(type_="content_block_stop", index=0),
+            _RawEvent(
+                type_="content_block_start",
+                index=1,
+                content_block=_ContentBlock(type_="text", text=""),
+            ),
+            _RawEvent(
+                type_="content_block_delta",
+                index=1,
+                delta=_Delta(type_="text_delta", text="answer"),
+            ),
+            _RawEvent(type_="content_block_stop", index=1),
+            _RawEvent(
+                type_="content_block_start",
+                index=2,
+                content_block=_ContentBlock(type_="tool_use", id="t1", name="echo"),
+            ),
+            _RawEvent(
+                type_="content_block_delta",
+                index=2,
+                delta=_Delta(type_="input_json_delta", partial_json='{"text":"hi"}'),
+            ),
+            _RawEvent(type_="content_block_stop", index=2),
+        ]
+    )
+    adapter = AnthropicCompatAdapter(_config(), client=_FakeAnthropicClient(raw))
+
+    events = await _collect(adapter, _req())
+
+    assert [event.type for event in events] == [
+        "thinking_start",
+        "thinking_delta",
+        "thinking_end",
+        "text_start",
+        "text_delta",
+        "text_end",
+        "toolcall_start",
+        "toolcall_delta",
+        "toolcall_end",
+        "done",
+    ]
+    assert isinstance(events[0], ThinkingStartEvent)
+    assert isinstance(events[2], ThinkingEndEvent)
+    assert isinstance(events[3], TextStartEvent)
+    assert isinstance(events[5], TextEndEvent)
+    assert isinstance(events[6], ToolCallStartEvent)
+    assert isinstance(events[7], ToolCallDeltaEvent)
+    assert isinstance(events[8], ToolCallEndEvent)
+    assert [event.content_index for event in events[:-1]] == [
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        2,
+        2,
+        2,
+    ]
+    assert isinstance(events[-1], DoneEvent)
+
+
+@pytest.mark.asyncio
+async def test_thinking_and_signature_deltas_are_preserved() -> None:
+    raw = _FakeRawStream(
+        events=[
+            _RawEvent(
+                type_="content_block_start",
+                content_block=_ContentBlock(type_="thinking", thinking="", signature=""),
+            ),
+            _RawEvent(
+                type_="content_block_delta",
+                delta=_Delta(type_="thinking_delta", thinking="reason"),
+            ),
+            _RawEvent(
+                type_="content_block_delta",
+                delta=_Delta(type_="signature_delta", signature="signed-payload"),
+            ),
+        ]
+    )
+    adapter = AnthropicCompatAdapter(_config(), client=_FakeAnthropicClient(raw))
+
+    events = await _collect(adapter, _req())
+    thinking_events = [event for event in events if isinstance(event, ThinkingDeltaEvent)]
+
+    assert [event.delta for event in thinking_events] == ["reason", ""]
+    assert thinking_events[-1].thinking_signature == "signed-payload"
+
+
+@pytest.mark.asyncio
+async def test_redacted_thinking_block_preserves_opaque_payload() -> None:
+    raw = _FakeRawStream(
+        events=[
+            _RawEvent(
+                type_="content_block_start",
+                content_block=_ContentBlock(
+                    type_="redacted_thinking",
+                    data="opaque-encrypted-payload",
+                ),
+            ),
+        ]
+    )
+    adapter = AnthropicCompatAdapter(_config(), client=_FakeAnthropicClient(raw))
+
+    events = await _collect(adapter, _req())
+    thinking = next(event for event in events if isinstance(event, ThinkingDeltaEvent))
+
+    assert thinking.delta == ""
+    assert thinking.thinking_signature == "opaque-encrypted-payload"
+    assert thinking.redacted is True
+
+
+@pytest.mark.asyncio
 async def test_tool_use_block_emits_tool_call_event() -> None:
     """content_block_start(tool_use) + input_json_delta + content_block_stop → ToolCallEvent。"""
     raw = _FakeRawStream(
@@ -338,6 +473,7 @@ async def test_missing_usage_defaults_to_zero() -> None:
         ],
         final_usage=None,
     )
+
     # get_final_message 抛异常的分支：用 raise 版本
     class _BrokenRawStream(_FakeRawStream):
         async def get_final_message(self) -> Any:
@@ -401,10 +537,11 @@ async def test_total_tokens_computed_from_input_plus_output_when_missing() -> No
 @pytest.mark.asyncio
 async def test_temperature_zero_is_passed_to_sdk() -> None:
     """显式 temperature=0.0 应该传给 SDK（不让 SDK 默认 1.0 偷偷生效）。"""
-    raw = _FakeRawStream(events=[
-        _RawEvent(type_="content_block_delta",
-                  delta=_Delta(type_="text_delta", text="x")),
-    ])
+    raw = _FakeRawStream(
+        events=[
+            _RawEvent(type_="content_block_delta", delta=_Delta(type_="text_delta", text="x")),
+        ]
+    )
     fake_client = _FakeAnthropicClient(raw)
     cfg = _config()  # default temperature=0.0
     adapter = AnthropicCompatAdapter(cfg, client=fake_client)
@@ -419,14 +556,18 @@ async def test_temperature_zero_is_passed_to_sdk() -> None:
 @pytest.mark.asyncio
 async def test_temperature_none_skips_kwarg() -> None:
     """temperature=None 时不传——让 SDK 用自己的默认。"""
-    raw = _FakeRawStream(events=[
-        _RawEvent(type_="content_block_delta",
-                  delta=_Delta(type_="text_delta", text="x")),
-    ])
+    raw = _FakeRawStream(
+        events=[
+            _RawEvent(type_="content_block_delta", delta=_Delta(type_="text_delta", text="x")),
+        ]
+    )
     fake_client = _FakeAnthropicClient(raw)
     cfg = AnthropicCompatConfig(
-        api_key="test-key", base_url="https://example.test",
-        model="m", max_tokens=128, temperature=None,
+        api_key="test-key",
+        base_url="https://example.test",
+        model="m",
+        max_tokens=128,
+        temperature=None,
     )
     adapter = AnthropicCompatAdapter(cfg, client=fake_client)
 
@@ -439,14 +580,18 @@ async def test_temperature_none_skips_kwarg() -> None:
 
 @pytest.mark.asyncio
 async def test_temperature_custom_value_passed_through() -> None:
-    raw = _FakeRawStream(events=[
-        _RawEvent(type_="content_block_delta",
-                  delta=_Delta(type_="text_delta", text="x")),
-    ])
+    raw = _FakeRawStream(
+        events=[
+            _RawEvent(type_="content_block_delta", delta=_Delta(type_="text_delta", text="x")),
+        ]
+    )
     fake_client = _FakeAnthropicClient(raw)
     cfg = AnthropicCompatConfig(
-        api_key="test-key", base_url="https://example.test",
-        model="m", max_tokens=128, temperature=0.7,
+        api_key="test-key",
+        base_url="https://example.test",
+        model="m",
+        max_tokens=128,
+        temperature=0.7,
     )
     adapter = AnthropicCompatAdapter(cfg, client=fake_client)
 
@@ -461,7 +606,9 @@ def test_missing_api_key_raises_provider_config_error() -> None:
     from pi_agent_core_py import ProviderConfigError
 
     cfg = AnthropicCompatConfig(
-        api_key="", base_url="https://example.test", model="m",
+        api_key="",
+        base_url="https://example.test",
+        model="m",
     )
     with pytest.raises(ProviderConfigError):
         AnthropicCompatAdapter(cfg)

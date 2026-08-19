@@ -50,11 +50,12 @@ class OSKeyringSecretStore:
                 None 表示用 keyring.get_keyring() 当前 backend
         """
         self._explicit_backend = keyring_backend
+        self._keyring_mod: Any | None = None
 
         if keyring_backend is None:
             # 延迟 import——不要求模块顶层安装 keyring
             try:
-                import keyring  # type: ignore[import-untyped]
+                import keyring
             except ImportError as e:
                 raise SecretStoreUnavailableError(
                     "keyring package not installed——install with `pip install keyring>=25` "
@@ -184,7 +185,7 @@ class OSKeyringSecretStore:
         except SecretStoreUnavailableError:
             # backend 不可用——返回 None 而非抛（与 Protocol "缺失返回 None" 一致）
             return None
-        return result
+        return result if isinstance(result, str) else None
 
     async def delete(self, secret_ref: str) -> None:
         if not isinstance(secret_ref, str) or not secret_ref or not secret_ref.strip():

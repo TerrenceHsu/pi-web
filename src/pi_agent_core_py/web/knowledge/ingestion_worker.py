@@ -184,7 +184,7 @@ class IngestionWorkerManager:
 
         # State (single-threaded asyncio; no lock needed for state field)
         self._state: WorkerState = "stopped"
-        self._worker_task: asyncio.Task | None = None
+        self._worker_task: asyncio.Task[None] | None = None
         self._stop_requested: bool = False
         self._active_job_id: str | None = None
         self._active_document_id: str | None = None

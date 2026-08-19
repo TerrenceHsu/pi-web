@@ -14,6 +14,7 @@
 
 默认运行（FakeClient + TestClient，无外部依赖）。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -77,9 +78,7 @@ def _wait_for_request_status(
             if last.get("status") in target:
                 return last
         time.sleep(0.02)
-    pytest.fail(
-        f"request {request_id} did not reach {target} within {timeout_s}s; last={last}"
-    )
+    pytest.fail(f"request {request_id} did not reach {target} within {timeout_s}s; last={last}")
 
 
 # ============================================================================
@@ -97,9 +96,7 @@ def test_1_list_active_requests_by_session(web_client_slow):
     request_id = resp.json()["request_id"]
 
     # 查 active
-    list_resp = client.get(
-        f"/api/requests?session_id={session_id}&status=active&limit=10"
-    )
+    list_resp = client.get(f"/api/requests?session_id={session_id}&status=active&limit=10")
     assert list_resp.status_code == 200
     body = list_resp.json()
     assert body["count"] >= 1
@@ -114,9 +111,7 @@ def test_2_list_no_active_returns_empty(web_client):
     resp = client.get("/api/sessions")
     session_id = resp.json()["sessions"][0]["id"]
 
-    list_resp = client.get(
-        f"/api/requests?session_id={session_id}&status=active"
-    )
+    list_resp = client.get(f"/api/requests?session_id={session_id}&status=active")
     assert list_resp.status_code == 200
     body = list_resp.json()
     assert body["count"] == 0
@@ -132,9 +127,7 @@ def test_3_terminal_not_active(web_client):
 
     _wait_for_request_status(client, request_id, ("completed",))
 
-    list_resp = client.get(
-        f"/api/requests?session_id={session_id}&status=active"
-    )
+    list_resp = client.get(f"/api/requests?session_id={session_id}&status=active")
     body = list_resp.json()
     active_ids = [r["request_id"] for r in body["requests"]]
     assert request_id not in active_ids, (
@@ -142,9 +135,7 @@ def test_3_terminal_not_active(web_client):
     )
 
     # 但 status=terminal 应该找到
-    term_resp = client.get(
-        f"/api/requests?session_id={session_id}&status=terminal"
-    )
+    term_resp = client.get(f"/api/requests?session_id={session_id}&status=terminal")
     term_ids = [r["request_id"] for r in term_resp.json()["requests"]]
     assert request_id in term_ids
 
@@ -171,9 +162,7 @@ def test_4_request_response_excludes_task_and_payload(web_client):
     # 单查
     single = client.get(f"/api/requests/{request_id}").json()
     assert "task" not in single, f"task should not be in response: {single}"
-    assert "payload" not in single, (
-        f"payload should not be in response: {single}"
-    )
+    assert "payload" not in single, f"payload should not be in response: {single}"
 
     # 列表查
     list_resp = client.get("/api/requests?status=active").json()
@@ -207,9 +196,7 @@ def test_5_list_sorted_created_at_desc(web_client):
     created_ats = [r["created_at"] for r in body["requests"] if r["created_at"]]
     if len(created_ats) >= 2:
         for i in range(1, len(created_ats)):
-            assert created_ats[i - 1] >= created_ats[i], (
-                f"not DESC sorted: {created_ats}"
-            )
+            assert created_ats[i - 1] >= created_ats[i], f"not DESC sorted: {created_ats}"
 
 
 # ============================================================================
@@ -273,7 +260,7 @@ def test_8_after_sequence_pagination(web_client):
     # 分页拉——limit=2
     after = 0
     paged_seqs: list[int] = []
-    for _ in range(20):  # 上限保护
+    for _ in range(len(all_seqs) + 1):  # 上限保护；事件种类扩展后仍可拉完
         r = client.get(f"/api/events?after_sequence={after}&limit=2").json()
         if not r["events"]:
             break

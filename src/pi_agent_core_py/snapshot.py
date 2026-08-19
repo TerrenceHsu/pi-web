@@ -165,6 +165,8 @@ class SnapshotBuilder:
         self._active_turn: TurnSnapshot | None = None
         self._current_messages: list[dict[str, Any]] = []
         self.seen_aborted = False
+        self.seen_error = False
+        self.last_error: str | None = None
 
     def start(
         self,
@@ -275,6 +277,9 @@ class SnapshotBuilder:
                 error=event.message.error_message,
                 message=_serialize_message(event.message),
             )
+            if stop_reason == "error":
+                self.seen_error = True
+                self.last_error = event.message.error_message
         elif isinstance(event, RequestEndEvent) and event.status == "aborted":
             self.seen_aborted = True
 

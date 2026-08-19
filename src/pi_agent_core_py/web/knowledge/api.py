@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from fastapi import (
     APIRouter,
@@ -58,6 +58,7 @@ from ..credentials.api import (
     require_ui_header_dep,
 )
 from ..local_web_security import WebSecurityConfig
+from .chunk_store import ChunkSearchHit, ChunkStore
 from .ingestion_store import (
     IngestionAlreadyActiveError,
     IngestionStore,
@@ -68,6 +69,8 @@ from .ingestion_worker import IngestionWorkerManager
 from .models import (
     MAX_LIBRARY_DESCRIPTION_LENGTH,
     MAX_LIBRARY_NAME_LENGTH,
+    Document,
+    LibraryView,
     is_valid_document_id,
     is_valid_library_description,
     is_valid_library_id,
@@ -302,7 +305,7 @@ async def get_knowledge_service(request: Request) -> KnowledgeService:
                 "message": "Knowledge subsystem is not initialized.",
             },
         )
-    return svc
+    return cast(KnowledgeService, svc)
 
 
 # ============================================================================
@@ -310,7 +313,7 @@ async def get_knowledge_service(request: Request) -> KnowledgeService:
 # ============================================================================
 
 
-async def get_knowledge_store(request: Request):
+async def get_knowledge_store(request: Request) -> KnowledgeStore:
     """Read KnowledgeStore; raise 503 if subsystem disabled."""
     web_state = getattr(request.app.state, "web", None)
     store = getattr(web_state, "knowledge_store", None) if web_state else None
@@ -322,7 +325,7 @@ async def get_knowledge_store(request: Request):
                 "message": "Knowledge subsystem is not initialized.",
             },
         )
-    return store
+    return cast(KnowledgeStore, store)
 
 
 async def get_ingestion_store(request: Request) -> IngestionStore:
@@ -341,7 +344,7 @@ async def get_ingestion_store(request: Request) -> IngestionStore:
     return IngestionStore(store)
 
 
-async def get_chunk_store(request: Request):
+async def get_chunk_store(request: Request) -> ChunkStore:
     """Read ChunkStore; raise 503 if subsystem disabled.
 
     Per P2-R5-A §10 — ChunkStore is sole owner of FTS SQL + BM25 ranking.
@@ -358,8 +361,7 @@ async def get_chunk_store(request: Request):
                 "message": "Knowledge subsystem is not initialized.",
             },
         )
-    from .chunk_store import ChunkStore
-    return ChunkStore(store)
+    return ChunkStore(cast(KnowledgeStore, store))
 
 
 async def get_worker_manager(request: Request) -> IngestionWorkerManager:
@@ -386,7 +388,7 @@ async def get_worker_manager(request: Request) -> IngestionWorkerManager:
                 "message": f"Ingestion worker state is {mgr.state!r}.",
             },
         )
-    return mgr
+    return cast(IngestionWorkerManager, mgr)
 
 
 async def get_upload_service(request: Request) -> UploadService:
@@ -880,7 +882,7 @@ def register_knowledge_endpoints(router: APIRouter) -> None:
         try:
             result: UploadResult = await upload_service.upload_stream(
                 library_id=library_id,
-                source_name=file.filename,
+                source_name=file.filename or "",
                 chunk_source=file,
                 content_length_hint=content_length_hint,
             )
@@ -1273,7 +1275,9 @@ def register_session_knowledge_endpoints(router: APIRouter) -> None:
 # ============================================================================
 
 
-async def _load_source_names_for_hits(store: KnowledgeStore, hits: list) -> dict[str, str]:
+async def _load_source_names_for_hits(
+    store: KnowledgeStore, hits: list[ChunkSearchHit]
+) -> dict[str, str]:
     """Batch-load ``Document.source_name`` for each hit's document_id.
 
     Used by ``search_library`` (R5-B2) — mirrors the friend-access pattern
@@ -1294,7 +1298,7 @@ async def _load_source_names_for_hits(store: KnowledgeStore, hits: list) -> dict
     return {row["id"]: row["source_name"] for row in rows}
 
 
-def _library_view_to_response(view) -> LibraryResponse:
+def _library_view_to_response(view: LibraryView) -> LibraryResponse:
     """Convert service-layer LibraryView → API LibraryResponse.
 
     Never includes absolute path / parser internals.
@@ -1312,7 +1316,7 @@ def _library_view_to_response(view) -> LibraryResponse:
     )
 
 
-def _document_to_response(doc) -> DocumentResponse:
+def _document_to_response(doc: Document) -> DocumentResponse:
     """Convert service-layer Document → API DocumentResponse.
 
     Rel paths only (P2-R0 §3.2 API path contract).

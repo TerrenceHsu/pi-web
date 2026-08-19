@@ -17,7 +17,7 @@ P1-E1-5B / LOW-1：新增 SafeValidation* 响应模型，覆盖 OpenAPI 默认 4
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Literal, overload
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
@@ -59,6 +59,14 @@ _CREDENTIAL_ID_RE = re.compile(CREDENTIAL_ID_PATTERN)
 # ============================================================================
 # Shared validators
 # ============================================================================
+
+
+@overload
+def _validate_secret_bytes(v: SecretStr) -> SecretStr: ...
+
+
+@overload
+def _validate_secret_bytes(v: None) -> None: ...
 
 
 def _validate_secret_bytes(v: SecretStr | None) -> SecretStr | None:

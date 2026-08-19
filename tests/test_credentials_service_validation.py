@@ -31,6 +31,7 @@ from pi_agent_core_py.web.credentials.errors import (
     CredentialBackendUnavailableError,
     CredentialServiceError,
 )
+from pi_agent_core_py.web.credentials.secret_store import SecretStoreRouter
 from pi_agent_core_py.web.credentials.service import (
     CreateCredentialCommand,
     CredentialService,
@@ -44,7 +45,6 @@ from pi_agent_core_py.web.providers.validation import (
     ProviderValidationResult,
     ValidationStrategyRegistry,
 )
-from pi_agent_core_py.web.credentials.secret_store import SecretStoreRouter
 
 # ============================================================================
 # Fakes

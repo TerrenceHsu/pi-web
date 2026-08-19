@@ -37,7 +37,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from fastapi import (
@@ -90,6 +90,9 @@ from .serializers import (
     to_json_safe,
 )
 from .state import WebAppState, WebMCPServerConfig, WebRunRequest
+
+if TYPE_CHECKING:
+    from .files import VirtualFileStore
 
 # ============================================================================
 # 常量
@@ -452,9 +455,10 @@ def create_app(
         # the authenticated workspace DB connection.
         from .model_capabilities import SQLiteModelCapabilityStore
 
-        model_capability_store = SQLiteModelCapabilityStore(
-            session_store.connection
-        )
+        session_connection = session_store.connection
+        if session_connection is None:
+            raise RuntimeError("session store connection unavailable after init")
+        model_capability_store = SQLiteModelCapabilityStore(session_connection)
         await model_capability_store.init()
         state.model_capability_store = model_capability_store
 
@@ -722,7 +726,7 @@ def create_app(
                         chunk_store=_chunk_store_for_search,
                     )
 
-                    def _evidence_registry_getter():
+                    def _evidence_registry_getter() -> Any:
                         if state._evidence_registry is None:
                             state._evidence_registry = _ER()
                         return state._evidence_registry
@@ -855,7 +859,7 @@ def create_app(
         # 2. 收集所有 active request 的 task——abort queued（cancel）+ abort running（harness.abort）
         #    用 list 快照——_abort_request_internal 会修改 state.active_requests
         active_reqs = list(state.active_requests.values())
-        active_tasks: list[asyncio.Task] = []
+        active_tasks: list[asyncio.Task[Any]] = []
         for req in active_reqs:
             try:
                 await _abort_request_internal(req, "server_shutdown")
@@ -948,10 +952,12 @@ def create_app(
                 pass
             state.indexing_worker_manager = None
         # P2-R1: 关闭 KnowledgeStore（独立 connection）
-        k_store = state.knowledge_store if hasattr(state, "knowledge_store") else None
-        if k_store is not None:
+        knowledge_store_to_close = (
+            state.knowledge_store if hasattr(state, "knowledge_store") else None
+        )
+        if knowledge_store_to_close is not None:
             try:
-                await k_store.close()
+                await knowledge_store_to_close.close()
             except Exception:
                 pass
         # VirtualFileStore 不需要 close（纯文件 IO），保留目录给后续进程用
@@ -997,7 +1003,7 @@ def create_app(
     # 前被拒绝。两个 if 块按 TrustedHost / BodyLimit 各自条件独立 add，
     # 但通过统一的 _pending_middlewares 列表收集后按 TrustedHost 后 add
     # 的顺序 flush，确保跨 if 块的顺序也正确。
-    _pending_middlewares: list[tuple[type, dict]] = []
+    _pending_middlewares: list[tuple[Any, dict[str, Any]]] = []
 
     if _cred_resolved.trusted_host_enabled:
         from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -1276,6 +1282,7 @@ def create_app(
                 status_code=409,
                 detail="harness is already running a request",
             )
+        phase: str
         try:
             phase = harness.context.phase
         except Exception:
@@ -2411,7 +2418,7 @@ def create_app(
         if snapshot is not None:
             try:
                 # to_dict 是 dataclass method；可能抛异常——best-effort
-                snapshot_payload = snapshot.to_dict()  # type: ignore[attr-defined]
+                snapshot_payload = snapshot.to_dict()
             except Exception:
                 snapshot_payload = None
 
@@ -2517,7 +2524,7 @@ def create_app(
 
         # 核心：finalize_revision（单 BEGIN IMMEDIATE transaction）
         try:
-            await state.extension_store.finalize_revision(  # type: ignore[union-attr]
+            await state.extension_store.finalize_revision(
                 revision_id=revision_id,
                 request_id=request_id,
                 candidate_content_json=candidate_json,
@@ -2642,10 +2649,11 @@ def create_app(
         """从 active + history 找 request record。"""
         req = state.active_requests.get(request_id)
         if req is not None:
-            return req
+            return cast(WebRunRequest, req)
         for r in state.request_history:
-            if r.id == request_id:
-                return r
+            candidate = cast(WebRunRequest, r)
+            if candidate.id == request_id:
+                return candidate
         return None
 
     def _remove_from_active(req: WebRunRequest) -> None:
@@ -2786,7 +2794,7 @@ def create_app(
                         ),
                     )
                 except PromptRuntimeError as e:
-                    raise CheckpointerError(e.code, e.message) from None
+                    raise CheckpointerError(e.error_type, e.message) from None
 
                 if memory_ref is None:
                     updated_ref = await file_store.write_text(
@@ -3257,8 +3265,10 @@ def create_app(
     # Messages
     # ========================================================================
 
-    @app.get("/api/messages")
-    async def get_messages(session_id: str | None = None) -> dict[str, Any]:
+    @app.get("/api/messages", response_model=None)
+    async def get_messages(
+        session_id: str | None = None,
+    ) -> dict[str, Any] | JSONResponse:
         """列出 messages。
 
         P0-1：支持 `?session_id=` 查 sqlite 历史消息。
@@ -3500,7 +3510,7 @@ def create_app(
             from pydantic import TypeAdapter
 
             from ..compaction import CompactionConfig, compact_messages
-            from ..messages import AgentMessage
+            from ..messages import AgentMessage, Message
 
             try:
                 messages = list(await store.list_messages(sid))
@@ -3530,11 +3540,11 @@ def create_app(
                         "reason": result.reason,
                     },
                 )
-            adapter = TypeAdapter(AgentMessage)
+            adapter: TypeAdapter[AgentMessage] = TypeAdapter(AgentMessage)
             replacement = [adapter.validate_python(item) for item in result.new_messages]
             await store.replace_messages(sid, replacement)
             if state.current_session_id == sid:
-                harness.agent.state.messages = list(replacement)
+                harness.agent.state.messages = cast(list[Message], replacement)
         finally:
             state.running = False
 
@@ -4078,14 +4088,14 @@ def create_app(
     # Files（P0-2）
     # ========================================================================
 
-    def _require_file_store():
+    def _require_file_store() -> VirtualFileStore:
         """统一拿 file_store；未启用返回 503 detail。"""
         if state.file_store is None:
             raise HTTPException(
                 status_code=503,
                 detail="file store not initialized; create_app(uploads_dir=...)",
             )
-        return state.file_store
+        return cast("VirtualFileStore", state.file_store)
 
     def _serialize_managed_file(ref: Any) -> dict[str, Any]:
         """返回逻辑文件 metadata，绝不暴露物理磁盘路径。"""

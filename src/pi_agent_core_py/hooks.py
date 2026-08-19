@@ -1,7 +1,7 @@
 """Tool Hooks（Step 6）。
 
 两个钩子：
-- `before_tool_call`：工具执行前拦截 / 修改 ToolCall
+- `before_tool_call`：工具执行前拦截 / 修改 ToolCall 的 name/arguments（ID 不可变）
 - `after_tool_call`：工具执行后修改 ToolResult
 
 设计要点：
@@ -63,7 +63,7 @@ class BeforeToolCallResult(BaseModel):
 
     - `allow=True`：放行（默认）
     - `allow=False`：阻断，`reason` 写入 ToolResultMessage.content
-    - `tool_call` 不为 None：使用修改后的 ToolCall 继续执行（替换原 tool_call）
+    - `tool_call` 不为 None：使用修改后的 ToolCall 继续执行；`id` 必须保持不变
     - `details`：合并到阻断时的 ToolResult.details
     """
     allow: bool = True

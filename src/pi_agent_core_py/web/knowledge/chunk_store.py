@@ -476,25 +476,37 @@ class ChunkStore:
         async with self._db.execute(
             "SELECT COUNT(*) AS n FROM knowledge_chunks"
         ) as cursor:
-            chunk_count = (await cursor.fetchone())["n"]
+            chunk_row = await cursor.fetchone()
+        if chunk_row is None:
+            raise FTSIntegrityError("chunk count query returned no row")
+        chunk_count = chunk_row["n"]
         async with self._db.execute(
             "SELECT COUNT(*) AS n FROM knowledge_chunks_fts"
         ) as cursor:
-            fts_count = (await cursor.fetchone())["n"]
+            fts_row = await cursor.fetchone()
+        if fts_row is None:
+            raise FTSIntegrityError("FTS count query returned no row")
+        fts_count = fts_row["n"]
         async with self._db.execute(
             "SELECT COUNT(*) AS n FROM knowledge_chunks c "
             "WHERE NOT EXISTS ("
             " SELECT 1 FROM knowledge_chunks_fts f WHERE f.chunk_id = c.id"
             ")"
         ) as cursor:
-            chunks_missing_fts = (await cursor.fetchone())["n"]
+            missing_row = await cursor.fetchone()
+        if missing_row is None:
+            raise FTSIntegrityError("missing FTS count query returned no row")
+        chunks_missing_fts = missing_row["n"]
         async with self._db.execute(
             "SELECT COUNT(*) AS n FROM knowledge_chunks_fts f "
             "WHERE NOT EXISTS ("
             " SELECT 1 FROM knowledge_chunks c WHERE c.id = f.chunk_id"
             ")"
         ) as cursor:
-            orphan_fts_rows = (await cursor.fetchone())["n"]
+            orphan_row = await cursor.fetchone()
+        if orphan_row is None:
+            raise FTSIntegrityError("orphan FTS count query returned no row")
+        orphan_fts_rows = orphan_row["n"]
         ok = (
             chunk_count == fts_count
             and chunks_missing_fts == 0

@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from pi_agent_core_py.web.providers.model_options import InvalidModelIdError
 from pi_agent_core_py.web.providers.config_service import (
     ProviderConfigService,
     ProviderProfileDisabledError,
@@ -18,6 +17,7 @@ from pi_agent_core_py.web.providers.config_store import (
     ProviderProfileNotFoundError,
     SQLiteProviderConfigStore,
 )
+from pi_agent_core_py.web.providers.model_options import InvalidModelIdError
 
 pytestmark = pytest.mark.asyncio
 

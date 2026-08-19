@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
-from .pdf_parser import PdfExtractionResult
+from .pdf_parser import PdfExtractionResult, PdfPage
 
 # ============================================================================
 # Warning thresholds (R2-B startup directive §12; values frozen here so tests
@@ -259,7 +259,7 @@ class PdfTextQualityEvaluator:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _validate_page_number_sequence(pages: tuple) -> None:
+    def _validate_page_number_sequence(pages: tuple[PdfPage, ...]) -> None:
         """Ensure page numbers are exactly ``1, 2, ..., len(pages)``.
 
         Per R2-B startup directive §14: page numbers must be strictly

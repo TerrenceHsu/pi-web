@@ -71,7 +71,7 @@ class PypdfParser:
     def __init__(self) -> None:
         # Lazy import — base package must be importable without pypdf installed.
         try:
-            import pypdf  # type: ignore[import-not-found]  # noqa: F401
+            import pypdf  # noqa: F401
         except ImportError as e:
             raise PdfParserUnavailable(
                 "pypdf is not installed; install the [rag] optional extra"
@@ -135,11 +135,12 @@ class PypdfParser:
             password_required = False
             if encrypted:
                 # Try empty-password decrypt; pypdf returns 0 on failure
+                decrypt_succeeded = False
                 try:
-                    result_code = reader.decrypt("")
+                    decrypt_succeeded = reader.decrypt("") != 0
                 except Exception:
-                    result_code = 0
-                password_required = result_code == 0
+                    pass
+                password_required = not decrypt_succeeded
 
             if password_required:
                 # Cannot probe pages / metadata without password — return
@@ -201,11 +202,12 @@ class PypdfParser:
         try:
             # Refuse encrypted PDFs per P2-R2-A §18 (no auto-decrypt)
             if getattr(reader, "is_encrypted", False):
+                decrypt_succeeded = False
                 try:
-                    decrypt_result = reader.decrypt("")
+                    decrypt_succeeded = reader.decrypt("") != 0
                 except Exception:
-                    decrypt_result = 0
-                if decrypt_result == 0:
+                    pass
+                if not decrypt_succeeded:
                     raise PdfPasswordRequired(
                         "PDF is encrypted and requires a password; "
                         "R2 does not accept passwords"
@@ -280,7 +282,7 @@ class PypdfParser:
 
         def _get(key: str) -> str | None:
             try:
-                return truncate_metadata_value(raw_meta.get(key))  # type: ignore[attr-defined]
+                return truncate_metadata_value(raw_meta.get(key))
             except Exception:
                 return None
 

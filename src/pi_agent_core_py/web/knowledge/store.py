@@ -336,7 +336,7 @@ class KnowledgeStore:
         connection: aiosqlite.Connection,
         owns_connection: bool,
     ) -> None:
-        self._db = connection
+        self._db: aiosqlite.Connection | None = connection
         self._owns_connection = owns_connection
         self._closed: bool = False
         self._write_lock = asyncio.Lock()

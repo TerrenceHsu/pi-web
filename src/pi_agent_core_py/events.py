@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SerializeAsAny
 
 from .messages import AssistantMessage, Message, ToolCall
 from .model_client import StreamEvent
@@ -82,7 +82,7 @@ class MessageUpdateEvent(BaseModel):
     """流式更新。只对 assistant 消息。"""
     type: Literal["message_update"] = "message_update"
     message: AssistantMessage
-    assistant_message_event: StreamEvent | None = None
+    assistant_message_event: SerializeAsAny[StreamEvent] | None = None
 
 
 class MessageEndEvent(BaseModel):

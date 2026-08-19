@@ -80,7 +80,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "slow: tests that hit real LLM APIs (require API key)",
-    "integration: tests that hit real external services (require API key / network)",
+    "integration: real external services; also requires PI_RUN_INTEGRATION=1",
     "docker: tests that require Docker daemon (not used in this trimmed copy)",
 ]
 addopts = [

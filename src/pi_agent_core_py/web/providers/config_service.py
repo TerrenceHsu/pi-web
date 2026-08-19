@@ -30,12 +30,6 @@ from typing import Literal
 from ...providers.registry import ProviderDefinition, ProviderRegistry
 from ..credentials.service import CredentialService, CredentialView
 from ..credentials.store import CredentialNotFoundError
-from .model_options import (
-    InvalidModelIdError,
-    ModelOption,
-    get_static_model_options,
-    normalize_model_id,
-)
 from .config_store import (
     ProviderConfigStoreError,
     ProviderProfile,
@@ -43,6 +37,12 @@ from .config_store import (
     ProviderProfileStateError,
     SessionModelBinding,
     SQLiteProviderConfigStore,
+)
+from .model_options import (
+    InvalidModelIdError,
+    ModelOption,
+    get_static_model_options,
+    normalize_model_id,
 )
 
 # ============================================================================

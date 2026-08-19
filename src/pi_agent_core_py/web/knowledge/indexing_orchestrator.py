@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import Final, cast
 
 from .chunk_store import ChunkStore
 from .chunker import (
@@ -30,10 +30,8 @@ from .chunker import (
 from .files import FileNotFoundError_ as MarkdownFileMissing
 from .files import KnowledgeFileStore
 from .indexing_store import IndexingStore
+from .models import Document
 from .store import DocumentNotFoundError, KnowledgeStore
-
-if TYPE_CHECKING:
-    pass
 
 # ============================================================================
 # Constants — frozen document.md filename (R2-B contract)
@@ -309,7 +307,7 @@ class IndexingOrchestrator:
     # ------------------------------------------------------------------
 
     async def _read_and_verify_markdown(
-        self, document
+        self, document: Document
     ) -> tuple[str, str]:
         """Return ``(markdown_text, parsed_source_sha256)``.
 
@@ -318,11 +316,14 @@ class IndexingOrchestrator:
             _ShaMismatch: frontmatter source_sha256 ≠ Document.source_sha256.
         """
         try:
-            markdown_text = self._file_store.read_file(
-                document.library_id,
-                document.id,
-                _DOCUMENT_MARKDOWN_FILENAME,
-                as_text=True,
+            markdown_text = cast(
+                str,
+                self._file_store.read_file(
+                    document.library_id,
+                    document.id,
+                    _DOCUMENT_MARKDOWN_FILENAME,
+                    as_text=True,
+                ),
             )
         except MarkdownFileMissing as exc:
             raise _MarkdownMissing() from exc
@@ -388,7 +389,7 @@ class IndexingOrchestrator:
         )
 
     @staticmethod
-    def _result_for_non_normalizing(document) -> IndexingResult:
+    def _result_for_non_normalizing(document: Document) -> IndexingResult:
         """Build a controlled ``IndexingResult`` for documents that are
         not in ``normalizing`` (so cannot be claimed)."""
         status = document.status

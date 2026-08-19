@@ -23,12 +23,12 @@ E1-4B2：8 个 endpoint 实现（仅调 CredentialService）
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
-from typing import Annotated, Any
+from collections.abc import Awaitable, Callable, Coroutine
+from typing import TYPE_CHECKING, Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Request, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -37,6 +37,7 @@ from ...providers.registry import (
     detect_provider_hint,
     list_provider_definitions,
 )
+from ..local_web_security import WebSecurityConfig
 from .dto import (
     CREDENTIAL_ID_PATTERN,
     CredentialCreateRequest,
@@ -69,7 +70,9 @@ from .store import (
     CredentialSecretRefConflictError,
     CredentialsSchemaError,
 )
-from ..local_web_security import WebSecurityConfig
+
+if TYPE_CHECKING:
+    from .runtime import CredentialRuntimeState
 
 __all__ = [
     # Body limit middleware
@@ -86,6 +89,7 @@ __all__ = [
     "register_credential_endpoints",
     "build_full_credential_router",
     "get_credential_service",
+    "SafeValidationErrorResponse",
     # Serializers
     "serialize_credential_view",
     "serialize_validation_result",
@@ -429,10 +433,12 @@ class CredentialAPIRoute(APIRoute):
     router——existing FastAPI APIs keep their default 422 schema.
     """
 
-    def get_route_handler(self) -> Callable[[Request], Awaitable[Any]]:
+    def get_route_handler(
+        self,
+    ) -> Callable[[Request], Coroutine[Any, Any, Response]]:
         original = super().get_route_handler()
 
-        async def custom_route_handler(request: Request) -> Any:
+        async def custom_route_handler(request: Request) -> Response:
             try:
                 return await original(request)
             except RequestValidationError as exc:
@@ -613,7 +619,7 @@ async def get_credential_service(request: Request) -> CredentialService:
                 "message": "Credential runtime is not initialized.",
             },
         )
-    return runtime.service
+    return cast("CredentialRuntimeState", runtime).service
 
 
 # ============================================================================
@@ -621,7 +627,7 @@ async def get_credential_service(request: Request) -> CredentialService:
 # ============================================================================
 
 
-def serialize_credential_view(view: CredentialView) -> dict:
+def serialize_credential_view(view: CredentialView) -> dict[str, Any]:
     """Safe JSON projection of CredentialView.
 
     Excludes secret_ref / fingerprint / raw record.
@@ -645,7 +651,7 @@ def serialize_credential_view(view: CredentialView) -> dict:
 
 def serialize_validation_result(
     result: CredentialValidationOperationResult,
-) -> dict:
+) -> dict[str, Any]:
     """Safe JSON projection of CredentialValidationOperationResult."""
     return {
         "credential_id": result.credential_id,
@@ -658,7 +664,7 @@ def serialize_validation_result(
     }
 
 
-def serialize_provider_definition(def_: ProviderDefinition) -> dict:
+def serialize_provider_definition(def_: ProviderDefinition) -> dict[str, Any]:
     """Safe JSON projection——no internal endpoint / strategy / key hints."""
     return {
         "id": def_.id,
@@ -688,7 +694,7 @@ def register_credential_endpoints(router: APIRouter) -> None:
     # ========================================================================
 
     @router.get("/api/provider-definitions")
-    async def get_provider_definitions() -> list[dict]:
+    async def get_provider_definitions() -> list[dict[str, Any]]:
         """Return built-in provider definitions (no internal endpoint info)."""
         return [
             serialize_provider_definition(d)
@@ -700,7 +706,7 @@ def register_credential_endpoints(router: APIRouter) -> None:
     # ========================================================================
 
     @router.post("/api/provider-hints")
-    async def detect_hint(req: ProviderHintRequest) -> dict:
+    async def detect_hint(req: ProviderHintRequest) -> dict[str, Any]:
         """Local provider hint detection——no network / no persistence."""
         # Extract secret to local var, then release dto + secret ASAP
         secret_value = req.secret_value.get_secret_value()
@@ -722,7 +728,7 @@ def register_credential_endpoints(router: APIRouter) -> None:
     async def list_credentials(
         service: Annotated[CredentialService, Depends(get_credential_service)],
         limit: int = 100,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """List user credentials as safe CredentialView projection."""
         if limit < 1:
             limit = 1
@@ -780,7 +786,7 @@ def register_credential_endpoints(router: APIRouter) -> None:
         credential_id: Annotated[str, Path(pattern=CREDENTIAL_ID_PATTERN)],
         req: CredentialLabelUpdateRequest,
         service: Annotated[CredentialService, Depends(get_credential_service)],
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Update label only——no secret / validation state change."""
         result = await service.update_label(credential_id, req.label)
         view = await service.get(result.record.id)
@@ -795,7 +801,7 @@ def register_credential_endpoints(router: APIRouter) -> None:
         credential_id: Annotated[str, Path(pattern=CREDENTIAL_ID_PATTERN)],
         req: CredentialRotateRequest,
         service: Annotated[CredentialService, Depends(get_credential_service)],
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Rotate secret + reset validation state with CAS."""
         try:
             req.normalize()
@@ -827,7 +833,7 @@ def register_credential_endpoints(router: APIRouter) -> None:
     async def delete_credential(
         credential_id: Annotated[str, Path(pattern=CREDENTIAL_ID_PATTERN)],
         service: Annotated[CredentialService, Depends(get_credential_service)],
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Delete credential + secret (best-effort old secret cleanup)."""
         result = await service.delete(credential_id)
         return {
@@ -845,7 +851,7 @@ def register_credential_endpoints(router: APIRouter) -> None:
         credential_id: Annotated[str, Path(pattern=CREDENTIAL_ID_PATTERN)],
         req: CredentialValidateRequest,
         service: Annotated[CredentialService, Depends(get_credential_service)],
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Remote credential validation. Non-attempted outcomes return 200."""
         result = await service.validate(credential_id, req.provider_id)
         return serialize_validation_result(result)

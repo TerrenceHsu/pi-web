@@ -12,7 +12,7 @@ Per P2-R4-A frozen contract §2.3-2.6 / §7 / §14-20:
 """
 from __future__ import annotations
 
-from .chunk_store import ChunkStore
+from .chunk_store import ChunkSearchHit, ChunkStore
 from .evidence import EvidenceRegistry
 from .search_models import (
     DEFAULT_TOOL_LIMIT,
@@ -137,7 +137,7 @@ class SearchKnowledgeService:
         )
 
     async def _load_source_names(
-        self, hits: list
+        self, hits: list[ChunkSearchHit]
     ) -> dict[str, str]:
         """Batch-load ``Document.source_name`` for each hit's document_id.
 

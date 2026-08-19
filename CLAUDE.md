@@ -85,7 +85,9 @@
 1. 每完成一个 Step，按 `steps/step-XX-name/GUIDE.md` 实现
 2. 在 `PLAN.md` 的进度表把 ☐ 改成 ✅
 3. 跑 `pytest tests/ -v -m "not slow"` 确认不回归
-4. 不依赖真实 API key 的测试必须始终通过；slow 标记的测试在 `PI_RUN_SLOW=1` 时才跑
+4. 不依赖真实 API key 的测试必须始终通过；真实集成测试必须通过
+   `scripts/run_live_integration_tests.py`（内部设置 `PI_RUN_INTEGRATION=1`）运行，
+   不得在测试收集阶段自动加载根 `.env`
 
 ## 不要做的事
 

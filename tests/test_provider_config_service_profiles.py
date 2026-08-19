@@ -12,7 +12,6 @@ import pytest
 from pi_agent_core_py.providers.registry import ProviderDefinition, ProviderRegistry
 from pi_agent_core_py.web.credentials.service import CredentialService, CredentialView
 from pi_agent_core_py.web.credentials.store import CredentialNotFoundError
-from pi_agent_core_py.web.providers.model_options import InvalidModelIdError
 from pi_agent_core_py.web.providers.config_service import (
     CredentialNotFoundForProfileError,
     InvalidProfileNameError,
@@ -24,6 +23,7 @@ from pi_agent_core_py.web.providers.config_store import (
     ProviderProfileNotFoundError,
     SQLiteProviderConfigStore,
 )
+from pi_agent_core_py.web.providers.model_options import InvalidModelIdError
 
 pytestmark = pytest.mark.asyncio
 

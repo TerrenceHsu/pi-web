@@ -13,13 +13,14 @@
 - usage 优先（先读 chunk.usage 再看 choices）
 - ToolCall buffer 按 index 升序 flush；finish_reason="tool_calls" 或正常流结束
   时统一 flush
-- reasoning_content 明确忽略（不生成 TextDeltaEvent / 不写 Message / Event）
+- reasoning_content / reasoning / reasoning_text 转成 ThinkingDeltaEvent
 - 错误用固定短文本（不含 str(exc) / repr(exc) / response.text / body），
   所有映射 `from None` 中断 cause 链
 - asyncio.CancelledError 原样传播；不映射为 ProviderError
 - 内部 AsyncOpenAI client 固定 max_retries=0——保证「一次 Agent 请求对应一次
   Provider 请求」的确定性
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -39,12 +40,19 @@ from ..llm_messages import (
     LLMToolResultMessage,
     LLMUserMessage,
 )
-from ..messages import TextContent, ToolCall, Usage
+from ..messages import TextContent, ThinkingContent, ToolCall, Usage
 from ..stream_events import (
     DoneEvent,
     StreamEvent,
     TextDeltaEvent,
-    ToolCallEvent,
+    TextEndEvent,
+    TextStartEvent,
+    ThinkingDeltaEvent,
+    ThinkingEndEvent,
+    ThinkingStartEvent,
+    ToolCallDeltaEvent,
+    ToolCallEndEvent,
+    ToolCallStartEvent,
 )
 from ..tools import ToolDef
 from .base import ProviderAdapter, ProviderRequest
@@ -165,6 +173,7 @@ class OpenAICompatConfig(BaseModel):
             return v
         # 拒绝 NaN / inf
         import math
+
         if math.isnan(v) or math.isinf(v):
             raise ValueError("temperature must be finite or None")
         return v
@@ -175,8 +184,15 @@ class OpenAICompatConfig(BaseModel):
 # ============================================================================
 
 
-def _join_text(contents: Sequence[TextContent]) -> str:
-    return "".join(c.text for c in contents)
+def _join_text(contents: Sequence[TextContent | ThinkingContent]) -> str:
+    return "".join(c.text for c in contents if isinstance(c, TextContent))
+
+
+def _join_thinking(contents: Sequence[TextContent | ThinkingContent]) -> tuple[str, str | None]:
+    blocks = [c for c in contents if isinstance(c, ThinkingContent) and not c.redacted]
+    thinking = "".join(c.thinking for c in blocks)
+    signature = next((c.thinking_signature for c in blocks if c.thinking_signature), None)
+    return thinking, signature
 
 
 def to_openai_messages(
@@ -202,7 +218,7 @@ def to_openai_messages(
       - 空 system prompt 不插入 system message
       - 不支持的 block 类型抛固定 ProviderProtocolError（错误信息不含正文）
       - 不修改原始 messages 对象
-      - reasoning_content 不纳入（OpenAI 协议没有该字段）
+      - ThinkingContent 按原 provider 字段名回放；未知签名回退 reasoning_content
     """
     out: list[dict[str, Any]] = []
 
@@ -216,6 +232,8 @@ def to_openai_messages(
             out.append({"role": "user", "content": text})
         elif isinstance(m, LLMAssistantMessage):
             text = _join_text(m.content)
+            thinking, thinking_signature = _join_thinking(m.content)
+            assistant_payload: dict[str, Any]
             if m.tool_calls:
                 tool_calls_payload: list[dict[str, Any]] = []
                 for tc in m.tool_calls:
@@ -227,33 +245,45 @@ def to_openai_messages(
                         raise ProviderProtocolError(
                             "assistant tool_call missing name",
                         ) from None
-                    tool_calls_payload.append({
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": _json.dumps(tc.arguments or {}, separators=(",", ":")),
-                        },
-                    })
+                    tool_calls_payload.append(
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": _json.dumps(tc.arguments or {}, separators=(",", ":")),
+                            },
+                        }
+                    )
                 # OpenAI 协议：assistant message w/ tool_calls 时 content 可为 None
-                out.append({
+                assistant_payload = {
                     "role": "assistant",
                     "content": text if text else None,
                     "tool_calls": tool_calls_payload,
-                })
+                }
             else:
-                out.append({"role": "assistant", "content": text})
+                assistant_payload = {"role": "assistant", "content": text}
+            if thinking:
+                reasoning_field = (
+                    thinking_signature
+                    if thinking_signature in {"reasoning_content", "reasoning", "reasoning_text"}
+                    else "reasoning_content"
+                )
+                assistant_payload[reasoning_field] = thinking
+            out.append(assistant_payload)
         elif isinstance(m, LLMToolResultMessage):
             if not m.tool_call_id:
                 raise ProviderProtocolError(
                     "tool result missing tool_call_id",
                 ) from None
             text = _join_text(m.content)
-            out.append({
-                "role": "tool",
-                "tool_call_id": m.tool_call_id,
-                "content": text,
-            })
+            out.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": m.tool_call_id,
+                    "content": text,
+                }
+            )
         else:
             # 不支持的 message 类型——固定短文本（不含正文）
             raise ProviderProtocolError(
@@ -289,14 +319,16 @@ def to_openai_tools(tools: Sequence[ToolDef]) -> list[dict[str, Any]]:
             raise ProviderProtocolError("tool missing name") from None
         # parameters 缺省时填标准 empty schema
         params = t.parameters or {"type": "object", "properties": {}}
-        out.append({
-            "type": "function",
-            "function": {
-                "name": t.name,
-                "description": t.description,
-                "parameters": params,
-            },
-        })
+        out.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": params,
+                },
+            }
+        )
     return out
 
 
@@ -312,6 +344,7 @@ class _ToolCallBuffer:
     id: str | None = None
     name: str | None = None
     argument_parts: list[str] = field(default_factory=list)
+    content_index: int | None = None
 
 
 # ============================================================================
@@ -490,11 +523,12 @@ class OpenAICompatibleProvider(ProviderAdapter):
         - choices 为空时 continue（usage-only chunk）
         - 不假设 choices[0] 永远存在
         - usage 缺失不是错误
-        - ToolCall buffers 按 index 升序 flush
+        - text/thinking/tool-call 块均产生 start/delta/end
+        - ToolCall buffers 按 content index 升序 flush
         - stream 正常结束时也 flush 已完成 tool calls
         - signal abort 后关闭 stream
         - asyncio.CancelledError 原样传播
-        - reasoning_content 忽略
+        - reasoning_content / reasoning / reasoning_text 保留为 ThinkingDeltaEvent
         """
         if self._closed:
             raise ProviderConfigError("provider adapter is closed") from None
@@ -509,6 +543,18 @@ class OpenAICompatibleProvider(ProviderAdapter):
         final_stop: Literal["stop", "length", "tool_use"] = "stop"
         final_usage = Usage()
         tool_buffers: dict[int, _ToolCallBuffer] = {}
+        text_parts: list[str] = []
+        thinking_parts: list[str] = []
+        text_content_index: int | None = None
+        thinking_content_index: int | None = None
+        thinking_signature: str | None = None
+        next_content_index = 0
+
+        def allocate_content_index() -> int:
+            nonlocal next_content_index
+            index = next_content_index
+            next_content_index += 1
+            return index
 
         signal = request.signal
         stream_manager: Any = None
@@ -545,9 +591,16 @@ class OpenAICompatibleProvider(ProviderAdapter):
                     # 4. text delta
                     content = getattr(delta, "content", None)
                     if content:
-                        yield TextDeltaEvent(delta=content)
+                        if text_content_index is None:
+                            text_content_index = allocate_content_index()
+                            yield TextStartEvent(content_index=text_content_index)
+                        text_parts.append(content)
+                        yield TextDeltaEvent(
+                            content_index=text_content_index,
+                            delta=content,
+                        )
 
-                    # 5. tool_call 增量累积（不立即 yield；统一在 stream 末尾 flush）
+                    # 5. tool_call 增量累积并逐片发出；完整调用只在 end 可执行。
                     raw_tool_calls = getattr(delta, "tool_calls", None)
                     if raw_tool_calls:
                         for tc in raw_tool_calls:
@@ -578,8 +631,43 @@ class OpenAICompatibleProvider(ProviderAdapter):
                                 fn_args = getattr(fn, "arguments", None)
                                 if fn_args:
                                     buf.argument_parts.append(fn_args)
+                            if buf.content_index is None:
+                                buf.content_index = allocate_content_index()
+                                yield ToolCallStartEvent(
+                                    content_index=buf.content_index,
+                                    tool_call_id=buf.id,
+                                    name=buf.name,
+                                )
+                            if fn is not None and fn_args:
+                                yield ToolCallDeltaEvent(
+                                    content_index=buf.content_index,
+                                    delta=fn_args,
+                                    tool_call_id=buf.id,
+                                    name=buf.name,
+                                )
 
-                    # 6. reasoning_content 忽略（修订 I）——不 yield / 不写 Message
+                    # 6. reasoning 增量：取第一个非空字段，避免兼容端点重复返回。
+                    for reasoning_field in (
+                        "reasoning_content",
+                        "reasoning",
+                        "reasoning_text",
+                    ):
+                        reasoning_delta = getattr(delta, reasoning_field, None)
+                        if isinstance(reasoning_delta, str) and reasoning_delta:
+                            if thinking_content_index is None:
+                                thinking_content_index = allocate_content_index()
+                                thinking_signature = reasoning_field
+                                yield ThinkingStartEvent(
+                                    content_index=thinking_content_index,
+                                    thinking_signature=thinking_signature,
+                                )
+                            thinking_parts.append(reasoning_delta)
+                            yield ThinkingDeltaEvent(
+                                content_index=thinking_content_index,
+                                delta=reasoning_delta,
+                                thinking_signature=reasoning_field,
+                            )
+                            break
 
                     # 7. finish_reason 决定最终 stop
                     fr = getattr(choice, "finish_reason", None)
@@ -595,12 +683,57 @@ class OpenAICompatibleProvider(ProviderAdapter):
 
             # /async with stream_manager
 
-            # 8. stream 正常结束：flush tool_calls（按 index 升序）
-            if tool_buffers:
-                for idx in sorted(tool_buffers.keys()):
-                    buf = tool_buffers[idx]
-                    tc = _build_tool_call(buf)
-                    yield ToolCallEvent(tool_call=tc)
+            # 8. 正常结束：按内容块出现顺序发出 canonical end。
+            end_events: list[tuple[int, StreamEvent]] = []
+            if text_content_index is not None:
+                end_events.append(
+                    (
+                        text_content_index,
+                        TextEndEvent(
+                            content_index=text_content_index,
+                            content="".join(text_parts),
+                        ),
+                    )
+                )
+            if thinking_content_index is not None:
+                end_events.append(
+                    (
+                        thinking_content_index,
+                        ThinkingEndEvent(
+                            content_index=thinking_content_index,
+                            content="".join(thinking_parts),
+                            thinking_signature=thinking_signature,
+                        ),
+                    )
+                )
+            tool_end_events: list[tuple[int, int, StreamEvent]] = []
+            for provider_index, buf in tool_buffers.items():
+                if buf.content_index is None:
+                    continue
+                tool_end_events.append(
+                    (
+                        provider_index,
+                        buf.content_index,
+                        ToolCallEndEvent(
+                            content_index=buf.content_index,
+                            tool_call=_build_tool_call(buf),
+                        ),
+                    )
+                )
+            if end_events:
+                end_events.extend(
+                    (content_index, event) for _, content_index, event in tool_end_events
+                )
+                for _, end_event in sorted(end_events, key=lambda item: item[0]):
+                    yield end_event
+            else:
+                # Preserve the adapter's historical pure-tool ordering by the
+                # provider's tool-call index, even if chunks arrived interleaved.
+                for _, _, end_event in sorted(
+                    tool_end_events,
+                    key=lambda item: item[0],
+                ):
+                    yield end_event
 
             # 9. 最终 DoneEvent（整个正常流只能产生一个）
             yield DoneEvent(stop_reason=final_stop, usage=final_usage)

@@ -21,7 +21,7 @@ from pi_agent_core_py.llm_messages import (
     LLMToolResultMessage,
     LLMUserMessage,
 )
-from pi_agent_core_py.messages import TextContent, ToolCall
+from pi_agent_core_py.messages import TextContent, ThinkingContent, ToolCall
 from pi_agent_core_py.providers.errors import ProviderProtocolError
 from pi_agent_core_py.providers.openai_compat import to_openai_messages
 
@@ -98,6 +98,36 @@ def test_user_multiple_text_blocks_joined() -> None:
 def test_assistant_text_becomes_assistant_message() -> None:
     out = to_openai_messages(system_prompt="", messages=[_assistant("ok")])
     assert out[0] == {"role": "assistant", "content": "ok"}
+
+
+def test_assistant_thinking_replays_with_original_reasoning_field() -> None:
+    msg = LLMAssistantMessage(
+        content=[
+            ThinkingContent(
+                thinking="hidden reasoning",
+                thinking_signature="reasoning",
+            ),
+            TextContent(text="answer"),
+        ]
+    )
+
+    out = to_openai_messages(system_prompt="", messages=[msg])
+
+    assert out[0] == {
+        "role": "assistant",
+        "content": "answer",
+        "reasoning": "hidden reasoning",
+    }
+
+
+def test_assistant_unknown_thinking_signature_uses_reasoning_content() -> None:
+    msg = LLMAssistantMessage(
+        content=[ThinkingContent(thinking="reason", thinking_signature="opaque")]
+    )
+
+    out = to_openai_messages(system_prompt="", messages=[msg])
+
+    assert out[0]["reasoning_content"] == "reason"
 
 
 # ============================================================================

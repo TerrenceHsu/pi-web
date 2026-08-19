@@ -581,7 +581,7 @@ class ExtensionSQLiteStore:
         content_sha256: str = "",
     ) -> None:
         """插入或更新上传 Skill。"""
-        self._require_db()
+        db = self._require_db()
         if not name or not name.strip():
             raise ExtensionStoreValidationError("skill name is required")
         if not skill_json:
@@ -590,7 +590,7 @@ class ExtensionSQLiteStore:
             raise ExtensionStoreValidationError("raw_markdown is required")
         now = self._now_iso()
         try:
-            await self._db.execute(
+            await db.execute(
                 """
                 INSERT INTO web_uploaded_skills
                     (name, skill_json, raw_markdown, enabled, source_kind,
@@ -616,7 +616,7 @@ class ExtensionSQLiteStore:
                     now,
                 ),
             )
-            await self._db.commit()
+            await db.commit()
         except ExtensionStoreValidationError:
             raise
         except Exception as e:
@@ -624,9 +624,9 @@ class ExtensionSQLiteStore:
 
     async def get_uploaded_skill(self, name: str) -> PersistedSkill | None:
         """单条查询——返回 None 如果不存在。"""
-        self._require_db()
+        db = self._require_db()
         try:
-            cursor = await self._db.execute(
+            cursor = await db.execute(
                 "SELECT * FROM web_uploaded_skills WHERE name = ?",
                 (name,),
             )
@@ -639,9 +639,9 @@ class ExtensionSQLiteStore:
 
     async def list_uploaded_skill_rows(self) -> list[aiosqlite.Row]:
         """返回所有原始 rows——调用方逐行 decode 隔离损坏。"""
-        self._require_db()
+        db = self._require_db()
         try:
-            cursor = await self._db.execute(
+            cursor = await db.execute(
                 "SELECT * FROM web_uploaded_skills ORDER BY created_at ASC"
             )
             return list(await cursor.fetchall())
@@ -686,9 +686,9 @@ class ExtensionSQLiteStore:
 
     async def set_skill_enabled(self, name: str, enabled: bool) -> None:
         """更新 enabled 状态。不存在抛 ConflictError。"""
-        self._require_db()
+        db = self._require_db()
         try:
-            cursor = await self._db.execute(
+            cursor = await db.execute(
                 "UPDATE web_uploaded_skills SET enabled = ?, updated_at = ? "
                 "WHERE name = ?",
                 (1 if enabled else 0, self._now_iso(), name),
@@ -697,7 +697,7 @@ class ExtensionSQLiteStore:
                 raise ExtensionStoreConflictError(
                     f"skill {name!r} not persisted"
                 )
-            await self._db.commit()
+            await db.commit()
         except ExtensionStoreConflictError:
             raise
         except Exception as e:
@@ -707,25 +707,25 @@ class ExtensionSQLiteStore:
         self, name: str, error: str | None
     ) -> None:
         """记录 / 清除 restore error。"""
-        self._require_db()
+        db = self._require_db()
         try:
-            await self._db.execute(
+            await db.execute(
                 "UPDATE web_uploaded_skills SET last_restore_error = ?, "
                 "updated_at = ? WHERE name = ?",
                 (error, self._now_iso(), name),
             )
-            await self._db.commit()
+            await db.commit()
         except Exception as e:
             raise ExtensionStoreError(self._safe_db_error(e)) from None
 
     async def delete_uploaded_skill(self, name: str) -> bool:
         """删除上传 Skill row。返回 True 如果删除了，False 如果不存在。"""
-        self._require_db()
+        db = self._require_db()
         try:
-            cursor = await self._db.execute(
+            cursor = await db.execute(
                 "DELETE FROM web_uploaded_skills WHERE name = ?", (name,)
             )
-            await self._db.commit()
+            await db.commit()
             return cursor.rowcount > 0
         except Exception as e:
             raise ExtensionStoreError(self._safe_db_error(e)) from None
@@ -745,7 +745,7 @@ class ExtensionSQLiteStore:
         env_keys: list[str],
     ) -> None:
         """插入 / 更新 MCP server config——**只存 env_keys，不存 value**。"""
-        self._require_db()
+        db = self._require_db()
         if not name or not name.strip():
             raise ExtensionStoreValidationError("mcp server name is required")
         if not command or not command.strip():
@@ -760,7 +760,7 @@ class ExtensionSQLiteStore:
         env_keys_json = json.dumps(sorted(env_keys))
         now = self._now_iso()
         try:
-            await self._db.execute(
+            await db.execute(
                 """
                 INSERT INTO web_mcp_servers
                     (name, transport, command, args_json, desired_enabled,
@@ -784,16 +784,16 @@ class ExtensionSQLiteStore:
                     now,
                 ),
             )
-            await self._db.commit()
+            await db.commit()
         except ExtensionStoreValidationError:
             raise
         except Exception as e:
             raise ExtensionStoreError(self._safe_db_error(e)) from None
 
     async def get_mcp_server(self, name: str) -> PersistedMCPServer | None:
-        self._require_db()
+        db = self._require_db()
         try:
-            cursor = await self._db.execute(
+            cursor = await db.execute(
                 "SELECT * FROM web_mcp_servers WHERE name = ?", (name,)
             )
             row = await cursor.fetchone()
@@ -805,9 +805,9 @@ class ExtensionSQLiteStore:
 
     async def list_mcp_server_rows(self) -> list[aiosqlite.Row]:
         """返回所有原始 rows——逐行 decode 隔离损坏。"""
-        self._require_db()
+        db = self._require_db()
         try:
-            cursor = await self._db.execute(
+            cursor = await db.execute(
                 "SELECT * FROM web_mcp_servers ORDER BY created_at ASC"
             )
             return list(await cursor.fetchall())
@@ -850,9 +850,9 @@ class ExtensionSQLiteStore:
         self, name: str, desired_enabled: bool
     ) -> None:
         """更新 desired_enabled 状态。"""
-        self._require_db()
+        db = self._require_db()
         try:
-            cursor = await self._db.execute(
+            cursor = await db.execute(
                 "UPDATE web_mcp_servers SET desired_enabled = ?, updated_at = ? "
                 "WHERE name = ?",
                 (1 if desired_enabled else 0, self._now_iso(), name),
@@ -861,7 +861,7 @@ class ExtensionSQLiteStore:
                 raise ExtensionStoreConflictError(
                     f"mcp server {name!r} not persisted"
                 )
-            await self._db.commit()
+            await db.commit()
         except ExtensionStoreConflictError:
             raise
         except Exception as e:
@@ -870,25 +870,25 @@ class ExtensionSQLiteStore:
     async def set_mcp_restore_error(
         self, name: str, error: str | None
     ) -> None:
-        self._require_db()
+        db = self._require_db()
         try:
-            await self._db.execute(
+            await db.execute(
                 "UPDATE web_mcp_servers SET last_restore_error = ?, "
                 "updated_at = ? WHERE name = ?",
                 (error, self._now_iso(), name),
             )
-            await self._db.commit()
+            await db.commit()
         except Exception as e:
             raise ExtensionStoreError(self._safe_db_error(e)) from None
 
     async def delete_mcp_server(self, name: str) -> bool:
         """删除 server + cascade disabled tools（FK ON DELETE CASCADE）。"""
-        self._require_db()
+        db = self._require_db()
         try:
-            cursor = await self._db.execute(
+            cursor = await db.execute(
                 "DELETE FROM web_mcp_servers WHERE name = ?", (name,)
             )
-            await self._db.commit()
+            await db.commit()
             return cursor.rowcount > 0
         except Exception as e:
             raise ExtensionStoreError(self._safe_db_error(e)) from None
@@ -901,13 +901,13 @@ class ExtensionSQLiteStore:
         self, server_name: str, tool_name: str
     ) -> None:
         """记录 disabled tool——结构化 key，不依赖 full_name.split。"""
-        self._require_db()
+        db = self._require_db()
         if not server_name or not tool_name:
             raise ExtensionStoreValidationError(
                 "server_name and tool_name are required"
             )
         try:
-            await self._db.execute(
+            await db.execute(
                 """
                 INSERT OR IGNORE INTO web_mcp_disabled_tools
                     (server_name, tool_name, disabled_at)
@@ -915,7 +915,7 @@ class ExtensionSQLiteStore:
                 """,
                 (server_name, tool_name, self._now_iso()),
             )
-            await self._db.commit()
+            await db.commit()
         except ExtensionStoreValidationError:
             raise
         except Exception as e:
@@ -925,14 +925,14 @@ class ExtensionSQLiteStore:
         self, server_name: str, tool_name: str
     ) -> None:
         """移除 disabled tool 记录。"""
-        self._require_db()
+        db = self._require_db()
         try:
-            await self._db.execute(
+            await db.execute(
                 "DELETE FROM web_mcp_disabled_tools "
                 "WHERE server_name = ? AND tool_name = ?",
                 (server_name, tool_name),
             )
-            await self._db.commit()
+            await db.commit()
         except Exception as e:
             raise ExtensionStoreError(self._safe_db_error(e)) from None
 
@@ -940,15 +940,15 @@ class ExtensionSQLiteStore:
         self, server_name: str | None = None
     ) -> list[PersistedDisabledTool]:
         """列出 disabled tools——可按 server 过滤。"""
-        self._require_db()
+        db = self._require_db()
         try:
             if server_name is None:
-                cursor = await self._db.execute(
+                cursor = await db.execute(
                     "SELECT * FROM web_mcp_disabled_tools "
                     "ORDER BY disabled_at ASC"
                 )
             else:
-                cursor = await self._db.execute(
+                cursor = await db.execute(
                     "SELECT * FROM web_mcp_disabled_tools "
                     "WHERE server_name = ? ORDER BY disabled_at ASC",
                     (server_name,),
@@ -971,9 +971,9 @@ class ExtensionSQLiteStore:
 
     async def get_schema_version(self) -> int | None:
         """读取 schema version——未来 migration 入口。"""
-        self._require_db()
+        db = self._require_db()
         try:
-            cursor = await self._db.execute(
+            cursor = await db.execute(
                 "SELECT version FROM web_extension_schema_meta LIMIT 1"
             )
             row = await cursor.fetchone()

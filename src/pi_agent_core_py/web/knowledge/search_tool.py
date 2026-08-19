@@ -20,7 +20,11 @@ from typing import TYPE_CHECKING, Any
 from ...messages import TextContent
 from ...tools import AgentTool, ToolResult, ToolUpdateCallback
 from .evidence import EvidenceRegistry
-from .search_models import DEFAULT_TOOL_LIMIT, KnowledgeSearchError
+from .search_models import (
+    DEFAULT_TOOL_LIMIT,
+    KnowledgeEvidence,
+    KnowledgeSearchError,
+)
 from .search_service import SearchKnowledgeService
 
 if TYPE_CHECKING:
@@ -148,7 +152,7 @@ class SearchKnowledgeTool(AgentTool):
     @staticmethod
     def _serialize_result(
         query: str,
-        hits: tuple,
+        hits: tuple[KnowledgeEvidence, ...],
     ) -> str:
         """Serialize search hits as structured text for the LLM.
 

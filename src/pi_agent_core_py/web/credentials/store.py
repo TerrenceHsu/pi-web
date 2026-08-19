@@ -286,7 +286,7 @@ class SQLiteCredentialStore:
         owns_connection: bool,
     ) -> None:
         """Private constructor——用 `open()` 或 `for_testing()` 工厂方法."""
-        self._db = connection
+        self._db: aiosqlite.Connection | None = connection
         self._owns_connection = owns_connection
         self._closed = False
         # E1-2.1：单 store 内的写操作序列化锁——独立 connection 场景下足够

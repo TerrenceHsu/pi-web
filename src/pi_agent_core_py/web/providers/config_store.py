@@ -481,7 +481,7 @@ class SQLiteProviderConfigStore:
         now_ms: Callable[[], int],
     ) -> None:
         """Private constructor——用 ``open()`` 或 ``for_testing()`` 工厂."""
-        self._db = connection
+        self._db: aiosqlite.Connection | None = connection
         self._owns_connection = owns_connection
         self._closed = False
         self._now_ms = now_ms
@@ -1305,6 +1305,10 @@ class SQLiteProviderConfigStore:
                             (session_id,),
                         )
                     ).fetchone()
+                    if old_updated_row is None:
+                        raise ProviderConfigStoreError(
+                            "session model binding disappeared during update"
+                        )
                     old_updated = int(old_updated_row["updated_at"])
                     new_updated = max(now, old_updated + 1)
                     await db.execute(

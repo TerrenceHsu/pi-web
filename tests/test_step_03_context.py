@@ -8,6 +8,7 @@
 5. ModelClient 收到的是 LLMMessage（不含 CustomMessage）
 6. 错误流仍然正常收敛
 """
+
 from __future__ import annotations
 
 import pytest
@@ -40,7 +41,9 @@ async def test_convert_to_llm_basic() -> None:
     user = UserMessage(content=[TextContent(text="hi")])
     assistant = AssistantMessage(
         content=[TextContent(text="hello")],
-        api="anthropic-messages", provider="glm", model="glm-4.5-flash",
+        api="anthropic-messages",
+        provider="glm",
+        model="glm-4.5-flash",
     )
     out = convert_to_llm([user, assistant])
 
@@ -67,7 +70,9 @@ async def test_convert_to_llm_filters_custom() -> None:
     note = CustomMessage(custom_type="notification", content="invisible")
     assistant = AssistantMessage(
         content=[TextContent(text="ok")],
-        api="x", provider="y", model="z",
+        api="x",
+        provider="y",
+        model="z",
     )
     out = convert_to_llm([user, note, assistant])
 
@@ -108,14 +113,20 @@ async def test_transform_context_default_passthrough() -> None:
 
 @pytest.mark.asyncio
 async def test_event_sequence_unchanged_after_context_hook() -> None:
-    fake = FakeClient([[
-        TextDeltaEvent(delta="hello"),
-        TextDeltaEvent(delta=" world"),
-        DoneEvent(stop_reason="stop", usage=Usage()),
-    ]])
+    fake = FakeClient(
+        [
+            [
+                TextDeltaEvent(delta="hello"),
+                TextDeltaEvent(delta=" world"),
+                DoneEvent(stop_reason="stop", usage=Usage()),
+            ]
+        ]
+    )
     types = []
     async for ev in run_event_loop(
-        system_prompt="x", user_text="hi", client=fake,
+        system_prompt="x",
+        user_text="hi",
+        client=fake,
     ):
         types.append(ev.type)
 
@@ -125,8 +136,10 @@ async def test_event_sequence_unchanged_after_context_hook() -> None:
         "message_start",
         "message_end",
         "message_start",
+        "message_update",  # text_start
         "message_update",
         "message_update",
+        "message_update",  # text_end
         "message_end",
         "turn_end",
         "agent_end",
@@ -150,7 +163,9 @@ async def test_fake_client_receives_llm_messages_only() -> None:
         ]
 
     async for _ in run_event_loop(
-        system_prompt="x", user_text="hi", client=fake,
+        system_prompt="x",
+        user_text="hi",
+        client=fake,
         transform_context_fn=inject_custom,
     ):
         pass
@@ -175,7 +190,9 @@ async def test_error_flow_still_converges() -> None:
     types = []
     agent_end = None
     async for ev in run_event_loop(
-        system_prompt="x", user_text="hi", client=fake,
+        system_prompt="x",
+        user_text="hi",
+        client=fake,
     ):
         types.append(ev.type)
         if isinstance(ev, AgentEndEvent):

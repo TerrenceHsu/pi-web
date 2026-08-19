@@ -36,6 +36,7 @@ from pi_agent_core_py.web.credentials.errors import (
     CredentialOperationConflictError,
     CredentialServiceError,
 )
+from pi_agent_core_py.web.credentials.secret_store import SecretStoreRouter
 from pi_agent_core_py.web.credentials.service import (
     CreateCredentialCommand,
     CredentialService,
@@ -49,7 +50,6 @@ from pi_agent_core_py.web.providers.validation import (
     ProviderValidationResult,
     ValidationStrategyRegistry,
 )
-from pi_agent_core_py.web.credentials.secret_store import SecretStoreRouter
 
 SECRET_MARKER = "PI_E1_SECRET_MARKER_7F3A91D2"
 

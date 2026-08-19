@@ -13,6 +13,7 @@ from .llm_messages import (
     LLMToolResultMessage,
     LLMUserMessage,
 )
+from .messages import ThinkingContent
 from .tools import ToolDef
 
 ContextBudgetLevel = Literal["unknown", "normal", "warning", "compact", "blocked"]
@@ -90,7 +91,10 @@ def _message_payload(message: LLMMessage) -> dict[str, object]:
     if isinstance(message, LLMAssistantMessage):
         return {
             "role": "assistant",
-            "content": [item.text for item in message.content],
+            "content": [
+                item.thinking if isinstance(item, ThinkingContent) else item.text
+                for item in message.content
+            ],
             "tool_calls": [
                 {
                     "id": call.id,

@@ -21,12 +21,15 @@ wiring (R3-D), HTTP indexing API (none — R4 owns retrieval).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import aiosqlite
 
 from .models import Document, is_valid_document_id
 from .store import KnowledgeStore
+
+if TYPE_CHECKING:
+    from .chunk_store import ChunkStore
 
 # ============================================================================
 # Constants — frozen safe error codes
@@ -293,7 +296,7 @@ class IndexingStore:
     async def recover_interrupted_indexing(
         self,
         *,
-        chunk_store=None,
+        chunk_store: ChunkStore | None = None,
     ) -> RecoveryResult:
         """Convert stale ``chunking`` / ``indexing`` Documents to ``failed``.
 

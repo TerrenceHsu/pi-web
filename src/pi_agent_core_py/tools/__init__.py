@@ -39,6 +39,13 @@ from ..messages import TextContent
 ToolExecutionMode = Literal["sequential", "parallel"]
 
 
+def _validate_tool_execution_mode(mode: str) -> ToolExecutionMode:
+    """Validate a global or per-agent tool execution mode at runtime."""
+    if mode not in ("sequential", "parallel"):
+        raise ValueError("tool_execution must be 'sequential' or 'parallel'")
+    return typing.cast(ToolExecutionMode, mode)
+
+
 # ============================================================================
 # 异常
 # ============================================================================

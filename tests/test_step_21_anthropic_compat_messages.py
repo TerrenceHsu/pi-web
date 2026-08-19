@@ -15,6 +15,7 @@ from pi_agent_core_py import (
     LLMToolResultMessage,
     LLMUserMessage,
     TextContent,
+    ThinkingContent,
     ToolDef,
     to_anthropic_messages,
     to_anthropic_tools,
@@ -54,6 +55,55 @@ def test_assistant_message_becomes_assistant_text_block() -> None:
     out = to_anthropic_messages([_a("sure")])
     assert out == [
         {"role": "assistant", "content": [{"type": "text", "text": "sure"}]},
+    ]
+
+
+def test_signed_thinking_replays_as_anthropic_thinking_block() -> None:
+    message = LLMAssistantMessage(
+        content=[
+            ThinkingContent(
+                thinking="reason",
+                thinking_signature="signed-payload",
+            ),
+            TextContent(text="answer"),
+        ]
+    )
+
+    out = to_anthropic_messages([message])
+
+    assert out[0]["content"] == [
+        {
+            "type": "thinking",
+            "thinking": "reason",
+            "signature": "signed-payload",
+        },
+        {"type": "text", "text": "answer"},
+    ]
+
+
+def test_unsigned_thinking_falls_back_to_assistant_text() -> None:
+    message = LLMAssistantMessage(content=[ThinkingContent(thinking="reason")])
+
+    out = to_anthropic_messages([message])
+
+    assert out[0]["content"] == [{"type": "text", "text": "reason"}]
+
+
+def test_redacted_thinking_replays_as_opaque_anthropic_block() -> None:
+    message = LLMAssistantMessage(
+        content=[
+            ThinkingContent(
+                thinking="",
+                thinking_signature="opaque-encrypted-payload",
+                redacted=True,
+            )
+        ]
+    )
+
+    out = to_anthropic_messages([message])
+
+    assert out[0]["content"] == [
+        {"type": "redacted_thinking", "data": "opaque-encrypted-payload"}
     ]
 
 

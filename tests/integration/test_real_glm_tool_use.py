@@ -13,16 +13,16 @@
     → 回喂 GLM 第二轮
     → 最终 AssistantMessage 文本含 PROBE_OK_ALPHA_7F3A
 
-标记：``slow + integration``（默认 offline suite 自动 skip）；无凭证 skip。
+标记：``slow + integration``（默认 offline suite 自动 skip）。
 
 显式运行：
 
-    PYTHONPATH=src /d/miniconda/envs/pipy/python.exe -m pytest \\
+    $env:PI_RUN_INTEGRATION = "1"
+    D:\\miniconda\\envs\\pipy\\python.exe -m pytest \\
         tests/integration/test_real_glm_tool_use.py -v -m "slow and integration"
 """
-from __future__ import annotations
 
-import os
+from __future__ import annotations
 
 import pytest
 
@@ -40,15 +40,6 @@ from pi_agent_core_py.providers import to_anthropic_messages
 from pi_agent_core_py.tools import AgentTool, ToolRegistry, ToolResult
 
 PROBE_TOKEN = "PROBE_OK_ALPHA_7F3A"
-
-_HAS_GLM_CREDS = bool(
-    os.environ.get("GLM_API_KEY")
-    or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-    or os.environ.get("ANTHROPIC_API_KEY")
-)
-_GLM_SKIP_REASON = (
-    "需要至少设置 GLM_API_KEY / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY 之一"
-)
 
 
 class E2EProbeTool(AgentTool):
@@ -76,14 +67,10 @@ class E2EProbeTool(AgentTool):
         )
 
 
-real_glm = pytest.mark.skipif(not _HAS_GLM_CREDS, reason=_GLM_SKIP_REASON)
-
-
-@real_glm
 @pytest.mark.slow
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_real_glm_e2e_probe_round_trip():
+async def test_real_glm_e2e_probe_round_trip(glm_live_config):
     """真实 GLM 必须调用 e2e_probe 才能得到 PROBE_OK_ALPHA_7F3A。
 
     模型偶发不调工具时允许最多 2 次重试（每次新建 client/harness）。
@@ -92,7 +79,7 @@ async def test_real_glm_e2e_probe_round_trip():
     last_err: Exception | None = None
     for attempt in (1, 2):
         try:
-            msgs = await _run_probe_conversation()
+            msgs = await _run_probe_conversation(glm_live_config)
             _assert_probe_round_trip(msgs)
             return
         except AssertionError as e:
@@ -100,13 +87,16 @@ async def test_real_glm_e2e_probe_round_trip():
             # 重试前打印摘要便于排查（不打印 key）
             print(f"[attempt {attempt}] assertion failed: {e}")
 
-    assert last_err is None, (
-        f"两次尝试模型都未通过 e2e_probe 断言: {last_err}"
+    assert last_err is None, f"两次尝试模型都未通过 e2e_probe 断言: {last_err}"
+
+
+async def _run_probe_conversation(config):
+    client = GLMClient(
+        api_key=config.api_key,
+        model=config.model,
+        base_url=config.base_url,
+        max_tokens=512,
     )
-
-
-async def _run_probe_conversation():
-    client = GLMClient(max_tokens=512)
     agent = Agent(
         system_prompt=(
             "You are running a tool-use integration test. "
@@ -135,9 +125,7 @@ def _assert_probe_round_trip(msgs: list) -> None:
 
     tool_calls = [c for a in assistants for c in a.content if isinstance(c, ToolCall)]
     e2e_calls = [c for c in tool_calls if c.name == "e2e_probe"]
-    assert e2e_calls, (
-        f"模型未调用 e2e_probe（tool_calls={[c.name for c in tool_calls]}）"
-    )
+    assert e2e_calls, f"模型未调用 e2e_probe（tool_calls={[c.name for c in tool_calls]}）"
 
     for c in e2e_calls:
         assert c.arguments.get("value") == "alpha", (
@@ -150,21 +138,14 @@ def _assert_probe_round_trip(msgs: list) -> None:
     call_ids = {c.id for c in e2e_calls}
     for r in results:
         assert r.tool_call_id in call_ids, (
-            f"ToolResult.tool_call_id={r.tool_call_id} 找不到配对 ToolCall; "
-            f"calls={call_ids}"
+            f"ToolResult.tool_call_id={r.tool_call_id} 找不到配对 ToolCall; calls={call_ids}"
         )
         assert r.is_error is False, f"ToolResult 报错: {r.content}"
 
     last = assistants[-1]
-    assert last.stop_reason != "error", (
-        f"最终 assistant stop_reason=error: {last.error_message}"
-    )
-    final_text = "".join(
-        c.text for c in last.content if isinstance(c, TextContent)
-    )
-    assert PROBE_TOKEN in final_text, (
-        f"最终 assistant 未包含 {PROBE_TOKEN}: {final_text[:200]}"
-    )
+    assert last.stop_reason != "error", f"最终 assistant stop_reason=error: {last.error_message}"
+    final_text = "".join(c.text for c in last.content if isinstance(c, TextContent))
+    assert PROBE_TOKEN in final_text, f"最终 assistant 未包含 {PROBE_TOKEN}: {final_text[:200]}"
 
     # 验证 messages 序列转 Anthropic 后 tool_use/tool_result 配对合法
     llm_msgs = convert_to_llm(msgs)
@@ -184,6 +165,5 @@ def _assert_probe_round_trip(msgs: list) -> None:
         if b.get("type") == "tool_result"
     }
     assert referenced.issubset(produced), (
-        f"tool_result 引用了不存在的 tool_use: "
-        f"referenced={referenced} produced={produced}"
+        f"tool_result 引用了不存在的 tool_use: referenced={referenced} produced={produced}"
     )

@@ -7,7 +7,7 @@
 - 空 choices usage chunk
 - usage 缺失（默认 Usage()）
 - stop / length / tool_calls finish_reason
-- reasoning_content 忽略
+- reasoning_content → ThinkingDeltaEvent
 - 只产生一个 DoneEvent
 - tool calling（单 chunk / 多 chunk / 交错 / 按 index 排序）
 - finish_reason=tool_calls 触发 flush
@@ -15,6 +15,7 @@
 - 非 chunk event 跳过
 - usage + choices 同 chunk
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -31,7 +32,15 @@ from pi_agent_core_py.providers.openai_compat import (
 from pi_agent_core_py.stream_events import (
     DoneEvent,
     TextDeltaEvent,
+    TextEndEvent,
+    TextStartEvent,
+    ThinkingDeltaEvent,
+    ThinkingEndEvent,
+    ThinkingStartEvent,
+    ToolCallDeltaEvent,
+    ToolCallEndEvent,
     ToolCallEvent,
+    ToolCallStartEvent,
 )
 from tests._openai_compat_fakes import (
     _FakeAsyncStream,
@@ -72,7 +81,8 @@ async def _collect(adapter: OpenAICompatibleProvider, req: ProviderRequest) -> l
 
 
 def _adapter(
-    stream: _FakeAsyncStream, **overrides: Any,
+    stream: _FakeAsyncStream,
+    **overrides: Any,
 ) -> tuple[OpenAICompatibleProvider, _FakeClient]:
     cfg = _config(**overrides)
     client = _FakeClient(stream)
@@ -87,9 +97,11 @@ def _adapter(
 
 @pytest.mark.asyncio
 async def test_single_text_delta() -> None:
-    stream = _FakeAsyncStream([
-        make_event(text_delta_chunk("hello", finish_reason="stop")),
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_event(text_delta_chunk("hello", finish_reason="stop")),
+        ]
+    )
     adapter, _ = _adapter(stream)
     events = await _collect(adapter, _req())
     text_events = [e for e in events if isinstance(e, TextDeltaEvent)]
@@ -101,10 +113,12 @@ async def test_single_text_delta() -> None:
 
 @pytest.mark.asyncio
 async def test_multiple_text_deltas_concat() -> None:
-    stream = _FakeAsyncStream([
-        make_event(text_delta_chunk("hello ")),
-        make_event(text_delta_chunk("world", finish_reason="stop")),
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_event(text_delta_chunk("hello ")),
+            make_event(text_delta_chunk("world", finish_reason="stop")),
+        ]
+    )
     adapter, _ = _adapter(stream)
     events = await _collect(adapter, _req())
     text_events = [e for e in events if isinstance(e, TextDeltaEvent)]
@@ -112,11 +126,38 @@ async def test_multiple_text_deltas_concat() -> None:
 
 
 @pytest.mark.asyncio
+async def test_text_stream_has_balanced_block_lifecycle() -> None:
+    stream = _FakeAsyncStream(
+        [
+            make_event(text_delta_chunk("hello ")),
+            make_event(text_delta_chunk("world", finish_reason="stop")),
+        ]
+    )
+    adapter, _ = _adapter(stream)
+
+    events = await _collect(adapter, _req())
+
+    assert [event.type for event in events] == [
+        "text_start",
+        "text_delta",
+        "text_delta",
+        "text_end",
+        "done",
+    ]
+    assert isinstance(events[0], TextStartEvent)
+    assert isinstance(events[-2], TextEndEvent)
+    assert {event.content_index for event in events[:-1]} == {0}
+    assert events[-2].content == "hello world"
+
+
+@pytest.mark.asyncio
 async def test_content_none_does_not_emit_text_event() -> None:
     """delta.content=None → 不 yield TextDeltaEvent."""
-    stream = _FakeAsyncStream([
-        make_event(empty_delta_chunk(finish_reason="stop")),
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_event(empty_delta_chunk(finish_reason="stop")),
+        ]
+    )
     adapter, _ = _adapter(stream)
     events = await _collect(adapter, _req())
     assert not any(isinstance(e, TextDeltaEvent) for e in events)
@@ -131,10 +172,12 @@ async def test_content_none_does_not_emit_text_event() -> None:
 @pytest.mark.asyncio
 async def test_usage_only_chunk_no_choices() -> None:
     """末尾 usage-only chunk（choices=[]）→ continue；不抛错."""
-    stream = _FakeAsyncStream([
-        make_event(text_delta_chunk("hi", finish_reason="stop")),
-        make_event(usage_only_chunk(prompt_tokens=10, completion_tokens=2)),
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_event(text_delta_chunk("hi", finish_reason="stop")),
+            make_event(usage_only_chunk(prompt_tokens=10, completion_tokens=2)),
+        ]
+    )
     adapter, _ = _adapter(stream)
     events = await _collect(adapter, _req())
     done = events[-1]
@@ -147,9 +190,11 @@ async def test_usage_only_chunk_no_choices() -> None:
 @pytest.mark.asyncio
 async def test_usage_missing_returns_default_usage() -> None:
     """usage 缺失 → 默认 Usage()（全 0）."""
-    stream = _FakeAsyncStream([
-        make_event(text_delta_chunk("hi", finish_reason="stop")),
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_event(text_delta_chunk("hi", finish_reason="stop")),
+        ]
+    )
     adapter, _ = _adapter(stream)
     events = await _collect(adapter, _req())
     done = events[-1]
@@ -161,13 +206,17 @@ async def test_usage_missing_returns_default_usage() -> None:
 @pytest.mark.asyncio
 async def test_usage_with_choices_in_same_chunk() -> None:
     """一个 chunk 同时含 choices 和 usage."""
-    stream = _FakeAsyncStream([
-        make_event(mixed_delta_chunk(
-            content="hi",
-            finish_reason="stop",
-            usage=make_usage(prompt_tokens=5, completion_tokens=1),
-        )),
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_event(
+                mixed_delta_chunk(
+                    content="hi",
+                    finish_reason="stop",
+                    usage=make_usage(prompt_tokens=5, completion_tokens=1),
+                )
+            ),
+        ]
+    )
     adapter, _ = _adapter(stream)
     events = await _collect(adapter, _req())
     done = events[-1]
@@ -178,11 +227,13 @@ async def test_usage_with_choices_in_same_chunk() -> None:
 @pytest.mark.asyncio
 async def test_multiple_usage_chunks_take_last_non_empty() -> None:
     """多个 usage chunk——使用最新非空值."""
-    stream = _FakeAsyncStream([
-        make_event(text_delta_chunk("hi", finish_reason="stop")),
-        make_event(usage_only_chunk(prompt_tokens=5, completion_tokens=1)),
-        make_event(usage_only_chunk(prompt_tokens=10, completion_tokens=2)),
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_event(text_delta_chunk("hi", finish_reason="stop")),
+            make_event(usage_only_chunk(prompt_tokens=5, completion_tokens=1)),
+            make_event(usage_only_chunk(prompt_tokens=10, completion_tokens=2)),
+        ]
+    )
     adapter, _ = _adapter(stream)
     events = await _collect(adapter, _req())
     done = events[-1]
@@ -197,9 +248,11 @@ async def test_multiple_usage_chunks_take_last_non_empty() -> None:
 
 @pytest.mark.asyncio
 async def test_finish_reason_stop() -> None:
-    stream = _FakeAsyncStream([
-        make_event(text_delta_chunk("done", finish_reason="stop")),
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_event(text_delta_chunk("done", finish_reason="stop")),
+        ]
+    )
     adapter, _ = _adapter(stream)
     events = await _collect(adapter, _req())
     assert events[-1].stop_reason == "stop"
@@ -207,9 +260,11 @@ async def test_finish_reason_stop() -> None:
 
 @pytest.mark.asyncio
 async def test_finish_reason_length() -> None:
-    stream = _FakeAsyncStream([
-        make_event(text_delta_chunk("..." * 100, finish_reason="length")),
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_event(text_delta_chunk("..." * 100, finish_reason="length")),
+        ]
+    )
     adapter, _ = _adapter(stream)
     events = await _collect(adapter, _req())
     assert events[-1].stop_reason == "length"
@@ -217,43 +272,87 @@ async def test_finish_reason_length() -> None:
 
 @pytest.mark.asyncio
 async def test_finish_reason_tool_calls_maps_to_tool_use() -> None:
-    stream = _FakeAsyncStream([
-        make_event(tool_call_delta_chunk(
-            0, id="t1", name="echo", arguments='{"x":1}', finish_reason="tool_calls",
-        )),
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_event(
+                tool_call_delta_chunk(
+                    0,
+                    id="t1",
+                    name="echo",
+                    arguments='{"x":1}',
+                    finish_reason="tool_calls",
+                )
+            ),
+        ]
+    )
     adapter, _ = _adapter(stream)
     events = await _collect(adapter, _req())
     assert events[-1].stop_reason == "tool_use"
 
 
 # ============================================================================
-# reasoning_content 忽略（修订 I）
+# reasoning_content → ThinkingDeltaEvent
 # ============================================================================
 
 
 @pytest.mark.asyncio
-async def test_reasoning_content_ignored() -> None:
-    """reasoning_content chunk → 不生成 TextDeltaEvent."""
-    stream = _FakeAsyncStream([
-        make_event(reasoning_chunk("internal reasoning")),
-        make_event(text_delta_chunk("visible answer", finish_reason="stop")),
-    ])
+async def test_reasoning_content_becomes_thinking_delta() -> None:
+    """reasoning_content is preserved separately from visible text."""
+    stream = _FakeAsyncStream(
+        [
+            make_event(reasoning_chunk("internal reasoning")),
+            make_event(text_delta_chunk("visible answer", finish_reason="stop")),
+        ]
+    )
     adapter, _ = _adapter(stream)
     events = await _collect(adapter, _req())
     text_events = [e for e in events if isinstance(e, TextDeltaEvent)]
     assert [e.delta for e in text_events] == ["visible answer"]
+    thinking_events = [e for e in events if isinstance(e, ThinkingDeltaEvent)]
+    assert [e.delta for e in thinking_events] == ["internal reasoning"]
+    assert thinking_events[0].thinking_signature == "reasoning_content"
+
+
+@pytest.mark.asyncio
+async def test_reasoning_and_text_blocks_have_independent_lifecycles() -> None:
+    stream = _FakeAsyncStream(
+        [
+            make_event(reasoning_chunk("reason")),
+            make_event(text_delta_chunk("answer", finish_reason="stop")),
+        ]
+    )
+    adapter, _ = _adapter(stream)
+
+    events = await _collect(adapter, _req())
+
+    assert [event.type for event in events] == [
+        "thinking_start",
+        "thinking_delta",
+        "text_start",
+        "text_delta",
+        "thinking_end",
+        "text_end",
+        "done",
+    ]
+    assert isinstance(events[0], ThinkingStartEvent)
+    assert isinstance(events[4], ThinkingEndEvent)
+    assert events[0].content_index == events[1].content_index == 0
+    assert events[2].content_index == events[3].content_index == 1
 
 
 @pytest.mark.asyncio
 async def test_reasoning_only_stream_terminates_with_done() -> None:
-    """全部 reasoning_content + finish_reason=stop → DoneEvent 无 text."""
-    stream = _FakeAsyncStream([
-        make_event(reasoning_chunk("thinking", finish_reason="stop")),
-    ])
+    """Reasoning-only responses preserve thinking and still terminate."""
+    stream = _FakeAsyncStream(
+        [
+            make_event(reasoning_chunk("thinking", finish_reason="stop")),
+        ]
+    )
     adapter, _ = _adapter(stream)
     events = await _collect(adapter, _req())
     assert not any(isinstance(e, TextDeltaEvent) for e in events)
+    thinking_events = [e for e in events if isinstance(e, ThinkingDeltaEvent)]
+    assert [e.delta for e in thinking_events] == ["thinking"]
     assert isinstance(events[-1], DoneEvent)
 
 
@@ -265,12 +364,14 @@ async def test_reasoning_only_stream_terminates_with_done() -> None:
 @pytest.mark.asyncio
 async def test_only_one_done_event_emitted() -> None:
     """整个正常流只能产生一个最终 DoneEvent."""
-    stream = _FakeAsyncStream([
-        make_event(text_delta_chunk("a")),
-        make_event(text_delta_chunk("b")),
-        make_event(text_delta_chunk("c", finish_reason="stop")),
-        make_event(usage_only_chunk(prompt_tokens=1, completion_tokens=1)),
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_event(text_delta_chunk("a")),
+            make_event(text_delta_chunk("b")),
+            make_event(text_delta_chunk("c", finish_reason="stop")),
+            make_event(usage_only_chunk(prompt_tokens=1, completion_tokens=1)),
+        ]
+    )
     adapter, _ = _adapter(stream)
     events = await _collect(adapter, _req())
     done_events = [e for e in events if isinstance(e, DoneEvent)]
@@ -285,11 +386,13 @@ async def test_only_one_done_event_emitted() -> None:
 @pytest.mark.asyncio
 async def test_non_chunk_events_skipped() -> None:
     """SDK 可能产生 content_part / tool_choice 等非 chunk 事件——continue."""
-    stream = _FakeAsyncStream([
-        make_non_chunk_event("content_part"),
-        make_event(text_delta_chunk("hi", finish_reason="stop")),
-        make_non_chunk_event("tool_choice"),
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_non_chunk_event("content_part"),
+            make_event(text_delta_chunk("hi", finish_reason="stop")),
+            make_non_chunk_event("tool_choice"),
+        ]
+    )
     adapter, _ = _adapter(stream)
     events = await _collect(adapter, _req())
     assert any(isinstance(e, TextDeltaEvent) for e in events)
@@ -302,11 +405,19 @@ async def test_non_chunk_events_skipped() -> None:
 
 @pytest.mark.asyncio
 async def test_single_tool_call_single_chunk() -> None:
-    stream = _FakeAsyncStream([
-        make_event(tool_call_delta_chunk(
-            0, id="t1", name="echo", arguments='{"x":1}', finish_reason="tool_calls",
-        )),
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_event(
+                tool_call_delta_chunk(
+                    0,
+                    id="t1",
+                    name="echo",
+                    arguments='{"x":1}',
+                    finish_reason="tool_calls",
+                )
+            ),
+        ]
+    )
     adapter, _ = _adapter(stream)
     events = await _collect(adapter, _req())
     tc_events = [e for e in events if isinstance(e, ToolCallEvent)]
@@ -320,11 +431,13 @@ async def test_single_tool_call_single_chunk() -> None:
 @pytest.mark.asyncio
 async def test_single_tool_call_split_across_chunks() -> None:
     """arguments 增量 JSON 字符串分片返回."""
-    stream = _FakeAsyncStream([
-        make_event(tool_call_delta_chunk(0, id="t1", name="echo", arguments='{"text":')),
-        make_event(tool_call_delta_chunk(0, arguments='"hi"}')),
-        make_event(empty_delta_chunk(finish_reason="tool_calls")),
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_event(tool_call_delta_chunk(0, id="t1", name="echo", arguments='{"text":')),
+            make_event(tool_call_delta_chunk(0, arguments='"hi"}')),
+            make_event(empty_delta_chunk(finish_reason="tool_calls")),
+        ]
+    )
     adapter, _ = _adapter(stream)
     events = await _collect(adapter, _req())
     tc_events = [e for e in events if isinstance(e, ToolCallEvent)]
@@ -333,15 +446,44 @@ async def test_single_tool_call_split_across_chunks() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tool_call_stream_has_balanced_block_lifecycle() -> None:
+    stream = _FakeAsyncStream(
+        [
+            make_event(tool_call_delta_chunk(0, id="t1", name="echo", arguments='{"text":')),
+            make_event(tool_call_delta_chunk(0, arguments='"hi"}')),
+            make_event(empty_delta_chunk(finish_reason="tool_calls")),
+        ]
+    )
+    adapter, _ = _adapter(stream)
+
+    events = await _collect(adapter, _req())
+
+    assert [event.type for event in events] == [
+        "toolcall_start",
+        "toolcall_delta",
+        "toolcall_delta",
+        "toolcall_end",
+        "done",
+    ]
+    assert isinstance(events[0], ToolCallStartEvent)
+    assert isinstance(events[1], ToolCallDeltaEvent)
+    assert isinstance(events[-2], ToolCallEndEvent)
+    assert {event.content_index for event in events[:-1]} == {0}
+    assert events[-2].tool_call.arguments == {"text": "hi"}
+
+
+@pytest.mark.asyncio
 async def test_multiple_tool_calls_interleaved() -> None:
     """两个 tool calls 交错到达（index 0 / 1 交替）."""
-    stream = _FakeAsyncStream([
-        make_event(tool_call_delta_chunk(0, id="t1", name="alpha", arguments='{"a":')),
-        make_event(tool_call_delta_chunk(1, id="t2", name="beta", arguments='{"b":')),
-        make_event(tool_call_delta_chunk(0, arguments='1}')),
-        make_event(tool_call_delta_chunk(1, arguments='2}')),
-        make_event(empty_delta_chunk(finish_reason="tool_calls")),
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_event(tool_call_delta_chunk(0, id="t1", name="alpha", arguments='{"a":')),
+            make_event(tool_call_delta_chunk(1, id="t2", name="beta", arguments='{"b":')),
+            make_event(tool_call_delta_chunk(0, arguments="1}")),
+            make_event(tool_call_delta_chunk(1, arguments="2}")),
+            make_event(empty_delta_chunk(finish_reason="tool_calls")),
+        ]
+    )
     adapter, _ = _adapter(stream)
     events = await _collect(adapter, _req())
     tc_events = [e for e in events if isinstance(e, ToolCallEvent)]
@@ -356,12 +498,14 @@ async def test_multiple_tool_calls_interleaved() -> None:
 @pytest.mark.asyncio
 async def test_tool_calls_emitted_in_index_order() -> None:
     """即使 chunk 中 index 顺序乱，最终 emit 按 index 升序."""
-    stream = _FakeAsyncStream([
-        make_event(tool_call_delta_chunk(2, id="t3", name="c")),
-        make_event(tool_call_delta_chunk(0, id="t1", name="a")),
-        make_event(tool_call_delta_chunk(1, id="t2", name="b")),
-        make_event(empty_delta_chunk(finish_reason="tool_calls")),
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_event(tool_call_delta_chunk(2, id="t3", name="c")),
+            make_event(tool_call_delta_chunk(0, id="t1", name="a")),
+            make_event(tool_call_delta_chunk(1, id="t2", name="b")),
+            make_event(empty_delta_chunk(finish_reason="tool_calls")),
+        ]
+    )
     adapter, _ = _adapter(stream)
     events = await _collect(adapter, _req())
     tc_events = [e for e in events if isinstance(e, ToolCallEvent)]
@@ -372,10 +516,12 @@ async def test_tool_calls_emitted_in_index_order() -> None:
 @pytest.mark.asyncio
 async def test_tool_call_flushed_on_normal_stream_end_without_finish_reason() -> None:
     """正常 stream 结束 + buffer 非空 → 也 flush tool calls."""
-    stream = _FakeAsyncStream([
-        make_event(tool_call_delta_chunk(0, id="t1", name="echo", arguments='{"x":1}')),
-        # 没有 finish_reason=tool_calls 的 chunk
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_event(tool_call_delta_chunk(0, id="t1", name="echo", arguments='{"x":1}')),
+            # 没有 finish_reason=tool_calls 的 chunk
+        ]
+    )
     adapter, _ = _adapter(stream)
     events = await _collect(adapter, _req())
     tc_events = [e for e in events if isinstance(e, ToolCallEvent)]
@@ -385,11 +531,19 @@ async def test_tool_call_flushed_on_normal_stream_end_without_finish_reason() ->
 @pytest.mark.asyncio
 async def test_tool_call_event_emitted_before_done_event() -> None:
     """ToolCallEvent 必须在 DoneEvent 之前."""
-    stream = _FakeAsyncStream([
-        make_event(tool_call_delta_chunk(
-            0, id="t1", name="echo", arguments='{}', finish_reason="tool_calls",
-        )),
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_event(
+                tool_call_delta_chunk(
+                    0,
+                    id="t1",
+                    name="echo",
+                    arguments="{}",
+                    finish_reason="tool_calls",
+                )
+            ),
+        ]
+    )
     adapter, _ = _adapter(stream)
     events = await _collect(adapter, _req())
     tc_idx = next(i for i, e in enumerate(events) if isinstance(e, ToolCallEvent))
@@ -401,11 +555,18 @@ async def test_tool_call_event_emitted_before_done_event() -> None:
 async def test_tool_call_missing_id_raises_protocol_error() -> None:
     from pi_agent_core_py.providers.errors import ProviderProtocolError
 
-    stream = _FakeAsyncStream([
-        make_event(tool_call_delta_chunk(
-            0, name="echo", arguments='{}', finish_reason="tool_calls",
-        )),
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_event(
+                tool_call_delta_chunk(
+                    0,
+                    name="echo",
+                    arguments="{}",
+                    finish_reason="tool_calls",
+                )
+            ),
+        ]
+    )
     adapter, _ = _adapter(stream)
     with pytest.raises(ProviderProtocolError) as exc_info:
         await _collect(adapter, _req())
@@ -417,9 +578,13 @@ async def test_tool_call_missing_id_raises_protocol_error() -> None:
 async def test_tool_call_missing_name_raises_protocol_error() -> None:
     from pi_agent_core_py.providers.errors import ProviderProtocolError
 
-    stream = _FakeAsyncStream([
-        make_event(tool_call_delta_chunk(0, id="t1", arguments='{}', finish_reason="tool_calls")),
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_event(
+                tool_call_delta_chunk(0, id="t1", arguments="{}", finish_reason="tool_calls")
+            ),
+        ]
+    )
     adapter, _ = _adapter(stream)
     with pytest.raises(ProviderProtocolError):
         await _collect(adapter, _req())
@@ -430,11 +595,19 @@ async def test_tool_call_invalid_json_raises_protocol_error() -> None:
     """arguments 拼接后非法 JSON → ProviderProtocolError."""
     from pi_agent_core_py.providers.errors import ProviderProtocolError
 
-    stream = _FakeAsyncStream([
-        make_event(tool_call_delta_chunk(
-            0, id="t1", name="echo", arguments="{not-json", finish_reason="tool_calls",
-        )),
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_event(
+                tool_call_delta_chunk(
+                    0,
+                    id="t1",
+                    name="echo",
+                    arguments="{not-json",
+                    finish_reason="tool_calls",
+                )
+            ),
+        ]
+    )
     adapter, _ = _adapter(stream)
     with pytest.raises(ProviderProtocolError) as exc_info:
         await _collect(adapter, _req())
@@ -447,11 +620,19 @@ async def test_tool_call_non_object_json_raises_protocol_error() -> None:
     """arguments 是合法 JSON array → 仍拒绝（必须是 object）."""
     from pi_agent_core_py.providers.errors import ProviderProtocolError
 
-    stream = _FakeAsyncStream([
-        make_event(tool_call_delta_chunk(
-            0, id="t1", name="echo", arguments="[1,2,3]", finish_reason="tool_calls",
-        )),
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_event(
+                tool_call_delta_chunk(
+                    0,
+                    id="t1",
+                    name="echo",
+                    arguments="[1,2,3]",
+                    finish_reason="tool_calls",
+                )
+            ),
+        ]
+    )
     adapter, _ = _adapter(stream)
     with pytest.raises(ProviderProtocolError):
         await _collect(adapter, _req())
@@ -462,11 +643,19 @@ async def test_tool_call_scalar_json_raises_protocol_error() -> None:
     """arguments 是 JSON scalar（如字符串）→ 拒绝."""
     from pi_agent_core_py.providers.errors import ProviderProtocolError
 
-    stream = _FakeAsyncStream([
-        make_event(tool_call_delta_chunk(
-            0, id="t1", name="echo", arguments='"hello"', finish_reason="tool_calls",
-        )),
-    ])
+    stream = _FakeAsyncStream(
+        [
+            make_event(
+                tool_call_delta_chunk(
+                    0,
+                    id="t1",
+                    name="echo",
+                    arguments='"hello"',
+                    finish_reason="tool_calls",
+                )
+            ),
+        ]
+    )
     adapter, _ = _adapter(stream)
     with pytest.raises(ProviderProtocolError):
         await _collect(adapter, _req())

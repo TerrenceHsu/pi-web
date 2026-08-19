@@ -11,6 +11,7 @@
 5.8 Step 3 不被破坏（事件顺序 / convert_to_llm 过滤 CustomMessage
     / ModelClient.stream 只接 LLMMessage）
 """
+
 from __future__ import annotations
 
 import pytest
@@ -82,16 +83,18 @@ def test_tool_result_full_fields() -> None:
     assert r.tool_call_id == "c1"
     assert r.name == "echo"
     assert r.content[0].text == "hi"
-    assert r.is_error is False   # 默认
+    assert r.is_error is False  # 默认
     assert r.terminate is False  # 默认
-    assert r.details == {}       # 默认
+    assert r.details == {}  # 默认
 
 
 def test_tool_result_error_and_terminate() -> None:
     r = ToolResult(
-        tool_call_id="c1", name="flaky",
+        tool_call_id="c1",
+        name="flaky",
         content=[TextContent(text="timeout")],
-        is_error=True, terminate=True,
+        is_error=True,
+        terminate=True,
         details={"reason": "timeout", "duration_ms": 5000},
     )
     assert r.is_error is True
@@ -112,7 +115,8 @@ class _Echo(AgentTool):
 
     async def execute(self, tool_call_id, args):
         return ToolResult(
-            tool_call_id=tool_call_id, name=self.name,
+            tool_call_id=tool_call_id,
+            name=self.name,
             content=[TextContent(text=args.get("text", ""))],
         )
 
@@ -126,7 +130,9 @@ class _SequentialEcho(AgentTool):
 
     async def execute(self, tool_call_id, args):
         return ToolResult(
-            tool_call_id=tool_call_id, name=self.name, content=[],
+            tool_call_id=tool_call_id,
+            name=self.name,
+            content=[],
         )
 
 
@@ -232,9 +238,11 @@ def test_registry_empty_name_raises() -> None:
 
 def test_registry_empty_description_raises() -> None:
     """description 也必须非空（LLM 需要描述来选工具）。"""
+
     class _NoDesc(AgentTool):
         name = "no_desc"
         description = ""  # 空
+
         async def execute(self, tool_call_id, args):
             return ToolResult(tool_call_id=tool_call_id, name="no_desc", content=[])
 
@@ -290,23 +298,34 @@ def test_registry_unregister_missing_is_silent() -> None:
 @pytest.mark.asyncio
 async def test_step3_event_sequence_unchanged() -> None:
     """Step 4 不改 run_event_loop 的事件顺序。"""
-    fake = FakeClient([[
-        TextDeltaEvent(delta="hi"),
-        DoneEvent(stop_reason="stop", usage=Usage()),
-    ]])
+    fake = FakeClient(
+        [
+            [
+                TextDeltaEvent(delta="hi"),
+                DoneEvent(stop_reason="stop", usage=Usage()),
+            ]
+        ]
+    )
     types = []
     async for ev in run_event_loop(
-        system_prompt="x", user_text="hi", client=fake,
+        system_prompt="x",
+        user_text="hi",
+        client=fake,
     ):
         types.append(ev.type)
 
     assert types == [
-        "agent_start", "turn_start",
-        "message_start", "message_end",                    # user
-        "message_start",                                    # assistant (empty partial)
-        "message_update",                                   # assistant partial
-        "message_end",                                      # assistant final
-        "turn_end", "agent_end",
+        "agent_start",
+        "turn_start",
+        "message_start",
+        "message_end",  # user
+        "message_start",  # assistant (empty partial)
+        "message_update",  # text_start
+        "message_update",  # text_delta
+        "message_update",  # text_end
+        "message_end",  # assistant final
+        "turn_end",
+        "agent_end",
     ]
 
 
@@ -330,7 +349,9 @@ async def test_step3_model_client_receives_llm_messages_only() -> None:
         return list(messages) + [CustomMessage(custom_type="x", content="y")]
 
     async for _ in run_event_loop(
-        system_prompt="x", user_text="hi", client=fake,
+        system_prompt="x",
+        user_text="hi",
+        client=fake,
         transform_context_fn=inject_custom,
     ):
         pass
@@ -352,7 +373,9 @@ def test_convert_to_llm_filters_tool_call_in_assistant_content() -> None:
             ToolCall(id="c1", name="echo", arguments={"text": "hi"}),
             TextContent(text="done"),
         ],
-        api="x", provider="y", model="z",
+        api="x",
+        provider="y",
+        model="z",
     )
     out = convert_to_llm([am])
     assert len(out) == 1

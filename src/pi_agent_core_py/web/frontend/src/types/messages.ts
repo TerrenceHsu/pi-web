@@ -13,6 +13,13 @@ export interface TextContent {
   text: string
 }
 
+export interface ThinkingContent {
+  type: "thinking"
+  thinking: string
+  thinking_signature?: string | null
+  redacted?: boolean
+}
+
 /** UserMessage.content 中可能出现的工具调用块（assistant 也含此类型）。 */
 export interface ToolCallContent {
   type: "toolCall"
@@ -31,7 +38,13 @@ export interface ToolResultContent {
   is_error?: boolean
 }
 
-export type UserContent = TextContent | FileBlock | ToolCallContent | ToolResultContent | { type: string; [k: string]: JsonValue }
+export type UserContent =
+  | TextContent
+  | ThinkingContent
+  | FileBlock
+  | ToolCallContent
+  | ToolResultContent
+  | { type: string; [k: string]: JsonValue }
 
 export interface MessageUsage {
   input: number

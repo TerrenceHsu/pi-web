@@ -42,7 +42,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, BinaryIO, Final, Protocol
 
 from .files import KnowledgeFileStore
 from .ingestion_store import IngestionStore
@@ -392,6 +392,7 @@ class UploadService:
             )
 
         # 6. Stream to staging file with SHA + size enforcement
+        staging_path: Path | None
         staging_path, source_sha, size_bytes, first_bytes = (
             await self._stream_to_staging(
                 library_id=library_id,
@@ -468,7 +469,9 @@ class UploadService:
                 await self._update_document_relpaths(document.id, source_relpath, markdown_relpath)
             except Exception:
                 # Compensation: delete Document + source.pdf
-                await self._safe_delete_source_pdf(library_id, document.id)
+                await asyncio.to_thread(
+                    self._safe_delete_source_pdf, library_id, document.id
+                )
                 await self._safe_delete_document(document.id)
                 raise
 
@@ -568,7 +571,7 @@ class UploadService:
         return staging_path, sha.hexdigest(), size, first_bytes
 
     @staticmethod
-    def _flush_and_fsync(file_obj) -> None:
+    def _flush_and_fsync(file_obj: BinaryIO) -> None:
         """flush + fsync a writable file object."""
         file_obj.flush()
         try:

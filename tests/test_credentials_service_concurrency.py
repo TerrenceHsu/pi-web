@@ -19,6 +19,7 @@ from pi_agent_core_py.secrets import EnvSecretStore, InMemorySecretStore
 from pi_agent_core_py.web.credentials.errors import (
     CredentialOperationConflictError,
 )
+from pi_agent_core_py.web.credentials.secret_store import SecretStoreRouter
 from pi_agent_core_py.web.credentials.service import (
     CreateCredentialCommand,
     CredentialService,
@@ -28,7 +29,6 @@ from pi_agent_core_py.web.credentials.store import (
     CredentialNotFoundError,
     SQLiteCredentialStore,
 )
-from pi_agent_core_py.web.credentials.secret_store import SecretStoreRouter
 
 # ============================================================================
 # Fixtures

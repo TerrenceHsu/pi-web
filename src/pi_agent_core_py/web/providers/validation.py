@@ -35,7 +35,7 @@ import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal, Never, Protocol
 
 import httpx
 
@@ -461,7 +461,7 @@ class ValidationStrategyRegistry:
         ids = sorted(self._strategies.keys())
         return f"ValidationStrategyRegistry(registered_strategy_ids={ids!r})"
 
-    def __reduce__(self) -> None:
+    def __reduce__(self) -> Never:
         """Disable pickling——prevent accidental secret leakage via persistence."""
         raise TypeError("ValidationStrategyRegistry is not picklable")
 

@@ -37,6 +37,7 @@ from .messages import (
     FileBlock,
     SummaryMessage,
     TextContent,
+    ThinkingContent,
     ToolCall,
     ToolResultMessage,
     UserMessage,
@@ -98,10 +99,12 @@ def convert_to_llm(messages: list[AgentMessage]) -> list[LLMMessage]:
                 content=new_content, timestamp=m.timestamp,
             ))
         elif isinstance(m, AssistantMessage):
-            text_only = [c for c in m.content if isinstance(c, TextContent)]
+            assistant_content = [
+                c for c in m.content if isinstance(c, (TextContent, ThinkingContent))
+            ]
             tool_calls = [c for c in m.content if isinstance(c, ToolCall)]
             out.append(LLMAssistantMessage(
-                content=text_only,
+                content=assistant_content,
                 tool_calls=tool_calls,
                 api=m.api, provider=m.provider, model=m.model,
                 stop_reason=m.stop_reason, usage=m.usage,

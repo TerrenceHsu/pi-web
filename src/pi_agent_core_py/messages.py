@@ -35,6 +35,20 @@ class TextContent(BaseModel):
     text: str
 
 
+class ThinkingContent(BaseModel):
+    """Assistant reasoning content preserved across events and turns.
+
+    ``thinking_signature`` carries provider metadata needed to replay signed
+    thinking blocks. For redacted Anthropic blocks it stores the opaque
+    encrypted payload while ``thinking`` remains empty.
+    """
+
+    type: Literal["thinking"] = "thinking"
+    thinking: str
+    thinking_signature: str | None = None
+    redacted: bool = False
+
+
 #: FileBlock.format 取值——附件类型分类（不区分 provider，仅给 LLM 提示）
 #:
 #: - markdown / html / csv / parquet / text：view_file 可读
@@ -93,7 +107,7 @@ class ToolCall(BaseModel):
     raw: dict[str, Any] | None = None
 
 
-AssistantContent = Union[TextContent, ToolCall]  # noqa: UP007
+AssistantContent = Union[TextContent, ThinkingContent, ToolCall]  # noqa: UP007
 
 #: P0-3：UserMessage.content 现可包含文件元信息块 FileBlock。
 #: 通过 `type` 字段判别（"text" / "file"）——Pydantic 自动 union 解析。
@@ -133,7 +147,7 @@ class UserMessage(BaseModel):
 
 
 class AssistantMessage(BaseModel):
-    """content 可含 TextContent + ToolCall。"""
+    """content 可含 TextContent + ThinkingContent + ToolCall。"""
     role: Literal["assistant"] = "assistant"
     content: list[AssistantContent] = Field(default_factory=list)
     api: str
@@ -244,7 +258,7 @@ AgentMessage = Annotated[
 
 
 __all__ = [
-    "TextContent", "ToolCall", "AssistantContent",
+    "TextContent", "ThinkingContent", "ToolCall", "AssistantContent",
     # P0-3
     "FileFormat", "FileBlock", "UserContent",
     "Usage", "GenerationMetrics",

@@ -14,7 +14,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
-from .messages import TextContent, ToolCall, Usage
+from .messages import TextContent, ThinkingContent, ToolCall, Usage
 
 
 class LLMUserMessage(BaseModel):
@@ -27,13 +27,13 @@ class LLMUserMessage(BaseModel):
 class LLMAssistantMessage(BaseModel):
     """发给 LLM 的 assistant 消息（多轮对话的历史回放）。
 
-    content 仅含 TextContent；Step 21 修复：新增 `tool_calls` 字段保留
+    content 含 TextContent / ThinkingContent；Step 21 修复：新增 `tool_calls` 字段保留
     AssistantMessage 的 ToolCall 列表，让 provider 适配器能重建 tool_use
     block（Anthropic 协议要求 tool_result 必须配对前一条 assistant 的
     tool_use，否则 multi-turn tool 调用会失败）。
     """
     role: Literal["assistant"] = "assistant"
-    content: list[TextContent] = Field(default_factory=list)
+    content: list[TextContent | ThinkingContent] = Field(default_factory=list)
     tool_calls: list[ToolCall] = Field(default_factory=list)
     api: str = ""
     provider: str = ""

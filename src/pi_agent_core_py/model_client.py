@@ -30,6 +30,7 @@ async for ev in client.stream(system_prompt="x", messages=[], tools=None):
 client = GLMClient()  # 读 ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL / ANTHROPIC_MODEL
 ```
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -46,7 +47,15 @@ from .stream_events import (
     ErrorEvent,
     StreamEvent,
     TextDeltaEvent,
+    TextEndEvent,
+    TextStartEvent,
+    ThinkingDeltaEvent,
+    ThinkingEndEvent,
+    ThinkingStartEvent,
+    ToolCallDeltaEvent,
+    ToolCallEndEvent,
     ToolCallEvent,
+    ToolCallStartEvent,
 )
 from .tools import ToolDef
 
@@ -246,10 +255,18 @@ class GLMClient(ModelClient):
 __all__ = [
     # Stream 事件（重新导出）
     "StreamEvent",
+    "TextStartEvent",
     "TextDeltaEvent",
+    "TextEndEvent",
+    "ThinkingStartEvent",
+    "ThinkingDeltaEvent",
+    "ThinkingEndEvent",
     "DoneEvent",
     "ErrorEvent",
     "ToolCallEvent",
+    "ToolCallStartEvent",
+    "ToolCallDeltaEvent",
+    "ToolCallEndEvent",
     # ModelClient 系列
     "ModelClient",
     "FakeClient",

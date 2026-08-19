@@ -361,7 +361,9 @@ class AgentHarness:
         """run_prompt / run_continue 共用主流程。"""
         if self.context.phase != "idle":
             raise RuntimeError(
-                f"Harness is already running (phase={self.context.phase})"
+                f"Harness is already running (phase={self.context.phase}). "
+                "Use harness.agent.steer() or harness.agent.follow_up(), "
+                "or wait_for_idle()."
             )
 
         # 准备 context
@@ -507,18 +509,22 @@ class AgentHarness:
                     await self._post_finish_snapshot(snapshot)
                     raise
 
-                # 正常完成：根据 builder.seen_aborted 决定 status
+                # 正常返回也可能携带 Provider/max_turns error assistant；按 turn
+                # 终态决定 request snapshot，而不是一律标 completed。
                 # Step 17：finish 前刷新 MCP metadata——本轮可能有 MCP
                 # tool call 失败导致 server connected=False
                 self._inject_mcp_metadata()
                 # Step 18：刷新 policy summary（含本轮 audit counts）
                 self._inject_policy_metadata()
                 normal_status: SnapshotStatus = (
-                    "aborted" if builder.seen_aborted else "completed"
+                    "aborted" if builder.seen_aborted
+                    else "error" if builder.seen_error
+                    else "completed"
                 )
                 snapshot = self._finish_snapshot(
                     status=normal_status,
                     messages_after=list(self.agent.state.messages),
+                    error=builder.last_error if builder.seen_error else None,
                 )
                 await self._post_finish_snapshot(snapshot)
 
@@ -531,6 +537,9 @@ class AgentHarness:
             # 无论成功/失败，请求结束都清空 _snapshot_builder——
             # 之后若用户直接 agent.prompt 触发的事件不应进入任何 snapshot
             self._snapshot_builder = None
+            # error 是 on_error hooks / snapshot 构建期间的瞬态；请求 coroutine
+            # 已经结束后 Harness 必须可再次使用，同时保留 last_error 供诊断。
+            self.context.phase = "idle"
 
     # ----------------------------------------------------------------------
     # abort / wait_for_idle / close

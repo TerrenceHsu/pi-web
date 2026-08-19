@@ -1,7 +1,8 @@
 """Agent 状态机 + Queue / Abort（Step 9）。
 
 在 Step 8 的单 turn 状态机之上加入：
-- **prompt queue**：running 时再 prompt 不报错，而是排队（FIFO）
+- **single active request**：活跃期间普通 prompt / continue 立即拒绝
+- **control queues**：steering / follow-up 独立排队，支持 all / one-at-a-time
 - **abort**：`abort(reason)` 通过 signal 协作中止当前 request
 - **新事件**：`RequestQueuedEvent` / `RequestStartEvent` / `RequestEndEvent` / `AgentAbortEvent`
 - **新状态**：`AgentStatus` 加 `"aborting"`
@@ -21,6 +22,7 @@ Step 9 **不实现**：
 - signal 会透传到 Tool、before hook 与 after hook
 - 强制 cancel running task——只用 signal 协作
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -55,14 +57,19 @@ from .loop import (
     ShouldStopAfterTurnFn,
     run_event_loop,
 )
-from .messages import Message
+from .messages import AssistantMessage, Message, TextContent, UserMessage
 from .model_client import ModelClient
 from .policy import (
     InMemoryToolPermissionAuditLog,
     ToolApprovalHandler,
     ToolPermissionPolicy,
 )
-from .tools import AgentTool, ToolRegistry
+from .tools import (
+    AgentTool,
+    ToolExecutionMode,
+    ToolRegistry,
+    _validate_tool_execution_mode,
+)
 
 # ============================================================================
 # AgentStatus / AgentState
@@ -75,10 +82,12 @@ from .tools import AgentTool, ToolRegistry
 #: - "aborting"  已 abort，等当前 request 收敛
 #: - "error"     Agent 自身异常（不是 LLM ErrorEvent / Tool is_error）
 AgentStatus = Literal["idle", "running", "aborting", "error"]
+QueueMode = Literal["all", "one-at-a-time"]
 
 
 class AgentState(BaseModel):
     """Agent 持有的可变状态。"""
+
     status: AgentStatus = "idle"
     messages: list[Message] = Field(default_factory=list)
     last_event: AgentEvent | None = None
@@ -102,11 +111,38 @@ class AgentRequest:
     `prompt()` / `continue_()` 入队时构造；worker 取出后调用 `_run_request`；
     调用方 `await request.future` 等到结果。
     """
+
     id: str
     type: AgentRequestType
     user_text: str | None
     future: asyncio.Future[Any] = field(repr=False)
     created_at: int = field(default_factory=lambda: int(time.time() * 1000))
+
+
+class _PendingMessageQueue:
+    """FIFO queue with pi-agent's two drain modes."""
+
+    def __init__(self, mode: QueueMode) -> None:
+        self.mode = mode
+        self._messages: list[Message] = []
+
+    def enqueue(self, message: Message) -> None:
+        self._messages.append(message)
+
+    def drain(self) -> list[Message]:
+        if self.mode == "all":
+            drained = self._messages
+            self._messages = []
+            return drained
+        if not self._messages:
+            return []
+        return [self._messages.pop(0)]
+
+    def clear(self) -> None:
+        self._messages.clear()
+
+    def has_items(self) -> bool:
+        return bool(self._messages)
 
 
 # ============================================================================
@@ -136,12 +172,15 @@ class Agent:
         transform_context_fn: TransformContextFn | None = None,
         before_tool_call: BeforeToolCallFn | None = None,
         after_tool_call: AfterToolCallFn | None = None,
+        tool_execution: ToolExecutionMode = "parallel",
         permission_policy: ToolPermissionPolicy | None = None,
         permission_audit_log: InMemoryToolPermissionAuditLog | None = None,
         tool_approval_handler: ToolApprovalHandler | None = None,
         should_stop_after_turn: ShouldStopAfterTurnFn | None = None,
         prepare_next_turn: PrepareNextTurnFn | None = None,
         before_model_call: BeforeModelCallFn | None = None,
+        steering_mode: QueueMode = "one-at-a-time",
+        follow_up_mode: QueueMode = "one-at-a-time",
         max_turns: int = 50,
     ):
         self.system_prompt = system_prompt
@@ -155,6 +194,7 @@ class Agent:
         self.transform_context_fn = transform_context_fn
         self.before_tool_call = before_tool_call
         self.after_tool_call = after_tool_call
+        self.tool_execution = tool_execution
         # Step 18：工具权限策略 / 审计日志——透传给 run_event_loop
         # Agent 只做"持有 + 透传"，不做决策；Harness 可在运行期替换。
         self.permission_policy: ToolPermissionPolicy | None = permission_policy
@@ -163,6 +203,12 @@ class Agent:
         self.should_stop_after_turn = should_stop_after_turn
         self.prepare_next_turn = prepare_next_turn
         self.before_model_call = before_model_call
+        self._steering_queue = _PendingMessageQueue(
+            self._validate_queue_mode(steering_mode),
+        )
+        self._follow_up_queue = _PendingMessageQueue(
+            self._validate_queue_mode(follow_up_mode),
+        )
         # Bug-fix：max_turns 安全网——透传给 run_event_loop
         self.max_turns: int = max_turns
 
@@ -197,23 +243,74 @@ class Agent:
         return unsubscribe
 
     # ----------------------------------------------------------------------
-    # 入口：prompt / continue_ / abort
+    # 入口：prompt / continue_ / steering / follow-up / abort
     # ----------------------------------------------------------------------
 
     async def prompt(self, user_text: str) -> list[Message]:
-        """入队一个 prompt 请求；await 直到该请求完成。"""
+        """启动一个 prompt；活跃请求期间必须改用 steer / follow_up。"""
+        self._ensure_request_admission("prompt")
         req = self._make_request(type_="prompt", user_text=user_text)
         await self._enqueue(req)
         return await typing.cast("asyncio.Future[list[Message]]", req.future)
 
-    async def continue_(self) -> list[Message]:
-        """入队一个 continue 请求；await 直到完成。
+    @property
+    def tool_execution(self) -> ToolExecutionMode:
+        return self._tool_execution
 
-        无 messages 时抛 ValueError（队列前校验，避免入队后才报错）。
+    @tool_execution.setter
+    def tool_execution(self, mode: ToolExecutionMode) -> None:
+        self._tool_execution = _validate_tool_execution_mode(mode)
+
+    @property
+    def steering_mode(self) -> QueueMode:
+        return self._steering_queue.mode
+
+    @steering_mode.setter
+    def steering_mode(self, mode: QueueMode) -> None:
+        self._steering_queue.mode = self._validate_queue_mode(mode)
+
+    @property
+    def follow_up_mode(self) -> QueueMode:
+        return self._follow_up_queue.mode
+
+    @follow_up_mode.setter
+    def follow_up_mode(self, mode: QueueMode) -> None:
+        self._follow_up_queue.mode = self._validate_queue_mode(mode)
+
+    def steer(self, message: Message | str) -> None:
+        """Queue a message for the next assistant turn boundary."""
+        self._steering_queue.enqueue(self._normalize_control_message(message))
+
+    def follow_up(self, message: Message | str) -> None:
+        """Queue work for when the agent would otherwise stop."""
+        self._follow_up_queue.enqueue(self._normalize_control_message(message))
+
+    def clear_steering_queue(self) -> None:
+        self._steering_queue.clear()
+
+    def clear_follow_up_queue(self) -> None:
+        self._follow_up_queue.clear()
+
+    def clear_all_queues(self) -> None:
+        self.clear_steering_queue()
+        self.clear_follow_up_queue()
+
+    def has_queued_messages(self) -> bool:
+        return self._steering_queue.has_items() or self._follow_up_queue.has_items()
+
+    async def continue_(self) -> list[Message]:
+        """启动一个 continue 请求；await 直到完成。
+
+        无 messages 或最后一条是 assistant 时抛 ValueError（队列前校验）。
         """
+        # 活跃检查必须先于 transcript 校验：运行中的 state.messages 可能尚未
+        # 收到 AgentEndEvent，此时应返回明确的控制面错误，而不是误报无历史。
+        self._ensure_request_admission("continue_")
         if not self.state.messages:
+            raise ValueError("Agent.continue_(): 当前无 messages，请先 prompt(...) 建立上下文")
+        if isinstance(self.state.messages[-1], AssistantMessage):
             raise ValueError(
-                "Agent.continue_(): 当前无 messages，请先 prompt(...) 建立上下文"
+                "Agent.continue_(): 不能从 assistant 尾消息继续；请先追加 user/toolResult 消息"
             )
         req = self._make_request(type_="continue", user_text=None)
         await self._enqueue(req)
@@ -234,10 +331,12 @@ class Agent:
         self.state.aborted_count += 1
         if self._abort_signal is not None:
             self._abort_signal.set()
-        await self._handle_event(AgentAbortEvent(
-            request_id=self.state.current_request_id,
-            reason=reason,
-        ))
+        await self._handle_event(
+            AgentAbortEvent(
+                request_id=self.state.current_request_id,
+                reason=reason,
+            )
+        )
 
     # ----------------------------------------------------------------------
     # reset / wait_for_idle
@@ -249,9 +348,7 @@ class Agent:
         Step 9 不做 auto-abort；调方需要先 `await abort()` + `await wait_for_idle()`。
         """
         if self.state.status in ("running", "aborting"):
-            raise RuntimeError(
-                f"Cannot reset while agent is {self.state.status}"
-            )
+            raise RuntimeError(f"Cannot reset while agent is {self.state.status}")
         if not self._queue.empty():
             raise RuntimeError("Cannot reset while queue is not empty")
         self.state.messages = []
@@ -262,6 +359,7 @@ class Agent:
         self.state.current_request_id = None
         self.state.aborted_count = 0
         self.state.status = "idle"
+        self.clear_all_queues()
 
     async def wait_for_idle(self) -> None:
         """等待 worker 把 queue 全部跑完。
@@ -276,13 +374,41 @@ class Agent:
     # 内部：构造 / 入队 / worker
     # ----------------------------------------------------------------------
 
+    def _ensure_request_admission(self, operation: str) -> None:
+        """Atomically reject a second ordinary request before it is enqueued."""
+        worker_active = self._worker_task is not None and not self._worker_task.done()
+        if (
+            self.state.status in ("running", "aborting")
+            or not self._queue.empty()
+            or worker_active
+        ):
+            raise RuntimeError(
+                f"Agent is already processing a request; cannot {operation}(). "
+                "Use steer() or follow_up() to queue messages, or wait_for_idle()."
+            )
+
+    @staticmethod
+    def _validate_queue_mode(mode: QueueMode) -> QueueMode:
+        if mode not in ("all", "one-at-a-time"):
+            raise ValueError("queue mode must be 'all' or 'one-at-a-time'")
+        return mode
+
+    @staticmethod
+    def _normalize_control_message(message: Message | str) -> Message:
+        if isinstance(message, str):
+            return UserMessage(content=[TextContent(text=message)])
+        return message
+
     def _make_request(self, *, type_: AgentRequestType, user_text: str | None) -> AgentRequest:
         self._next_id += 1
         req_id = f"req-{self._next_id}"
         loop = asyncio.get_event_loop()
         future = loop.create_future()
         return AgentRequest(
-            id=req_id, type=type_, user_text=user_text, future=future,
+            id=req_id,
+            type=type_,
+            user_text=user_text,
+            future=future,
         )
 
     async def _enqueue(self, req: AgentRequest) -> None:
@@ -292,11 +418,13 @@ class Agent:
         await self._queue.put(req)
         # 入队后立即更新 state.queue_size（worker 还没取走）
         self.state.queue_size = self._queue.qsize()
-        await self._handle_event(RequestQueuedEvent(
-            request_id=req.id,
-            request_type=req.type,
-            queue_size=self._queue.qsize(),
-        ))
+        await self._handle_event(
+            RequestQueuedEvent(
+                request_id=req.id,
+                request_type=req.type,
+                queue_size=self._queue.qsize(),
+            )
+        )
         self._ensure_worker()
 
     def _ensure_worker(self) -> None:
@@ -335,16 +463,17 @@ class Agent:
         self.state.queue_size = self._queue.qsize()
         self.state.status = "running"
 
-        await self._handle_event(RequestStartEvent(
-            request_id=req.id, request_type=req.type,
-        ))
+        await self._handle_event(
+            RequestStartEvent(
+                request_id=req.id,
+                request_type=req.type,
+            )
+        )
 
         # 为本轮 request 建独立 signal
         self._abort_signal = asyncio.Event()
 
-        self._current_task = asyncio.ensure_future(
-            self._run_request(req, self._abort_signal)
-        )
+        self._current_task = asyncio.ensure_future(self._run_request(req, self._abort_signal))
 
         end_status: RequestEndStatus = "completed"
         exc: Exception | None = None
@@ -368,9 +497,13 @@ class Agent:
         self._current_task = None
         self._abort_signal = None
 
-        await self._handle_event(RequestEndEvent(
-            request_id=req.id, request_type=req.type, status=end_status,
-        ))
+        await self._handle_event(
+            RequestEndEvent(
+                request_id=req.id,
+                request_type=req.type,
+                status=end_status,
+            )
+        )
 
         if exc is not None:
             raise exc
@@ -391,6 +524,7 @@ class Agent:
             transform_context_fn=self.transform_context_fn,
             before_tool_call=self.before_tool_call,
             after_tool_call=self.after_tool_call,
+            tool_execution=self.tool_execution,
             signal=signal,
             permission_policy=self.permission_policy,
             permission_audit_log=self.permission_audit_log,
@@ -398,6 +532,8 @@ class Agent:
             should_stop_after_turn=self.should_stop_after_turn,
             prepare_next_turn=self.prepare_next_turn,
             before_model_call=self.before_model_call,
+            get_steering_messages=self._steering_queue.drain,
+            get_follow_up_messages=self._follow_up_queue.drain,
             max_turns=self.max_turns,
         ):
             await self._handle_event(ev)
@@ -408,9 +544,13 @@ class Agent:
             req = await self._queue.get()
             if not req.future.done():
                 req.future.set_exception(exc)
-            await self._handle_event(RequestEndEvent(
-                request_id=req.id, request_type=req.type, status="error",
-            ))
+            await self._handle_event(
+                RequestEndEvent(
+                    request_id=req.id,
+                    request_type=req.type,
+                    status="error",
+                )
+            )
             self._queue.task_done()
         self.state.queue_size = 0
 
@@ -447,11 +587,14 @@ class Agent:
                 if inspect.isawaitable(result):
                     await result
             except Exception as e:
-                self.state.last_error = (
-                    f"subscriber error: {type(e).__name__}: {e}"
-                )
+                self.state.last_error = f"subscriber error: {type(e).__name__}: {e}"
 
 
 __all__ = [
-    "AgentStatus", "AgentState", "Agent", "AgentRequest", "Subscriber",
+    "AgentStatus",
+    "QueueMode",
+    "AgentState",
+    "Agent",
+    "AgentRequest",
+    "Subscriber",
 ]

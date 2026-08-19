@@ -30,7 +30,7 @@ from __future__ import annotations
 import secrets
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from .models import (
     Document,
@@ -58,7 +58,7 @@ MAX_RETRY_ATTEMPTS: int = 5
 #: Per C0 §9.5 — R2-C uses a single Job with ``stage='extract'`` to cover
 #: inspect + extract + Quality evaluate + Build + Persist. ``normalize``
 #: / ``chunk`` / ``index`` are reserved for future R3 stages.
-EXTRACT_STAGE: str = "extract"
+EXTRACT_STAGE: Literal["extract"] = "extract"
 
 #: Safe error code recorded on ``failed`` Jobs recovered after a crash
 #: (per C0 §15.2). Stable machine value — no path / body / secret.

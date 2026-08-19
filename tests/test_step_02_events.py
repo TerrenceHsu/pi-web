@@ -9,6 +9,7 @@
 4. ErrorEvent 会产生 stop_reason="error"
 5. ErrorEvent 情况下仍然有 turn_end 和 agent_end
 """
+
 from __future__ import annotations
 
 import pytest
@@ -35,15 +36,21 @@ from pi_agent_core_py import (
 
 @pytest.mark.asyncio
 async def test_event_order_normal_stream() -> None:
-    fake = FakeClient([[
-        TextDeltaEvent(delta="Hello"),
-        TextDeltaEvent(delta=", world"),
-        DoneEvent(stop_reason="stop", usage=Usage()),
-    ]])
+    fake = FakeClient(
+        [
+            [
+                TextDeltaEvent(delta="Hello"),
+                TextDeltaEvent(delta=", world"),
+                DoneEvent(stop_reason="stop", usage=Usage()),
+            ]
+        ]
+    )
 
     events = []
     async for ev in run_event_loop(
-        system_prompt="x", user_text="hi", client=fake,
+        system_prompt="x",
+        user_text="hi",
+        client=fake,
     ):
         events.append(ev)
 
@@ -51,12 +58,14 @@ async def test_event_order_normal_stream() -> None:
     assert types == [
         "agent_start",
         "turn_start",
-        "message_start",   # user
-        "message_end",     # user
-        "message_start",   # assistant (empty partial)
+        "message_start",  # user
+        "message_end",  # user
+        "message_start",  # assistant (empty partial)
+        "message_update",  # text_start
         "message_update",  # "Hello"
         "message_update",  # "Hello, world"
-        "message_end",     # assistant final
+        "message_update",  # text_end
+        "message_end",  # assistant final
         "turn_end",
         "agent_end",
     ], f"实际序列: {types}"
@@ -74,17 +83,23 @@ async def test_event_order_normal_stream() -> None:
 
 @pytest.mark.asyncio
 async def test_assistant_text_concat() -> None:
-    fake = FakeClient([[
-        TextDeltaEvent(delta="Hello"),
-        TextDeltaEvent(delta=", "),
-        TextDeltaEvent(delta="world!"),
-        DoneEvent(stop_reason="stop", usage=Usage()),
-    ]])
+    fake = FakeClient(
+        [
+            [
+                TextDeltaEvent(delta="Hello"),
+                TextDeltaEvent(delta=", "),
+                TextDeltaEvent(delta="world!"),
+                DoneEvent(stop_reason="stop", usage=Usage()),
+            ]
+        ]
+    )
 
     final_assistant = None
     last_update_text: str | None = None
     async for ev in run_event_loop(
-        system_prompt="x", user_text="hi", client=fake,
+        system_prompt="x",
+        user_text="hi",
+        client=fake,
     ):
         if isinstance(ev, MessageUpdateEvent):
             last_update_text = ev.message.content[0].text
@@ -104,14 +119,20 @@ async def test_assistant_text_concat() -> None:
 
 @pytest.mark.asyncio
 async def test_agent_end_messages() -> None:
-    fake = FakeClient([[
-        TextDeltaEvent(delta="ok"),
-        DoneEvent(stop_reason="stop", usage=Usage()),
-    ]])
+    fake = FakeClient(
+        [
+            [
+                TextDeltaEvent(delta="ok"),
+                DoneEvent(stop_reason="stop", usage=Usage()),
+            ]
+        ]
+    )
 
     agent_end = None
     async for ev in run_event_loop(
-        system_prompt="x", user_text="hi", client=fake,
+        system_prompt="x",
+        user_text="hi",
+        client=fake,
     ):
         if isinstance(ev, AgentEndEvent):
             agent_end = ev
@@ -137,7 +158,9 @@ async def test_error_event_sets_stop_reason() -> None:
 
     final_assistant = None
     async for ev in run_event_loop(
-        system_prompt="x", user_text="hi", client=fake,
+        system_prompt="x",
+        user_text="hi",
+        client=fake,
     ):
         if isinstance(ev, MessageEndEvent) and ev.message.role == "assistant":
             final_assistant = ev.message
@@ -162,7 +185,9 @@ async def test_error_event_keeps_full_sequence() -> None:
     agent_end = None
     turn_end = None
     async for ev in run_event_loop(
-        system_prompt="x", user_text="hi", client=fake,
+        system_prompt="x",
+        user_text="hi",
+        client=fake,
     ):
         types.append(ev.type)
         if isinstance(ev, AgentEndEvent):
@@ -184,4 +209,4 @@ async def test_error_event_keeps_full_sequence() -> None:
     # turn_end 的 message 也是 error assistant
     assert turn_end is not None
     assert turn_end.message.stop_reason == "error"
-    assert turn_end.tool_results == []   # Step 2 永远为空
+    assert turn_end.tool_results == []  # Step 2 永远为空

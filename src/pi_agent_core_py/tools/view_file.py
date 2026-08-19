@@ -238,13 +238,13 @@ def _read_parquet_summary(
     pyarrow 不可用 → 抛 ImportError，由上层 catch 转 ToolResult(is_error=True)。
     """
     try:
-        import pyarrow.parquet as pq  # type: ignore[import-not-found]
+        import pyarrow.parquet as pq
     except ImportError as e:
         raise ImportError(
             "parquet support requires pyarrow; install with `pip install pyarrow>=15`"
         ) from e
 
-    pf = pq.ParquetFile(str(path))
+    pf = pq.ParquetFile(str(path))  # type: ignore[no-untyped-call]
     arrow_schema = pf.schema_arrow
     schema_dict: dict[str, str] = {
         name: str(arrow_schema.field(name).type) for name in arrow_schema.names
@@ -254,7 +254,9 @@ def _read_parquet_summary(
     row_count = metadata.num_rows if metadata is not None else -1
 
     # 只读前 max_rows
-    batch_iter = pf.iter_batches(batch_size=max(1, max_rows))
+    batch_iter = pf.iter_batches(  # type: ignore[no-untyped-call]
+        batch_size=max(1, max_rows),
+    )
     rows: list[dict[str, Any]] = []
     warning: str | None = None
     seen = 0
@@ -513,7 +515,7 @@ class ViewFileTool(AgentTool):
         truncated = len(raw.encode("utf-8", errors="replace")) > max_bytes
         content = raw[:max_bytes]  # 简单按字符数截——utf-8 字符数 ≤ 字节数
 
-        payload = {
+        payload: dict[str, Any] = {
             "kind": "text",
             "format": fmt,
             "file_id": ref.id,
@@ -733,7 +735,7 @@ class ViewFileTool(AgentTool):
         self, tool_call_id: str, ref: FileRef, fmt: str,
     ) -> ToolResult:
         kind = "binary" if fmt == "binary" else "unsupported"
-        payload = {
+        payload: dict[str, Any] = {
             "kind": kind,
             "format": fmt,
             "file_id": ref.id,

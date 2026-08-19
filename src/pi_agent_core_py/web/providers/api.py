@@ -24,11 +24,12 @@
 """
 from __future__ import annotations
 
-from typing import Annotated, Any
+from collections.abc import Callable, Coroutine
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.requests import Request as StarletteRequest
@@ -371,25 +372,27 @@ class ProviderProfileAPIRoute(APIRoute):
     via ``provider_profile_error_to_response``.
     """
 
-    def get_route_handler(self):  # type: ignore[override]
+    def get_route_handler(
+        self,
+    ) -> Callable[[StarletteRequest], Coroutine[Any, Any, Response]]:
         original_handler = super().get_route_handler()
 
-        async def custom_route_handler(request: StarletteRequest) -> Any:
+        async def custom_route_handler(request: StarletteRequest) -> Response:
             try:
                 return await original_handler(request)
             except RequestValidationError as exc:
                 return safe_validation_response(exc)
-            except _HeaderMissingError as exc:
+            except _HeaderMissingError:
                 return _provider_profile_error_response(
-                    exc.status_code,
-                    exc.detail["code"],
-                    exc.detail["message"],
+                    status.HTTP_400_BAD_REQUEST,
+                    "missing_ui_header",
+                    "X-PI-Agent-UI header is required.",
                 )
-            except _OriginInvalidError as exc:
+            except _OriginInvalidError:
                 return _provider_profile_error_response(
-                    exc.status_code,
-                    exc.detail["code"],
-                    exc.detail["message"],
+                    status.HTTP_403_FORBIDDEN,
+                    "invalid_origin",
+                    "Request origin is not allowed.",
                 )
             except HTTPException as exc:
                 # Safe projection of HTTPException detail
@@ -457,7 +460,7 @@ def get_model_capability_store(
                 "message": "Model capabilities are not initialized.",
             },
         )
-    return store
+    return cast(SQLiteModelCapabilityStore, store)
 
 
 # ============================================================================

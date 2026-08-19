@@ -3,6 +3,7 @@
 These tests intentionally pin event order. Changing a literal sequence below is a
 runtime protocol change and must be reviewed together with Web consumers.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -57,12 +58,14 @@ class UpdatingTool(AgentTool):
         self.calls += 1
         self.signal = signal
         if on_update is not None:
-            await on_update(ToolResult(
-                tool_call_id=tool_call_id,
-                name=self.name,
-                content=[TextContent(text="half")],
-                details={"progress": 0.5},
-            ))
+            await on_update(
+                ToolResult(
+                    tool_call_id=tool_call_id,
+                    name=self.name,
+                    content=[TextContent(text="half")],
+                    details={"progress": 0.5},
+                )
+            )
         return ToolResult(
             tool_call_id=tool_call_id,
             name=self.name,
@@ -71,41 +74,50 @@ class UpdatingTool(AgentTool):
 
 
 def _two_turn_client(*, first_stop: str = "tool_use") -> FakeClient:
-    return FakeClient([
+    return FakeClient(
         [
-            ToolCallEvent(tool_call=ToolCall(id="call-1", name="update", arguments={})),
-            DoneEvent(stop_reason=first_stop),
-        ],
-        [TextDeltaEvent(delta="done"), DoneEvent(stop_reason="stop")],
-    ])
+            [
+                ToolCallEvent(tool_call=ToolCall(id="call-1", name="update", arguments={})),
+                DoneEvent(stop_reason=first_stop),
+            ],
+            [TextDeltaEvent(delta="done"), DoneEvent(stop_reason="stop")],
+        ]
+    )
 
 
 @pytest.mark.asyncio
 async def test_golden_one_llm_call_plus_tool_batch_per_turn() -> None:
     tool = UpdatingTool()
-    events = [event async for event in run_event_loop(
-        system_prompt="sys",
-        user_text="go",
-        client=_two_turn_client(),
-        tools=ToolRegistry([tool]),
-    )]
+    events = [
+        event
+        async for event in run_event_loop(
+            system_prompt="sys",
+            user_text="go",
+            client=_two_turn_client(),
+            tools=ToolRegistry([tool]),
+        )
+    ]
 
     assert [event.type for event in events] == [
         "agent_start",
         "turn_start",
-        "message_start",       # user
+        "message_start",  # user
         "message_end",
-        "message_start",       # first LLM assistant
+        "message_start",  # first LLM assistant
+        "message_update",  # toolcall_start
+        "message_update",  # toolcall_end
         "message_end",
         "tool_execution_start",
         "tool_execution_update",
         "tool_execution_end",
-        "message_start",       # final tool result, after execution_end
+        "message_start",  # final tool result, after execution_end
         "message_end",
         "turn_end",
         "turn_start",
-        "message_start",       # second LLM assistant
-        "message_update",
+        "message_start",  # second LLM assistant
+        "message_update",  # text_start
+        "message_update",  # text_delta
+        "message_update",  # text_end
         "message_end",
         "turn_end",
         "agent_end",
@@ -140,12 +152,15 @@ async def test_request_snapshot_contains_true_turn_snapshots() -> None:
 @pytest.mark.asyncio
 async def test_length_with_tool_calls_returns_safe_results_without_execution() -> None:
     tool = UpdatingTool()
-    events = [event async for event in run_event_loop(
-        system_prompt="sys",
-        user_text="go",
-        client=_two_turn_client(first_stop="length"),
-        tools=ToolRegistry([tool]),
-    )]
+    events = [
+        event
+        async for event in run_event_loop(
+            system_prompt="sys",
+            user_text="go",
+            client=_two_turn_client(first_stop="length"),
+            tools=ToolRegistry([tool]),
+        )
+    ]
 
     assert tool.calls == 0
     assert not any(event.type.startswith("tool_execution_") for event in events)
@@ -185,15 +200,18 @@ async def test_signal_reaches_before_hook_tool_and_after_hook() -> None:
         seen.append(("after", signal))
         return context.result
 
-    _ = [event async for event in run_event_loop(
-        system_prompt="sys",
-        user_text="go",
-        client=_two_turn_client(),
-        tools=ToolRegistry([tool]),
-        before_tool_call=before,
-        after_tool_call=after,
-        signal=signal,
-    )]
+    _ = [
+        event
+        async for event in run_event_loop(
+            system_prompt="sys",
+            user_text="go",
+            client=_two_turn_client(),
+            tools=ToolRegistry([tool]),
+            before_tool_call=before,
+            after_tool_call=after,
+            signal=signal,
+        )
+    ]
 
     assert seen == [("before", signal), ("after", signal)]
     assert tool.signal is signal
@@ -212,14 +230,17 @@ async def test_prepare_then_should_stop_after_turn() -> None:
         calls.append("stop")
         return True
 
-    events = [event async for event in run_event_loop(
-        system_prompt="sys",
-        user_text="go",
-        client=client,
-        tools=ToolRegistry([UpdatingTool()]),
-        prepare_next_turn=prepare,
-        should_stop_after_turn=should_stop,
-    )]
+    events = [
+        event
+        async for event in run_event_loop(
+            system_prompt="sys",
+            user_text="go",
+            client=client,
+            tools=ToolRegistry([UpdatingTool()]),
+            prepare_next_turn=prepare,
+            should_stop_after_turn=should_stop,
+        )
+    ]
 
     assert calls == ["prepare", "stop"]
     assert sum(event.type == "turn_start" for event in events) == 1
@@ -238,13 +259,16 @@ async def test_turn_controls_also_run_before_natural_agent_end() -> None:
         calls.append("stop")
         return False
 
-    events = [event async for event in run_event_loop(
-        system_prompt="sys",
-        user_text="go",
-        client=FakeClient([[DoneEvent(stop_reason="stop")]]),
-        prepare_next_turn=prepare,
-        should_stop_after_turn=should_stop,
-    )]
+    events = [
+        event
+        async for event in run_event_loop(
+            system_prompt="sys",
+            user_text="go",
+            client=FakeClient([[DoneEvent(stop_reason="stop")]]),
+            prepare_next_turn=prepare,
+            should_stop_after_turn=should_stop,
+        )
+    ]
 
     assert calls == ["prepare", "stop"]
     assert [event.type for event in events[-2:]] == ["turn_end", "agent_end"]
@@ -269,11 +293,13 @@ class DelayedTool(AgentTool):
     ) -> ToolResult:
         await asyncio.sleep(self.delay)
         if on_update is not None:
-            await on_update(ToolResult(
-                tool_call_id=tool_call_id,
-                name=self.name,
-                content=[TextContent(text=f"{self.name}-update")],
-            ))
+            await on_update(
+                ToolResult(
+                    tool_call_id=tool_call_id,
+                    name=self.name,
+                    content=[TextContent(text=f"{self.name}-update")],
+                )
+            )
         return ToolResult(
             tool_call_id=tool_call_id,
             name=self.name,
@@ -283,23 +309,30 @@ class DelayedTool(AgentTool):
 
 @pytest.mark.asyncio
 async def test_golden_parallel_event_order() -> None:
-    client = FakeClient([
+    client = FakeClient(
         [
-            ToolCallEvent(tool_call=ToolCall(id="a", name="slow", arguments={})),
-            ToolCallEvent(tool_call=ToolCall(id="b", name="fast", arguments={})),
-            DoneEvent(stop_reason="tool_use"),
-        ],
-        [DoneEvent(stop_reason="stop")],
-    ])
-    events = [event async for event in run_event_loop(
-        system_prompt="sys",
-        user_text="go",
-        client=client,
-        tools=ToolRegistry([
-            DelayedTool("slow", 0.03),
-            DelayedTool("fast", 0.001),
-        ]),
-    )]
+            [
+                ToolCallEvent(tool_call=ToolCall(id="a", name="slow", arguments={})),
+                ToolCallEvent(tool_call=ToolCall(id="b", name="fast", arguments={})),
+                DoneEvent(stop_reason="tool_use"),
+            ],
+            [DoneEvent(stop_reason="stop")],
+        ]
+    )
+    events = [
+        event
+        async for event in run_event_loop(
+            system_prompt="sys",
+            user_text="go",
+            client=client,
+            tools=ToolRegistry(
+                [
+                    DelayedTool("slow", 0.03),
+                    DelayedTool("fast", 0.001),
+                ]
+            ),
+        )
+    ]
 
     lifecycle: list[str] = []
     for event in events:
@@ -325,38 +358,46 @@ async def test_golden_parallel_event_order() -> None:
 
 
 def test_legacy_request_shaped_snapshot_is_readable() -> None:
-    snapshot = RequestSnapshot.model_validate({
-        "id": "legacy",
-        "request_type": "prompt",
-        "user_text": "old",
-        "status": "completed",
-        "events": [],
-        "tool_calls": [],
-        "tool_results": [],
-    })
+    snapshot = RequestSnapshot.model_validate(
+        {
+            "id": "legacy",
+            "request_type": "prompt",
+            "user_text": "old",
+            "status": "completed",
+            "events": [],
+            "tool_calls": [],
+            "tool_results": [],
+        }
+    )
     assert snapshot.id == "legacy"
     assert snapshot.turns == []
 
 
 @pytest.mark.asyncio
 async def test_generation_usage_and_provider_latency_are_persisted_on_message() -> None:
-    client = FakeClient([[
-        TextDeltaEvent(delta="done"),
-        DoneEvent(
-            stop_reason="stop",
-            usage=Usage(input=12, output=3, total_tokens=15),
-        ),
-    ]])
-    events = [event async for event in run_event_loop(
-        system_prompt="sys",
-        user_text="go",
-        client=client,
-    )]
+    client = FakeClient(
+        [
+            [
+                TextDeltaEvent(delta="done"),
+                DoneEvent(
+                    stop_reason="stop",
+                    usage=Usage(input=12, output=3, total_tokens=15),
+                ),
+            ]
+        ]
+    )
+    events = [
+        event
+        async for event in run_event_loop(
+            system_prompt="sys",
+            user_text="go",
+            client=client,
+        )
+    ]
     message = next(
         event.message
         for event in events
-        if event.type == "message_end"
-        and getattr(event.message, "role", None) == "assistant"
+        if event.type == "message_end" and getattr(event.message, "role", None) == "assistant"
     )
     assert message.usage.total_tokens == 15
     assert message.generation_metrics is not None
@@ -373,13 +414,16 @@ async def test_before_model_call_runs_for_first_and_tool_followup_calls() -> Non
         seen.append((context.turn_index, len(context.messages), len(context.tools)))
         return ModelCallDecision()
 
-    events = [event async for event in run_event_loop(
-        system_prompt="sys",
-        user_text="go",
-        client=_two_turn_client(),
-        tools=ToolRegistry([UpdatingTool()]),
-        before_model_call=before_model_call,
-    )]
+    events = [
+        event
+        async for event in run_event_loop(
+            system_prompt="sys",
+            user_text="go",
+            client=_two_turn_client(),
+            tools=ToolRegistry([UpdatingTool()]),
+            before_model_call=before_model_call,
+        )
+    ]
     assert [turn for turn, _, _ in seen] == [1, 2]
     assert all(tool_count == 1 for _, _, tool_count in seen)
     assert [event.type for event in events].count("turn_end") == 2
@@ -387,15 +431,18 @@ async def test_before_model_call_runs_for_first_and_tool_followup_calls() -> Non
 
 @pytest.mark.asyncio
 async def test_before_model_call_denial_is_a_safe_terminal_assistant() -> None:
-    events = [event async for event in run_event_loop(
-        system_prompt="sys",
-        user_text="go",
-        client=FakeClient([[TextDeltaEvent(delta="must not stream")]]),
-        before_model_call=lambda context: ModelCallDecision(
-            allow=False,
-            error_message="context budget exceeded",
-        ),
-    )]
+    events = [
+        event
+        async for event in run_event_loop(
+            system_prompt="sys",
+            user_text="go",
+            client=FakeClient([[TextDeltaEvent(delta="must not stream")]]),
+            before_model_call=lambda context: ModelCallDecision(
+                allow=False,
+                error_message="context budget exceeded",
+            ),
+        )
+    ]
     assert [event.type for event in events] == [
         "agent_start",
         "turn_start",

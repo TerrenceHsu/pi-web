@@ -29,6 +29,7 @@ Step 9 新增（Queue / Abort）：
 - `_execute_tool_batch` 也接 signal：sequential 模式下逐个工具前检查
 - 信号传给 `client.stream(signal=...)`——FakeClient / GLMClient 已支持
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -74,6 +75,7 @@ from .messages import (
     GenerationMetrics,
     Message,
     TextContent,
+    ThinkingContent,
     ToolCall,
     ToolResultMessage,
     Usage,
@@ -84,7 +86,15 @@ from .model_client import (
     ErrorEvent,
     ModelClient,
     TextDeltaEvent,
+    TextEndEvent,
+    TextStartEvent,
+    ThinkingDeltaEvent,
+    ThinkingEndEvent,
+    ThinkingStartEvent,
+    ToolCallDeltaEvent,
+    ToolCallEndEvent,
     ToolCallEvent,
+    ToolCallStartEvent,
 )
 from .policy import (
     InMemoryToolPermissionAuditLog,
@@ -100,10 +110,12 @@ from .tool_validation import (
 )
 from .tools import (
     AgentTool,
+    ToolExecutionMode,
     ToolNotFoundError,
     ToolRegistry,
     ToolResult,
     ToolUpdateCallback,
+    _validate_tool_execution_mode,
 )
 
 # ============================================================================
@@ -118,10 +130,22 @@ class ExecutedToolResult:
     `index` 保留 ToolCall 在原 assistant 消息里的源序；
     parallel 模式下完成后用它把 results 重排回源序，保证 new_messages 稳定。
     """
+
     index: int
     tool_call: ToolCall
     result: ToolResult
     message: ToolResultMessage
+
+
+@dataclass
+class _PreparedToolCall:
+    """已串行完成 preflight、可以进入实际执行阶段的工具调用。"""
+
+    tool_call: ToolCall
+    tool: AgentTool
+    messages: list[AgentMessage]
+    after_tool_call: AfterToolCallFn
+    signal: asyncio.Event | None
 
 
 @dataclass
@@ -130,6 +154,7 @@ class _BatchDone:
 
     非公开 AgentEvent；只在 loop.py 内部用作 async generator 的"返回值"。
     """
+
     ordered: list[ExecutedToolResult]
 
 
@@ -162,15 +187,17 @@ class ModelCallDecision:
     error_message: str | None = None
 
 
-ShouldStopAfterTurnFn = Callable[
-    [TurnControlContext], bool | Awaitable[bool]
-]
+ShouldStopAfterTurnFn = Callable[[TurnControlContext], bool | Awaitable[bool]]
 PrepareNextTurnFn = Callable[
     [TurnControlContext], list[Message] | None | Awaitable[list[Message] | None]
 ]
 BeforeModelCallFn = Callable[
     [ModelCallContext],
     ModelCallDecision | bool | None | Awaitable[ModelCallDecision | bool | None],
+]
+PendingMessagesFn = Callable[
+    [],
+    Sequence[Message] | None | Awaitable[Sequence[Message] | None],
 ]
 
 
@@ -195,15 +222,27 @@ async def _await_maybe(value: Any) -> Any:
     return value
 
 
+async def _poll_pending_messages(
+    callback: PendingMessagesFn | None,
+) -> list[Message]:
+    """Drain one queue poll into an isolated list.
+
+    Queue ownership stays with the caller (normally :class:`Agent`).  The loop
+    only asks for messages at the upstream-defined delivery boundaries.
+    """
+    if callback is None:
+        return []
+    pending = await _await_maybe(callback())
+    return list(pending) if pending else []
+
+
 def _accepts_parameter(fn: Callable[..., Any], name: str) -> bool:
     """签名探测失败时采用新版契约；可探测时兼容旧版实现。"""
     try:
         params = inspect.signature(fn).parameters
     except (TypeError, ValueError):
         return True
-    return name in params or any(
-        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
-    )
+    return name in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 async def _call_tool_hook(
@@ -252,11 +291,15 @@ def _to_registry(
 def _should_run_sequential(
     registry: ToolRegistry,
     tool_calls: list[ToolCall],
+    tool_execution: ToolExecutionMode = "parallel",
 ) -> bool:
-    """batch 中任一**已注册**工具声明 sequential → 整批 sequential。
+    """全局串行或任一**已注册**工具声明串行 → 整批串行。
 
-    ToolNotFoundError 的工具不参与判断（错误结果不影响模式选择）。
+    逐工具 ``parallel`` 不能放宽全局 ``sequential``。ToolNotFoundError
+    的工具不参与逐工具判断（错误结果不影响模式选择）。
     """
+    if tool_execution == "sequential":
+        return True
     for tc in tool_calls:
         if not registry.has(tc.name):
             continue
@@ -283,7 +326,8 @@ async def _execute_tool_with_hooks(
     permission_policy: ToolPermissionPolicy | None = None,
     permission_audit_log: InMemoryToolPermissionAuditLog | None = None,
     tool_approval_handler: ToolApprovalHandler | None = None,
-) -> ToolResult:
+    prepare_only: bool = False,
+) -> ToolResult | _PreparedToolCall:
     """执行单个工具，含 before / after hooks；所有失败路径都包成 ToolResult。
 
     顺序：
@@ -291,7 +335,7 @@ async def _execute_tool_with_hooks(
       2. before_tool_call(BeforeToolCallContext{tool_call, tool, messages})
          - 抛异常    → error ToolResult（details.hook="before_tool_call"）
          - allow=False → error ToolResult（details.blocked_by="before_tool_call"）
-         - tool_call 不为 None → 用新 tool_call 继续
+         - tool_call 不为 None → 用新 tool_call 继续，但 id 必须保持不变
       3. 若 hook 修改了 tool_call.name → 重查 registry
       4. 若 tool is None → error ToolResult（ToolNotFoundError）
       5. **Step 18 permission_policy.check_tool_call**（在 validation 前）
@@ -323,15 +367,19 @@ async def _execute_tool_with_hooks(
     # Step 9 检查点 1：before_tool_call 之前
     if signal is not None and signal.is_set():
         return ToolResult(
-            tool_call_id=tool_call.id, name=tool_call.name,
+            tool_call_id=tool_call.id,
+            name=tool_call.name,
             content=[TextContent(text="aborted")],
-            is_error=True, details={"error_type": "AbortSignal"},
+            is_error=True,
+            details={"error_type": "AbortSignal"},
         )
 
     # 2. before_tool_call
     try:
         before_ctx = BeforeToolCallContext(
-            tool_call=tool_call, tool=tool, messages=list(messages),
+            tool_call=tool_call,
+            tool=tool,
+            messages=list(messages),
         )
         before_result = BeforeToolCallResult.model_validate(
             await _call_tool_hook(before_tool_call, before_ctx, signal)
@@ -340,9 +388,11 @@ async def _execute_tool_with_hooks(
         return ToolResult(
             tool_call_id=tool_call.id,
             name=tool_call.name,
-            content=[TextContent(
-                text=f"before_tool_call failed: {type(e).__name__}: {e}",
-            )],
+            content=[
+                TextContent(
+                    text=f"before_tool_call failed: {type(e).__name__}: {e}",
+                )
+            ],
             is_error=True,
             details={
                 "hook": "before_tool_call",
@@ -365,11 +415,29 @@ async def _execute_tool_with_hooks(
     # 4. 使用修改后的 tool_call（若有）
     effective_tool_call = before_result.tool_call or tool_call
 
+    # ToolCall ID 是 Provider 协议中 assistant tool call 与 tool result 的关联键。
+    # hook 可以兼容性地修正 name / arguments，但绝不能创建新的调用身份。
+    if effective_tool_call.id != tool_call.id:
+        return ToolResult(
+            tool_call_id=tool_call.id,
+            name=tool_call.name,
+            content=[
+                TextContent(
+                    text=(
+                        "before_tool_call cannot change tool_call.id "
+                        f"({tool_call.id!r} -> {effective_tool_call.id!r})"
+                    )
+                )
+            ],
+            is_error=True,
+            details={
+                "hook": "before_tool_call",
+                "error_type": "ToolCallIdentityMutationError",
+            },
+        )
+
     # 4.1 如果 hook 修改了 tool_call.name，需要重新查 registry
-    if (
-        before_result.tool_call is not None
-        and effective_tool_call.name != tool_call.name
-    ):
+    if before_result.tool_call is not None and effective_tool_call.name != tool_call.name:
         try:
             tool = registry.get(effective_tool_call.name)
         except ToolNotFoundError:
@@ -404,22 +472,26 @@ async def _execute_tool_with_hooks(
 
             # audit log（allow / deny / require_approval 都记）
             if permission_audit_log is not None:
-                permission_audit_log.append(ToolPermissionAuditRecord(
-                    tool_call_id=effective_tool_call.id,
-                    tool_name=effective_tool_call.name,
-                    decision=decision.decision,
-                    policy_name=decision.policy_name,
-                    reason=decision.reason,
-                    metadata=dict(decision.metadata),
-                ))
+                permission_audit_log.append(
+                    ToolPermissionAuditRecord(
+                        tool_call_id=effective_tool_call.id,
+                        tool_name=effective_tool_call.name,
+                        decision=decision.decision,
+                        policy_name=decision.policy_name,
+                        reason=decision.reason,
+                        metadata=dict(decision.metadata),
+                    )
+                )
 
             if decision.denied:
                 return ToolResult(
                     tool_call_id=effective_tool_call.id,
                     name=effective_tool_call.name,
-                    content=[TextContent(
-                        text=f"Tool call denied by policy: {decision.reason or 'no reason'}",
-                    )],
+                    content=[
+                        TextContent(
+                            text=f"Tool call denied by policy: {decision.reason or 'no reason'}",
+                        )
+                    ],
                     is_error=True,
                     details={
                         "error_type": "ToolPermissionDenied",
@@ -443,12 +515,14 @@ async def _execute_tool_with_hooks(
                     return ToolResult(
                         tool_call_id=effective_tool_call.id,
                         name=effective_tool_call.name,
-                        content=[TextContent(
-                            text=(
-                                "Tool call requires approval but no approval "
-                                f"handler is available: {decision.reason or 'no reason'}"
-                            ),
-                        )],
+                        content=[
+                            TextContent(
+                                text=(
+                                    "Tool call requires approval but no approval "
+                                    f"handler is available: {decision.reason or 'no reason'}"
+                                ),
+                            )
+                        ],
                         is_error=True,
                         details={
                             "error_type": "ToolApprovalRequired",
@@ -456,27 +530,32 @@ async def _execute_tool_with_hooks(
                         },
                     )
                 try:
-                    approved = await _await_maybe(tool_approval_handler(
-                        ToolApprovalContext(
-                            tool_call=effective_tool_call,
-                            tool=tool,
-                            decision=decision,
-                            signal=signal,
+                    approved = await _await_maybe(
+                        tool_approval_handler(
+                            ToolApprovalContext(
+                                tool_call=effective_tool_call,
+                                tool=tool,
+                                decision=decision,
+                                signal=signal,
+                            )
                         )
-                    ))
+                    )
                     if not isinstance(approved, bool):
                         raise TypeError(
-                            "tool approval handler must return bool, "
-                            f"got {type(approved).__name__}"
+                            f"tool approval handler must return bool, got {type(approved).__name__}"
                         )
                 except Exception as approval_exc:
                     return ToolResult(
                         tool_call_id=effective_tool_call.id,
                         name=effective_tool_call.name,
-                        content=[TextContent(text=(
-                            "Tool approval handler failed: "
-                            f"{type(approval_exc).__name__}: {approval_exc}"
-                        ))],
+                        content=[
+                            TextContent(
+                                text=(
+                                    "Tool approval handler failed: "
+                                    f"{type(approval_exc).__name__}: {approval_exc}"
+                                )
+                            )
+                        ],
                         is_error=True,
                         details={
                             "error_type": "ToolApprovalHandlerError",
@@ -510,12 +589,13 @@ async def _execute_tool_with_hooks(
             return ToolResult(
                 tool_call_id=effective_tool_call.id,
                 name=effective_tool_call.name,
-                content=[TextContent(
-                    text=(
-                        f"Permission policy error: "
-                        f"{type(policy_exc).__name__}: {policy_exc}"
-                    ),
-                )],
+                content=[
+                    TextContent(
+                        text=(
+                            f"Permission policy error: {type(policy_exc).__name__}: {policy_exc}"
+                        ),
+                    )
+                ],
                 is_error=True,
                 details={
                     "error_type": "ToolPermissionPolicyError",
@@ -562,69 +642,116 @@ async def _execute_tool_with_hooks(
             },
         )
 
+    prepared = _PreparedToolCall(
+        tool_call=effective_tool_call,
+        tool=tool,
+        messages=list(messages),
+        after_tool_call=after_tool_call,
+        signal=signal,
+    )
+    if prepare_only:
+        return prepared
+    return await _execute_prepared_tool_call(
+        prepared=prepared,
+        on_update=on_update,
+    )
+
+
+async def _execute_prepared_tool_call(
+    *,
+    prepared: _PreparedToolCall,
+    on_update: ToolUpdateCallback | None = None,
+) -> ToolResult:
+    """执行已完成 preflight 的工具，并运行 after hook。"""
+    tool_call = prepared.tool_call
+    tool = prepared.tool
+    signal = prepared.signal
+
     # Step 9 检查点 2：tool.execute 之前
     if signal is not None and signal.is_set():
         return ToolResult(
-            tool_call_id=effective_tool_call.id, name=effective_tool_call.name,
+            tool_call_id=tool_call.id,
+            name=tool_call.name,
             content=[TextContent(text="aborted")],
-            is_error=True, details={"error_type": "AbortSignal"},
+            is_error=True,
+            details={"error_type": "AbortSignal"},
         )
 
     # 6. 执行
     try:
-        result = await _call_tool_execute(
-            tool,
-            effective_tool_call,
-            signal=signal,
-            on_update=on_update,
+        result = ToolResult.model_validate(
+            await _call_tool_execute(
+                tool,
+                tool_call,
+                signal=signal,
+                on_update=on_update,
+            )
         )
+        # 工具实现不拥有调用身份；即使返回了错误 ID，也要绑定回原 ToolCall。
+        if result.tool_call_id != tool_call.id:
+            result = result.model_copy(update={"tool_call_id": tool_call.id})
     except Exception as e:
         result = ToolResult(
-            tool_call_id=effective_tool_call.id,
-            name=effective_tool_call.name,
+            tool_call_id=tool_call.id,
+            name=tool_call.name,
             content=[TextContent(text=f"{type(e).__name__}: {e}")],
             is_error=True,
             details={"error_type": type(e).__name__},
         )
 
-    # Step 9 检查点 3：tool.execute 之后
+    # Step 9 检查点 3/4：tool.execute 之后、after_tool_call 之前
     if signal is not None and signal.is_set():
         return ToolResult(
-            tool_call_id=effective_tool_call.id, name=effective_tool_call.name,
+            tool_call_id=tool_call.id,
+            name=tool_call.name,
             content=[TextContent(text="aborted")],
-            is_error=True, details={"error_type": "AbortSignal"},
-        )
-
-    # Step 9 检查点 4：after_tool_call 之前
-    if signal is not None and signal.is_set():
-        return ToolResult(
-            tool_call_id=effective_tool_call.id, name=effective_tool_call.name,
-            content=[TextContent(text="aborted")],
-            is_error=True, details={"error_type": "AbortSignal"},
+            is_error=True,
+            details={"error_type": "AbortSignal"},
         )
 
     # 7. after_tool_call
     try:
         after_ctx = AfterToolCallContext(
-            tool_call=effective_tool_call,
+            tool_call=tool_call,
             tool=tool,
             result=result,
-            messages=list(messages),
+            messages=list(prepared.messages),
         )
         final_result = ToolResult.model_validate(
-            await _call_tool_hook(after_tool_call, after_ctx, signal)
+            await _call_tool_hook(prepared.after_tool_call, after_ctx, signal)
         )
     except Exception as e:
         return ToolResult(
-            tool_call_id=effective_tool_call.id,
-            name=effective_tool_call.name,
-            content=[TextContent(
-                text=f"after_tool_call failed: {type(e).__name__}: {e}",
-            )],
+            tool_call_id=tool_call.id,
+            name=tool_call.name,
+            content=[
+                TextContent(
+                    text=f"after_tool_call failed: {type(e).__name__}: {e}",
+                )
+            ],
             is_error=True,
             details={
                 "hook": "after_tool_call",
                 "error_type": type(e).__name__,
+            },
+        )
+
+    if final_result.tool_call_id != tool_call.id:
+        return ToolResult(
+            tool_call_id=tool_call.id,
+            name=tool_call.name,
+            content=[
+                TextContent(
+                    text=(
+                        "after_tool_call cannot change tool_call_id "
+                        f"({tool_call.id!r} -> {final_result.tool_call_id!r})"
+                    )
+                )
+            ],
+            is_error=True,
+            details={
+                "hook": "after_tool_call",
+                "error_type": "ToolCallIdentityMutationError",
             },
         )
 
@@ -669,7 +796,7 @@ async def _exec_one_tool(
             details={"error_type": "AbortSignal"},
         )
     else:
-        result = await _execute_tool_with_hooks(
+        prepared_or_result = await _execute_tool_with_hooks(
             registry=registry,
             tool_call=tool_call,
             messages=messages,
@@ -681,6 +808,9 @@ async def _exec_one_tool(
             permission_audit_log=permission_audit_log,
             tool_approval_handler=tool_approval_handler,
         )
+        if isinstance(prepared_or_result, _PreparedToolCall):
+            raise RuntimeError("tool preflight unexpectedly remained deferred")
+        result = prepared_or_result
     msg = ToolResultMessage(
         tool_call_id=result.tool_call_id,
         name=result.name,
@@ -690,7 +820,10 @@ async def _exec_one_tool(
         details=result.details,
     )
     return ExecutedToolResult(
-        index=index, tool_call=tool_call, result=result, message=msg,
+        index=index,
+        tool_call=tool_call,
+        result=result,
+        message=msg,
     )
 
 
@@ -701,6 +834,7 @@ async def _execute_tool_batch(
     messages: Sequence[AgentMessage],
     before_fn: BeforeToolCallFn,
     after_fn: AfterToolCallFn,
+    tool_execution: ToolExecutionMode = "parallel",
     signal: asyncio.Event | None = None,
     permission_policy: ToolPermissionPolicy | None = None,
     permission_audit_log: InMemoryToolPermissionAuditLog | None = None,
@@ -712,12 +846,13 @@ async def _execute_tool_batch(
     最终 ToolResultMessage 一律在 end 之后发出。并行模式的 start 保持源序、
     update/end 保持实际到达/完成序、result message 保持源序。
     """
-    is_sequential = _should_run_sequential(registry, tool_calls)
+    is_sequential = _should_run_sequential(registry, tool_calls, tool_execution)
 
     async def produce(
         index: int,
         tc: ToolCall,
         queue: asyncio.Queue[_ToolUpdateItem | _ToolDoneItem],
+        prepared: _PreparedToolCall | None = None,
     ) -> None:
         loop = asyncio.get_running_loop()
 
@@ -725,24 +860,39 @@ async def _execute_tool_batch(
             future: asyncio.Future[None] = loop.create_future()
             try:
                 partial = ToolResult.model_validate(partial_result)
-                queue.put_nowait(_ToolUpdateItem(
-                    index=index, tool_call=tc, result=partial,
-                ))
+                queue.put_nowait(
+                    _ToolUpdateItem(
+                        index=index,
+                        tool_call=tc,
+                        result=partial,
+                    )
+                )
                 future.set_result(None)
             except Exception as exc:
                 future.set_exception(exc)
             return future
 
         try:
-            executed = await _exec_one_tool(
-                index=index, tool_call=tc,
-                registry=registry, messages=list(messages),
-                before_fn=before_fn, after_fn=after_fn,
-                signal=signal, on_update=on_update,
-                permission_policy=permission_policy,
-                permission_audit_log=permission_audit_log,
-                tool_approval_handler=tool_approval_handler,
-            )
+            if prepared is None:
+                executed = await _exec_one_tool(
+                    index=index,
+                    tool_call=tc,
+                    registry=registry,
+                    messages=list(messages),
+                    before_fn=before_fn,
+                    after_fn=after_fn,
+                    signal=signal,
+                    on_update=on_update,
+                    permission_policy=permission_policy,
+                    permission_audit_log=permission_audit_log,
+                    tool_approval_handler=tool_approval_handler,
+                )
+            else:
+                result = await _execute_prepared_tool_call(
+                    prepared=prepared,
+                    on_update=on_update,
+                )
+                executed = executed_result(index, tc, result)
             queue.put_nowait(_ToolDoneItem(index=index, executed=executed))
         except Exception as exc:  # 最后一层安全网：单工具不能炸掉整个 batch
             queue.put_nowait(_ToolDoneItem(index=index, error=exc))
@@ -764,6 +914,25 @@ async def _execute_tool_batch(
                 name=tc.name,
                 content=result.content,
                 is_error=True,
+                details=result.details,
+            ),
+        )
+
+    def executed_result(
+        index: int,
+        tc: ToolCall,
+        result: ToolResult,
+    ) -> ExecutedToolResult:
+        return ExecutedToolResult(
+            index=index,
+            tool_call=tc,
+            result=result,
+            message=ToolResultMessage(
+                tool_call_id=result.tool_call_id,
+                name=result.name,
+                content=result.content,
+                is_error=result.is_error,
+                terminate=result.terminate,
                 details=result.details,
             ),
         )
@@ -802,20 +971,58 @@ async def _execute_tool_batch(
             yield _BatchDone(ordered=[])
             return
 
-        for tc in tool_calls:
-            yield ToolExecutionStartEvent(tool_call=tc)
-
-        queue = asyncio.Queue()
-        tasks = [asyncio.create_task(produce(i, tc, queue)) for i, tc in enumerate(tool_calls)]
+        # pi-agent 语义：并行仅作用于实际 tool.execute。所有 preflight
+        # （before hook、policy、approval、validation）必须按源序串行完成，
+        # 避免审批重叠和安全决策竞态。
+        prepared_calls: list[tuple[int, ToolCall, _PreparedToolCall]] = []
         results_by_index: dict[int, ExecutedToolResult] = {}
-        while len(results_by_index) < len(tool_calls):
-            item = await queue.get()
+        for i, tc in enumerate(tool_calls):
+            yield ToolExecutionStartEvent(tool_call=tc)
+            try:
+                prepared_or_result = await _execute_tool_with_hooks(
+                    registry=registry,
+                    tool_call=tc,
+                    messages=list(messages),
+                    before_tool_call=before_fn,
+                    after_tool_call=after_fn,
+                    signal=signal,
+                    permission_policy=permission_policy,
+                    permission_audit_log=permission_audit_log,
+                    tool_approval_handler=tool_approval_handler,
+                    prepare_only=True,
+                )
+            except Exception as exc:
+                executed = failed_execution(i, tc, exc)
+                results_by_index[i] = executed
+                yield ToolExecutionEndEvent(tool_call=tc, result=executed.result)
+                continue
+
+            if isinstance(prepared_or_result, _PreparedToolCall):
+                prepared_calls.append((i, tc, prepared_or_result))
+            else:
+                executed = executed_result(i, tc, prepared_or_result)
+                results_by_index[i] = executed
+                yield ToolExecutionEndEvent(tool_call=tc, result=executed.result)
+
+            if signal is not None and signal.is_set():
+                break
+
+        parallel_queue: asyncio.Queue[_ToolUpdateItem | _ToolDoneItem] = asyncio.Queue()
+        tasks = [
+            asyncio.create_task(produce(i, tc, parallel_queue, prepared))
+            for i, tc, prepared in prepared_calls
+        ]
+        pending_count = len(prepared_calls)
+        completed_count = 0
+        while completed_count < pending_count:
+            item = await parallel_queue.get()
             if isinstance(item, _ToolUpdateItem):
                 yield ToolExecutionUpdateEvent(
                     tool_call=item.tool_call,
                     partial_result=item.result,
                 )
                 continue
+            completed_count += 1
             if item.executed is not None:
                 executed = item.executed
             else:
@@ -826,11 +1033,12 @@ async def _execute_tool_batch(
                 )
             results_by_index[executed.index] = executed
             yield ToolExecutionEndEvent(
-                tool_call=executed.tool_call, result=executed.result,
+                tool_call=executed.tool_call,
+                result=executed.result,
             )
         await asyncio.gather(*tasks)
         # 按原 index 排序——保证 new_messages 顺序稳定
-        ordered = [results_by_index[i] for i in range(len(tool_calls))]
+        ordered = [results_by_index[i] for i in sorted(results_by_index)]
         for executed in ordered:
             yield MessageStartEvent(message=executed.message)
             yield MessageEndEvent(message=executed.message)
@@ -853,6 +1061,7 @@ async def run_event_loop(
     transform_context_fn: TransformContextFn | None = None,
     before_tool_call: BeforeToolCallFn | None = None,
     after_tool_call: AfterToolCallFn | None = None,
+    tool_execution: ToolExecutionMode = "parallel",
     signal: asyncio.Event | None = None,
     permission_policy: ToolPermissionPolicy | None = None,
     permission_audit_log: InMemoryToolPermissionAuditLog | None = None,
@@ -860,6 +1069,8 @@ async def run_event_loop(
     should_stop_after_turn: ShouldStopAfterTurnFn | None = None,
     prepare_next_turn: PrepareNextTurnFn | None = None,
     before_model_call: BeforeModelCallFn | None = None,
+    get_steering_messages: PendingMessagesFn | None = None,
+    get_follow_up_messages: PendingMessagesFn | None = None,
     max_turns: int = 50,
 ) -> AsyncIterator[AgentEvent]:
     """事件驱动的 agent loop（Step 9：abort signal；Step 8：initial_messages；Step 7：batch）。
@@ -882,6 +1093,16 @@ async def run_event_loop(
                                  收敛（error_message="max_turns exceeded"），
                                  防止模型持续 yield tool_call 时死循环。
 
+    工具批次调度：
+      tool_execution         —— 全局模式（默认 parallel）；全局 sequential
+                                 或批次内任一工具 execution_mode=sequential 时，
+                                 整批按 sequential 执行。
+
+    Agent 控制队列：
+      get_steering_messages  —— 每个 assistant turn 后优先拉取；首次模型调用前
+                                 也拉取一次。
+      get_follow_up_messages —— 仅在没有后续 tool turn / steering 时拉取。
+
     Step 9 abort 检查点：
       1. while iter 开始（before transform/stream）—— 立即发 aborted assistant + 收敛
       2. client.stream 迭代中收到 ErrorEvent 且 signal set —— 标 aborted
@@ -890,14 +1111,11 @@ async def run_event_loop(
 
     Step 8 / 7 / 6 / 5 / 4 / 3 / 2 / 1 行为全部保留。
     """
+    tool_execution = _validate_tool_execution_mode(tool_execution)
     if user_text is None and not initial_messages:
-        raise ValueError(
-            "run_event_loop: 必须提供 user_text 或 initial_messages 至少一项"
-        )
+        raise ValueError("run_event_loop: 必须提供 user_text 或 initial_messages 至少一项")
     if max_turns < 1:
-        raise ValueError(
-            f"run_event_loop: max_turns 必须 >= 1，实际 {max_turns}"
-        )
+        raise ValueError(f"run_event_loop: max_turns 必须 >= 1，实际 {max_turns}")
 
     registry = _to_registry(tools)
     tool_defs = registry.definitions()
@@ -914,6 +1132,10 @@ async def run_event_loop(
         yield MessageStartEvent(message=user_msg)
         yield MessageEndEvent(message=user_msg)
         new_messages.append(user_msg)
+
+    # 与 pi-agent 一致：在第一次模型调用前先检查 steering。这样在请求真正
+    # 开始流式响应前到达的 steer 不会被无故延迟一个 turn。
+    pending_messages = await _poll_pending_messages(get_steering_messages)
 
     # P0：一个 turn 严格对应一次 LLM 调用及该调用产生的整批工具。
     turn_count = 1
@@ -959,6 +1181,14 @@ async def run_event_loop(
                 yield ev
             return
 
+        # steering / follow-up 都作为独立消息在下一次模型调用前注入，并产生
+        # 完整 message_start/end 事件，保证 transcript、snapshot 与 UI 一致。
+        for pending_message in pending_messages:
+            yield MessageStartEvent(message=pending_message)
+            yield MessageEndEvent(message=pending_message)
+            new_messages.append(pending_message)
+        pending_messages = []
+
         # —— Context 转换 ——
         raw_context: list[AgentMessage] = list(new_messages)
         transform = transform_context_fn or default_transform_context
@@ -968,14 +1198,18 @@ async def run_event_loop(
         if before_model_call is not None:
             admission_error: str | None = None
             try:
-                raw_decision = await _await_maybe(before_model_call(ModelCallContext(
-                    turn_index=turn_count,
-                    system_prompt=system_prompt,
-                    messages=tuple(llm_messages),
-                    tools=tuple(tool_defs),
-                    client=client,
-                    signal=signal,
-                )))
+                raw_decision = await _await_maybe(
+                    before_model_call(
+                        ModelCallContext(
+                            turn_index=turn_count,
+                            system_prompt=system_prompt,
+                            messages=tuple(llm_messages),
+                            tools=tuple(tool_defs),
+                            client=client,
+                            signal=signal,
+                        )
+                    )
+                )
                 if isinstance(raw_decision, ModelCallDecision):
                     if not raw_decision.allow:
                         admission_error = (
@@ -1008,7 +1242,14 @@ async def run_event_loop(
                 return
 
         # —— 调 LLM ——
-        text_buf: list[str] = []
+        content_by_index: dict[int, TextContent | ThinkingContent | ToolCall] = {}
+        claimed_indices: set[int] = set()
+        open_text_indices: set[int] = set()
+        open_thinking_indices: set[int] = set()
+        pending_tool_calls: dict[int, dict[str, Any]] = {}
+        legacy_text_index: int | None = None
+        legacy_thinking_index: int | None = None
+        next_content_index = 0
         tool_calls: list[ToolCall] = []
         stop_reason: str = "stop"
         error_message: str | None = None
@@ -1017,16 +1258,31 @@ async def run_event_loop(
         first_response_at: float | None = None
         generation_metrics: GenerationMetrics | None = None
 
+        def claim_content_index(  # noqa: B023
+            index: int | None = None,
+            claimed: set[int] = claimed_indices,
+        ) -> int:
+            nonlocal next_content_index
+            if index is None:
+                while next_content_index in claimed:
+                    next_content_index += 1
+                index = next_content_index
+            claimed.add(index)
+            next_content_index = max(next_content_index, index + 1)
+            return index
+
         def make_assistant() -> AssistantMessage:  # noqa: B023
-            content: list[Any] = []
-            if text_buf:  # noqa: B023
-                content.append(TextContent(text="".join(text_buf)))  # noqa: B023
-            content.extend(tool_calls)  # noqa: B023
+            content = [
+                content_by_index[index]  # noqa: B023
+                for index in sorted(content_by_index)  # noqa: B023
+            ]
             return AssistantMessage(
                 content=content,
-                api=client.api_id, provider=client.provider_id,
+                api=client.api_id,
+                provider=client.provider_id,
                 model=getattr(client, "model", "unknown"),
-                stop_reason=stop_reason, error_message=error_message,  # noqa: B023
+                stop_reason=stop_reason,  # noqa: B023
+                error_message=error_message,  # noqa: B023
                 usage=final_usage,  # noqa: B023
                 generation_metrics=generation_metrics,  # noqa: B023
             )
@@ -1039,17 +1295,238 @@ async def run_event_loop(
             tools=tool_defs if tool_defs else None,
             signal=signal,
         ):
-            if isinstance(s_ev, TextDeltaEvent):
+            if isinstance(s_ev, TextStartEvent):
                 if first_response_at is None:
                     first_response_at = time.perf_counter()
-                text_buf.append(s_ev.delta)
+                index = claim_content_index(s_ev.content_index)
+                content_by_index[index] = TextContent(text="")
+                open_text_indices.add(index)
                 yield MessageUpdateEvent(
-                    message=make_assistant(), assistant_message_event=s_ev,
+                    message=make_assistant(),
+                    assistant_message_event=s_ev,
+                )
+            elif isinstance(s_ev, TextDeltaEvent):
+                if first_response_at is None:
+                    first_response_at = time.perf_counter()
+                text_index = s_ev.content_index
+                if text_index is None:
+                    if legacy_text_index is None:
+                        legacy_text_index = claim_content_index()
+                    text_index = legacy_text_index
+                    s_ev = s_ev.model_copy(update={"content_index": text_index})
+                else:
+                    claim_content_index(text_index)
+                if text_index not in open_text_indices:
+                    content_by_index[text_index] = TextContent(text="")
+                    open_text_indices.add(text_index)
+                    yield MessageUpdateEvent(
+                        message=make_assistant(),
+                        assistant_message_event=TextStartEvent(content_index=text_index),
+                    )
+                current_text = content_by_index.get(text_index)
+                prefix = current_text.text if isinstance(current_text, TextContent) else ""
+                content_by_index[text_index] = TextContent(text=prefix + s_ev.delta)
+                yield MessageUpdateEvent(
+                    message=make_assistant(),
+                    assistant_message_event=s_ev,
+                )
+            elif isinstance(s_ev, TextEndEvent):
+                if first_response_at is None:
+                    first_response_at = time.perf_counter()
+                index = claim_content_index(s_ev.content_index)
+                if index not in open_text_indices:
+                    content_by_index[index] = TextContent(text="")
+                    yield MessageUpdateEvent(
+                        message=make_assistant(),
+                        assistant_message_event=TextStartEvent(content_index=index),
+                    )
+                content_by_index[index] = TextContent(text=s_ev.content)
+                open_text_indices.discard(index)
+                yield MessageUpdateEvent(
+                    message=make_assistant(),
+                    assistant_message_event=s_ev,
+                )
+            elif isinstance(s_ev, ThinkingStartEvent):
+                if first_response_at is None:
+                    first_response_at = time.perf_counter()
+                index = claim_content_index(s_ev.content_index)
+                content_by_index[index] = ThinkingContent(
+                    thinking="",
+                    thinking_signature=s_ev.thinking_signature,
+                    redacted=s_ev.redacted,
+                )
+                open_thinking_indices.add(index)
+                yield MessageUpdateEvent(
+                    message=make_assistant(),
+                    assistant_message_event=s_ev,
+                )
+            elif isinstance(s_ev, ThinkingDeltaEvent):
+                if first_response_at is None:
+                    first_response_at = time.perf_counter()
+                thinking_index = s_ev.content_index
+                if thinking_index is None:
+                    if legacy_thinking_index is None:
+                        legacy_thinking_index = claim_content_index()
+                    thinking_index = legacy_thinking_index
+                    s_ev = s_ev.model_copy(update={"content_index": thinking_index})
+                else:
+                    claim_content_index(thinking_index)
+                if thinking_index not in open_thinking_indices:
+                    content_by_index[thinking_index] = ThinkingContent(
+                        thinking="",
+                        thinking_signature=s_ev.thinking_signature,
+                        redacted=s_ev.redacted,
+                    )
+                    open_thinking_indices.add(thinking_index)
+                    yield MessageUpdateEvent(
+                        message=make_assistant(),
+                        assistant_message_event=ThinkingStartEvent(
+                            content_index=thinking_index,
+                            thinking_signature=s_ev.thinking_signature,
+                            redacted=s_ev.redacted,
+                        ),
+                    )
+                current_thinking = content_by_index.get(thinking_index)
+                if isinstance(current_thinking, ThinkingContent):
+                    thinking = current_thinking.thinking + s_ev.delta
+                    signature = (
+                        s_ev.thinking_signature
+                        if s_ev.thinking_signature is not None
+                        else current_thinking.thinking_signature
+                    )
+                    redacted = current_thinking.redacted or s_ev.redacted
+                else:
+                    thinking = s_ev.delta
+                    signature = s_ev.thinking_signature
+                    redacted = s_ev.redacted
+                content_by_index[thinking_index] = ThinkingContent(
+                    thinking=thinking,
+                    thinking_signature=signature,
+                    redacted=redacted,
+                )
+                yield MessageUpdateEvent(
+                    message=make_assistant(),
+                    assistant_message_event=s_ev,
+                )
+            elif isinstance(s_ev, ThinkingEndEvent):
+                if first_response_at is None:
+                    first_response_at = time.perf_counter()
+                index = claim_content_index(s_ev.content_index)
+                current_thinking = content_by_index.get(index)
+                if index not in open_thinking_indices:
+                    content_by_index[index] = ThinkingContent(thinking="")
+                    yield MessageUpdateEvent(
+                        message=make_assistant(),
+                        assistant_message_event=ThinkingStartEvent(
+                            content_index=index,
+                            thinking_signature=s_ev.thinking_signature,
+                            redacted=s_ev.redacted,
+                        ),
+                    )
+                content_by_index[index] = ThinkingContent(
+                    thinking=s_ev.content,
+                    thinking_signature=(
+                        s_ev.thinking_signature
+                        if s_ev.thinking_signature is not None
+                        else (
+                            current_thinking.thinking_signature
+                            if isinstance(current_thinking, ThinkingContent)
+                            else None
+                        )
+                    ),
+                    redacted=s_ev.redacted
+                    or (
+                        current_thinking.redacted
+                        if isinstance(current_thinking, ThinkingContent)
+                        else False
+                    ),
+                )
+                open_thinking_indices.discard(index)
+                yield MessageUpdateEvent(
+                    message=make_assistant(),
+                    assistant_message_event=s_ev,
+                )
+            elif isinstance(s_ev, ToolCallStartEvent):
+                if first_response_at is None:
+                    first_response_at = time.perf_counter()
+                index = claim_content_index(s_ev.content_index)
+                pending_tool_calls[index] = {
+                    "id": s_ev.tool_call_id,
+                    "name": s_ev.name,
+                    "argument_parts": [],
+                }
+                yield MessageUpdateEvent(
+                    message=make_assistant(),
+                    assistant_message_event=s_ev,
+                )
+            elif isinstance(s_ev, ToolCallDeltaEvent):
+                if first_response_at is None:
+                    first_response_at = time.perf_counter()
+                index = claim_content_index(s_ev.content_index)
+                if index not in pending_tool_calls:
+                    pending_tool_calls[index] = {
+                        "id": s_ev.tool_call_id,
+                        "name": s_ev.name,
+                        "argument_parts": [],
+                    }
+                    yield MessageUpdateEvent(
+                        message=make_assistant(),
+                        assistant_message_event=ToolCallStartEvent(
+                            content_index=index,
+                            tool_call_id=s_ev.tool_call_id,
+                            name=s_ev.name,
+                        ),
+                    )
+                pending = pending_tool_calls[index]
+                if s_ev.tool_call_id is not None:
+                    pending["id"] = s_ev.tool_call_id
+                if s_ev.name is not None:
+                    pending["name"] = s_ev.name
+                pending["argument_parts"].append(s_ev.delta)
+                yield MessageUpdateEvent(
+                    message=make_assistant(),
+                    assistant_message_event=s_ev,
+                )
+            elif isinstance(s_ev, ToolCallEndEvent):
+                if first_response_at is None:
+                    first_response_at = time.perf_counter()
+                index = claim_content_index(s_ev.content_index)
+                if index not in pending_tool_calls:
+                    yield MessageUpdateEvent(
+                        message=make_assistant(),
+                        assistant_message_event=ToolCallStartEvent(
+                            content_index=index,
+                            tool_call_id=s_ev.tool_call.id,
+                            name=s_ev.tool_call.name,
+                        ),
+                    )
+                pending_tool_calls.pop(index, None)
+                content_by_index[index] = s_ev.tool_call
+                yield MessageUpdateEvent(
+                    message=make_assistant(),
+                    assistant_message_event=s_ev,
                 )
             elif isinstance(s_ev, ToolCallEvent):
                 if first_response_at is None:
                     first_response_at = time.perf_counter()
-                tool_calls.append(s_ev.tool_call)
+                index = claim_content_index()
+                start_event = ToolCallStartEvent(
+                    content_index=index,
+                    tool_call_id=s_ev.tool_call.id,
+                    name=s_ev.tool_call.name,
+                )
+                yield MessageUpdateEvent(
+                    message=make_assistant(),
+                    assistant_message_event=start_event,
+                )
+                content_by_index[index] = s_ev.tool_call
+                yield MessageUpdateEvent(
+                    message=make_assistant(),
+                    assistant_message_event=ToolCallEndEvent(
+                        content_index=index,
+                        tool_call=s_ev.tool_call,
+                    ),
+                )
             elif isinstance(s_ev, DoneEvent):
                 stop_reason = s_ev.stop_reason
                 final_usage = s_ev.usage
@@ -1057,8 +1534,45 @@ async def run_event_loop(
                 # 也走 abort 路径——抛弃 partial text / tool_calls，记 error_message
                 if stop_reason == "aborted":
                     error_message = "aborted"
-                    text_buf.clear()
-                    tool_calls.clear()
+                    content_by_index.clear()
+                    pending_tool_calls.clear()
+                    open_text_indices.clear()
+                    open_thinking_indices.clear()
+                else:
+                    for index in sorted(open_text_indices):
+                        block = content_by_index.get(index)
+                        content = block.text if isinstance(block, TextContent) else ""
+                        yield MessageUpdateEvent(
+                            message=make_assistant(),
+                            assistant_message_event=TextEndEvent(
+                                content_index=index,
+                                content=content,
+                            ),
+                        )
+                    open_text_indices.clear()
+                    for index in sorted(open_thinking_indices):
+                        block = content_by_index.get(index)
+                        if isinstance(block, ThinkingContent):
+                            content = block.thinking
+                            signature = block.thinking_signature
+                            redacted = block.redacted
+                        else:
+                            content = ""
+                            signature = None
+                            redacted = False
+                        yield MessageUpdateEvent(
+                            message=make_assistant(),
+                            assistant_message_event=ThinkingEndEvent(
+                                content_index=index,
+                                content=content,
+                                thinking_signature=signature,
+                                redacted=redacted,
+                            ),
+                        )
+                    open_thinking_indices.clear()
+                    if pending_tool_calls:
+                        stop_reason = "error"
+                        error_message = "provider ended with incomplete tool call"
                 break
             elif isinstance(s_ev, ErrorEvent):
                 # Step 9：若 signal set，标记为 aborted；否则 error
@@ -1066,8 +1580,10 @@ async def run_event_loop(
                     stop_reason = "aborted"
                     error_message = "aborted"
                     # 抛弃已累积的 partial text / tool_calls——aborted assistant 内容为空
-                    text_buf.clear()
-                    tool_calls.clear()
+                    content_by_index.clear()
+                    pending_tool_calls.clear()
+                    open_text_indices.clear()
+                    open_thinking_indices.clear()
                 else:
                     stop_reason = "error"
                     error_message = s_ev.message
@@ -1090,11 +1606,20 @@ async def run_event_loop(
         if signal is not None and signal.is_set() and stop_reason == "stop":
             stop_reason = "aborted"
             error_message = "aborted"
-            text_buf.clear()
+            content_by_index.clear()
+            pending_tool_calls.clear()
+            open_text_indices.clear()
+            open_thinking_indices.clear()
             tool_calls.clear()
 
+        tool_calls = [
+            content
+            for _, content in sorted(content_by_index.items())
+            if isinstance(content, ToolCall)
+        ]
         assistant = make_assistant()
         yield MessageEndEvent(message=assistant)
+        assistant_message_index = len(new_messages)
         new_messages.append(assistant)
 
         # 错误或被中断：直接结束
@@ -1106,9 +1631,29 @@ async def run_event_loop(
         # 没 ToolCall：本轮 turn 自然结束
         if not tool_calls:
             yield TurnEndEvent(message=assistant, tool_results=current_tool_results)
-            await apply_turn_controls(assistant, current_tool_results)
-            yield AgentEndEvent(messages=new_messages)
-            return
+            stop_requested = await apply_turn_controls(
+                assistant,
+                current_tool_results,
+            )
+            if stop_requested or turn_count >= max_turns:
+                yield AgentEndEvent(messages=new_messages)
+                return
+
+            # steering 始终优先；只有 Agent 原本将结束时才消费 follow-up。
+            pending_messages = await _poll_pending_messages(
+                get_steering_messages,
+            )
+            if not pending_messages:
+                pending_messages = await _poll_pending_messages(
+                    get_follow_up_messages,
+                )
+            if not pending_messages:
+                yield AgentEndEvent(messages=new_messages)
+                return
+
+            turn_count += 1
+            yield TurnStartEvent()
+            continue
 
         # Provider 因长度限制截断时，tool call 可能是不完整 JSON。绝不执行这些
         # 调用；为每个 call 生成可回喂 LLM 的安全错误结果。
@@ -1118,10 +1663,14 @@ async def run_event_loop(
                 result = ToolResult(
                     tool_call_id=tc.id,
                     name=tc.name,
-                    content=[TextContent(text=(
-                        "Tool call was not executed because the model response "
-                        "ended at the length limit. Retry with complete arguments."
-                    ))],
+                    content=[
+                        TextContent(
+                            text=(
+                                "Tool call was not executed because the model response "
+                                "ended at the length limit. Retry with complete arguments."
+                            )
+                        )
+                    ],
                     is_error=True,
                     details={
                         "error_type": "IncompleteToolCall",
@@ -1135,9 +1684,14 @@ async def run_event_loop(
                     is_error=True,
                     details=result.details,
                 )
-                ordered.append(ExecutedToolResult(
-                    index=index, tool_call=tc, result=result, message=message,
-                ))
+                ordered.append(
+                    ExecutedToolResult(
+                        index=index,
+                        tool_call=tc,
+                        result=result,
+                        message=message,
+                    )
+                )
                 yield MessageStartEvent(message=message)
                 yield MessageEndEvent(message=message)
         else:
@@ -1161,6 +1715,7 @@ async def run_event_loop(
                 messages=batch_messages_snapshot,
                 before_fn=before_fn,
                 after_fn=after_fn,
+                tool_execution=tool_execution,
                 signal=signal,
                 permission_policy=permission_policy,
                 permission_audit_log=permission_audit_log,
@@ -1181,25 +1736,38 @@ async def run_event_loop(
         turn_message = assistant
         if maxed and not terminate:
             # 不创建无 LLM 调用的“伪 turn”；把本次真实调用标为安全上限终止。
-            turn_message = assistant.model_copy(update={
-                "stop_reason": "error",
-                "error_message": f"max_turns exceeded ({max_turns})",
-            })
+            turn_message = assistant.model_copy(
+                update={
+                    "stop_reason": "error",
+                    "error_message": f"max_turns exceeded ({max_turns})",
+                }
+            )
+            # TurnEndEvent、AgentEndEvent 与持久化 transcript 必须引用同一个
+            # 终态 assistant；不能只修改临时的 turn_message。
+            new_messages[assistant_message_index] = turn_message
 
         yield TurnEndEvent(message=turn_message, tool_results=current_tool_results)
 
         stop_requested = await apply_turn_controls(
-            turn_message, current_tool_results,
+            turn_message,
+            current_tool_results,
         )
 
-        if (
-            stop_requested
-            or maxed
-            or terminate
-            or (signal is not None and signal.is_set())
-        ):
+        if stop_requested or maxed or (signal is not None and signal.is_set()):
             yield AgentEndEvent(messages=new_messages)
             return
+
+        pending_messages = await _poll_pending_messages(
+            get_steering_messages,
+        )
+        if terminate and not pending_messages:
+            # terminate 表示工具链原本将结束，因此此时才轮到 follow-up。
+            pending_messages = await _poll_pending_messages(
+                get_follow_up_messages,
+            )
+            if not pending_messages:
+                yield AgentEndEvent(messages=new_messages)
+                return
 
         turn_count += 1
         yield TurnStartEvent()
@@ -1219,9 +1787,11 @@ async def _finalize_abort(
     """
     aborted = AssistantMessage(
         content=[],
-        api=client.api_id, provider=client.provider_id,
+        api=client.api_id,
+        provider=client.provider_id,
         model=getattr(client, "model", "unknown"),
-        stop_reason="aborted", error_message="aborted",
+        stop_reason="aborted",
+        error_message="aborted",
     )
     yield MessageStartEvent(message=aborted)
     yield MessageEndEvent(message=aborted)
@@ -1239,12 +1809,15 @@ async def run_min_loop(
     tools: ToolRegistry | Iterable[AgentTool] | None = None,
     before_tool_call: BeforeToolCallFn | None = None,
     after_tool_call: AfterToolCallFn | None = None,
+    tool_execution: ToolExecutionMode = "parallel",
     permission_policy: ToolPermissionPolicy | None = None,
     permission_audit_log: InMemoryToolPermissionAuditLog | None = None,
     tool_approval_handler: ToolApprovalHandler | None = None,
     should_stop_after_turn: ShouldStopAfterTurnFn | None = None,
     prepare_next_turn: PrepareNextTurnFn | None = None,
     before_model_call: BeforeModelCallFn | None = None,
+    get_steering_messages: PendingMessagesFn | None = None,
+    get_follow_up_messages: PendingMessagesFn | None = None,
     max_turns: int = 50,
 ) -> list[Message]:
     """Step 1+ 便捷封装：跑 event loop，返回所有新 messages。
@@ -1253,17 +1826,22 @@ async def run_min_loop(
     Step 18 起支持 permission_policy / permission_audit_log 透传。
     """
     async for ev in run_event_loop(
-        system_prompt=system_prompt, user_text=user_text,
+        system_prompt=system_prompt,
+        user_text=user_text,
         initial_messages=initial_messages,
-        client=client, tools=tools,
+        client=client,
+        tools=tools,
         before_tool_call=before_tool_call,
         after_tool_call=after_tool_call,
+        tool_execution=tool_execution,
         permission_policy=permission_policy,
         permission_audit_log=permission_audit_log,
         tool_approval_handler=tool_approval_handler,
         should_stop_after_turn=should_stop_after_turn,
         prepare_next_turn=prepare_next_turn,
         before_model_call=before_model_call,
+        get_steering_messages=get_steering_messages,
+        get_follow_up_messages=get_follow_up_messages,
         max_turns=max_turns,
     ):
         if isinstance(ev, AgentEndEvent):
@@ -1272,8 +1850,14 @@ async def run_min_loop(
 
 
 __all__ = [
-    "run_event_loop", "run_min_loop",
+    "run_event_loop",
+    "run_min_loop",
     "ExecutedToolResult",
-    "TurnControlContext", "ShouldStopAfterTurnFn", "PrepareNextTurnFn",
-    "ModelCallContext", "ModelCallDecision", "BeforeModelCallFn",
+    "TurnControlContext",
+    "ShouldStopAfterTurnFn",
+    "PrepareNextTurnFn",
+    "ModelCallContext",
+    "ModelCallDecision",
+    "BeforeModelCallFn",
+    "PendingMessagesFn",
 ]

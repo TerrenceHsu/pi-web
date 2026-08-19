@@ -16,6 +16,7 @@
 - 权限策略（policy 子包负责）
 - 重试 / fallback（上层负责）
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -32,12 +33,19 @@ from ..llm_messages import (
     LLMToolResultMessage,
     LLMUserMessage,
 )
-from ..messages import ToolCall, Usage
+from ..messages import TextContent, ThinkingContent, ToolCall, Usage
 from ..stream_events import (
     DoneEvent,
     StreamEvent,
     TextDeltaEvent,
-    ToolCallEvent,
+    TextEndEvent,
+    TextStartEvent,
+    ThinkingDeltaEvent,
+    ThinkingEndEvent,
+    ThinkingStartEvent,
+    ToolCallDeltaEvent,
+    ToolCallEndEvent,
+    ToolCallStartEvent,
 )
 from ..tools import ToolDef
 from .base import ProviderAdapter, ProviderRequest
@@ -91,18 +99,42 @@ def to_anthropic_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
             text = "".join(c.text for c in m.content)
             out.append({"role": "user", "content": [{"type": "text", "text": text}]})
         elif isinstance(m, LLMAssistantMessage):
-            text = "".join(c.text for c in m.content)
             blocks: list[dict[str, Any]] = []
-            if text:
-                blocks.append({"type": "text", "text": text})
+            for content in m.content:
+                if isinstance(content, TextContent):
+                    if content.text:
+                        blocks.append({"type": "text", "text": content.text})
+                elif isinstance(content, ThinkingContent):
+                    if content.redacted:
+                        if content.thinking_signature:
+                            blocks.append(
+                                {
+                                    "type": "redacted_thinking",
+                                    "data": content.thinking_signature,
+                                }
+                            )
+                    elif content.thinking_signature:
+                        blocks.append(
+                            {
+                                "type": "thinking",
+                                "thinking": content.thinking,
+                                "signature": content.thinking_signature,
+                            }
+                        )
+                    elif content.thinking:
+                        # Anthropic requires a signature on replayed thinking blocks.
+                        # Preserve unsigned reasoning as ordinary assistant text.
+                        blocks.append({"type": "text", "text": content.thinking})
             # Step 21 修复：保留 ToolCall → tool_use block
             for tc in m.tool_calls:
-                blocks.append({
-                    "type": "tool_use",
-                    "id": tc.id,
-                    "name": tc.name,
-                    "input": tc.arguments or {},
-                })
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": tc.id,
+                        "name": tc.name,
+                        "input": tc.arguments or {},
+                    }
+                )
             if not blocks:
                 # Anthropic 拒绝空 content；保底塞一个空 text
                 blocks.append({"type": "text", "text": ""})
@@ -116,11 +148,7 @@ def to_anthropic_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
                 "is_error": m.is_error,
             }
             # 合并到上一个 user message，否则新建
-            if (
-                out
-                and out[-1]["role"] == "user"
-                and isinstance(out[-1]["content"], list)
-            ):
+            if out and out[-1]["role"] == "user" and isinstance(out[-1]["content"], list):
                 out[-1]["content"].append(block)
             else:
                 out.append({"role": "user", "content": [block]})
@@ -223,18 +251,19 @@ class AnthropicCompatAdapter(ProviderAdapter):
         stream: Any,
         signal: asyncio.Event | None,
     ) -> AsyncIterator[StreamEvent]:
-        """Anthropic SDK 事件 → pi 最小事件流。
+        """Anthropic SDK 事件 → pi content-block 生命周期事件流。
 
         解析：
-        - text_delta → TextDeltaEvent
+        - text → TextStartEvent / TextDeltaEvent / TextEndEvent
+        - thinking / redacted_thinking → thinking start/delta/end
         - tool_use block（content_block_start + input_json_delta + content_block_stop）
-          → 累积 partial JSON，stop 时一次性 yield ToolCallEvent
+          → toolcall start/delta/end；只有 end 携带可执行 ToolCall
         - message_delta(stop_reason) → 决定 DoneEvent.stop_reason
         - 末态 message.usage → DoneEvent.usage
         """
         final_stop: Literal["stop", "length", "tool_use"] = "stop"
         final_usage = Usage()
-        tool_blocks: dict[int, dict[str, Any]] = {}
+        content_blocks: dict[int, dict[str, Any]] = {}
 
         async for event in stream:
             if signal is not None and signal.is_set():
@@ -244,25 +273,152 @@ class AnthropicCompatAdapter(ProviderAdapter):
             t = event.type
             if t == "content_block_start":
                 cb = event.content_block
-                if getattr(cb, "type", None) == "tool_use":
-                    tool_blocks[event.index] = {
+                block_type = getattr(cb, "type", None)
+                index = event.index
+                if block_type == "text":
+                    initial_text = getattr(cb, "text", "") or ""
+                    content_blocks[index] = {
+                        "type": "text",
+                        "parts": [initial_text] if initial_text else [],
+                    }
+                    yield TextStartEvent(content_index=index)
+                    if initial_text:
+                        yield TextDeltaEvent(
+                            content_index=index,
+                            delta=initial_text,
+                        )
+                elif block_type == "tool_use":
+                    content_blocks[index] = {
+                        "type": "tool_use",
                         "id": cb.id,
                         "name": cb.name,
                         "json_parts": [],
                     }
+                    yield ToolCallStartEvent(
+                        content_index=index,
+                        tool_call_id=cb.id,
+                        name=cb.name,
+                    )
+                elif block_type == "thinking":
+                    thinking = getattr(cb, "thinking", "") or ""
+                    signature = getattr(cb, "signature", None) or None
+                    content_blocks[index] = {
+                        "type": "thinking",
+                        "parts": [thinking] if thinking else [],
+                        "signature": signature,
+                        "redacted": False,
+                    }
+                    yield ThinkingStartEvent(
+                        content_index=index,
+                        thinking_signature=signature,
+                    )
+                    if thinking:
+                        yield ThinkingDeltaEvent(
+                            content_index=index,
+                            delta=thinking,
+                            thinking_signature=signature,
+                        )
+                elif block_type == "redacted_thinking":
+                    data = getattr(cb, "data", None)
+                    signature = data if isinstance(data, str) and data else None
+                    content_blocks[index] = {
+                        "type": "thinking",
+                        "parts": [],
+                        "signature": signature,
+                        "redacted": True,
+                    }
+                    yield ThinkingStartEvent(
+                        content_index=index,
+                        thinking_signature=signature,
+                        redacted=True,
+                    )
+                    # Preserve the former observable payload event while still
+                    # representing redacted blocks as a full lifecycle.
+                    yield ThinkingDeltaEvent(
+                        content_index=index,
+                        delta="",
+                        thinking_signature=signature,
+                        redacted=True,
+                    )
 
             elif t == "content_block_delta":
                 delta = event.delta
                 if delta.type == "text_delta":
-                    yield TextDeltaEvent(delta=delta.text)
+                    block = content_blocks.get(event.index)
+                    if block is None:
+                        block = {"type": "text", "parts": []}
+                        content_blocks[event.index] = block
+                        yield TextStartEvent(content_index=event.index)
+                    if block.get("type") == "text":
+                        block["parts"].append(delta.text)
+                    yield TextDeltaEvent(
+                        content_index=event.index,
+                        delta=delta.text,
+                    )
+                elif delta.type == "thinking_delta":
+                    block = content_blocks.get(event.index)
+                    if block is None:
+                        block = {
+                            "type": "thinking",
+                            "parts": [],
+                            "signature": None,
+                            "redacted": False,
+                        }
+                        content_blocks[event.index] = block
+                        yield ThinkingStartEvent(content_index=event.index)
+                    if block.get("type") == "thinking":
+                        block["parts"].append(delta.thinking)
+                    yield ThinkingDeltaEvent(
+                        content_index=event.index,
+                        delta=delta.thinking,
+                    )
+                elif delta.type == "signature_delta":
+                    block = content_blocks.get(event.index)
+                    if block is None:
+                        block = {
+                            "type": "thinking",
+                            "parts": [],
+                            "signature": None,
+                            "redacted": False,
+                        }
+                        content_blocks[event.index] = block
+                        yield ThinkingStartEvent(content_index=event.index)
+                    if block.get("type") == "thinking":
+                        block["signature"] = delta.signature
+                    yield ThinkingDeltaEvent(
+                        content_index=event.index,
+                        delta="",
+                        thinking_signature=delta.signature,
+                    )
                 elif delta.type == "input_json_delta":
-                    block = tool_blocks.get(event.index)
-                    if block is not None:
+                    block = content_blocks.get(event.index)
+                    if block is not None and block.get("type") == "tool_use":
                         block["json_parts"].append(delta.partial_json)
+                        yield ToolCallDeltaEvent(
+                            content_index=event.index,
+                            delta=delta.partial_json,
+                            tool_call_id=block["id"],
+                            name=block["name"],
+                        )
 
             elif t == "content_block_stop":
-                block = tool_blocks.pop(event.index, None)
-                if block is not None:
+                block = content_blocks.pop(event.index, None)
+                if block is None:
+                    continue
+                block_type = block.get("type")
+                if block_type == "text":
+                    yield TextEndEvent(
+                        content_index=event.index,
+                        content="".join(block["parts"]),
+                    )
+                elif block_type == "thinking":
+                    yield ThinkingEndEvent(
+                        content_index=event.index,
+                        content="".join(block["parts"]),
+                        thinking_signature=block["signature"],
+                        redacted=block["redacted"],
+                    )
+                elif block_type == "tool_use":
                     raw_json = "".join(block["json_parts"])
                     try:
                         args = _json.loads(raw_json) if raw_json else {}
@@ -274,7 +430,8 @@ class AnthropicCompatAdapter(ProviderAdapter):
                         raise ProviderProtocolError(
                             f"tool_use input 必须是 JSON object，实际：{type(args).__name__}",
                         )
-                    yield ToolCallEvent(
+                    yield ToolCallEndEvent(
+                        content_index=event.index,
                         tool_call=ToolCall(
                             id=block["id"],
                             name=block["name"],
@@ -293,6 +450,27 @@ class AnthropicCompatAdapter(ProviderAdapter):
                     final_stop = "tool_use"
                 elif sr == "max_tokens":
                     final_stop = "length"
+
+        # Some compatible gateways omit content_block_stop.  Close complete
+        # text/thinking blocks here so consumers still receive balanced events.
+        for index, block in sorted(content_blocks.items()):
+            block_type = block.get("type")
+            if block_type == "text":
+                yield TextEndEvent(
+                    content_index=index,
+                    content="".join(block["parts"]),
+                )
+            elif block_type == "thinking":
+                yield ThinkingEndEvent(
+                    content_index=index,
+                    content="".join(block["parts"]),
+                    thinking_signature=block["signature"],
+                    redacted=block["redacted"],
+                )
+            elif block_type == "tool_use":
+                raise ProviderProtocolError(
+                    "provider ended with incomplete tool call",
+                ) from None
 
         try:
             final_msg = await stream.get_final_message()

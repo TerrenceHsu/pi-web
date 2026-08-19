@@ -30,6 +30,7 @@ from pi_agent_core_py.web.credentials.runtime import (  # noqa: E402
     CredentialRuntimeState,
     build_credential_runtime_config,
 )
+from pi_agent_core_py.web.credentials.secret_store import SecretStoreRouter  # noqa: E402
 from pi_agent_core_py.web.credentials.service import CredentialService  # noqa: E402
 from pi_agent_core_py.web.credentials.store import SQLiteCredentialStore  # noqa: E402
 from pi_agent_core_py.web.local_web_security import (  # noqa: E402
@@ -39,7 +40,6 @@ from pi_agent_core_py.web.providers.validation import (  # noqa: E402
     ProviderValidationResult,
     ValidationStrategyRegistry,
 )
-from pi_agent_core_py.web.credentials.secret_store import SecretStoreRouter  # noqa: E402
 
 SECRET_MARKER = "PI_E1_SECRET_MARKER_7F3A91D2"
 

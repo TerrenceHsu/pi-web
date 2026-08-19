@@ -14,16 +14,15 @@ Production diff = 0 (this file is the only addition).
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 import time
 from pathlib import Path
 from typing import Any
 
 import pytest
+from _pdf_fixture_factory import write_blank_pdf, write_text_pdf
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from _pdf_fixture_factory import write_blank_pdf, write_text_pdf
 from pi_agent_core_py.agent import Agent
 from pi_agent_core_py.harness import AgentHarness
 from pi_agent_core_py.model_client import DoneEvent, FakeClient, TextDeltaEvent
