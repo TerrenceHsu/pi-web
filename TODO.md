@@ -1,363 +1,92 @@
 # Current TODO
 
-> Current status: [STATUS.md](STATUS.md)
-> Future roadmap: [ROADMAP.md](ROADMAP.md)
-> Released versions: [CHANGELOG.md](CHANGELOG.md)
-
-## Current phase
-
-**P2-C Context Budget + Compaction UI — ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-17）**。
-
-- [x] Audit usage、GLM DoneEvent、Snapshot/session、完整 system prompt、Tool schema、SummaryMessage 与模型窗口数据源
-- [x] 新增带 12% 安全余量的确定性 mixed-char estimator；分项统计 system/messages/tools，并计入 reserved output
-- [x] Web draft 预检 + Core `before_model_call` 双层 admission；每个工具续轮重新估算，95% hard stop 保留草稿
-- [x] 阈值固定为 warning 70%、compaction 85%、blocked 95%；unknown context window 明确显示 unknown 且 fail-open
-- [x] Provider Profile 支持查看/保存 `context_window` 与 `max_output_tokens`；workspace SQLite 持久化 user override
-- [x] 新增 Context Budget GET/preview API、`context_budget_updated` 事件与 `Context ~N%` Badge
-- [x] 用户手动 compaction 只按完整 Turn 边界切分，安全处理 parallel tools；原子替换消息并保留 snapshots
-- [x] SummaryMessage 以 Markdown 卡片进入 canonical history，Session 切换与整页刷新后恢复
-- [x] AssistantMessage 展示真实 input/output usage、总 latency 与 TTFT；usage 不可用时不伪造
-- [x] Backend P2-C 新增/受影响 83/83；Frontend 393/393；Chromium E2E 1/1；typecheck/lint/build/changed-file Ruff PASS
-- [ ] Provider 官方 tokenizer、自动 compaction、LLM 摘要器——不在 P2-C 第一版范围
-
-### Previous phase: P2-B
-
-**P2-B Human Approval UI — ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-16）**。
-
-- [x] Core Runtime 新增可选 `ToolApprovalHandler`，`require_approval` 可暂停精确 ToolCall；未配置 handler 时保持安全 `ToolApprovalRequired`
-- [x] Approve once 只批准当前 ToolCall；Deny、handler 异常、abort 与 shutdown 均返回安全结果且不执行未批准工具
-- [x] Web approval manager + requested/resolved 事件 + list/resolve REST API；approval 与 request/session 严格绑定
-- [x] 浏览器参数预览递归脱敏并限制大小；当前 Turn 内联 Approval Card，整页刷新恢复 pending 状态
-- [x] Core/Web 18/18；broader regression 158/158；Frontend 387/387；联合 E2E 7/7；Offline Backend 3569 passed
-- [ ] 永久授权、RBAC、跨后端重启审批持久化——不在 P2-B 第一版范围
-
-### Previous phase: P0-AGENT-RUNTIME
-
-**P0-AGENT-RUNTIME Upstream Contract Alignment — ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-16）**。
-
-- [x] Turn 改为一次 LLM 调用及其当批工具；每次继续调用前重新发 `turn_start`
-- [x] 拆分 `RequestSnapshot` / `TurnSnapshot`；SQLite 与旧版 request-shaped JSON 兼容
-- [x] `length + tool_calls` 不执行工具，为每个调用生成 `IncompleteToolCall` 安全错误结果
-- [x] request signal 传入 Tool、before hook、after hook；旧二参数 Tool / 单参数 Hook 保持兼容
-- [x] 新增实时 `tool_execution_update`，前端在 running tool card 中展示 partial result
-- [x] 新增 `prepare_next_turn` / `should_stop_after_turn`，严格在每个 `turn_end` 后依次执行
-- [x] 建立单工具、多 Turn、parallel 完成序、length、signal、snapshot 的 golden contract tests
-- [x] 提交前审核修正 DDGS 公共调用签名；敏感信息、认证、Session 路径、Checkpointer 补偿与内置 MCP 边界审核无阻塞项
-- [x] 验证：核心相关 188/188；新增/受影响契约最终 16/16；完整离线 3555 passed / 3 skipped / 15 deselected；Frontend 375/375 + typecheck / lint / build；changed-file Ruff / targeted mypy PASS
-
-### Previous phase: P2-CHECKPOINTER
-
-**P2-CHECKPOINTER Slash Command — ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-15）**。
-
-- [x] 建立 slash command catalog/parser；当前精确支持无参数 `/checkpointer`，命令本身不进入消息历史
-- [x] 使用当前 Session Provider 直接调用 LLM，总结过程中禁用 Tools / Skills / MCP；长历史分块后累计归并
-- [x] 在当前 Session 根目录创建或更新唯一 `Memory.md`，记录 source SHA-256 并支持崩溃后幂等重试
-- [x] 两阶段提交：先保存 Memory，再清空 canonical messages；Provider/文件/清空失败均保留对话，提交失败补偿回滚 Memory
-- [x] 下一轮 Prompt/Regenerate 自动加载有界 `Memory.md`，并标记为不可信事实上下文而非行为指令
-- [x] 前端 `/` 菜单、键盘选择、checkpoint 运行状态、成功清屏/刷新文件树、失败保留消息并恢复命令
-- [x] Folder 支持打开、查看和修改 `Memory.md`；保存使用 SHA-256 乐观锁，下一轮加载用户修改后的内容，普通文件保持不可编辑
-- [x] Memory 编辑验证：Backend extended 204/204（其中 files+checkpointer 32/32）；Frontend full 368/368；typecheck / lint / build / changed-file Ruff PASS
-- [x] Checkpointer 后端全量基线：3539 passed / 3 skipped / 14 deselected
-
-### Previous phase: P2-SESSION-WORKSPACE
-
-**P2-SESSION-WORKSPACE Conversation + Folder + AGENT.md — ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-15）**。
-
-- [x] 应用启动时为已有 Session 补齐目录；创建 Session 时在返回前初始化目录
-- [x] 每个 Session 根目录幂等初始化唯一 `AGENT.md`；已有内容不覆盖，重新登录/重启应用后继续保留
-- [x] 每轮 Agent 请求自动读取当前 Session 的 `AGENT.md`；编辑采用 SHA-256 乐观并发检查，保存后下一轮生效
-- [x] FileRef 增加 `logical_path` / `origin` / `purpose`，API 不暴露物理路径；前端以可展开文件树展示
-- [x] 用户上传文件继续保存到当前 Session 目录并沿用 FileRef metadata / 配额 / 删除级联
-- [x] 新增 `write_file(filename, content, folder?)` AgentTool；仅创建 UTF-8 managed file，不接受物理路径、不覆盖已有文件
-- [x] `list_files` / `view_file` / `write_file` 绑定请求 Session，而非仅依赖 UI 默认 Session
-- [x] 聊天标题栏新增 `Folder N` 面板：文件树查看、下载、删除、刷新和 `AGENT.md` 编辑；Agent 请求结束后自动刷新
-- [x] 退出再登录与应用关闭后重建均保留同账号 Session、历史消息、文件和编辑后的 `AGENT.md`
-- [x] Backend related 211/211；Frontend 362/362；typecheck / lint / build / Ruff / mypy PASS
-
-### Previous phase: P2-AUTH
-
-**P2-AUTH Local Login + Account Workspace Isolation — ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-15）**。
-
-- [x] 独立 SQLite `auth_users` / `auth_sessions` schema；空库幂等创建 `admin / 123456`
-- [x] PBKDF2-SHA256 随机盐密码哈希；服务端只保存登录 token SHA-256
-- [x] HttpOnly + SameSite=Strict Cookie；登录 / Session 恢复 / 退出 API；登录失败限流
-- [x] 登录 Session 绑定后端运行周期：运行期间免重复登录，后端重启后强制重新认证；用户与工作区数据保持持久化
-- [x] 未登录只显示 LoginPage；工作区 API 返回 401；WebSocket 返回 4401
-- [x] 每账号独立 Session / Upload / Skills / MCP / Knowledge / Provider Settings 工作区
-- [x] 删除 Users Modal、Users CRUD API 与侧栏 Users 入口；侧栏新增当前账号和 Sign out
-- [x] Frontend auth baseline 358/358；typecheck / lint / build PASS；Backend auth 8/8（含历史消息与 `AGENT.md` 重新登录持久化）+ compatibility 36/36；Full 3514 passed，唯一 ingestion worker 时序抖动用例独立复跑 3/3 PASS
-- [ ] RBAC / OAuth / 企业级多租户 / 公网部署——不在本阶段
-
-### Historical current phase
-
-**P1-E Multi-Provider Switching — ✅ COMPLETE / FROZEN**（M1 Runtime + M2 Frontend + M3 Unified Freeze）。
-
-- 路线：[ROADMAP.md](ROADMAP.md) § P1-E
-- 状态：[STATUS.md](STATUS.md) — P1-E 全链路 ✅ COMPLETE / FROZEN；等待用户授权 merge / tag / push
-- 最终归档：[docs/validation/p1-e/P1_E_M3_UNIFIED_FREEZE.md](docs/validation/p1-e/P1_E_M3_UNIFIED_FREEZE.md)
-- M3 是 docs-only 阶段——production / test / dependency / schema diff = 0
-
-## P1-E1 ✅ COMPLETE（MERGED + TAGGED）
-
-P1-E1 Secure Credentials 已正式交付：
-
-- **master merge commit**：`de05c66`（no-ff；保留 22 commit 阶段性历史）
-- **release tag**：`v0.0.27-secure-credentials`
-- **post-merge baseline**：1833 passed / 14 deselected / 0 failed；37/37 E2E；ruff clean；working tree clean
-- **Push status**：⛔ 未授权（仅本地）
-
-子阶段全部 FROZEN：
-
-- P1-E1-1 Secret Primitives ✅
-- P1-E1-2 Credential Repository ✅（含 2.1 并发加固 / 2.2 enum 校验）
-- P1-E1-3A Router / Service ✅
-- P1-E1-3B Validation Strategy ✅（B1 Anthropic / B2 wiring）
-- P1-E1-4 Web API Design ✅ APPROVED
-- P1-E1-4A Composition Root ✅
-- P1-E1-4B REST API ✅
-- P1-E1-5A Security Audit ✅（78 控制 / 5 finding）
-- P1-E1-5B Security Hardening ✅（5 finding/gap 全 RESOLVED/CLOSED）
-- P1-E1-5C Final Regression ✅
-
-## P1-E2 Backend Foundation（✅ COMPLETE，不单独 merge / tag）
-
-P1-E2 配置后端已 frozen，作为 M1/M2/M3 的持久化基础。**不再扩展配置后端**——E2-4 独立 Security Freeze cancelled，并入 M3 Unified Freeze。
-
-- E2-1 Schema + Store ✅ FROZEN @ `89fabfd`
-- E2-2 Service + Static Model Options ✅ FROZEN @ `a2c7932`
-- E2-3A Session Creation Audit ✅ FROZEN @ `9878ef9`
-- E2-3 Composition + REST API + Session binding ✅ FROZEN @ `17c843d` / `9bbd0f2` / `cad7ca7`
-
-测试基线：2063 full pytest + 2×37/37 E2E + ruff clean + 0 Core Runtime diff + 0 network + 0 secret reads。
-
-## M1 deliverables — Multi-Provider Runtime
-
-### M1-0：Provider Contract Audit（审计门，无生产代码）✅ FROZEN @ `be13a1f`
-
-- [x] 审计 `providers/base.py` Adapter contract（stream / close / events）
-- [x] 审计 `providers/glm.py` 流式事件格式 / tool_call 增量 / usage / finish_reason / client close 生命周期
-- [x] 审计 `providers/anthropic_compat.py`（参考；不重写）
-- [x] 审计 `providers/registry.py` ProviderDefinition 结构
-- [x] 审计 Agent 如何持有 Provider（`harness.agent.<provider field>` 引用结构）
-- [x] 审计 `_run_prompt_core` / `_run_regeneration_core` 调用入口
-- [x] 输出 `docs/design/p1-e-m1-provider-runtime.md`：冻结统一 Adapter 接口
-
-### M1-1：OpenAI-compatible Provider ✅ FROZEN @ `8daaa90`（124 tests）
-
-- [x] `providers/openai_compat.py`：Qwen / Kimi 共用 Adapter
-- [x] request / SSE stream / assistant text delta / tool calls / finish reason / usage
-- [x] safe error mapping（错误信息不含 Authorization / 完整 endpoint）
-- [x] client close 生命周期
-- [x] 围绕现有 Provider contract 实现，不发明第二套事件模型
-- [x] `feat(providers): add openai-compatible provider adapter`
-
-### M1-2：Qwen / Kimi ProviderDefinition presets ✅ FROZEN @ `4d89c82`（64 tests）
-
-- [x] `registry.py` 加 `qwen` preset（protocol=`openai_compatible` / `default_base_url`）
-- [x] `registry.py` 加 `kimi` preset（同上）
-- [x] `GET /api/provider-definitions` 返回 glm / qwen / kimi + anthropic（safe display fields only）
-- [x] `feat(providers): add qwen and kimi provider presets`
-
-### M1-3：Provider Factory ✅ FROZEN @ `a35a4ad`（64 tests）
-
-- [x] `providers/factory.py`：唯一知道「哪个 Provider 用哪个 Adapter」的位置
-- [x] GLM → 包装现有 GLMProvider
-- [x] Qwen / Kimi → `OpenAICompatibleProvider`
-- [x] Anthropic → 包装现有（保留兼容）
-- [x] 输入 ProviderDefinition + api_key + model_id；输出 RequestProvider
-- [x] `feat(providers): add provider factory`
-
-### M1-4：Request Provider Runtime ✅ FROZEN @ `8827bd1`（80 tests / 6 files）
-
-- [x] `web/provider_runtime.py`：`RequestProviderRuntime` + `bind_to_harness` async context manager
-- [x] Session Binding → Profile → Credential → Secret → ProviderFactory → 临时绑定 `harness.agent.<provider>`
-- [x] finally 恢复旧 Provider + close request client
-- [x] 复用现有单 active request lock（不创建第二把锁）
-- [x] `RequestProviderSelection(profile_id, provider_id, model_id, selection_source)` 不可变快照（`credential_id repr=False`）
-- [x] `feat(web): add request-scoped provider runtime`
-
-### M1-5：Prompt Integration ✅ FROZEN @ `f116ddd`（47 tests / 5 files）
-
-- [x] Composition root：`credential_runtime + provider_config_runtime` 都启动时构造 `RequestProviderRuntime`
-- [x] `_execute_prompt` 唯一接入点：`AsyncExitStack` + `bind_to_harness`
-- [x] 无 Binding → `selection=None` → legacy client 兼容路径
-- [x] 4 固定错误码：`provider_profile_{unavailable,disabled}` / `provider_credential_unavailable` / `provider_initialization_failed`
-- [x] `CancelledError`（BaseException）原样传播——不被 `except Exception` 捕获
-- [x] 不写 `context.metadata["provider_selection"]`
-- [x] 2×37/37 Playwright E2E
-- [x] `feat(web): bind prompt execution to session provider`
-
-### M1-6：Regenerate Validation ✅ FROZEN @ `06ecb80`（67 tests / 5 files）
-
-- [x] 验证 Regenerate 通过 `_execute_prompt` 走同一 `bind_to_harness` 路径（M1-5 唯一接入点已覆盖）
-- [x] Regenerate 用当前 Session 当前模型（不动 D2 schema；revision `content_json` 自带 model 信息）
-- [x] 验证 revision `message_id` 不变（in-place）
-- [x] 原历史模型不决定本次 Regenerate
-- [x] 失败恢复 revision 状态
-- [x] 无双重 bind（Regenerate 不与 Prompt 嵌套）
-- [x] validation-only——0 production diff（AST 测试锁定 lexical-body 接线只在 `_execute_prompt`）
-- [x] `test(web): validate regenerate provider selection`
-
-### M1-7：Runtime Final Validation ✅ COMPLETE / FROZEN（本提交）
-
-- [x] GLM / Qwen / Kimi 真实流式回答（mock contract）
-- [x] 工具调用保持正常（Tool loop 不变量：resolve / secret / factory / adapter 各一次）
-- [x] 切换只影响下次请求（请求级不可变快照）
-- [x] 失败不污染下一请求（错误隔离）
-- [x] Core Runtime diff = 0（GLM 包装，不重写；AST 静态约束）
-- [x] 跨 Session 隔离（single harness，顺序执行不污染）
-- [x] 默认 Profile 全链路 + 显式切换全链路
-- [x] app restart（env / keyring / session-only Credential）
-- [x] Credential 删除 / 替换 / env 值变化
-- [x] 安全出口全审计（HTTP / SQLite main+WAL+SHM / log / exception chain / Selection repr / Adapter repr）
-- [x] 静态架构约束（Core Runtime M1 diff=0；Provider Runtime 接线只在 `_execute_prompt`；模块依赖方向）
-- [x] `test(web): freeze multi-provider runtime`（M1-7 production diff = 0；E2E 由主仓库 `pi-py` 验证）
-
-## M2 deliverables — Frontend Switching（✅ COMPLETE / FROZEN）
-
-- [x] `stores/providerStore.ts` — ✅ FROZEN @ `313f28b`
-- [x] `components/provider/ProviderSelector.vue`（顶部切换器；运行时禁用并提示 `Generating...`）— ✅ FROZEN @ `c0792e1`
-- [x] `components/provider/ProviderSettingsModal.vue`（每个 Provider 一张卡：API Key + Model ID + status）— ✅ FROZEN @ `0626ac4`
-- [x] Session binding restore（刷新后保留选择）— ✅ FROZEN @ `c0792e1`
-- [x] M2-4 Integration Validation — ✅ COMPLETE / FROZEN @ `f9dfc1c`（含 M2-F1 hotfix @ `dcf45ce`）
-
-## M3 deliverables — Unified Freeze（✅ COMPLETE / FROZEN，docs-only）
-
-- [x] Secret leak audit（API / SQLite / log / WS / export / marker）— ✅ 0 leak（M2-4 §8）
-- [x] GLM / Qwen / Kimi contract tests — ✅ 包含于 144 backend 定向测试
-- [x] Prompt / Regenerate / tool / streaming / Session A/B / restart — ✅ backend 144 + vitest 261
-- [x] Playwright E2E（连续两次）— ✅ 37/37 × 2（M2-4 §11）
-- [ ] merge / tag：`feat(providers): deliver multi-provider switching` — ⛔ NOT AUTHORED（等待用户授权；M3 不自动 merge / tag / push）
-
-## Cross-stage frozen constraints（M1 / M2 / M3 全程约束）
-
-- ❌ 不修改 D2 Revision schema（v2）——provider/model 从 AssistantMessage JSON 投影
-- ❌ 不修改 `loop.py` / `agent.py` / `context.py` / `events.py` / `stream_events.py` / `messages.py`
-- ❌ 不替换现有 `providers/glm.py` / `anthropic_compat.py` / `base.py`（GLM 包装现有；OpenAI-compatible 为新增模块）
-- ❌ 不向多个第三方发 API Key 自动探测供应商（只对 Session 选中的 Provider 调用）
-- ❌ 不实现自动 provider fallback / 模型负载均衡
-- ❌ 不顺带重构 `web/app.py`（留 P3）
-- ❌ 不在 P1-E 阶段引入 Markdown 面板（P1-F 独立阶段）
-- ❌ **M1/M2/M3 内不调用任何远程模型目录 API**（`/v1/models` 等远端探测均不进入）——Messages API 调用除外
-- ❌ **M1/M2/M3 内不引入 remote `ModelOption` source**（静态建议 + 用户手动填写）
-- ❌ **M1/M2/M3 内不复制第二套安全中间件**（全复用 E1）
-- ✅ M1 起：执行 Prompt/Regenerate 时**会**读 Secret + 构造 HTTP client（仅对 Session 选中的 Profile）
-- ✅ keyring 为 web optional dependency；通用 `create_app(auto)` 不可用时保持 degraded；持久化优先的 `scripts/dev_web_app.py` 必须通过真实写读删探针，否则 fail-fast 拒绝启动
-- ✅ 请求启动后 provider/model 不可变（运行中切换只影响下次请求）
-- ✅ Regenerate 使用当前 session 当前模型（不动 D2 不变量）
-
-## Next after P1-E
-
-P1-E Multi-Provider Switching 已 ✅ COMPLETE / FROZEN。**等待用户决定**：
-
-- 是否 merge P1-E 全链路到 master
-- 是否打 release tag（如 `v0.0.28-multi-provider-switching`）
-- 是否 push 到远端
-- 是否进入下一阶段（P1-F Markdown Workspace Panel / P2 Web Agent Enhancements）
-
-M3 是 docs-only 归档阶段，未自动执行上述任一动作。
-
-## Post-P1-E Web Enhancements
-
-- P1-D3 PDF Text Extraction ✅ RESTARTED via P2-R（2026-07-27；见 [ROADMAP §P2-R](ROADMAP.md) + [docs/design/p2-r0-rag-contract.md](docs/design/p2-r0-rag-contract.md)）
-- [x] **P2-A URL Routing + Full Reload Recovery** —— ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-16）；`/chat/{session_id}`、精确刷新恢复、active Prompt/Regenerate replay、非法/越权 ID 回退、登出跨账号隔离；Frontend 382/382；Chromium E2E 5/5；Full Backend 3563 passed。
-- [x] **P2-B Human Approval UI** —— ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-16）；精确 ToolCall 暂停、脱敏 inline Approval Card、Approve once / Deny、刷新恢复、abort/shutdown 安全取消；Frontend 387/387；联合 Chromium E2E 7/7；Offline Backend 3569 passed。
-- [x] **P2-C Context Budget + Compaction UI** —— ✅ IMPLEMENTED / LOCAL BASELINE（2026-08-17）；完整 canonical input 近似估算、70/85/95% 分级、Profile 模型窗口持久化、Core hard stop、Turn-safe compaction、usage/latency、刷新恢复；Backend 83/83；Frontend 393/393；Chromium E2E 1/1。
-
-## P2-R — Knowledge / RAG Subsystem（🟡 IN PROGRESS）
-
-路线 Pivot（2026-07-27）：P2-R 系列取代原 P2 候选成为下一阶段主线。详见 [ROADMAP §P2-R](ROADMAP.md)。
-
-- [x] **P2-R0 Contract Audit**（docs-only）—— 解除 7 处旧 deferred / out-of-scope 标记；冻结数据模型 / 目录布局 / PDF 边界 / Chunk 格式 / Tool 接口 / Session ACL / 同步策略；产出 4 份 docs。FROZEN @ `b32e4b4`。
-- [x] **P2-R0 Amendment 1**（docs-only）—— R1 范围重划：marker 集成 / PDF→MD smoke / needs_ocr 测试从 R1 推迟到 R2；R1 缩窄为 Library Foundation only。详见 [docs/design/p2-r0-amendment-1.md](docs/design/p2-r0-amendment-1.md)。
-- [x] **P2-R1 Library Foundation** —— 5 表 DDL + migration（独立 knowledge.db）+ KnowledgeFileStore + Library/Document/Binding metadata Store/Service + Library CRUD API + Session Binding API + restart 恢复。FROZEN @ `0973b79`（含 R1-A `4397c3f` + R1-B `1e764e9` + R1-C `0973b79` + R1-D validation docs）。**显式不含** PDF parser（推到 R2）。2702 backend tests + 267 frontend tests + 0 PDF 依赖 + 0 回归。详见 [docs/validation/p2-r1/P2_R1_LIBRARY_FOUNDATION.md](docs/validation/p2-r1/P2_R1_LIBRARY_FOUNDATION.md)。
-- [x] **P2-R2-0 PDF Parser License Gate**（docs-only）—— FROZEN @ <R2-0 commit>。
-      选定 **pypdf 6.14.2 (BSD-3-Clause)** 为 R2 MVP；marker (OpenRAIL-M 模型 + surya/torch hard dep) 拒绝；
-      PyMuPDF (AGPL/Commercial) 拒绝。D6 已重命名 + RESOLVED。
-      详见 [docs/design/p2-r2-0-pdf-parser-license-gate.md](docs/design/p2-r2-0-pdf-parser-license-gate.md)。
-- [x] **P2-R2-A pypdf Parser Adapter** —— ✅ COMPLETE / FROZEN @ <R2-A freeze commit>。
-      含 R2-A1 `c359ee5` (build: pypdf dep + license record) + R2-A2 `88b017b` (feat: PdfParser Protocol + PypdfParser Adapter + 66 tests + fixture factory) + R2-A3 validation docs。
-      2768 backend + 267 frontend + 0 回归 + 0 PDF parser 越界 + 0 网络/模型/OCR。
-      详见 [docs/validation/p2-r2/P2_R2_A_PARSER_ADAPTER.md](docs/validation/p2-r2/P2_R2_A_PARSER_ADAPTER.md)。
-- [x] **P2-R2-B Canonical Markdown Builder** —— ✅ COMPLETE / FROZEN @ `eb193b2`（implementation + tests + archive closure 全部完成）。
-      含 P2-R0 Amendment 2 `15b411b`（pre-R2-B docs-only；用户 AskUserQuestion 显式选择 "走 amendment-2 流程"；解决 frontmatter 字段 + needs_ocr 阈值合同冲突）+ R2-B1 `0154cde` (feat: pdf_quality.py 43 tests) + R2-B2 `c077d5a` (feat: canonical_markdown.py 80 tests) + R2-B3 `677ed13` (feat: markdown_persistence.py 29 tests) + R2-B4 `eb193b2` freeze (8 integration tests + validation docs)。
-      R2-B targeted 160/160 PASS + 完整 backend **2928** passed（**CORRECTED @ P2-R2-D-A**；原报告 2920 误抄）/ 2 skipped / 14 deselected + 0 functional regression + 0 dependency diff + 0 schema diff + 0 frontend diff。详见 [docs/validation/p2-r2/P2_R2_B_CANONICAL_MARKDOWN.md](docs/validation/p2-r2/P2_R2_B_CANONICAL_MARKDOWN.md)。
-- [x] **P2-R2-B Contract/Archive Closure** —— ✅ COMPLETE @ 2026-08-03（User decision: **A — RATIFIED**；Amendment 2 APPROVED；docs-only closure commit）。
-      接受：`needs_ocr = total_non_whitespace_chars == 0`；低文本密度作 warning；Canonical frontmatter 字段集（schema / document_id / source_filename / source_sha256 / parser_id / parser_version / page_count / title? / generated_at?）；删除 library_id；source_name → source_filename；parser_id 与 parser_version 分离；新增 schema 标识；title 可选。
-      library_id 继续由数据库和 Session allowlist 提供，不从 Markdown frontmatter 获得；不削弱 Session ACL / R3 检索 / Citation。
-      `generated_at` 冻结规则：R2-C MVP 不传；Builder 默认省略；不调 `datetime.now()`；仅显式传入时写入；相同 PDF 重 ingest 必须生成相同 Markdown bytes 和 SHA-256。任务时间继续用 DB `created_at` / `updated_at` / Job 时间字段。
-      测试统计判定：targeted 160 / new 160 / backend delta **160**（**CORRECTED @ P2-R2-D-A**；原报告 delta 152 是 freeze 时点误报 2920 passed 导致；实测 2928 passed）/ functional regression 0；historical 8-test discrepancy = ✅ **RECONCILED @ P2-R2-D-A**（freeze 时点文档误抄；不存在 node-ID-level 差异）。详见 [docs/validation/p2-r2/P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md](docs/validation/p2-r2/P2_R2_B_AMENDMENT2_AUTHORIZATION_AUDIT.md) + [docs/validation/p2-r2/P2_R2_D_TEST_COUNT_RECONCILIATION.md](docs/validation/p2-r2/P2_R2_D_TEST_COUNT_RECONCILIATION.md)。
-- [x] **P2-R2-C0 Ingestion Runtime/API Contract** —— ✅ COMPLETE / FROZEN @ <this commit>（docs-only / contract-only / audit-only）。
-      含 38 项决策冻结（worker_concurrency=1 / queue=32 / shutdown_grace=30s / SQLite durable source of truth / Document `uploaded`=pending signal / app-level active Job uniqueness via BEGIN IMMEDIATE / 404-409-413-415-500-503 错误映射 / 27-case 失败矩阵 / 4 API endpoints / generated_at MUST NOT BE PASSED）。
-      **Schema Amendment NOT REQUIRED**（R1 schema 充分；3 non-blocking gaps deferred to R2-D：markdown_sha256 / parser_id / warnings_json）。
-      **R0 §8.1 sync→async 已 minimal refine**（per R2-C0 directive §70 授权；不创建 Amendment 3）。
-      4 子阶段：C1 Store+Orchestrator / C2 Worker+Recovery / C3 API / C4 Validation+Freeze。详见 [docs/design/p2-r2-c0-ingestion-runtime-api-contract.md](docs/design/p2-r2-c0-ingestion-runtime-api-contract.md) + [docs/validation/p2-r2/P2_R2_C0_INGESTION_CONTRACT_AUDIT.md](docs/validation/p2-r2/P2_R2_C0_INGESTION_CONTRACT_AUDIT.md)。
-- [x] **P2-R2-C1 Ingestion Store Extensions + Orchestrator** —— ✅ COMPLETE / FROZEN @ `cde0e0b` + freeze commit。
-      含 C0 Archive Correction `0a8f554`（R2-C terminal `ready → normalizing`，per 状态机冻结冲突）+ C1-A `015dc45` IngestionStore（atomic claim / retry / recovery primitives + 38 tests）+ C1-B `cde0e0b` IngestionOrchestrator（Parser+Quality+Builder+Persistence composition + 20 tests）+ C1-C freeze（58/58 targeted + 2986 backend + 267 frontend + ruff clean + 0 regression）。
-      **关键不变量**：generated_at MUST NOT BE PASSED；R2-C 终态 = `normalizing`（不调用 `transition_document_status(doc_id, 'ready')`）；needs_ocr 终态 Job='completed'；source.pdf 完整性保留；错误响应零路径/正文/异常泄漏。
-      详见 [docs/validation/p2-r2/P2_R2_C1_INGESTION_ORCHESTRATOR.md](docs/validation/p2-r2/P2_R2_C1_INGESTION_ORCHESTRATOR.md)。
-- [x] **P2-R2-C2 Bounded Worker + Recovery** —— ✅ COMPLETE / FROZEN @ `115136a` + freeze commit。
-      含 C2-A `5aea74b` IngestionWorkerManager（asyncio.Queue cap=32 wake + 30s poll fallback + conditional UPDATE for shutdown race）+ C2-B `115136a` FastAPI lifespan 接线（manager.stop() before KnowledgeStore.close()）+ 37/37 targeted tests。
-      **关键不变量**：worker_concurrency=1（frozen）；SQLite = durable source of truth；asyncio.Queue 仅 wake hint；startup recovery（Job running + Document extracting/normalizing → failed + ingestion_interrupted）；graceful shutdown 30s grace + conditional fail；import 无 side effect。
-      详见 [docs/validation/p2-r2/P2_R2_C2_WORKER_RECOVERY.md](docs/validation/p2-r2/P2_R2_C2_WORKER_RECOVERY.md)。
-- [x] **P2-R2-C3 Upload / Status / Retry / Markdown API** —— ✅ COMPLETE / FROZEN @ `c6a19ec` + freeze commit。
-      含 C3-A `72121c5` UploadService（streaming + SHA + staging + atomic rename + duplicate 409 + Worker notify）+ Upload endpoint + 25 tests；C3-B `c6a19ec` Status / Retry / Markdown endpoints + delete guards + 18 tests；C3-C Freeze。
-      **关键不变量**：4 endpoints under Trusted UI；MAX_PDF_BYTES=25 MB；streaming chunked 64 KiB；PDF `%PDF-` magic；R2-C terminal=`normalizing`（Markdown readable）；needs_ocr/normalizing/ready 不允许 retry；active Job blocks Document/Library delete；upload 不调 Parser；retry 复用 Document + source.pdf；generated_at 不传。
-      详见 [docs/validation/p2-r2/P2_R2_C3_INGESTION_APIS.md](docs/validation/p2-r2/P2_R2_C3_INGESTION_APIS.md)。
-- [x] **P2-R2-C4 Integration Validation + R2-C Freeze** —— ✅ COMPLETE / FROZEN @ `<this commit>`.
-      47 C4 integration tests across 5 files: E2E pipeline / failure injection / concurrency / restart+shutdown / security boundaries. Production diff=0. 详见 [P2_R2_C4_INTEGRATION_FREEZE.md](docs/validation/p2-r2/P2_R2_C4_INTEGRATION_FREEZE.md).
-- [x] **P2-R2-D-A Test Count Reconciliation** —— ✅ COMPLETE / FROZEN @ `287edb9`（A/B 隔离 worktree + 集合分析；historical 8-test discrepancy ✅ RECONCILED；root cause = R2-B freeze 时点文档误报 2920 passed；实测 2928；selected delta = 160 = targeted 160 完全对账；node-ID-level 无差异）。详见 [docs/validation/p2-r2/P2_R2_D_TEST_COUNT_RECONCILIATION.md](docs/validation/p2-r2/P2_R2_D_TEST_COUNT_RECONCILIATION.md)。
-- [x] **P2-R2-D-Fix Ruff Cleanup** —— ✅ COMPLETE / FROZEN @ `a27494c`（C4-R Fix-1 unused `import importlib` cleanup；1 file / 1 line deletion；ruff PASS；full backend ×2 fresh process = 3113/3/14/0 failed；行为零变化）。
-- [x] **P2-R2-D-B Final PDF Pipeline Freeze** —— ✅ COMPLETE / FROZEN @ `<this commit>`（docs-only；R1 targeted count ✅ RECONCILED 118 selected = 117 passed + 1 skipped；10 处 R1 历史误写已修；C4-R Ruff archival correction；P2-R2 全链归档关闭；P2-R3 APPROVED TO START 不在本提交启动）。详见 [docs/validation/p2-r2/P2_R2_D_FINAL_PDF_PIPELINE_VALIDATION.md](docs/validation/p2-r2/P2_R2_D_FINAL_PDF_PIPELINE_VALIDATION.md)。
-- [x] **P2-R3-A Chunk Contract + Chunker** —— ✅ COMPLETE / FROZEN @ `677fe33`（`chunker.py` + `KnowledgeChunk` DTO + `HeadingAwareChunker` pure function；CHUNK_TARGET_CHARS=1200 / MAX=1800 / OVERLAP=160；deterministic chunk_id=`sha256(doc_id\0ordinal\0content_sha)`；heading stack H1-H6 + code-fence 排除；page marker `<!-- page:N -->` 解析严格 1..N；frontmatter 验证 doc_id + page_count；44/44 unit tests PASS）。详见 [docs/design/p2-r3-chunker-contract.md](docs/design/p2-r3-chunker-contract.md)。
-- [x] **P2-R3-A-R Reliability Closure** —— ✅ COMPLETE / FROZEN @ `<this commit>`（docs-only forensic；causality 排除：含 chunker vs 排除 chunker 同样 Windows sequential-suite flake pattern；chunker→victim ×2 / victim→chunker ×1 全 PASS；chunker 静态+动态资源审计 = 0 资源操作；final ×2 = 3157/0 failed deterministic）。详见 [docs/validation/p2-r3/P2_R3_A_R_RELIABILITY_CLOSURE.md](docs/validation/p2-r3/P2_R3_A_R_RELIABILITY_CLOSURE.md)。
-- [x] **P2-R3-B1 Schema Migration v1→v2** —— ✅ COMPLETE / FROZEN @ `<this commit>`（`KNOWLEDGE_SCHEMA_VERSION=2`；knowledge_chunks 扩展 char_count + content_sha256；knowledge_chunks_fts FTS5 virtual table（unicode61 remove_diacritics 2）；insert_chunk 兼容 v2 派生新列；18/18 migration tests + R1 regression 全 PASS；full Backend 3175/3/14/0 failed）。详见 [docs/design/p2-r3-b-schema-migration-contract.md](docs/design/p2-r3-b-schema-migration-contract.md)。
-- [x] **P2-R3-B2 Chunk/FTS Store** —— ✅ COMPLETE / FROZEN @ `db03be7`（chunk_store.py：replace_document_chunks / delete_document_chunks / rebuild_fts / verify_fts_integrity / search_chunks_fts；safe literal FTS query compiler；BM25 heading-weighted (3.0/1.0) + stable tie-break；ready-only filter；library filter；chunking-only state guard；FTS cleanup 集成到 delete_document_hard / delete_library_hard；66/66 tests PASS；full Backend 3241/0 failed）。
-- [x] **P2-R3-B3 Validation Freeze** —— ✅ COMPLETE / FROZEN @ `<this commit>`（docs-only；84/84 R3-B targeted tests；full Backend 3241/3/14/0 failed；73/73 exit gate；R2 frozen 模块未触动）。详见 [docs/validation/p2-r3/P2_R3_B_SCHEMA_FTS5_VALIDATION.md](docs/validation/p2-r3/P2_R3_B_SCHEMA_FTS5_VALIDATION.md)。
-- [x] **P2-R3-C1 IndexingStore** —— ✅ COMPLETE / FROZEN @ `<this commit>`（indexing_store.py：atomic conditional claim + state transitions normalizing→chunking→indexing→ready + mark_failed + recover_interrupted_indexing；RecoveryResult DTO；SQLite conditional write 无 asyncio.Lock correctness；不引入 indexing_jobs 表 schema diff=0；37/37 tests PASS；full Backend 3278/3/14/0 failed；R3-A/B/R2 frozen 模块未触动）。
-- [x] **P2-R3-C2 IndexingOrchestrator** —— ✅ COMPLETE / FROZEN @ `<this commit>`（indexing_orchestrator.py：process_document 显式调用；T1-T6 normalizing→chunking→indexing→ready；Markdown read + source_sha256 完整性 + Chunker frontmatter/page_count 复用 + ChunkStore.replace_document_chunks + FTS integrity gate + mark_ready；IndexingResult DTO；safe error taxonomy 8 codes（canonical_markdown_missing / canonical_markdown_integrity_error / canonical_markdown_invalid / chunking_empty / chunking_failed / chunk_persistence_failed / fts_integrity_error / indexing_failed）；failure compensation 自动清理 chunks+FTS；21/21 tests PASS；full Backend 3299/3/14/0 failed @ Run #3；R3-A/B/C1/R2 frozen 模块未触动）。
-- [x] **P2-R3-C3 Validation Freeze** —— ✅ COMPLETE / FROZEN @ `<this commit>`（docs-only；validation doc 61 节；75/75 exit gate；full Backend 3299/0 failed @ Run #3；R3-A/B/R2 frozen 模块未触动）。详见 [docs/validation/p2-r3/P2_R3_C_INDEXING_RUNTIME_VALIDATION.md](docs/validation/p2-r3/P2_R3_C_INDEXING_RUNTIME_VALIDATION.md)。
-- [x] **P2-R3-D1 IndexingWorkerManager** —— ✅ COMPLETE / FROZEN @ `<this commit>`（indexing_worker.py：bounded single-concurrency；poll=2.0s；shutdown_grace=30.0s；startup recover_interrupted_indexing wiring（raw SQL cleanup 避免非重入 _write_lock 死锁）；immediate scan + backlog drain + idle poll（无 busy spin）；failure isolation；asyncio.Event wake+stop；zero import side effects；19/19 tests PASS；full Backend ×2 = 3318/0 failed consecutive；R3-A/B/C/R2 frozen 模块未触动）。
-- [x] **P2-R3-D2 Lifecycle + Delete Guards** —— ✅ COMPLETE / FROZEN @ `<this commit>`（state.py 加 indexing_worker_manager 字段；app.py lifespan 加 IndexingWorkerManager 构造+start（IngestionWorker 后）+ stop（IngestionWorker 后、KnowledgeStore.close 前）+ knowledge disabled mode 设 None；api.py 加 _document_is_indexing / _library_has_indexing_doc helpers + 409 document_indexing_active / library_indexing_active guards；16/16 lifecycle + guard tests PASS；full Backend Run #2 = 3334/0 failed；R3-A/B/C/R2 frozen 模块未触动）。
-- [x] **P2-R3-D3 Validation Freeze** —— ✅ COMPLETE / FROZEN @ `<this commit>`（docs-only；validation doc 69 节；95/96 exit gate；full Backend Run #1 = 3334/0 failed；R3-A/B/C/R2 frozen 模块未触动）。详见 [docs/validation/p2-r3/P2_R3_D_INDEX_WORKER_VALIDATION.md](docs/validation/p2-r3/P2_R3_D_INDEX_WORKER_VALIDATION.md)。
-- [x] **P2-R3-D-R Reliability + Boundary Closure** —— ✅ COMPLETE / FROZEN @ `<this commit>`（§1 reliability：×2 consecutive 0-failed met + R3-D causality rejected；§2 raw SQL boundary：P2-R3-C-D Bridge Amendment Option B applied — ChunkStore owns `delete_document_chunks_in_transaction`；IndexingStore 用 `chunk_store=` 参数不再用 callback；Worker ZERO persistence SQL；72/72 targeted tests；full Backend ×2 = 3334/0 failed）。详见 [docs/validation/p2-r3/P2_R3_D_R_RELIABILITY_AND_BOUNDARY_CLOSURE.md](docs/validation/p2-r3/P2_R3_D_R_RELIABILITY_AND_BOUNDARY_CLOSURE.md)。
-- [x] **P2-R3-E Final Integration Freeze** —— ✅ COMPLETE / FINAL FROZEN @ `<this commit>`（含 R3-E-Fix frontmatter regex 冒号匹配 + 23 integration tests：real upload→ready / source+Markdown SHA 不变 / chunks+FTS 完整性 / needs_ocr terminal / restart recovery / delete cleanup+guard / repeated lifespan / 0 pending tasks；full Backend 3357/0 failed；50/50 exit gate）。详见 [docs/validation/p2-r3/P2_R3_E_FINAL_INTEGRATION_FREEZE.md](docs/validation/p2-r3/P2_R3_E_FINAL_INTEGRATION_FREEZE.md)。
-- [x] **P2-R4-A Retrieval + Citation Contract** —— ✅ COMPLETE / FROZEN @ `<this commit>`（docs-only；真实代码审计 Session/Binding/ChunkStore/ToolRegistry/Assistant lifecycle；冻结 Tool schema + ACL + Evidence + Citation 合同；12 threats mitigated；29/29 exit gate；production diff=0）。详见 [docs/validation/p2-r4/P2_R4_A_CONTRACT_SECURITY_GATE.md](docs/validation/p2-r4/P2_R4_A_CONTRACT_SECURITY_GATE.md) + [docs/design/p2-r4-search-knowledge-citation-contract.md](docs/design/p2-r4-search-knowledge-citation-contract.md)。
-- [x] **P2-R4-B1 Search Service + Evidence** —— ✅ COMPLETE / FROZEN @ `<this commit>`（search_models.py: KnowledgeEvidence/SearchKnowledgeResult DTO + KnowledgeSearchError；evidence.py: EvidenceRegistry turn-scoped E1/E2 + chunk_id dedupe + first-seen snapshot；search_service.py: SearchKnowledgeService session ACL→ChunkStore→source_name→Evidence；empty binding short-circuit（ChunkStore 不调用）；library_ids=None 永不传递；29/29 targeted tests；full Backend 3386/0 failed）。
-- [x] **P2-R4-B2 search_knowledge Tool + Agent wiring** —— ✅ COMPLETE / FROZEN @ `<this commit>`（search_tool.py: SearchKnowledgeTool(AgentTool) schema=query+limit/additionalProperties=false；session_id_getter closure + evidence_registry_getter lazy init；app.py lifespan 注册；12/12 tool tests；R1 test 更新；full Backend 3398/0 failed）。
-- [x] **P2-R4-B3 Validation Freeze** —— ✅ COMPLETE / FUNCTIONALLY FROZEN @ `0353be8`（docs freeze @ 7f35696 + TOCTOU admission fix @ 0353be8；_ensure_idle + state.running=True 原子化；45 targeted tests；full Backend ×2 = 3402/0 failed consecutive；44/44 exit gate；EvidenceRegistry lifecycle + prompt reservation TOCTOU closed）。详见 [docs/validation/p2-r4/P2_R4_B_SESSION_SCOPED_SEARCH_KNOWLEDGE.md](docs/validation/p2-r4/P2_R4_B_SESSION_SCOPED_SEARCH_KNOWLEDGE.md)。
-- [x] **P2-R4-C1 Citation 模块** —— ✅ COMPLETE / FROZEN @ `<this commit>`（citations.py: parse_citations / process_citations / render_source_footer / render_citation_inline；strict regex `[cite:E1]`；first-use numbering；unknown evidence remove+warning；32/32 unit tests；full Backend 3434/0 failed）。
-- [x] **P2-R4-C2 system prompt + Assistant finalize** —— ✅ COMPLETE / FROZEN @ `<this commit>`（system_prompt.py _KNOWLEDGE_HINT + knowledge_enabled；harness.py build_default_system_prompt(knowledge_enabled=)；app.py _apply_citation_transform module-level 后 _execute_prompt 前 _persist；[cite:E1]→[1]+Sources footer；9/9 integration tests；full Backend 3443/0 failed）。
-- [x] **P2-R4-C3 Validation Freeze** —— ✅ COMPLETE / FROZEN @ `<this commit>`（docs-only；41 targeted tests；full Backend ×2 = 3443/0 failed consecutive；27/27 exit gate；[cite:E1]→[1]+Sources footer pipeline verified）。详见 [docs/validation/p2-r4/P2_R4_C_CITATION_AGENT_INTEGRATION.md](docs/validation/p2-r4/P2_R4_C_CITATION_AGENT_INTEGRATION.md)。
-- [x] **P2-R4-D Final RAG Integration Freeze** —— ✅ COMPLETE / FINAL FROZEN @ `<this commit>`（6 E2E tests：full PDF→ready→search→evidence→citation pipeline + empty binding + cross-session isolation + invalid citation + source SHA；full Backend ×2 = 3455/0 failed consecutive；19/19 exit gate；**Agent-facing Knowledge RAG ✅ AVAILABLE**）。详见 [docs/validation/p2-r4/P2_R4_D_FINAL_RAG_FREEZE.md](docs/validation/p2-r4/P2_R4_D_FINAL_RAG_FREEZE.md)。
-- [ ] **P2-R4 Session-scoped search_knowledge + Page Marker Citation** —— ⛔ BLOCKED BY P2-R3。
-- [x] **B7 SQLite Store Open-Failure Cleanup** —— ✅ RESOLVED / COMMITTED BASELINE（2026-08-18，`688cf08`；`KnowledgeStore.open`、`SQLiteCredentialStore.open`、`SQLiteSessionStore.init`、`ExtensionSQLiteStore.init` 的初始化失败路径均释放自有连接并清除内部引用；覆盖 `CancelledError`；注入的共享 Extension 连接不越权关闭；305 passed + 1 skipped，changed-file Ruff clean）。详见 [P2_R2_D_FINAL_PDF_PIPELINE_VALIDATION.md §17](docs/validation/p2-r2/P2_R2_D_FINAL_PDF_PIPELINE_VALIDATION.md)。
-- [x] **Keyring Persistent Startup Preflight** —— ✅ RESOLVED / COMMITTED BASELINE（2026-08-18，`ada31fc`；真实 write/read/delete capability probe；WinVault `CredWrite` 受限登录会话假阳性被识别；开发启动器默认持久化并在监听端口前 fail-fast；显式 `memory` 才跳过；155 passed + 1 skipped related regressions）。
-- [x] **ToolResult Ordering + MCP UTF-8** —— ✅ RESOLVED / COMMITTED BASELINE（2026-08-18；终态消息就地对账保留跨轮工具卡顺序；MCP 子进程和 DDGS stdio 强制 UTF-8；非法字节 fail-closed 为协议错误；Frontend 394/394 + Backend targeted 106/106）。
-
-## P2-R5 — Web Knowledge Management + REST + E2E（🟡 IN PROGRESS）
-
-R5 阶段总目标：把 R2/R3/R4 已交付的 Knowledge backend 能力 Web 产品化——REST API composition + Knowledge Manager UI + Upload→Ingest→Search E2E。
-
-- [x] **P2-R5-A Web API + UI Contract Audit** —— ✅ COMPLETE / FROZEN @ `1c1f519`（docs-only；production diff=0；audit 14 existing Knowledge REST endpoints；冻结 Search REST 合同 / status mapping / polling model / UI architecture / E2E plan）。详见 [P2_R5_A_WEB_CONTRACT.md](docs/validation/p2-r5/P2_R5_A_WEB_CONTRACT.md)。
-- [x] **P2-R5-B Knowledge REST API** —— ✅ COMPLETE / FROZEN @ `d099185` + `134094a`（R5-B2 Search REST endpoint + DTOs；R5-B3 35 targeted tests；full Backend 3492/0 failed；R2/R3/R4 0 regression；schema/deps/Core Runtime/R2/R3/R4 diff = 0）。R5-B1 跳过（Library/Document REST 已完整）。详见 [P2_R5_B_REST_API.md](docs/validation/p2-r5/P2_R5_B_REST_API.md)。
-- [x] **P2-R5-C Knowledge Management Frontend** —— ✅ COMPLETE / FROZEN @ working tree（pending commit on top of `041801c`）。
-      含 R5-C1 production（api/types/store + 7 components + SessionSidebar entry，~1834 new + 11 modified）+ R5-C2 tests（7 spec files，80 tests：33 store + 47 component）+ R5-C3 freeze docs。
-      **关键不变量**：347/347 vitest（delta 80）+ typecheck/lint/build PASS + frontend-only（backend production diff = 0）；stale-request safety（AbortController + selectedLibraryId guard + searchRequestId）；polling cleanup（onModalClose / onBeforeUnmount / library-switch）；status mapping 终态保留 raw string；binding optimistic + rollback；markdown preview MVP（raw blob in new tab）。
-      详见 [P2_R5_C_FRONTEND.md](docs/validation/p2-r5/P2_R5_C_FRONTEND.md)。
-- [x] **P2-R5-D Final Upload→Ingest→Search E2E Freeze** —— ✅ COMPLETE / FROZEN @ working tree（pending commit on top of `f2750e3`）。
-      含 R5-D1 tests（tests/test_r5_d_knowledge_e2e.py，19 tests across 9 classes）+ R5-D2 freeze docs。
-      **关键不变量**：production diff = 0（validation-only）；Full Backend #1 3511/0 failed（delta +19 = R5-D targeted 全对账）；12 R5-A §16 场景全覆盖（library lifecycle / upload→ready pipeline / REST search / cross-library isolation / delete exclusions / retry 409 / binding via REST / agent continuity / repeated reads / app restart / needs_ocr exclusion / boundary）；0 external HTTP / 0 model downloads / 0 mocks in pipeline。
-      详见 [P2_R5_D_FINAL_E2E_FREEZE.md](docs/validation/p2-r5/P2_R5_D_FINAL_E2E_FREEZE.md)。
-      **P2-R5 全系列 ✅ COMPLETE**。
-
-## Explicitly out of scope (long-term)
-
-- OCR / Image understanding（marker 配置 `force_ocr=False`；扫描 PDF 进 `status=needs_ocr` 终态）
-- Long-term user memory / 跨 Session 用户偏好（区别于 RAG——RAG 已在 P2-R 系列重启）
-- Multi-Agent / RBAC / OAuth / 企业级多租户（本地登录与账号工作区隔离已完成）
-- 公网部署 / 横向扩展
-- CLI（仅 Web UI 入口）
-- 本地文件系统操作工具
-- 自动 provider fallback / 模型负载均衡
-- 长期后台任务调度
+> 校准日期：**2026-08-19**。本文件只保留尚未完成或明确延期的事项；已完成阶段不再复制数百行历史记录，统一由 [`STATUS.md`](STATUS.md)、[`CHANGELOG.md`](CHANGELOG.md) 和 `docs/validation/` 追溯。
+
+## 当前收敛执行顺序
+
+- [x] **1. 修复全量 Ruff / strict Mypy，使仓库自身 CI 静态检查通过**（完成：Ruff 0 项；Mypy 114 files / 0 issues；后端 CI 3655 passed、6 skipped、12 deselected、coverage 83.73%；前端 lint / typecheck / build 通过；Python CI job timeout 由 10 分钟调整为 30 分钟以容纳完整门禁）
+- [x] **2. 整理并提交当前工作区改动，同时更新 `STATUS.md` 到最新验证基线**（完成：运行时/测试/CI 提交 `c214d28`；81 个工作区路径完成分类与敏感信息审计，状态文档记录真实门禁结果）
+- [ ] **3. 统一 Python、FastAPI/Auth、前端与 release 版本号，并补齐仓库根 `LICENSE`**
+- [ ] **4. 复跑当前提交的完整 Playwright E2E 与最终 GLM 真实 smoke**
+- [ ] **5. 继续 pi-agent 对齐：补齐 model、thinking level、streaming message、pending tool calls 等公开 Agent 状态**
+
+## pi-agent Core 对齐修复顺序
+
+### 1. P0 — 语义正确性
+
+- [x] 并行工具批次改为两阶段执行：按源序串行完成 before hook、权限策略、人工审批和参数校验，再并行执行已放行工具
+- [x] `max_turns` 终止信息写回最终 `AgentEndEvent`、`Agent.state.messages` 和持久化消息
+- [x] `Agent.continue_()` 拒绝从 assistant 尾消息直接继续
+- [x] 禁止 before/after tool hook 改写 tool-call ID，保证 ToolCall/ToolResult 协议配对
+- [x] Harness 请求异常完成后恢复 `idle`，保留 `last_error` 和 error snapshot 供诊断
+- [x] 为以上语义增加回归测试，并复跑 Agent Core 测试集（179 passed）
+
+### 2. P1 — Agent 控制面兼容
+
+- [x] 实现独立的 steering / follow-up 队列及 `all` / `one-at-a-time` 消费模式（默认均为 `one-at-a-time`；steering 优先，follow-up 仅在 Agent 原本将结束时消费；新增 9 项队列契约测试）
+- [x] 活跃请求期间拒绝普通 `prompt()` / `continue_()`，错误信息明确引导调用已提供的 steer / follow-up 入口（覆盖 queued-before-worker、running Agent 与 running Harness 三个竞态窗口）
+- [x] 增加全局 `tool_execution` 配置，并保留逐工具 `execution_mode` 覆盖（全局 `sequential` 强制整批串行；全局 `parallel` 下任一逐工具 `sequential` 可收紧整批；新增 8 项配置、透传与运行时校验测试，Agent/loop/Harness 相关回归 163 passed）
+
+### 3. P1 — 消息、流与模型状态
+
+- [x] 扩展 thinking/reasoning 内容块：保留正文、provider signature 与 redacted payload；打通 OpenAI/Anthropic 增量、Agent 消息、上下文回放、预算估算和持久化（相关回归 289 passed）
+- [ ] 扩展图片内容块，不再把图片统一降级为 `image_unsupported`（按当前决定暂缓）
+- [x] 增加细粒度 text/thinking/tool-call start/delta/end 流事件：Provider 统一输出带 `content_index` 的完整块生命周期，Agent 维护 partial message 并兼容旧 delta-only / whole-tool-call 流；工具仅在 `toolcall_end` 后进入执行（定向回归 62 passed；全量非网络回归 3655 passed）
+- [ ] 补齐 model、thinking level、streaming message、pending tool calls 等公开 Agent 状态
+- [ ] 对齐 ToolResult 的图片内容、usage 和动态 added-tool metadata
+
+### 4. P2 — Session、Compaction 与持久化
+
+- [ ] 评估并迁移 append-only 会话树或 lane-based Session；支持 branch、fork、label 和 active leaf
+- [ ] 引入 durable operation/recovery，避免整份 JSON 覆盖和非原子发布
+- [ ] 将 compaction 默认边界改为完整 turn，并补齐 token/window、前缀摘要和重试语义
+
+## P0 — Release 与文档卫生
+
+- [ ] 统一版本元数据：Python `__version__` / FastAPI 当前为 `0.0.21`，前端为 `0.0.20`，最新 tag 为 `v0.0.27-secure-credentials`
+- [ ] 在仓库根补齐与 `pyproject.toml` MIT 声明一致的 `LICENSE` 文件
+- [ ] 在发布前复跑当前 HEAD 的完整 Playwright E2E，而不是沿用历史阶段数字
+- [ ] 决定下一个 release 版本与 tag；tag 仍需用户单独授权
+- [ ] 如需 push，先配置 Git remote；当前仓库没有 remote，push 仍需用户单独授权
+- [ ] 评估本地初始账号 `admin / 123456` 的改密入口；在此之前继续保持 localhost-only
+
+## P1 — 可靠性与维护
+
+- [ ] 清理全量 Backend 的已知 warning：Starlette/httpx deprecated API、同步测试误用 `@pytest.mark.asyncio`
+- [ ] 修复本机 `.pytest_cache` ACL 或在开发流程中固定可写 cache 目录，避免测试通过时仍产生 cache warning
+- [ ] 为 ToolResult/UTF-8 修复增加 Browser E2E：跨轮工具卡顺序、中文 DDGS 结果和刷新恢复
+- [ ] 设计旧消息中 `U+FFFD` 的可选检测/标记工具；不得声称能恢复已丢失原字符
+- [ ] 为 Keyring 启动预检增加 Windows 实机 smoke 文档；保持非敏感探针和执行后清理约束
+
+## P2 — 可选产品迭代
+
+- [ ] **P2-D Session organization**：Session 搜索、收藏、归档
+- [ ] 接入 Provider 官方 tokenizer；保留当前 estimator 作为安全 fallback
+- [ ] 自动 compaction 策略；明确触发时机、失败回滚和请求并发边界
+- [ ] 可选 LLM compaction 摘要器；与 `/checkpointer` 的 Session Memory 语义保持区分
+- [ ] 跨后端重启的 request/approval 持久化方案；当前仅浏览器刷新恢复
+- [ ] Human Approval 的持久规则/永久授权模型；需要新的安全与审计设计
+- [ ] MCP HTTP transport；当前仅 stdio transport 可用
+
+## 明确延期 / Out of scope
+
+- [ ] OCR 与图片理解：扫描 PDF 当前终态为 `needs_ocr`
+- [ ] Multi-Agent、Plan Mode、Docker Sandbox/Git Integration
+- [ ] RBAC、OAuth、企业级多租户、TLS 公网部署、横向扩展
+- [ ] 向量数据库、embedding、hybrid retrieval；当前 Knowledge 固定为 SQLite FTS5/BM25
+- [ ] 自动 provider fallback、模型负载均衡、长期后台任务调度
+
+## 已完成基线索引
+
+| 能力 | 最终状态/提交 |
+|---|---|
+| P2-R Knowledge/RAG + Web Manager | ✅ `7faf635` / `6527be5` |
+| Auth + Session Folder + Checkpointer + P0 Runtime | ✅ `b529bbc` |
+| P2-A Session reload recovery | ✅ `f30da56` |
+| P2-B Approval + P2-C Context Budget/Compaction | ✅ `924b047` |
+| B7 SQLite cleanup | ✅ `688cf08` |
+| Persistent Keyring preflight | ✅ `ada31fc` |
+| ToolResult ordering + MCP UTF-8 | ✅ `e7bf8f3` |
+| Agent semantics + controls + stream lifecycle | ✅ `c214d28` |
+
+当前代码基线的验证结果见 [`STATUS.md`](STATUS.md#2026-08-19-当前验证基线)。

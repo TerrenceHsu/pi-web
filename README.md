@@ -1,689 +1,324 @@
 # pi-agent-core-py
 
-`@earendil-works/pi-agent-core`（TypeScript 上游项目）的 Python 完整移植版本——一个面向"本地优先、可观察、可回放"的 Agent 开发框架，内置 MCP 工具生态、权限沙箱、Skill 体系、Session 记忆和网页端调试器。
+`@earendil-works/pi-agent-core` 的 Python 移植与本地 Web Agent 工作台。项目包含事件驱动 Agent Runtime、工具与 MCP、Skills、Provider 切换、Session 工作区、Knowledge/RAG、审批、上下文预算和可恢复的浏览器聊天界面。
 
-> 上游 TypeScript 项目路径（不在本副本）：`../pi-main/packages/agent`
+> 当前代码事实以 [`STATUS.md`](STATUS.md) 为准；未完成事项只维护在 [`TODO.md`](TODO.md)。本项目是 **localhost-only** 本地开发工具，不是公网 SaaS。
 
-> 当前进度：Step 1–21 完成（核心 15 步 + Phase A MCP/权限 + Phase B Skill Loader + Phase C Web App + Provider Adapter Refactor）；
-> Web Claude P0 MVP + P1-A 真实环境验证 + P1-B 异步架构 + P1-C 持久化 + P1-D1 Export Markdown + P1-D2 Regenerate 全部完成 ✅。
-> 当前状态见 [`STATUS.md`](STATUS.md)；未来计划见 [`ROADMAP.md`](ROADMAP.md)；版本历史见 [`CHANGELOG.md`](CHANGELOG.md)。
->
-> **Web UI now requires local login. Each account is routed to a private workspace; it remains localhost-only and is not suitable for public exposure.**
+## 当前能力概览
 
----
+### Agent Runtime
 
-## 目录
+- 异步流式 LLM 调用、ToolCall、并行/顺序工具批次、abort signal 和事件订阅
+- 一个 Turn 严格等于“一次 LLM 调用 + 该调用产生的当批工具”
+- `RequestSnapshot` 保存一次请求，内部 `TurnSnapshot[]` 保存真实 LLM 轮次
+- Tool、before hook、after hook 接收协作式 `signal`
+- 独立 steering / follow-up 控制队列，支持 `all` / `one-at-a-time` 消费模式
+- 全局 `tool_execution` 可强制批次串行，逐工具 execution mode 可进一步收紧
+- `tool_execution_update` 支持工具执行中的增量状态
+- `prepare_next_turn` 与 `should_stop_after_turn` 提供 Turn 边界控制
+- `length + tool_calls`、非法工具参数和工具异常统一转为安全 ToolResult，不让 loop 崩溃
+- text/thinking/tool-call 提供完整 start/delta/end 生命周期；thinking 保留 provider signature/redacted payload
 
-- [设计理念](#设计理念)
-- [技术栈](#技术栈)
-- [功能模块](#功能模块)
-- [项目结构](#项目结构)
-- [快速开始](#快速开始)
-- [Web UI](#web-ui)
-- [开发流程](#开发流程)
-- [路线图](#路线图)
+### Web 工作台
 
----
+- 本地账号登录；每账号独立 Session、文件、Skills、MCP、Knowledge 和 Provider 配置
+- `/chat/{session_id}` 路由；整页刷新恢复 Session、历史、文件树及当前进程中的 active request
+- Prompt、Stop、Regenerate 最新 Assistant、Markdown Export、SSE/WebSocket 实时事件
+- Human Approval：高风险 ToolCall 在当前 Turn 内暂停，支持 Approve once / Deny
+- Context Budget：完整输入估算、70/85/95% 分级、hard stop、手动 Turn-safe compaction
+- Assistant Markdown 渲染、usage、总 latency 与 TTFT 展示
+- ToolCall/ToolResult 卡片保持原始跨轮顺序；MCP stdio 端到端严格 UTF-8
 
-## 设计理念
+### Session 工作区与记忆
 
-1. **垂直切片**：每个 Step 端到端跑通（demo + 测试 + 文档），不做半成品。
-2. **事件驱动**：Agent / Harness / Tool 的所有行为都通过 `AgentEvent` 流式广播，可观察、可序列化、可重放。
-3. **不可变语义**：Pydantic v2 模型 + `RequestSnapshot` / `TurnSnapshot`，运行时对象不会被订阅者反向修改。
-4. **本地优先**：Web UI 使用本地账号登录和隔离工作区；不实现 RBAC / OAuth / 公网部署，MCP / Skill / Policy 仍在各用户进程内工作区编排。
-5. **Provider 无关**：`ModelClient` 抽象层；当前默认 GLM-5.0（智谱 Anthropic 兼容协议），未来拆 Anthropic / OpenAI / Fake 多 provider。
+- 每个 Session 初始化独立目录和唯一根 `AGENT.md`
+- 用户上传文件保存在当前 Session；Agent 可调用 `list_files`、`view_file`、`write_file`
+- 文件树可查看、下载、删除和刷新；`AGENT.md`、`Memory.md` 可用 SHA-256 乐观锁编辑
+- `/checkpointer` 使用当前 Session 绑定的 LLM 总结对话到累计 `Memory.md`，成功后清空当前消息窗口
+- 重新登录或重启后恢复同账号的 Session、历史消息、受管文件和配置
 
----
+### Provider 与凭证
+
+- Provider adapters：GLM/Anthropic-compatible 与 OpenAI-compatible；Web UI 管理 GLM、Qwen、Kimi Profile
+- Provider Profile、Model、Session binding、Context Window、Max Output Tokens 持久化
+- API Key 可存 OS Keyring、session-only memory 或显式环境变量；不写入 SQLite 明文
+- 开发启动器默认要求持久化 Keyring，并在监听端口前执行非敏感 write/read/delete 探针
+- 未配置可用 Profile 时，开发启动器保留 delayed FakeClient 作为本地 UI fallback；真实回答需要在 Providers 中保存并绑定真实 Profile
+
+### MCP 与网络搜索
+
+- MCP client 支持 stdio tools/prompts、server 生命周期、工具 enable/disable 和持久化恢复
+- 内置 `ddgs` MCP 随开发工作区固定创建且不可删除
+- DDGS 前端可调整返回数、地区、安全搜索、时间范围、后端等参数
+- MCP 子进程强制 `PYTHONIOENCODING=utf-8` / `PYTHONUTF8=1`；非法 UTF-8 作为协议错误拒绝
+- HTTP MCP transport 仍是 placeholder；当前生产可用 transport 为 stdio
+
+### Knowledge / RAG
+
+- Knowledge Library/Document 管理、Session binding 和账号隔离
+- PDF 流式上传、文本提取、Canonical Markdown、heading-aware chunk、SQLite FTS5/BM25
+- 后台 ingestion/indexing worker、重启恢复、状态/重试/delete guard
+- `search_knowledge` Agent Tool 按当前 Session Library ACL 检索
+- Assistant 中的 `[cite:E1]` 转为稳定编号和 Sources footer
+- Knowledge Manager UI 支持上传、状态轮询、Markdown 查看和搜索
+
+Knowledge 是纯 FTS5 路线，不使用 embedding、向量数据库或外部模型下载。扫描 PDF 进入 `needs_ocr`，当前不做 OCR。
+
+## 关键数据边界
+
+Session 文件和 Knowledge 文档用途不同：
+
+| 能力 | Session Folder | Knowledge Library |
+|---|---|---|
+| 作用域 | 单个 Session | 账号内 Library，可绑定多个 Session |
+| 输入 | 任意受配额文件 | PDF |
+| Agent 读取 | 文本/Markdown/HTML/CSV/Parquet；PDF 仅元信息 | `search_knowledge` 返回索引片段 |
+| 持久化 | `uploads/{session_id}/` + workspace metadata | `knowledge.db` + `knowledge/libraries/` |
+| 图片/OCR | 不支持 | 扫描 PDF → `needs_ocr` |
+
+`AGENT.md` 是当前 Session 的行为指令；`Memory.md` 是当前 Session 的对话摘要。两者都不是跨 Session 用户画像，也不能覆盖平台安全规则。
 
 ## 技术栈
 
-| 维度 | 选型 | 备注 |
-|------|------|------|
-| 语言 | Python 3.12 | conda 环境 `pipy`（不强制，>=3.11 也可） |
-| 并发 | asyncio + anyio | 全异步事件循环 |
-| 数据建模 | Pydantic v2 | 所有 message / event / snapshot 模型 |
-| HTTP / SDK | httpx + anthropic + openai | LLM provider SDK |
-| Token 计数 | tiktoken | 用于 compaction 估算 |
-| Schema 校验 | jsonschema | 工具参数 JSON Schema 校验 |
-| 配置 | python-dotenv + pyyaml | `.env` 凭证 + Skill YAML frontmatter |
-| 测试 | pytest + pytest-asyncio | `tests/`，`slow` mark 跳过真实 API |
-| Lint / Type | ruff + mypy（strict） | CI 必过 |
-| Web 后端 | FastAPI + uvicorn | optional extra `[web]` |
-| Web 前端 | Vue 3 + Vite + TypeScript | 单页应用，build 到 `web/static/` 由 FastAPI 托管 |
-| 默认 Provider | 智谱 GLM-5.0 | Anthropic 兼容协议，凭证在 `.env` |
-
----
-
-## 功能模块
-
-按代码组织划分，每块对应一个或多个 Step。每个模块都标注了**边界**（明确说明它**不**做什么），帮你避免误用。
-
-### 全局不做的事（跨模块约束）
-
-下面这些是整个项目当前阶段**明确不做**的，无论组合哪个模块都拿不到：
-
-- **RAG**——P2-R 系列引入（marker + heading-aware chunk + SQLite FTS5 + Session-scoped Library ACL）；不引入外部 vector DB。详见 [ROADMAP §P2-R](ROADMAP.md)
-- **Long-term user memory / 跨 Session 用户记忆**——仍不做；`/checkpointer` 只维护当前 Session 的 `Memory.md`（区别于用户画像与 RAG）
-- **RBAC / OAuth / 企业级多租户**——已有本地登录与账号工作区隔离，但没有角色权限、第三方登录或跨节点租户能力
-- **公网部署 / 横向扩展**——FastAPI 状态在内存，SSE 单机广播
-- **CLI**——只做 Web UI（Step 20）
-- **自动 compaction 的真 LLM 摘要器**——`default_summary_generator` 仍是规则式；显式 `/checkpointer` 使用当前 Session 绑定的 LLM
-- **Skill 热加载 / 跨项目共享**——文件改了要重启
-
-按代码组织划分，每块对应一个或多个 Step。
-
-
-### 1. 消息层 `messages.py` / `llm_messages.py`
-
-- `UserMessage` / `AssistantMessage` / `ToolResultMessage` / `SummaryMessage` / `CustomMessage`
-- `TextContent` / `ToolCall` / `Usage`
-- `LLMMessage` 系列：`LLMUserMessage` / `LLMAssistantMessage` / `LLMToolResultMessage`，对齐 Anthropic Messages API 格式
-- Step 1 起 + Step 3 扩展 + Step 5 加 `ToolCall` / `ToolResultMessage`
-
-**边界**：纯数据模型，无业务行为；`CustomMessage` 不会出现在 `convert_to_llm` 输出里（被过滤）。
-
-### 2. Provider 抽象 `model_client.py`
-
-- `ModelClient`（抽象基类）：`stream()` 是 async generator，按顺序 yield `StreamEvent`
-- `GLMClient`（生产用）：完整解析 Anthropic 协议——`text_delta` 流式、`tool_use` block（`content_block_start` + `input_json_delta` + `content_block_stop` → `ToolCallEvent`）、`message_delta(stop_reason)`、`usage`
-- `FakeClient`（离线测试用）：按预置脚本回放 `StreamEvent`，记录每次 stream 调用的 messages
-- `StreamEvent` 联合类型：`TextDeltaEvent` / `ToolCallEvent` / `DoneEvent` / `ErrorEvent`
-
-**边界**：仅 Anthropic 协议（Step 21 才拆 OpenAI/Anthropic/GLM 多 provider）；`FakeClient` 仅供测试，不要进生产；不修改 `stream` 内部状态、`convert_to_llm`、`tool_use` parse 这三处既有契约。
-
-### 3. 事件流 `events.py`
-
-10+ 种 `AgentEvent`，覆盖完整生命周期：
-
-- **Agent 级**：`AgentStartEvent` / `AgentEndEvent`
-- **Turn 级**：`TurnStartEvent` / `TurnEndEvent`
-- **Message 级（流式）**：`MessageStartEvent` / `MessageUpdateEvent` / `MessageEndEvent`
-- **Tool 执行级**：`ToolExecutionStartEvent` / `ToolExecutionEndEvent`
-- **Queue / Abort 级（Step 9）**：`RequestQueuedEvent` / `RequestStartEvent` / `RequestEndEvent` / `AgentAbortEvent`
-
-所有事件都是 Pydantic 模型，可直接 JSON 序列化——这是 Web UI SSE 推送的基础。
-
-**边界**：事件只描述"发生了什么"，不带投递保证（at-most-once；订阅者慢了会被丢弃）；不是 audit log（持久化在 Session/Snapshot 里）。
-
-### 4. Context 转换 `context.py`
-
-- `transform_context`：把 Agent 内部消息（含 Summary / ToolResult）转换为 LLM 可读的 messages
-- `convert_to_llm`：去摘要、合并连续 UserMessage、组装 `LLMMessage` 列表
-- `TransformContextFn`：自定义转换 hook
-
-**边界**：只做"消息形状变换"——不直接读取外部知识；RAG 的检索由 `search_knowledge` Tool 在 loop 层注入（P2-R 系列），不在 context 层做向量召回。`CustomMessage` 在转换时被丢弃（不会发给 LLM）。
-
-### 5. Tool Hooks `hooks.py`
-
-- `BeforeToolCallFn` / `AfterToolCallFn`：工具调用前后的拦截点
-- `BeforeToolCallContext` / `BeforeToolCallResult`：可短路、可改 args
-- `AfterToolCallContext`：可观察 result、可记录指标
-
-**边界**：hooks 在工具**单次调用**粒度触发；不能拦截 batch 整体（批次粒度看 loop 内部）；after-hook 抛异常会被 loop 吞掉并转成 error ToolResult，不会让 Agent 崩。
-
-### 6. Agent Loop `loop.py`
-
-- `run_event_loop`：核心循环——调 LLM stream → 累积 text + tool_calls → 执行工具 → 再调 LLM 直到 `stop`
-- `run_min_loop`：极简版，便于 demo
-- 处理 abort（`asyncio.Event` signal）、错误包装（不抛异常，包成 `stop_reason="error"` 的 AssistantMessage）
-
-**边界**：单 turn 内的逻辑——不感知 queue / status（那是 Agent 的事）；abort 是**协作式中止**（在 checkpoint 检查 signal），不能强制 cancel 正在跑的 LLM stream 或工具 `execute()`；错误不抛异常，统一包成 `stop_reason="error"` 的 AssistantMessage。
-
-### 7. Agent 状态机 `agent.py`
-
-- `AgentState`：messages / turn_count / status / queue / pending request
-- `AgentStatus`：`idle` / `running` / `error` / `aborted`
-- `AgentRequest`：prompt / continue / steer / follow_up
-- `Subscriber`：subscribe Agent 事件流
-- `Agent.run_prompt()` / `Agent.continue_()` / `Agent.abort()` / `Agent.wait_for_idle()`
-
-**边界**：Agent **不感知** skills / MCP / policy——那是 Harness 的事；不持久化 messages（Session 才存）；abort 是协作式 signal，不强制 cancel task；`reset()` 仅在 idle 时可用，running 中会抛 `RuntimeError`。
-
-### 8. Harness 应用层 `harness.py`
-
-`AgentHarness` 包装 `Agent`，补充应用层能力：
-
-- **Phase 控制**：`HarnessPhase`（before_request / agent / after_request / done）
-- **Hooks**：`BeforeRequestHook` / `AfterRequestHook` / `OnEventHook` / `OnErrorHook`
-- **Skills 注入**：`attach_skills()` + `select_skills()` 自动渲染到 system prompt
-- **MCP 注册**：`attach_mcp_servers()` 管理生命周期
-- **Permission Policy**：每条 ToolCall 都过 policy
-- **Session 同步**：可选 `attach_session()` 双向同步 messages
-
-**边界**：Harness **不替代** Agent，是外层协调；`require_approval` 决策按 deny 处理（Step 18 不做交互式 human approval UI）；`on_error` hook 抛异常追加进 metadata，不递归；compaction **不删除** snapshots（历史永久保留）。
-
-### 9. Request / Turn Snapshot `snapshot.py`
-
-每次 Harness 请求构建一个 `RequestSnapshot`，其中 `turns[]` 保存真实
-`TurnSnapshot`。一个 turn 严格等于“一次 LLM 调用 + 该调用产生的当批工具”：
-
-- `messages_before` / `messages_after`
-- `events`（事件快照）
-- `tool_calls` / `tool_results`（工具调用明细）
-- Request 级 `metadata` / `status` / `error` / `duration_ms`
-- Turn 级 assistant `message`、独立事件区间和工具明细
-- `SnapshotBuilder` 在 request 期间累积，按 `turn_start` / `turn_end` 切片
-
-**兼容性**：Session / SQLite 持久化 RequestSnapshot；旧版 request-shaped
-TurnSnapshot JSON 会按 `turns=[]` 兼容读取。Web 完整详情会返回嵌套 turns。
-
-### 10. Session Memory `session.py`
-
-- `SessionMemory`：单 session 累积 messages + snapshots + metadata
-- `SessionState`：可序列化的 session 状态
-- `SessionStore`：`InMemorySessionStore` / `JsonFileSessionStore`（JSONL 持久化）
-- 序列化 / 反序列化 helper：`serialize_message(s)` / `deserialize_message(s)_snapshot`
-- Session tree：fork / restore（Step 12）
-
-**边界**：**不**含 Skills / Compaction / Long-term user memory；存储后端只有内存和 JSONL（无 DB / Redis）；只支持单 session 实例（多 session 由上层 session store 管理）。**向量召回不在此模块**——RAG 检索属于 Knowledge 子系统（P2-R 系列，独立 `knowledge.db`），与 SessionMemory 解耦。
-
-### 11. Session Sync `session_sync.py`
-
-- `SessionSyncConfig`：自动保存策略 / 一致性检查配置
-- `SessionConsistencyReport` + `SessionConsistencyIssue`：列出 agent ↔ session ↔ snapshot 的不一致
-- `SessionAutoSavePolicy`：never / on_turn_end / on_request_end / debounced
-
-**边界**：只做"一致性检查 + 自动保存触发"；**不**做 Skills / Compaction / Vector / 自动摘要；不修复 issue——只报告，调方决定是否 `restore_messages`。
-
-### 12. Skills / Templates `skills.py`
-
-- `Skill`：name / description / prompt / tags / status / tool_names / metadata
-- `SkillRegistry`：注册、查询、按 `SkillSelection`（names / tags / values）过滤
-- `PromptTemplate`：Jinja-like 模板渲染，支持 `{{var}}` 占位
-- `SkillInjectionConfig`：渲染到 system prompt 的格式 / 顺序
-- `render_skill_block()`：单个 skill 渲染为 markdown block
-
-**边界**：Skill 是**提示组织层**——不改变 Agent 执行内核；`tool_names` 仅 metadata（**不**自动注册工具到 registry）；PromptTemplate 用 Python `str.format()`，**不**引入 Jinja2；Step 14 **不做** Compaction / Branch Summary / 向量召回 / 自动摘要。
-
-### 13. Compaction / Branch Summary `compaction.py`
-
-- `compact_messages()`：基于 message_count / token 估算触发压缩
-- `CompactionConfig`：触发阈值 / 保留策略
-- `BranchSummary` / `BranchSummaryConfig`：fork 出分支时生成摘要
-- `SummaryGenerator` / `default_summary_generator`：可替换的摘要器（未来接真 LLM）
-
-**边界**：**只压缩 messages**——不删 snapshots、不动 events；Step 15 **不做** RAG / Long-term user memory / 自动后台压缩 / 数据库；`default_summary_generator` 是规则式（不调真 LLM）。向量召回属于 Knowledge 子系统（P2-R 系列），不在此模块。
-
-### 14. Tools 子包 `tools/`
-
-- `AgentTool`（抽象基类）：`name` / `description` / `parameters`（JSON Schema）/ `execute()`
-- `ToolRegistry`：注册、查询、按 name 解析
-- `ToolResult`：标准返回结构
-- `ToolExecutionMode`：`sequential` / `parallel` / `terminate`
-- `WebSearchTool`（Step 5.5）：内置 web search demo
-
-**边界**：执行是**协作式**的——`execute()` 内部不会感知 abort signal，只能在调用前后检查；不能跨 tool 共享状态（每个 tool 独立）；内置只 Echo + WebSearch，其它工具通过 MCP 或用户自注册。
-
-### 15. Tool Validation `tool_validation.py`
-
-- `validate_tool_arguments()`：基于 JSON Schema 校验工具参数
-- `ToolArgumentValidationError`：详细错误信息
-
-**边界**：只做 **JSON Schema 语法**校验；不做语义校验（如"路径是否存在"、"权限够不够"——那是 tool `execute()` 自己的事）；不修改 args（返回错误而非修复）。
-
-### 16. MCP 子包 `mcp/`
-
-完整 MCP（Model Context Protocol）客户端实现：
-
-- `MCPClient`：单个 server 连接
-- `MCPTransport` / `StdioMCPTransport` / `HttpMCPTransport` / `FakeMCPTransport`
-- `MCPRegistry`：管理多个 server，统一暴露 tools
-- `MCPAgentTool`：把 MCP tool 适配为 `AgentTool`
-- `MCPPromptSkillAdapter`：把 MCP prompts 适配为 Skill
-- `naming.py`：`server__tool` 命名规范 + 校验
-- `errors.py`：完整异常体系
-
-**边界**：第一阶段只接 **tools + prompts**，**不**接 resources / notifications / progress / logging / subscribe；`HttpMCPTransport` 是 placeholder（连接时抛 `NotImplementedError`，仅 stdio 可用）；MCP server 异常被 adapter 主动转成 `is_error=True` 的 ToolResult，不让异常穿透到 loop。
-
-### 17. Permission / Policy 子包 `policy/`
-
-- `ToolPermissionPolicy`（抽象基类）
-- `AllowAllToolPermissionPolicy` / `DenyAllToolPermissionPolicy` / `DefaultToolPermissionPolicy`
-- `ToolPermissionDecision`：`allow` / `deny` / `ask`
-- `InMemoryToolPermissionAuditLog` + `ToolPermissionAuditRecord`：审计日志
-- `sandbox.py`：路径沙箱（`is_path_within_roots` / `extract_candidate_paths` / `parse_mcp_namespaced_tool`）
-
-**边界**：`permission_policy=None` 关闭检查（向后兼容）；policy 抛异常 / 返回非法对象时**不让 loop 崩**，转成 `error_type="ToolPermissionPolicyError"` 的 ToolResult；audit log **仅内存**（无文件 / DB 持久化）；`require_approval` 按 deny 处理（Step 18 不做 human approval UI）；不做 OAuth / RBAC / 多租户授权 / 企业 secret vault。
-
-### 18. Skill File Loader `skill_loader.py`
-
-- `SkillFileLoader`：从文件系统加载 SKILL.md
-- `parse_skill_markdown()`：解析 YAML frontmatter + body
-- 安全限制：`DEFAULT_MAX_FILE_SIZE_BYTES` / `DEFAULT_ALLOWED_FILENAMES`
-- 异常：`SkillFileLoadError` / `SkillFileFormatError` / `SkillFileSecurityError`
-
-**边界**：MVP **不支持热加载**（文件改了要重启 Harness 才生效）；不做跨项目共享（无 project / workspace / global 三级库）；只识别指定文件名（默认 `SKILL.md` / `skill.md`），不支持任意 .md。
-
-### 19. Web 子包 `web/`
-
-本地调试 UI（FastAPI + Vue 3）：
-
-- `app.py`：`create_app(harness)` 工厂，注册 REST API + SSE + 静态资源
-- `auth/`：登录会话、HttpOnly Cookie 网关与每账号独立工作区路由
-- `state.py`：`WebAppState` + `TraceEventBuffer`（最近 500 事件）
-- `serializers.py`：Pydantic 模型 → JSON-safe dict
-- `frontend/`：Vue 3 + Vite + TypeScript 单页应用
-
-**边界**：**仅本地调试**——`create_authenticated_app(...)` 提供本地登录与账号级工作区隔离，但不实现 RBAC / OAuth / 公网部署；每个用户工作区 event buffer 有界，并发请求仍由 `_ensure_idle()` 拒绝。
-
-**REST API**（均同源，前缀 `/api`）：
-
-| 方法 | 路径 | 用途 |
-|------|------|------|
-| GET | `/state` | agent / harness 状态摘要 |
-| GET | `/messages` | 当前 messages |
-| GET | `/events` | event buffer（最近 500） |
-| POST | `/events/clear` | 清空 event buffer |
-| GET | `/snapshots` | snapshot summaries |
-| GET | `/snapshots/{i}` | 完整 snapshot detail |
-| GET | `/session` | session summary |
-| GET | `/mcp` | MCP servers / tools / prompts |
-| GET | `/skills` | SkillRegistry + skill_loader metadata |
-| GET | `/policy/audit` | permission audit records |
-| POST | `/prompt` | `{ text, skill_selection }` |
-| POST | `/abort` | `{ reason }` |
-| POST | `/reset` | `{ clear_events, clear_snapshots, clear_audit }` |
-| GET | `/stream` | SSE 事件流（实时推送） |
-
----
-
-## 项目结构
-
-```
-pi-py/
-├── README.md                     # 本文件
-├── CLAUDE.md                     # AI 协作约定（必读）
-├── PLAN.md                       # 15 步核心 + 扩展 track 实施计划
-├── STATUS.md                     # 当前状态
-├── TODO.md                       # 待办
-├── pyproject.toml                # 项目元数据 + dependencies
-├── src/pi_agent_core_py/
-│   ├── __init__.py               # 顶层 re-exports（340+ 行）
-│   ├── messages.py               # 消息模型
-│   ├── llm_messages.py           # LLM 协议层消息
-│   ├── model_client.py           # Provider 抽象 + GLMClient + FakeClient
-│   ├── events.py                 # AgentEvent 联合类型
-│   ├── context.py                # Context 转换
-│   ├── hooks.py                  # Tool Hooks
-│   ├── loop.py                   # Agent Loop（核心）
-│   ├── agent.py                  # Agent 状态机
-│   ├── harness.py                # AgentHarness 应用层
-│   ├── snapshot.py               # Turn Snapshot
-│   ├── session.py                # Session Memory
-│   ├── session_sync.py           # Session 一致性检查
-│   ├── skills.py                 # Skills / Templates
-│   ├── compaction.py             # Compaction / Branch Summary
-│   ├── tool_validation.py        # 工具参数校验
-│   ├── skill_loader.py           # SKILL.md 文件加载
-│   ├── tools/                    # 内置工具子包
-│   │   ├── __init__.py
-│   │   └── web_search.py
-│   ├── mcp/                      # MCP 客户端子包
-│   │   ├── __init__.py
-│   │   ├── adapter.py            # MCPAgentTool / MCPPromptSkillAdapter
-│   │   ├── client.py             # MCPClient
-│   │   ├── config.py             # MCPServerConfig
-│   │   ├── errors.py
-│   │   ├── naming.py
-│   │   ├── prompts.py            # MCP prompts → Skill
-│   │   ├── registry.py           # MCPRegistry
-│   │   └── transport.py          # stdio / http / fake
-│   ├── policy/                   # 权限子包
-│   │   ├── __init__.py
-│   │   ├── audit.py              # 审计日志
-│   │   ├── permissions.py        # Policy 抽象 + 3 个默认实现
-│   │   └── sandbox.py            # 路径沙箱
-│   └── web/                      # Web UI 子包
-│       ├── __init__.py
-│       ├── app.py                # FastAPI 工厂
-│       ├── auth/                 # 账号、登录 Session、认证网关与工作区隔离
-│       ├── serializers.py
-│       ├── state.py
-│       ├── static/               # Vue build 产物
-│       └── frontend/             # Vue 3 + Vite + TS 源码
-│           ├── package.json
-│           ├── vite.config.ts
-│           ├── tsconfig.json
-│           ├── index.html
-│           └── src/
-│               ├── main.ts
-│               ├── App.vue       # Pinia 初始化 + WS 连接（不再渲染 DeveloperDrawer）
-│               ├── api/          # client.ts + 各模块 fetch 封装（sessions/files/skills/mcp/messages）
-│               ├── types/        # 强类型 barrel index.ts
-│               ├── stores/       # Pinia stores（chat / session / file / skill / mcp）
-│               ├── styles.css    # 全局样式（chat 风格）
-│               └── components/
-│                   ├── layout/
-│                   │   ├── AppShell.vue        # 两栏 shell（sidebar + main slots）
-│                   │   └── SessionSidebar.vue  # New chat / 会话列表 / 工具 / 当前账号与退出
-│                   ├── auth/
-│                   │   └── LoginPage.vue       # 未登录首屏
-│                   ├── chat/                   # 中间对话流 + Inline Turn Cards
-│                   │   ├── ChatPanel.vue
-│                   │   ├── MessageList.vue
-│                   │   ├── ChatInput.vue       # 拖放 + 附件 + Enter 发送
-│                   │   ├── AttachmentBar.vue
-│                   │   ├── FileChip.vue
-│                   │   ├── MessageBubble.vue
-│                   │   ├── TurnInfoCard.vue
-│                   │   ├── ToolCallCard.vue
-│                   │   ├── ToolResultCard.vue
-│                   │   ├── FileReadCard.vue
-│                   │   ├── MCPToolCard.vue
-│                   │   ├── SkillUsedCard.vue
-│                   │   └── ErrorCard.vue
-│                   ├── skills/                 # Skills Manager Modal
-│                   │   ├── SkillManagerModal.vue
-│                   │   ├── SkillUploadForm.vue
-│                   │   └── SkillList.vue
-│                   ├── mcp/                    # MCP Manager Modal
-│                   │   ├── MCPManagerModal.vue
-│                   │   ├── MCPServerForm.vue
-│                   │   ├── MCPServerList.vue
-│                   │   └── MCPToolList.vue
-│                   └── common/
-│                       ├── Modal.vue           # 通用居中弹窗（非右栏 Drawer）
-│                       ├── ErrorBanner.vue
-│                       ├── LoadingSpinner.vue
-│                       └── EmptyState.vue
-├── tests/                        # pytest 测试（按 step 组织）
-├── examples/                     # 示例代码
-└── steps/                        # 每 Step 的 demo + Architecture.md + tutorial.md
-    ├── step-01-min-loop/
-    ├── step-02-event-stream/
-    ├── ...
-    └── step-20-web-trace-viewer/
-```
-
----
+| 层 | 技术 |
+|---|---|
+| Runtime | Python >=3.11、asyncio/anyio、Pydantic v2 |
+| LLM | anthropic SDK、openai SDK、httpx |
+| Web 后端 | FastAPI、uvicorn、WebSocket/SSE |
+| Web 前端 | Vue 3、Pinia、Vite、TypeScript |
+| 持久化 | aiosqlite、OS Keyring、受管文件目录 |
+| Knowledge | pypdf、SQLite FTS5/BM25 |
+| MCP 搜索 | ddgs 9.x，stdio JSON-RPC |
+| 测试 | pytest/pytest-asyncio、Vitest、Playwright |
 
 ## 快速开始
 
-### 1. 环境准备
+以下命令针对当前 Windows 工作区和项目约定。Python 必须使用：
 
-```bash
-# 推荐：用 conda 创建 pipy 环境
-conda create -n pipy python=3.12 -y
-conda activate pipy
-
-# 或直接用系统 Python >= 3.11
+```powershell
+D:\miniconda\envs\pipy\python.exe
 ```
 
-### 2. 安装
+### 1. 安装 Python 与前端依赖
 
-```bash
-cd D:/LLMTutorial/pi/pi-py
-
-# 基础安装
-pip install -e ".[dev]"
-
-# Web UI 额外依赖
-pip install -e ".[web]"
+```powershell
+Set-Location D:\LLMTutorial\test
+D:\miniconda\envs\pipy\python.exe -m pip install -e ".[dev,web,rag]"
+npm --prefix src/pi_agent_core_py/web/frontend ci
 ```
 
-### 3. 配置凭证
+### 2. 启动后端
 
-在项目根创建 `.env`：
+必须从当前 Windows 交互式登录用户会话启动，确保 Credential Manager 可用：
 
-```bash
-# 智谱 GLM-5.0（默认 provider，Anthropic 兼容）
-ANTHROPIC_BASE_URL=https://open.bigmodel.cn/api/anthropic
-ANTHROPIC_API_KEY=your_zhipu_key
-ANTHROPIC_MODEL=glm-5.0
+```powershell
+Set-Location D:\LLMTutorial\test
+$env:PYTHONPATH = "src"
+D:\miniconda\envs\pipy\python.exe scripts/dev_web_app.py
 ```
 
-### 4. 跑测试
+默认地址：`http://127.0.0.1:8000`。默认数据目录：`.pi-agent-data/`。
 
-```bash
-pytest tests/ -v -m "not slow"
-# 真实 LLM 测试（需要 API key）
-PI_RUN_SLOW=1 pytest tests/ -v -m "slow"
+开发启动器默认 `PI_AGENT_SECRET_BACKEND=keyring`。Keyring 探针失败时会在监听端口前退出；如果明确接受 API Key 不持久化，可临时使用：
+
+```powershell
+$env:PI_AGENT_SECRET_BACKEND = "memory"
 ```
 
-### 5. 跑 demo
+该模式不会把 Key 自动降级写入 SQLite。
 
-每个 Step 都有独立 demo：
+### 3. 启动前端开发服务器
 
-```bash
-# Step 20 Web UI（ChatGPT-like 界面）
-python steps/step-20-web-trace-viewer/demo.py
-# → http://127.0.0.1:8000
+另开一个 PowerShell：
 
-# 其他 step demo
-python steps/step-XX-name/demo.py
+```powershell
+Set-Location D:\LLMTutorial\test
+npm --prefix src/pi_agent_core_py/web/frontend run dev
 ```
 
----
+打开 `http://127.0.0.1:5173/`。Vite 会把 `/api` 和 `/ws` 代理到后端 8000。
 
-## Web Claude MVP
+### 4. 登录与配置真实模型
 
-**Web Claude P0 MVP 完成（2026-07-07）**——claude.ai 风格的两栏聊天界面，支持文件上传、Skills、MCP server。
+空认证库首次启动会创建：
 
-> ⚠️ **本地账号登录与工作区隔离已启用，但没有 RBAC / OAuth / 公网部署防护，仍不可暴露到公网。**
->
-> 默认 `include_prompt=true` 返回 403 防止 prompt 模板泄露；MCP env values 严格不回显（response 只有 `env_keys`）；MCP/Skill 配置由 P1-C 持久化到当前账号的 `workspace.sqlite`。
-
-### 功能
-
-- **登录首屏**：未认证时只显示 Username / Password；成功后才启动该账号的 Agent 工作区
-- **重启重新认证**：后端网关启动时撤销上一次运行留下的登录 Session；当前进程运行期间刷新或重新打开页面无需重复输入密码
-- **工作区持久化**：退出再登录或重启网关后，同账号此前的 Session、历史消息、文件及 `AGENT.md` 原样保留
-- **左侧 SessionSidebar**：New chat / 会话列表 / 重命名 / 删除；纵向 Skills / Knowledge / MCP / Providers；底部显示当前账号与 Sign out
-- **中间 ChatPanel**：header 状态 + 消息流 + ChatInput（拖放 + 文件选择 + Enter 发送 / Shift+Enter 换行；running 时 Send → Stop）
-- **Inline Turn Cards**（淡化、不抢主舞台）：
-  - `UserMessage` / `AssistantMessage`（streaming draft + 光标动画）
-  - `TurnInfo`（本轮 turn 信息折叠块）
-  - `ToolCall` / `ToolResult`（普通工具）
-  - `FileRead`（list_files / view_file / write_file）
-  - `MCPToolCall`（mcp__server__tool）
-  - `SkillUsed`（本轮启用 skill 提示）
-  - `Error`
-- **Session 文件夹**：每个 Session 创建时立即初始化独立目录及唯一根 `AGENT.md`；用户上传和 Agent 生成文件都只属于当前 Session
-- **文件树、指令与记忆**：Folder 面板按逻辑路径展示可展开文件树；根 `AGENT.md` 与 `/checkpointer` 生成的 `Memory.md` 均可查看、编辑并使用 SHA-256 乐观锁保存；两者从下一轮请求开始加载
-- **Slash Command**：输入 `/` 显示命令菜单；`/checkpointer` 用当前 Session Provider 总结现有对话到累计 `Memory.md`，成功保存后清空消息窗口，后续请求自动加载该记忆
-- **Human Approval**：高风险工具在当前 Turn 内暂停并显示脱敏 Approval Card；支持 Approve once / Deny，刷新页面可恢复等待状态，abort/退出不执行未批准工具
-- **文件读写**：`list_files` / `view_file` 查阅 Session 文件；`write_file(filename, content, folder?)` 让 Agent 在逻辑目录创建新的 UTF-8 文本文件（不接受物理路径、不覆盖已有文件）
-- **文件上传**：上传文件直接保存到当前 Session 文件夹；支持 md / html / csv / parquet / 文本；**图片明确 unsupported**；**PDF 正文不解析**
-- **Skills Modal**：上传 SKILL.md + enable/disable + Use-this-turn 选择（selected 必须是 enabled 子集）
-- **MCP Modal**：add server（args JSON + env key/value）+ Test / Enable / Disable / Delete + tools enable/disable
-- **用户数据隔离**：Session、上传文件、Skills、MCP、Knowledge、Provider/Credential Settings 均使用账号专属 SQLite 与目录
-
-### 启动
-
-```bash
-# 后端（FastAPI 登录网关 on :8000）
-PYTHONPATH=src /d/miniconda/envs/pipy/python.exe scripts/dev_web_app.py
-
-# 前端开发（热重载，:5173，proxy /api → :8000）
-cd src/pi_agent_core_py/web/frontend
-npm install
-npm run dev
-
-# 或直接 build 由 FastAPI 托管
-npm run build
+```text
+Username: admin
+Password: 123456
 ```
 
-开发脚本默认把认证库与账号工作区持久化到 `.pi-agent-data/`；可用
-`PI_AGENT_DATA_DIR` 改位置。初始账号为 `admin / 123456`。账号与工作区数据跨重启
-保留，但后端重启后旧登录 Cookie 失效，必须重新登录一次。
+登录后：
 
-开发启动器默认使用持久化 `Keyring`，并在绑定 8000 端口前执行一次无用户秘密的
-写入→读取→删除探针。探针失败时启动器会直接退出，避免页面运行后才发现 API Key
-无法保存。Windows 上必须从当前交互式登录用户会话启动后端；受限 sandbox、无登录
-会话的服务进程或失效的 Credential Manager token 会被拒绝。只有明确不需要持久化
-API Key 时，才可显式设置 `PI_AGENT_SECRET_BACKEND=memory`；此模式不会把 Keyring
-凭据降级保存到 SQLite。
+1. 打开左侧 `Providers`。
+2. 为 GLM、Qwen 或 Kimi 创建 Profile，填写 Model ID 与 API Key。
+3. 保存后将 Profile 设为当前 Session binding。
+4. 新建或选择 Session，再发送消息。
 
-单工作区 `create_app` 的关键参数（全部可选）：
+当前没有 Users 管理模块。初始凭据只适合 localhost 本地开发。
 
-| 参数 | 默认 | 说明 |
-|---|---|---|
-| `event_buffer_max_size` | 1000 | TraceEventBuffer 容量，超过丢最旧 |
-| `allow_prompt_preview` | False | `?include_prompt=true` 是否暴露 Skill prompt；True 也只接受 localhost |
-| `db_path` | None（`:memory:` 内部 fallback） | SQLiteSessionStore 路径；None → 内存库 |
-| `uploads_dir` | None | Session 文件夹根目录；None → 不启用上传、Agent 文件读写路径（相关 endpoint 返回 503） |
-| `max_file_size` | 25 MB | 单文件大小上限 |
-| `max_session_upload_size` | 100 MB | 单 session 总上传上限 |
+### 5. 由 FastAPI 托管构建后的前端
 
-### 界面布局
-
-```
-┌─────────────┬─────────────────────────────────────┐
-│  Sidebar    │  Chat Header (status / turns)       │
-│  - app name │─────────────────────────────────────│
-│  - New chat │                                     │
-│  - Sessions │  Message List                       │
-│  - Skills ▼ │   - user 气泡（右）                  │
-│  - MCP    ▼ │   - assistant 流式（左）             │
-│  - Providers│   - 当前账号独立工作区                 │
-│             │   - inline Turn / ToolCall /         │
-│             │     FileRead / MCPTool /             │
-│             │     SkillUsed / Error cards          │
-│             │─────────────────────────────────────│
-│             │  Composer (Enter 发送 / Stop / 📎)   │
-└─────────────┴─────────────────────────────────────┘
+```powershell
+npm --prefix src/pi_agent_core_py/web/frontend run build
+$env:PYTHONPATH = "src"
+D:\miniconda\envs\pipy\python.exe scripts/dev_web_app.py
 ```
 
-**无右栏 / 无 Drawer / 无 DeveloperDrawer 主入口**——管理入口通过左侧纵向按钮打开居中 Modal。
+然后访问 `http://127.0.0.1:8000/`。
 
-### 使用流程
+## 常用工作流
 
-1. 打开 `http://127.0.0.1:8000`，输入 `admin / 123456` 登录
-2. 登录成功后加载 admin 专属的 Session / Skills / MCP / Knowledge / Provider Settings
-3. **新建 session**：左栏顶部 `+ New chat`
-4. **发送消息**：底部输入框 → Enter
-5. **上传文件**：📎 按钮或拖放到输入框 → 文件保存到当前 Session 文件夹 → Send 时携带 `file_ids`
-6. **查看文件夹**：聊天标题栏点击 `Folder N`，展开文件树后可查看、下载、刷新或删除普通文件
-7. **编辑 Session 指令**：选择根 `AGENT.md`，编辑并保存；新内容从下一轮对话开始生效
-8. **让 Agent 创建文件**：例如“把结论保存到 reports/report.md”；Agent 调用 `write_file` 后文件会出现在当前 Folder
-9. **创建或修改记忆**：输入 `/checkpointer` 生成 `Memory.md`；在 Folder 中点击 `Memory.md` 可查看和修改，保存内容从下一轮开始生效
-10. **使用 Skills**：左栏 `Skills` → 上传 SKILL.md → enable → 勾选 "Use this turn"
-11. **使用 MCP**：左栏 `MCP` → Add server → Test connection → Enable
-12. **退出**：左栏底部 `Sign out`，退出后所有工作区 API 重新返回 401；再次登录仍恢复原工作区
+1. `+ New chat` 创建 Session；URL 自动切换为 `/chat/{session_id}`。
+2. `Folder` 查看 Session 文件树并编辑 `AGENT.md`。
+3. 拖放或选择文件上传；Agent 在下一轮可用文件工具读取。
+4. 输入 `/checkpointer` 生成或累计更新 `Memory.md`。
+5. `Skills` 上传并启用 `SKILL.md`，按 Turn 选择使用。
+6. `Knowledge` 创建 Library、上传 PDF、等待 ready、绑定当前 Session。
+7. `MCP` 配置自定义 stdio server；内置 DDGS 参数可直接编辑。
+8. `Providers` 管理凭证/Profile/模型窗口，并切换当前 Session binding。
+9. 对最新 Assistant 使用 Regenerate；从 Session 菜单导出 Markdown。
+10. 遇到高风险工具，在内联 Approval Card 中选择 Approve once 或 Deny。
 
-### 安全说明（重要）
+## 持久化布局
 
-- **localhost only**：虽有登录、失败尝试限流和账号工作区隔离，但无 TLS / RBAC / OAuth / 公网部署加固，不建议公网暴露
-- **密码与会话不存明文**：密码使用 PBKDF2-SHA256 + 随机盐；登录 Cookie 为 HttpOnly + SameSite=Strict，服务端只保存 token SHA-256
-- **登录 Session 绑定后端运行周期**：后端重启会清空 `auth_sessions`，但不会删除 `auth_users` 或任何账号工作区数据
-- **MCP command / env 是本地开发能力**：用户可填任意 stdio command；env values 在 server memory 中（用于子进程）
-- **MCP env values 不回显**：response 类型只有 `env_keys`，没有任何 endpoint 返回 env value；前端表单提交后立即清空，`type=password + autocomplete=new-password` 防浏览器回填
-- **Prompt preview 默认禁用**：`?include_prompt=true` 默认 403；需 `create_app(allow_prompt_preview=True)` + localhost
-- **不做 RBAC / OAuth / 企业级多租户或公网部署**
+`scripts/dev_web_app.py` 默认使用：
 
-### 当前限制
+```text
+.pi-agent-data/
+├── auth.sqlite
+└── users/
+    └── {user_id}/
+        ├── workspace.sqlite
+        ├── uploads/
+        │   └── {session_id}/
+        │       ├── AGENT.md
+        │       ├── Memory.md        # 首次 checkpointer 后存在
+        │       └── ...
+        └── knowledge/
+            ├── knowledge.db
+            └── libraries/
+```
 
-- `POST /api/prompt` **同步阻塞**——LLM 调用结束才返回；当前没有 `/api/prompt/async`；前端通过 WS `/ws/events` 展示实时事件，但 prompt 请求本身仍等待后端完成
-- 单账号工作区仍是 single harness，不支持同一账号内多个 Session 并行执行
-- Agent `write_file` 当前只创建 UTF-8 文本文件；同一逻辑目录的同名文件会自动生成唯一名称和独立 file id
-- 不支持图片理解（不做 OCR / 不做视觉理解）
-- PDF 正文不解析
-- 无 Regenerate
-- 无 Export markdown
+可通过 `PI_AGENT_DATA_DIR` 修改根目录。后端重启会撤销旧登录 Session，但不会删除账号或工作区数据。
 
-### Browser smoke tests
+## API 与事件
 
-Playwright E2E smoke（5 核心用例 + 1 skip）位于 `tests/e2e/`，覆盖真实浏览器下的 layout / chat / file upload / image unsupported / Skills & MCP modals + env value 不回显。运行说明见 [`docs/guides/web-testing.md`](docs/guides/web-testing.md) 的「Browser smoke tests / Playwright」段。
+完整接口见 [`docs/api/web-api.md`](docs/api/web-api.md)。主要分组：
 
-### REST endpoints
+- `/api/auth/*`：登录、恢复身份、退出
+- `/api/sessions*`：Session CRUD、消息、Regenerate、Export、Context Budget/Compaction
+- `/api/sessions/{sid}/files*`：上传、文件树、下载、受管文本编辑
+- `/api/slash-commands`：命令目录与 `/checkpointer`
+- `/api/requests*`：active request、abort、approval
+- `/api/provider-*`、`/api/credentials`：Provider/Profile/Binding/Credential
+- `/api/mcp/*`、`/api/skills/*`：MCP 与 Skills
+- `/api/knowledge/*`：Library、Document、PDF ingestion、search、Session binding
+- `/api/stream` 与 `/ws/events`：SSE/WebSocket 实时事件
 
-完整 API 详见 [`docs/api/web-api.md`](docs/api/web-api.md)。常用：
+所有工作区 API 均受登录网关保护；未认证 HTTP 返回 401，WebSocket 关闭码为 4401。
 
-| 路径 | 方法 | 说明 |
-|------|------|------|
-| `/api/state` | GET | Agent / Harness 状态摘要 |
-| `/api/messages?session_id=` | GET | 当前 / 历史 messages |
-| `/api/sessions` | GET / POST | session 列表 / 创建 |
-| `/api/sessions/{sid}` | PATCH / DELETE | 重命名 / 删除 |
-| `/api/sessions/{sid}/files` | GET / POST | 列出 / 上传 session 文件 |
-| `/api/sessions/{sid}/files/{fid}` | GET / DELETE | 下载 / 删除单文件 |
-| `/api/sessions/{sid}/files/{fid}/content` | PUT | 保存根 `AGENT.md` 或 `Memory.md`（SHA-256 乐观并发检查） |
-| `/api/slash-commands` | GET | Composer 可用命令目录 |
-| `/api/sessions/{sid}/slash-commands` | POST | 异步执行 `/checkpointer` 等 Session 命令 |
-| `/api/skills` | GET | attached skills（`include_prompt=true` 默认 403） |
-| `/api/skills/upload` | POST | multipart 上传 SKILL.md |
-| `/api/skills/{name}/enable` `/disable` | POST | 启用 / 禁用 |
-| `/api/mcp/servers` | GET / POST | server 列表 / 添加 |
-| `/api/mcp/servers/{name}/test` | POST | 测试连接（不污染 harness） |
-| `/api/mcp/servers/{name}/enable` `/disable` | POST | 启用 / 禁用 |
-| `/api/mcp/servers/{name}` | DELETE | 删除 |
-| `/api/mcp/tools/{name}/enable` `/disable` | POST | 启用 / 禁用（真实 unregister/register） |
-| `/api/auth/login` | POST | 用户名密码登录并签发 HttpOnly Cookie |
-| `/api/auth/session` | GET | 恢复当前登录身份 |
-| `/api/auth/logout` | POST | 吊销登录 Session 并清除 Cookie |
-| `/api/prompt` | POST | 同步触发 prompt（支持 session_id / file_ids / skill_names） |
-| `/api/abort` | POST | 中止当前请求 |
-| `/api/requests/{request_id}/approvals` | GET | 查询当前请求的审批记录，可按状态过滤 |
-| `/api/requests/{request_id}/approvals/{approval_id}` | POST | 对精确 ToolCall 执行 Approve once / Deny |
-| `/api/reset` | POST | 重置 agent / clear events / snapshots / audit |
+## 测试
 
-### 实时事件流（SSE / WebSocket）
+当前代码基线的准确数字见 [`STATUS.md`](STATUS.md#2026-08-19-当前验证基线)。2026-08-19 CI 等价校准结果：Backend **3655 passed / 6 skipped / 12 deselected**、coverage **83.73%**，Ruff/Mypy 全绿；Frontend lint/typecheck/build 全绿，最近 Vitest **394/394**。真实 DDGS + GLM 最近一次为 **3/3**，当前提交后的最终 smoke 仍待 TODO 第 4 项复跑。
 
-- **`GET /api/stream`**（SSE）—— 兼容通道；新增 `?limit=N` 用于自动化测试
-- **`WS /ws/events`**（WebSocket，**前端 P0 默认**）—— 每连接独立 `asyncio.Queue(maxsize=100)`；慢客户端 queue 满时丢弃该 event
+### Backend offline
 
----
+```powershell
+Set-Location D:\LLMTutorial\test
+New-Item -ItemType Directory -Force .test-tmp/pytest | Out-Null
+$env:PYTHONPATH = "src"
+D:\miniconda\envs\pipy\python.exe -m pytest tests -q --no-cov --basetemp=.test-tmp/pytest
+```
 
-## 开发版 Web UI（旧 Trace Viewer）
+默认 marker 排除 `slow`、`integration` 和 `docker`，不会调用真实 LLM、外部 DDGS 或 Docker。
 
-> ⚠️ v0.0.22 baseline 之前的 DeveloperDrawer 调试 UI 已从主路径下线（文件保留）；需要查看时直接读 `state.json` / 用 `/api/state` / `/api/events` / `/api/snapshots` 等 endpoint。
+### DDGS + GLM 真实 smoke
 
----
+必须从当前 Windows 交互式登录用户会话运行，确保真实网络和 Credential Manager
+都可用：
 
-## 开发流程
+```powershell
+Set-Location D:\LLMTutorial\test
+D:\miniconda\envs\pipy\python.exe scripts/run_live_integration_tests.py
+```
 
-详见 [`CLAUDE.md`](CLAUDE.md)，要点：
+固定脚本只运行 1 个 DDGS 与 2 个 GLM smoke，并自动设置真实测试门禁。
+即使手工把 pytest marker 改为 `-m integration`，缺少
+`PI_RUN_INTEGRATION=1` 时仍会 skip，不会误访问真实服务。
 
-1. 每完成一个 Step，按 `steps/step-XX-name/GUIDE.md` 实现
-2. 在 `PLAN.md` 的进度表把 ☐ 改成 ✅
-3. 跑 `pytest tests/ -v -m "not slow"` 确认不回归
-4. 不依赖真实 API key 的测试必须始终通过
+GLM 配置优先级为：显式 `PI_AGENT_TEST_GLM_*` → 当前 Web 默认 GLM
+Profile/Keyring → 当前进程已有的 GLM/Anthropic 环境变量。测试不会自动加载根
+`.env`，因此旧 `.env` API Key 不会再覆盖 Web 中实际可用的凭证。多工作区时可用
+`PI_AGENT_TEST_WORKSPACE_DB` 显式指定 `workspace.sqlite`。
 
-### 不做的事
+### Frontend
 
-- 不修改 `pi-main/` 下的 TS 源码（上游参考项目）
-- 不把 `.env` 提交到 git
-- 不在 Pydantic 模型上 mutation 后又传给订阅者——保持不可变语义
-- 不在循环里抛异常——按 TS 版契约，错误要包成 `stop_reason="error"` 的 AssistantMessage 或 `ErrorEvent`
+```powershell
+npm --prefix src/pi_agent_core_py/web/frontend test
+npm --prefix src/pi_agent_core_py/web/frontend run typecheck
+npm --prefix src/pi_agent_core_py/web/frontend run lint
+npm --prefix src/pi_agent_core_py/web/frontend run build
+```
 
----
+### Browser E2E
 
-## 路线图
+Playwright 测试位于 `tests/e2e/`，覆盖基础聊天、异步流、刷新路由、Regenerate、MCP、Approval、Context Compaction 与扩展持久化。运行说明见 [`docs/guides/web-testing.md`](docs/guides/web-testing.md)。
 
-### 已完成（Step 1–21 + Web Claude P0 MVP）
+## 安全边界
 
-- ✅ **Step 1–15**（核心）：min-loop / event-stream / context / tool / multi-tool / agent-state / queue-abort / harness / snapshot / session / session-sync / skills / compaction
-- ✅ **Step 16** MCP Tools + Tool Validation
-- ✅ **Step 17** MCP Harness Integration
-- ✅ **Step 18** Permission / Approval Policy
-- ✅ **Step 19** Skill File Loader + MCP Prompts
-- ✅ **Step 20** Web App / Trace Viewer
-- ✅ **Step 20.5** ChatGPT-like Chat UI 重构（流式显示）
-- ✅ **Step 21** Provider Adapter Refactor（GLM / Anthropic / OpenAI / Fake 拆分）
-- ✅ **Web Claude P0 MVP**（P0-1 sqlite 多会话 + P0-2 VirtualFileStore + P0-3 view_file/list_files + P0-4 Claude-like Web UI Step 1–8 + P0-5 默认 system prompt）
-- ✅ **Session Folder Workspace**（Session 创建即初始化目录与 `AGENT.md` + 持久历史 + 逻辑文件树 + list/view/write Agent 工具 + 指令编辑与逐轮加载）
-- ✅ **Slash Command `/checkpointer`**（LLM 累计总结到 Session `Memory.md` + 保存后清空 + 失败回滚 + 后续逐轮加载）
-- ✅ **P2-A Session 刷新恢复**（`/chat/{session_id}` + 历史/文件/运行中请求恢复 + 账号安全回退）
-- ✅ **P2-B Human Approval UI**（精确 ToolCall 暂停 + 脱敏 Approve once / Deny + 刷新恢复）
-- ✅ **P2-C Context Budget + Compaction UI**（完整输入近似估算 + 70/85/95% 阈值 + 模型窗口持久化 + Turn-safe Summary + usage/latency）
+- 只绑定 localhost；不要直接暴露公网
+- 密码保存为 PBKDF2-SHA256 + 随机盐；登录 token 服务端只保存 SHA-256
+- Cookie 为 HttpOnly + SameSite=Strict
+- API Key 不在 API response、日志、SQLite main/WAL/SHM 中回显或明文持久化
+- MCP env values 不回显；配置后前端立即清空输入
+- Prompt preview 默认关闭；开发启动器只对受信任本地 origin 开启
+- MCP command、Session 文件和 Knowledge 文档均视为不可信输入
+- Pending approval 与 active request 是进程内状态，不是永久授权或审计数据库
 
-### 后续 step（不在本副本）
+## 当前限制
 
-主仓库 `D:\LLMTutorial\pi\pi-py\` 还在继续推进：
+- 单账号单 harness、单 active request；没有并行 Session 生成
+- Context estimator 不是 Provider 官方 tokenizer；compaction 默认手动、规则式
+- Regenerate 只支持最新 Assistant；没有 revision history UI
+- Session Folder 不解析 PDF 正文；PDF RAG 必须通过 Knowledge Library 上传
+- 无 OCR、图片理解、向量检索、Multi-Agent、RBAC/OAuth 或公网部署
+- MCP HTTP transport 未实现；只支持 stdio
+- 历史数据中已经存在的 `U+FFFD` 无法自动恢复原字符
+- 根 `LICENSE`、版本元数据统一和 Git remote 仍待处理
 
-- Step 22 — Sandbox Execution (Docker)
-- Step 23 — Sandbox Git Integration
-- Step 24 — Slash Command System（本副本已先实现首个 `/checkpointer`，并非完整主仓库 Step 24）
-- Step 25+ — Plan Mode / Auto Compaction / Multi-Agent
+## 项目结构
 
-本副本（`D:\LLMTutorial\test\`）核心移植仍以 Step 21 为边界，但 Web 产品层已先实现 Session Workspace、`/checkpointer`、刷新恢复、Human Approval 与 Context Budget/Compaction；主仓库 Step 22+ 的其余内容不在这里。
+```text
+.
+├── src/pi_agent_core_py/
+│   ├── agent.py / loop.py / harness.py / snapshot.py
+│   ├── providers/              # GLM / Anthropic / OpenAI-compatible
+│   ├── mcp/                    # MCP client、transport、DDGS server
+│   ├── policy/                 # permission 与 sandbox helpers
+│   ├── tools/                  # list/view/write/web search
+│   └── web/
+│       ├── app.py              # 工作区 FastAPI composition root
+│       ├── auth/               # 本地账号与登录网关
+│       ├── credentials/        # Credential metadata/runtime
+│       ├── providers/          # Profile/Binding/runtime
+│       ├── knowledge/          # PDF ingestion、FTS5、citation
+│       └── frontend/           # Vue 3/Vite/Pinia
+├── scripts/dev_web_app.py
+├── tests/
+├── tests/e2e/
+├── docs/
+└── steps/
+```
 
-> 主仓库 Python 路径（不在本副本）：`../pi-py/PLAN.md`
+## 文档职责
 
----
+- [`STATUS.md`](STATUS.md)：唯一当前事实与验证快照
+- [`TODO.md`](TODO.md)：唯一未完成事项清单
+- [`ROADMAP.md`](ROADMAP.md)：未来方向与历史路线
+- [`CHANGELOG.md`](CHANGELOG.md)：release 历史
+- `docs/validation/`：阶段性冻结证据；其中的历史测试数字不代表当前 HEAD
+- [`CLAUDE.md`](CLAUDE.md)：本仓库协作和运行约束
 
 ## License
 
-MIT（与上游 `@earendil-works/pi-agent-core` 一致）。
-
-> 上游 TypeScript 项目路径（不在本副本）：`../pi-main/packages/agent`
+`pyproject.toml` 声明 MIT；仓库根实际 `LICENSE` 文件尚未补齐，属于发布前置事项。
