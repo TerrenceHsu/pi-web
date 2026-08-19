@@ -13,6 +13,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Python package、workspace FastAPI、Auth gateway FastAPI、前端 package 与 lockfile 统一为未打 tag 的 `0.0.28`；FastAPI 元数据直接复用 Python `__version__`
 - 新增版本一致性回归测试，防止 Python/API/前端版本再次漂移
 - 补齐标准 MIT 根 `LICENSE`，`pyproject.toml` 改为引用该文件，并验证构建 wheel 携带许可证正文与 `License-File: LICENSE` 元数据
+- 修复 Playwright full-suite 三处测试竞态：等待第二条 persisted assistant、logout 使用隔离 admin token、Session 删除等待路由切换并按后端 ID 验证
+- 当前发布前门禁：完整 Chromium Playwright 45/45 passed；固定 DDGS + GLM 真实 smoke 3/3 passed
 
 ### P1-E Multi-Provider Switching（✅ COMPLETE / FROZEN；待 merge / tag 授权）
 

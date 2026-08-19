@@ -7,7 +7,7 @@
 - [x] **1. 修复全量 Ruff / strict Mypy，使仓库自身 CI 静态检查通过**（完成：Ruff 0 项；Mypy 114 files / 0 issues；后端 CI 3655 passed、6 skipped、12 deselected、coverage 83.73%；前端 lint / typecheck / build 通过；Python CI job timeout 由 10 分钟调整为 30 分钟以容纳完整门禁）
 - [x] **2. 整理并提交当前工作区改动，同时更新 `STATUS.md` 到最新验证基线**（完成：运行时/测试/CI 提交 `c214d28`；81 个工作区路径完成分类与敏感信息审计，状态文档记录真实门禁结果）
 - [x] **3. 统一 Python、FastAPI/Auth、前端与 release 版本号，并补齐仓库根 `LICENSE`**（完成：统一为未打 tag 的 `0.0.28`；两个 FastAPI 工厂直接复用 Python `__version__`；新增跨 Python/前端/lockfile/API 一致性测试；根 MIT `LICENSE` 已进入 wheel；提交 `8a6ff2e`）
-- [ ] **4. 复跑当前提交的完整 Playwright E2E 与最终 GLM 真实 smoke**
+- [x] **4. 复跑当前提交的完整 Playwright E2E 与最终 GLM 真实 smoke**（完成：修复 full-suite 的 Regenerate 完成等待、logout 共享 token 撤销与 Session 删除路由竞态，提交 `51ce3c7`；完整 Playwright 45/45 passed；固定 DDGS 1 项 + GLM 2 项真实 smoke 3/3 passed）
 - [ ] **5. 继续 pi-agent 对齐：补齐 model、thinking level、streaming message、pending tool calls 等公开 Agent 状态**
 
 ## pi-agent Core 对齐修复顺序
@@ -45,7 +45,8 @@
 
 - [x] 统一版本元数据为 `0.0.28`：Python `__version__`、workspace FastAPI、Auth gateway FastAPI、前端 package 与 lockfile；回归测试防止再次漂移
 - [x] 在仓库根补齐标准 MIT `LICENSE`，`pyproject.toml` 直接引用该文件，并验证 wheel 同时携带 `License-File: LICENSE` 与许可证正文
-- [ ] 在发布前复跑当前 HEAD 的完整 Playwright E2E，而不是沿用历史阶段数字
+- [x] 在发布前复跑当前 HEAD 的完整 Playwright E2E：45/45 passed，单 worker、`CI=1`、独立端口 8012，production build 已由 posttest 恢复
+- [x] 通过固定 secret-safe 脚本复跑真实网络 smoke：DDGS 1 项 + GLM 2 项，3/3 passed，未输出 API Key
 - [ ] 决定并创建 `0.0.28` 对应的 release tag；package baseline 已确定，但 tag 名称与创建动作仍需用户单独授权
 - [ ] 如需 push，先配置 Git remote；当前仓库没有 remote，push 仍需用户单独授权
 - [ ] 评估本地初始账号 `admin / 123456` 的改密入口；在此之前继续保持 localhost-only

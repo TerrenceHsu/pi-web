@@ -219,7 +219,7 @@ D:\miniconda\envs\pipy\python.exe scripts/dev_web_app.py
 
 ## 测试
 
-当前代码基线的准确数字见 [`STATUS.md`](STATUS.md#2026-08-19-当前验证基线)。2026-08-19 CI 等价校准结果：Backend **3655 passed / 6 skipped / 12 deselected**、coverage **83.73%**，Ruff/Mypy 全绿；Frontend lint/typecheck/build 全绿，最近 Vitest **394/394**。真实 DDGS + GLM 最近一次为 **3/3**，当前提交后的最终 smoke 仍待 TODO 第 4 项复跑。
+当前代码基线的准确数字见 [`STATUS.md`](STATUS.md#2026-08-19-当前验证基线)。2026-08-19 CI 等价校准结果：Backend **3655 passed / 6 skipped / 12 deselected**、coverage **83.73%**，Ruff/Mypy 全绿；Frontend lint/typecheck/build 全绿，最近 Vitest **394/394**；完整 Playwright **45/45**；真实 DDGS + GLM **3/3**。
 
 ### Backend offline
 
@@ -263,6 +263,8 @@ npm --prefix src/pi_agent_core_py/web/frontend run build
 ### Browser E2E
 
 Playwright 测试位于 `tests/e2e/`，覆盖基础聊天、异步流、刷新路由、Regenerate、MCP、Approval、Context Compaction 与扩展持久化。运行说明见 [`docs/guides/web-testing.md`](docs/guides/web-testing.md)。
+
+当前发布前基线为 Chromium 单 worker **45/45 passed**；全套件使用独立端口与 FakeClient，不访问真实 Provider。
 
 ## 安全边界
 

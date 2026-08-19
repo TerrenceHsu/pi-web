@@ -6,7 +6,7 @@
 
 | 项 | 当前事实 |
 |---|---|
-| 代码基线 | `8a6ff2e` — `chore(release): align version metadata and license` |
+| 代码基线 | `51ce3c7` — `test(e2e): isolate full-suite state and completion waits` |
 | 分支 | `master` |
 | 最新 release tag | `v0.0.27-secure-credentials` @ `de05c66`；当前代码基线尚未打新 tag |
 | Python / API 版本 | `0.0.28`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
@@ -39,6 +39,7 @@
 | Thinking 与细粒度流生命周期 | ✅ 完成 | `c214d28`；text/thinking/tool-call start/delta/end |
 | 全仓 Ruff / strict Mypy / CI 收敛 | ✅ 完成 | Ruff 0；Mypy 114 files / 0 issues；Python CI timeout 30 分钟 |
 | Release metadata 与 MIT License | ✅ 完成 | `8a6ff2e`；Python/API/前端统一 `0.0.28`，wheel 携带根许可证 |
+| 当前发布前浏览器/联网门禁 | ✅ 完成 | `51ce3c7`；Playwright 45/45，DDGS + GLM 真实 smoke 3/3 |
 
 ## 当前产品能力
 
@@ -75,7 +76,8 @@
 ## 2026-08-19 当前验证基线
 
 Backend 全量数字基于 `c214d28` 提交前的等价暂存内容实际复跑；版本/许可证提交
-`8a6ff2e` 另行通过全量静态检查、版本定向测试、前端构建与 wheel 元数据验证。
+`8a6ff2e` 另行通过全量静态检查、版本定向测试、前端构建与 wheel 元数据验证；
+`51ce3c7` 的等价内容通过完整 Playwright 与最终真实网络 smoke。
 Vitest 沿用 2026-08-18 的已验证结果：
 
 | 验证 | 结果 | 备注 |
@@ -84,7 +86,7 @@ Vitest 沿用 2026-08-18 的已验证结果：
 | strict Mypy 全量 | **PASS** | `mypy src/pi_agent_core_py`；114 files / 0 issues |
 | Backend CI 全量 + coverage | **3655 passed, 6 skipped, 12 deselected** | `pytest tests -m "not slow" --tb=short -q` 等价运行；83.73% coverage；864.59s；58 warnings |
 | 受影响后端定向回归 | **1111 passed, 3 skipped** | Agent/Web/Knowledge/Credential/Provider 范围；无失败 |
-| DDGS + GLM 真实 smoke | **最近一次 3/3 passed** | 固定脚本；DDGS 1 项 + Web Profile/Keyring GLM 2 项；`c214d28` 提交后的最终复跑仍列在 TODO 第 4 项 |
+| DDGS + GLM 真实 smoke | **3/3 passed** | 固定 secret-safe 脚本；DDGS 1 项 + GLM 2 项；24.63s；未输出凭证 |
 | 真实测试门禁回归 | **3 skipped** | 手工选择 `-m integration` 但未设置 `PI_RUN_INTEGRATION=1`，确认不触网 |
 | Frontend Vitest 全量 | **394/394 passed** | 26 files；2026-08-18 结果 |
 | Frontend typecheck | **PASS** | `vue-tsc --noEmit` |
@@ -96,7 +98,7 @@ Vitest 沿用 2026-08-18 的已验证结果：
 | Keyring 定向回归 | **94/94 passed** | Runtime、launcher 与 restart 范围 |
 | 真实 Windows Keyring 探针 | **write/read = true；cleanup = true** | 随机非用户值，执行后删除 |
 | MCP/DDGS UTF-8 定向回归 | **34 passed, 1 deselected** | 含真实 Python 子进程中文 round-trip |
-| Browser E2E | 当前提交**未复跑** | 将在 TODO 第 4 项复跑，不沿用历史阶段数字 |
+| Browser E2E | **45/45 passed** | Chromium；单 worker；`CI=1`；独立端口 8012；2.5m；0 retry / 0 failure |
 
 默认 pytest marker 排除真实 LLM、真实外网 integration 和 Docker；额外门禁还要求
 `PI_RUN_INTEGRATION=1`。因此 Offline Backend 基线不依赖 API Key、DDGS 网络或
@@ -137,12 +139,11 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 ## 当前阻塞项
 
-无功能实现阻塞。版本元数据和 `LICENSE` 发布门已关闭；正式 release 仍需复跑 Browser E2E / GLM smoke、决定 tag 名并在需要 push 时配置 Git remote。
+无功能实现阻塞。版本、许可证、Browser E2E 与最终真实 smoke 发布门均已关闭；正式 release 只剩决定 tag 名，并在需要 push 时配置 Git remote。
 
 ## 建议下一步
 
-1. 对 `8a6ff2e` 之后的当前提交复跑完整 Browser E2E 与最终 GLM 真实 smoke。
-2. 随后继续 pi-agent 对齐：公开 model、thinking level、streaming message、pending tool calls 等 Agent 状态。
-3. `0.0.28` tag/push 仍需单独决定；仓库当前尚无 remote。
+1. 继续 pi-agent 对齐：公开 model、thinking level、streaming message、pending tool calls 等 Agent 状态。
+2. `0.0.28` tag/push 仍需单独决定；仓库当前尚无 remote。
 
 未完成事项的唯一清单见 [`TODO.md`](TODO.md)。使用与架构说明见 [`README.md`](README.md)。
