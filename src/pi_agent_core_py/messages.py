@@ -176,6 +176,8 @@ class ToolResultMessage(BaseModel):
       is_error      —— 工具是否失败
       terminate     —— 是否停止自动下一轮 LLM 调用
       details       —— 结构化数据，仅给 UI / observability；不发给 LLM
+      usage         —— 工具自身消耗；不计入主 LLM 上下文 usage
+      added_tool_names —— 本结果之后可用的 Context.tools 名称（provider 加载点）
       timestamp     —— 毫秒
     """
     role: Literal["toolResult"] = "toolResult"
@@ -185,6 +187,8 @@ class ToolResultMessage(BaseModel):
     is_error: bool = False
     terminate: bool = False
     details: dict[str, Any] = Field(default_factory=dict)
+    usage: Usage | None = None
+    added_tool_names: list[str] = Field(default_factory=list)
     timestamp: int = Field(default_factory=_now_ms)
 
 

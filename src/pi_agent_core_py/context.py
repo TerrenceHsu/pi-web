@@ -72,7 +72,8 @@ def convert_to_llm(messages: list[AgentMessage]) -> list[LLMMessage]:
         让 provider 适配器能重建 tool_use block（Anthropic 协议要求
         tool_result 必须配对前一条 assistant 的 tool_use，否则 multi-turn
         tool 调用会失败）。
-      - ToolResultMessage → LLMToolResultMessage（不带 terminate / details）
+      - ToolResultMessage → LLMToolResultMessage（不带 terminate / details；保留
+        工具自身 usage 与 deferred-tool load-point metadata）
       - CustomMessage     → 默认过滤掉（不发给 LLM）
 
     Step 15：
@@ -117,6 +118,8 @@ def convert_to_llm(messages: list[AgentMessage]) -> list[LLMMessage]:
                 name=m.name,
                 content=list(m.content),
                 is_error=m.is_error,
+                usage=m.usage,
+                added_tool_names=list(m.added_tool_names),
                 timestamp=m.timestamp,
             ))
         elif isinstance(m, SummaryMessage):

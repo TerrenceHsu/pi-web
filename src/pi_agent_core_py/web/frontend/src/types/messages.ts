@@ -72,7 +72,9 @@ export interface AgentMessage {
   model?: string
   stop_reason?: string
   error_message?: string | null
-  usage?: MessageUsage
+  usage?: MessageUsage | null
+  /** Context.tools 中从该工具结果之后可用的工具名；不是注册指令。 */
+  added_tool_names?: string[]
   generation_metrics?: GenerationMetrics | null
   summary_type?: string
   source_message_count?: number

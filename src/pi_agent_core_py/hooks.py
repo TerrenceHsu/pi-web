@@ -8,7 +8,8 @@
 - Hook **不新增 AgentEvent**——结果体现在 `ToolResultMessage.details` 里
 - Hook 抛异常不让 loop 崩，转成 is_error=True 的 ToolResult（details.hook / details.error_type）
 - `before` 返回 `{allow=False, reason=...}` 阻断；返回修改后的 `tool_call` 改参
-- `after` 直接返回新的 ToolResult（覆盖 content / details / is_error / terminate）
+- `after` 直接返回新的 ToolResult（覆盖 content / details / is_error / terminate /
+  usage；added_tool_names 保持工具执行结果的加载点）
 
 默认实现：
 - `default_before_tool_call` 总是 allow=True
@@ -81,7 +82,8 @@ class AfterToolCallContext(BaseModel):
     """`after_tool_call` 的输入。
 
     `result` 是工具执行后的 ToolResult；hook 可以基于此返回新的 ToolResult
-    （覆盖 content / details / is_error / terminate）。
+    （覆盖 content / details / is_error / terminate / usage）。
+    ``added_tool_names`` 是工具执行产生的加载点，hook 返回值不能改写。
     """
     model_config = ConfigDict(arbitrary_types_allowed=True)
 

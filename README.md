@@ -17,6 +17,7 @@
 - `tool_execution_update` 支持工具执行中的增量状态
 - `prepare_next_turn` 与 `should_stop_after_turn` 提供 Turn 边界控制
 - `length + tool_calls`、非法工具参数和工具异常统一转为安全 ToolResult，不让 loop 崩溃
+- ToolResult 保留工具自身 usage 与 deferred-tool 加载点元数据，并贯穿事件、快照和持久化
 - text/thinking/tool-call 提供完整 start/delta/end 生命周期；thinking 保留 provider signature/redacted payload
 
 ### Web 工作台

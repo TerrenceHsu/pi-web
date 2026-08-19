@@ -137,6 +137,20 @@ class ExecutedToolResult:
     message: ToolResultMessage
 
 
+def _tool_result_message(result: ToolResult) -> ToolResultMessage:
+    """Build the transcript message without dropping ToolResult metadata."""
+    return ToolResultMessage(
+        tool_call_id=result.tool_call_id,
+        name=result.name,
+        content=result.content,
+        is_error=result.is_error,
+        terminate=result.terminate,
+        details=result.details,
+        usage=result.usage,
+        added_tool_names=list(result.added_tool_names),
+    )
+
+
 @dataclass
 class _PreparedToolCall:
     """已串行完成 preflight、可以进入实际执行阶段的工具调用。"""
@@ -755,7 +769,12 @@ async def _execute_prepared_tool_call(
             },
         )
 
-    return final_result
+    # added_tool_names describes the load point produced by tool execution.
+    # Upstream afterToolCall overrides do not expose this field, so a hook must
+    # not be able to invent or remove deferred-tool availability metadata.
+    return final_result.model_copy(
+        update={"added_tool_names": list(result.added_tool_names)}
+    )
 
 
 # ============================================================================
@@ -811,14 +830,7 @@ async def _exec_one_tool(
         if isinstance(prepared_or_result, _PreparedToolCall):
             raise RuntimeError("tool preflight unexpectedly remained deferred")
         result = prepared_or_result
-    msg = ToolResultMessage(
-        tool_call_id=result.tool_call_id,
-        name=result.name,
-        content=result.content,
-        is_error=result.is_error,
-        terminate=result.terminate,
-        details=result.details,
-    )
+    msg = _tool_result_message(result)
     return ExecutedToolResult(
         index=index,
         tool_call=tool_call,
@@ -909,13 +921,7 @@ async def _execute_tool_batch(
             index=index,
             tool_call=tc,
             result=result,
-            message=ToolResultMessage(
-                tool_call_id=tc.id,
-                name=tc.name,
-                content=result.content,
-                is_error=True,
-                details=result.details,
-            ),
+            message=_tool_result_message(result),
         )
 
     def executed_result(
@@ -927,14 +933,7 @@ async def _execute_tool_batch(
             index=index,
             tool_call=tc,
             result=result,
-            message=ToolResultMessage(
-                tool_call_id=result.tool_call_id,
-                name=result.name,
-                content=result.content,
-                is_error=result.is_error,
-                terminate=result.terminate,
-                details=result.details,
-            ),
+            message=_tool_result_message(result),
         )
 
     if is_sequential:
@@ -1677,13 +1676,7 @@ async def run_event_loop(
                         "stop_reason": "length",
                     },
                 )
-                message = ToolResultMessage(
-                    tool_call_id=tc.id,
-                    name=tc.name,
-                    content=result.content,
-                    is_error=True,
-                    details=result.details,
-                )
+                message = _tool_result_message(result)
                 ordered.append(
                     ExecutedToolResult(
                         index=index,

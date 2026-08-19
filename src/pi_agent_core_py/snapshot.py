@@ -23,7 +23,7 @@ from .events import (
     TurnEndEvent,
     TurnStartEvent,
 )
-from .messages import Message
+from .messages import Message, Usage
 
 SnapshotStatus = Literal["running", "completed", "aborted", "error"]
 
@@ -63,6 +63,8 @@ class ToolResultSnapshot(BaseModel):
     is_error: bool
     terminate: bool
     details: dict[str, Any]
+    usage: Usage | None = None
+    added_tool_names: list[str] = Field(default_factory=list)
     timestamp: int
 
 
@@ -151,6 +153,8 @@ def _tool_result_snapshot(event: ToolExecutionEndEvent, timestamp: int) -> ToolR
         is_error=result.is_error,
         terminate=result.terminate,
         details=dict(result.details),
+        usage=result.usage,
+        added_tool_names=list(result.added_tool_names),
         timestamp=timestamp,
     )
 

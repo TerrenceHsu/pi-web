@@ -6,7 +6,8 @@ LLMMessage union:
     LLMUserMessage | LLMAssistantMessage | LLMToolResultMessage
 
 注意：LLMToolResultMessage 没有 `terminate` 和 `details` 字段——它们是 agent
-内部语义，不发给 LLM。
+内部语义，不发给 LLM。工具自身 `usage` 和 `added_tool_names` 作为 provider
+边界元数据保留；普通 provider payload 转换器可以忽略它们。
 """
 from __future__ import annotations
 
@@ -48,12 +49,15 @@ class LLMToolResultMessage(BaseModel):
 
     对应 LLM 协议里的 tool_result block（Anthropic） / tool role（OpenAI）。
     字段比 ToolResultMessage 少 terminate / details——这两者是 agent 内部语义。
+    ``added_tool_names`` 标记 Context.tools 中从本结果起可用的工具，不负责注册工具。
     """
     role: Literal["toolResult"] = "toolResult"
     tool_call_id: str
     name: str
     content: list[TextContent] = Field(default_factory=list)
     is_error: bool = False
+    usage: Usage | None = None
+    added_tool_names: list[str] = Field(default_factory=list)
     timestamp: int = 0
 
 

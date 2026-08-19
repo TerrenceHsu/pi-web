@@ -329,7 +329,7 @@ export const useChatStore = defineStore("chat", () => {
         kind: "assistant_message",
         id,
         content: textOf(msg),
-        usage: msg.usage,
+        usage: msg.usage ?? undefined,
         generationMetrics: msg.generation_metrics,
       }
     }
@@ -383,7 +383,7 @@ export const useChatStore = defineStore("chat", () => {
         messageIndex: dto.idx,
         persisted: true,
         content: textOf(msg),
-        usage: msg.usage,
+        usage: msg.usage ?? undefined,
         generationMetrics: msg.generation_metrics,
       }
     }
@@ -1667,7 +1667,7 @@ export const useChatStore = defineStore("chat", () => {
             if (it.kind === "assistant_message") {
               it.content = finalText
               it.streaming = false
-              it.usage = msg.usage
+              it.usage = msg.usage ?? undefined
               it.generationMetrics = msg.generation_metrics
             }
           })
@@ -1743,7 +1743,7 @@ export const useChatStore = defineStore("chat", () => {
             kind: "assistant_message",
             id,
             content: full,
-            usage: msg.usage,
+            usage: msg.usage ?? undefined,
             generationMetrics: msg.generation_metrics,
           })
           currentAssistantItemId = id

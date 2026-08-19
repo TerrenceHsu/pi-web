@@ -27,7 +27,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from ..messages import TextContent
+from ..messages import TextContent, Usage
 
 # ============================================================================
 # Literal：执行模式
@@ -103,6 +103,8 @@ class ToolResult(BaseModel):
       is_error      —— 是否失败
       terminate     —— 早停提示（仅当本批所有工具都 True 才生效，Step 7 实现）
       details       —— 任意结构化数据，给 UI / 日志，不发给 LLM
+      usage         —— 工具自身消耗；不计入主 LLM 上下文 usage
+      added_tool_names —— 本结果之后可用的 Context.tools 名称（provider 加载点）
     """
     tool_call_id: str
     name: str
@@ -110,6 +112,8 @@ class ToolResult(BaseModel):
     is_error: bool = False
     terminate: bool = False
     details: dict[str, Any] = Field(default_factory=dict)
+    usage: Usage | None = None
+    added_tool_names: list[str] = Field(default_factory=list)
 
 
 #: 工具可在执行期间调用 ``on_update(partial_result)``。callback 返回一个已完成

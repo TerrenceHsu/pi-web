@@ -32,6 +32,7 @@ from pi_agent_core_py.messages import (
     TextContent,
     ToolCall,
     ToolResultMessage,
+    Usage,
     UserMessage,
 )
 from pi_agent_core_py.session_sqlite import (
@@ -231,9 +232,19 @@ async def test_append_message_stores_tool_result(store):
     msg = ToolResultMessage(
         tool_call_id="t1", name="echo",
         content=[TextContent(text="ok")],
+        usage=Usage(input=2, output=1, total_tokens=3),
+        added_tool_names=["search"],
     )
     rec = await store.append_message(s.id, msg)
     assert rec.role == "toolResult"
+    assert isinstance(rec.message, ToolResultMessage)
+    assert rec.message.usage == Usage(input=2, output=1, total_tokens=3)
+    assert rec.message.added_tool_names == ["search"]
+
+    restored = await store.list_messages(s.id)
+    assert isinstance(restored[0], ToolResultMessage)
+    assert restored[0].usage == msg.usage
+    assert restored[0].added_tool_names == ["search"]
 
 
 @pytest.mark.asyncio
