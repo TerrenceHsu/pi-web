@@ -6,7 +6,7 @@ Phase A/B/C 完成（Step 1–21）；Phase D 及之后未包含在本副本。
 
 from __future__ import annotations
 
-__version__ = "0.0.21"
+__version__ = "0.0.28"
 
 # 消息（Step 1 起 + Step 3 扩展 + Step 4 加 ToolCall + Step 5 加 ToolResultMessage）
 # Agent（Step 8 + Step 9）

@@ -4,7 +4,7 @@ dynamic = ["version"]
 description = "Python port of @earendil-works/pi-agent-core"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = { file = "LICENSE" }
 authors = [{ name = "Pi Python Port" }]
 dependencies = [
     "pydantic>=2.7",

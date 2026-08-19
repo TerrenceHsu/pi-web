@@ -57,6 +57,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 
+from .. import __version__
 from ..harness import AgentHarness
 from ..skills import SkillSelection
 from .approvals import ToolApprovalManager
@@ -968,7 +969,7 @@ def create_app(
             "Local-only development UI for inspecting Agent runtime state. "
             "DO NOT expose publicly."
         ),
-        version="0.0.21",
+        version=__version__,
         lifespan=_lifespan,
     )
 

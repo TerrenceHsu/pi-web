@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from ... import __version__
 from ..app import _FALLBACK_HTML, _STATIC_DIR
 from ..credentials.api import CredentialBodyLimitMiddleware, build_credential_router
 from ..local_web_security import WebSecurityConfig, default_web_security_config
@@ -318,7 +319,7 @@ def create_authenticated_app(
     app = FastAPI(
         title="pi-agent-core-py Authenticated Web UI",
         description="Local login gateway with isolated per-user workspaces.",
-        version="0.0.22",
+        version=__version__,
         lifespan=lifespan,
     )
     app.state.auth_store = None
