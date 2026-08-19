@@ -3247,17 +3247,24 @@ def create_app(
     @app.get("/api/state")
     async def get_state() -> dict[str, Any]:
         agent = harness.agent
-        try:
-            queue_size = agent.state.queue.qsize()  # type: ignore[attr-defined]
-        except Exception:
-            queue_size = 0
+        agent_state = agent.state
         return {
             "running": state.running,
             "last_error": state.last_error,
             "agent_status": _agent_status(),
-            "queue_size": queue_size,
-            "turn_count": getattr(agent.state, "turn_count", 0),
-            "message_count": len(agent.state.messages),
+            "queue_size": agent_state.queue_size,
+            "turn_count": agent_state.turn_count,
+            "message_count": len(agent_state.messages),
+            "model": agent_state.model.model_dump(mode="json"),
+            "thinking_level": agent_state.thinking_level,
+            "is_streaming": agent_state.is_streaming,
+            "streaming_message": (
+                agent_state.streaming_message.model_dump(mode="json")
+                if agent_state.streaming_message is not None
+                else None
+            ),
+            "pending_tool_calls": sorted(agent_state.pending_tool_calls),
+            "error_message": agent_state.error_message,
             "snapshot_count": len(harness.snapshots),
             "event_count": len(state.event_buffer),
         }

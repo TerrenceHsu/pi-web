@@ -115,6 +115,16 @@ def test_state_initial(client: TestClient) -> None:
     assert data["message_count"] == 0
     assert data["snapshot_count"] == 0
     assert data["event_count"] == 0
+    assert data["model"] == {
+        "id": "fake-1",
+        "provider": "fake",
+        "api": "fake",
+    }
+    assert data["thinking_level"] == "off"
+    assert data["is_streaming"] is False
+    assert data["streaming_message"] is None
+    assert data["pending_tool_calls"] == []
+    assert data["error_message"] is None
 
 
 # ============================================================================

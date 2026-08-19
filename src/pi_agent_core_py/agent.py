@@ -41,10 +41,16 @@ from .events import (
     AgentEndEvent,
     AgentEvent,
     AgentRequestType,
+    AgentStartEvent,
+    MessageEndEvent,
+    MessageStartEvent,
+    MessageUpdateEvent,
     RequestEndEvent,
     RequestEndStatus,
     RequestQueuedEvent,
     RequestStartEvent,
+    ToolExecutionEndEvent,
+    ToolExecutionStartEvent,
     TurnEndEvent,
 )
 from .hooks import (
@@ -83,10 +89,36 @@ from .tools import (
 #: - "error"     Agent 自身异常（不是 LLM ErrorEvent / Tool is_error）
 AgentStatus = Literal["idle", "running", "aborting", "error"]
 QueueMode = Literal["all", "one-at-a-time"]
+ThinkingLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+
+class AgentModelState(BaseModel):
+    """Secret-free identity of the model currently bound to the Agent."""
+
+    id: str = "unknown"
+    provider: str = "unknown"
+    api: str = "unknown"
+
+
+def _model_state_from_client(client: ModelClient) -> AgentModelState:
+    """Project a client into stable, JSON-safe public model metadata."""
+    return AgentModelState(
+        id=getattr(client, "model", "") or "unknown",
+        provider=getattr(client, "provider_id", "") or "unknown",
+        api=getattr(client, "api_id", "") or "unknown",
+    )
 
 
 class AgentState(BaseModel):
     """Agent 持有的可变状态。"""
+
+    # pi-agent compatible public configuration/runtime projection.
+    model: AgentModelState = Field(default_factory=AgentModelState)
+    thinking_level: ThinkingLevel = "off"
+    is_streaming: bool = False
+    streaming_message: Message | None = None
+    pending_tool_calls: frozenset[str] = Field(default_factory=frozenset)
+    error_message: str | None = None
 
     status: AgentStatus = "idle"
     messages: list[Message] = Field(default_factory=list)
@@ -181,10 +213,11 @@ class Agent:
         before_model_call: BeforeModelCallFn | None = None,
         steering_mode: QueueMode = "one-at-a-time",
         follow_up_mode: QueueMode = "one-at-a-time",
+        thinking_level: ThinkingLevel = "off",
         max_turns: int = 50,
     ):
         self.system_prompt = system_prompt
-        self.client = client
+        self._client = client
         if isinstance(tools, ToolRegistry):
             self.tools: ToolRegistry = tools
         elif tools is None:
@@ -212,7 +245,10 @@ class Agent:
         # Bug-fix：max_turns 安全网——透传给 run_event_loop
         self.max_turns: int = max_turns
 
-        self.state: AgentState = AgentState()
+        self.state: AgentState = AgentState(
+            model=_model_state_from_client(client),
+            thinking_level=thinking_level,
+        )
         self._subscribers: list[Subscriber] = []
 
         # Step 9 queue / worker 状态
@@ -225,6 +261,18 @@ class Agent:
         # _idle_event：set 表示 worker 已退出（queue 全空）
         self._idle_event: asyncio.Event = asyncio.Event()
         self._idle_event.set()
+
+    @property
+    def client(self) -> ModelClient:
+        """Currently bound model client."""
+        return self._client
+
+    @client.setter
+    def client(self, client: ModelClient) -> None:
+        """Replace the client and keep the public model projection in sync."""
+        self._client = client
+        if hasattr(self, "state"):
+            self.state.model = _model_state_from_client(client)
 
     # ----------------------------------------------------------------------
     # 订阅
@@ -358,6 +406,7 @@ class Agent:
         self.state.queue_size = 0
         self.state.current_request_id = None
         self.state.aborted_count = 0
+        self._clear_runtime_state()
         self.state.status = "idle"
         self.clear_all_queues()
 
@@ -446,6 +495,8 @@ class Agent:
                     # request 自身异常 → 进入 error 态 + 清空 queue
                     self.state.status = "error"
                     self.state.last_error = f"{type(e).__name__}: {e}"
+                    self.state.error_message = str(e)
+                    self._clear_runtime_state(preserve_error=True)
                     await self._drain_queue_on_error(e)
                     return
                 finally:
@@ -462,6 +513,11 @@ class Agent:
         self.state.current_request_id = req.id
         self.state.queue_size = self._queue.qsize()
         self.state.status = "running"
+        self.state.model = _model_state_from_client(self.client)
+        self.state.is_streaming = True
+        self.state.streaming_message = None
+        self.state.pending_tool_calls = frozenset()
+        self.state.error_message = None
 
         await self._handle_event(
             RequestStartEvent(
@@ -504,6 +560,7 @@ class Agent:
                 status=end_status,
             )
         )
+        self._clear_runtime_state(preserve_error=True)
 
         if exc is not None:
             raise exc
@@ -562,11 +619,33 @@ class Agent:
         """更新 state，再派发给订阅者。"""
         self.state.last_event = event
 
-        # 权威源：AgentEndEvent 拷回 messages
-        if isinstance(event, AgentEndEvent):
+        if isinstance(event, AgentStartEvent):
+            self.state.is_streaming = True
+        elif isinstance(event, MessageStartEvent):
+            self.state.streaming_message = event.message
+        elif isinstance(event, MessageUpdateEvent):
+            self.state.streaming_message = event.message
+        elif isinstance(event, MessageEndEvent):
+            self.state.streaming_message = None
+            self.state.messages.append(event.message)
+        elif isinstance(event, ToolExecutionStartEvent):
+            self.state.pending_tool_calls = frozenset(
+                (*self.state.pending_tool_calls, event.tool_call.id)
+            )
+        elif isinstance(event, ToolExecutionEndEvent):
+            pending = set(self.state.pending_tool_calls)
+            pending.discard(event.tool_call.id)
+            self.state.pending_tool_calls = frozenset(pending)
+        # AgentEndEvent is the authoritative final transcript. This also
+        # replaces an assistant message whose terminal fields changed at
+        # turn_end (for example max_turns).
+        elif isinstance(event, AgentEndEvent):
+            self.state.streaming_message = None
             self.state.messages = list(event.messages)
         elif isinstance(event, TurnEndEvent):
             self.state.turn_count += 1
+            if event.message.error_message is not None:
+                self.state.error_message = event.message.error_message
         elif isinstance(event, RequestQueuedEvent):
             self.state.queue_size = event.queue_size
         elif isinstance(event, RequestStartEvent):
@@ -578,6 +657,14 @@ class Agent:
             pass
 
         await self._emit(event)
+
+    def _clear_runtime_state(self, *, preserve_error: bool = False) -> None:
+        """Clear request-owned public fields while preserving configuration."""
+        self.state.is_streaming = False
+        self.state.streaming_message = None
+        self.state.pending_tool_calls = frozenset()
+        if not preserve_error:
+            self.state.error_message = None
 
     async def _emit(self, event: AgentEvent) -> None:
         """派发事件给所有订阅者；单个抛异常不让主 loop 崩。"""
@@ -593,6 +680,8 @@ class Agent:
 __all__ = [
     "AgentStatus",
     "QueueMode",
+    "ThinkingLevel",
+    "AgentModelState",
     "AgentState",
     "Agent",
     "AgentRequest",

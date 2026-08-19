@@ -4,6 +4,14 @@
 
 export type JsonValue = any
 
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+
+export interface AgentModelState {
+  id: string
+  provider: string
+  api: string
+}
+
 export interface AgentStateSummary {
   running: boolean
   last_error: string | null
@@ -11,6 +19,12 @@ export interface AgentStateSummary {
   queue_size: number
   turn_count: number
   message_count: number
+  model: AgentModelState
+  thinking_level: ThinkingLevel
+  is_streaming: boolean
+  streaming_message: JsonValue | null
+  pending_tool_calls: string[]
+  error_message: string | null
   snapshot_count: number
   event_count: number
 }

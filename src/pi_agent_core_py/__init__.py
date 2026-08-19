@@ -10,7 +10,16 @@ __version__ = "0.0.28"
 
 # 消息（Step 1 起 + Step 3 扩展 + Step 4 加 ToolCall + Step 5 加 ToolResultMessage）
 # Agent（Step 8 + Step 9）
-from .agent import Agent, AgentRequest, AgentState, AgentStatus, QueueMode, Subscriber
+from .agent import (
+    Agent,
+    AgentModelState,
+    AgentRequest,
+    AgentState,
+    AgentStatus,
+    QueueMode,
+    Subscriber,
+    ThinkingLevel,
+)
 
 # Compaction / Branch Summary（Step 15）
 from .compaction import (
@@ -412,11 +421,13 @@ __all__ = [
     "PendingMessagesFn",
     # agent
     "Agent",
+    "AgentModelState",
     "AgentRequest",
     "AgentState",
     "AgentStatus",
     "QueueMode",
     "Subscriber",
+    "ThinkingLevel",
     # harness
     "AgentHarness",
     "HarnessContext",
