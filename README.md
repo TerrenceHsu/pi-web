@@ -32,6 +32,8 @@
 
 ### Session 工作区与记忆
 
+- 对话历史以 append-only entry tree 持久化；命名 lane 支持 fork、branch、label 与重启后 active leaf 恢复
+- 当前 active lane 会物化为兼容消息视图，因此现有聊天、Regenerate、Export 与 Context 工具无需理解树结构
 - 每个 Session 初始化独立目录和唯一根 `AGENT.md`
 - 用户上传文件保存在当前 Session；Agent 可调用 `list_files`、`view_file`、`write_file`
 - 文件树可查看、下载、删除和刷新；`AGENT.md`、`Memory.md` 可用 SHA-256 乐观锁编辑
@@ -207,7 +209,7 @@ D:\miniconda\envs\pipy\python.exe scripts/dev_web_app.py
 完整接口见 [`docs/api/web-api.md`](docs/api/web-api.md)。主要分组：
 
 - `/api/auth/*`：登录、恢复身份、退出
-- `/api/sessions*`：Session CRUD、消息、Regenerate、Export、Context Budget/Compaction
+- `/api/sessions*`：Session CRUD、append-only tree/lane、消息、Regenerate、Export、Context Budget/Compaction
 - `/api/sessions/{sid}/files*`：上传、文件树、下载、受管文本编辑
 - `/api/slash-commands`：命令目录与 `/checkpointer`
 - `/api/requests*`：active request、abort、approval

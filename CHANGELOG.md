@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Append-only Session tree 与 lanes（2026-08-20）
+
+- SQLite Session 从单一线性历史迁移为 immutable parent-entry tree；每个命名 lane 持久化 active leaf，旧库按 `messages.idx` 幂等回填 `main` lane
+- `messages` 保留为 active lane 兼容投影；branch、fork、active-lane 切换、label fact 与旧消息 ID/revision 在单 SQLite 事务中保持一致
+- Regenerate 不再改写 tree entry：新回答创建 sibling branch；若最新 Assistant 后仍有 ToolResult，则复制 trailing suffix 到新分支
+- 新增 Core 与 Web tree API、前端类型/客户端、设计文档及 16 项后端 + 5 项前端契约测试；完整后端 3681 passed / 83.84% coverage，前端 399/399，Ruff / strict Mypy / typecheck / ESLint / production build 全部通过
+
 ### ToolResult usage 与 deferred-tool metadata（2026-08-20）
 
 - `ToolResult`、`ToolResultMessage` 与 `LLMToolResultMessage` 新增可选工具自身 usage 和 `added_tool_names`；usage 明确不并入主 LLM 上下文计费

@@ -57,6 +57,7 @@ import pytest
 from pi_agent_core_py.messages import (
     AssistantMessage,
     TextContent,
+    ToolResultMessage,
     UserMessage,
 )
 from pi_agent_core_py.session_sqlite import SQLiteSessionStore
@@ -368,6 +369,72 @@ async def test_finalize_updates_messages_same_id(shared):
     new_content = (await cur.fetchone())["content_json"]
     await cur.close()
     assert new_content == candidate
+
+
+async def test_finalize_appends_session_tree_sibling(shared):
+    """Regenerate 在同一事务创建新 leaf，旧 assistant entry 不被改写。"""
+    session_store, ext, sid, aid = shared
+    before = await session_store.list_entries(sid)
+    old_assistant = before[-1]
+    rev = await ext.create_running_revision(
+        session_id=sid, assistant_message_id=aid, request_id="req-tree"
+    )
+    candidate = (
+        '{"type": "AssistantMessage", "data": '
+        + _assistant_msg("tree replacement").model_dump_json()
+        + "}"
+    )
+    await ext.finalize_revision(
+        revision_id=rev.id,
+        request_id="req-tree",
+        candidate_content_json=candidate,
+    )
+
+    active = await session_store.list_entries(sid)
+    all_entries = await session_store.list_all_entries(sid)
+    new_assistant = active[-1]
+    assert new_assistant.id != old_assistant.id
+    assert new_assistant.parent_id == old_assistant.parent_id
+    assert new_assistant.message_id == old_assistant.message_id == aid
+    assert len(all_entries) == len(before) + 1
+
+
+async def test_finalize_rebuilds_tree_suffix_after_latest_assistant(shared):
+    """兼容最新 assistant 后仍有 tool result 的旧/中断历史。"""
+    session_store, ext, sid, aid = shared
+    trailing = await session_store.append_entry(
+        sid,
+        ToolResultMessage(
+            tool_call_id="tool-1",
+            name="echo",
+            content=[TextContent(text="result")],
+        ),
+    )
+    before = await session_store.list_entries(sid)
+    old_assistant = before[-2]
+    rev = await ext.create_running_revision(
+        session_id=sid, assistant_message_id=aid, request_id="req-suffix"
+    )
+    candidate = (
+        '{"type": "AssistantMessage", "data": '
+        + _assistant_msg("replacement before tool result").model_dump_json()
+        + "}"
+    )
+    await ext.finalize_revision(
+        revision_id=rev.id,
+        request_id="req-suffix",
+        candidate_content_json=candidate,
+    )
+
+    active = await session_store.list_entries(sid)
+    all_entries = await session_store.list_all_entries(sid)
+    assert active[-2].id != old_assistant.id
+    assert active[-2].parent_id == old_assistant.parent_id
+    assert active[-2].message_id == old_assistant.message_id == aid
+    assert active[-1].id != trailing.id
+    assert active[-1].parent_id == active[-2].id
+    assert active[-1].message_id == trailing.message_id
+    assert len(all_entries) == len(before) + 2
 
 
 async def test_finalize_preserves_idx_and_created_at(shared):
@@ -865,8 +932,8 @@ async def test_session_delete_cascades_revisions(shared):
     assert (await cur.fetchone())["c"] == 0
 
 
-async def test_replace_messages_cleans_orphan_revisions(shared):
-    """门槛 Query 5：replace_messages 删除 assistant 时清理 revision（orphan 防护）。"""
+async def test_replace_messages_preserves_revisions_for_inactive_branch(shared):
+    """Session tree 截断只移动 leaf；旧 assistant revision 仍可随分支恢复。"""
     session_store, ext, sid, aid = shared
     # 给 assistant 创建一条 finalized revision——candidate 必须是合法
     # AssistantMessage 的 canonical JSON（{type, data} 包装），否则 list_messages
@@ -884,7 +951,8 @@ async def test_replace_messages_cleans_orphan_revisions(shared):
         candidate_content_json=candidate,
     )
 
-    # 现在 replace_messages 用**更短的**列表（删掉 assistant）——必须清理 revision
+    # replace_messages 用更短列表会移动 active leaf，但 immutable entry 仍引用
+    # assistant message_id，因此 revision 不是 orphan，必须保留。
     msgs = await session_store.list_messages(sid)
     # AgentMessage 没 id——通过 list_messages 拿到对话内容，然后只保留 user 部分
     shorter = [m for m in msgs if m.role == "user"]
@@ -896,7 +964,7 @@ async def test_replace_messages_cleans_orphan_revisions(shared):
         "WHERE assistant_message_id = ?",
         (aid,),
     )
-    assert (await cur.fetchone())["c"] == 0
+    assert (await cur.fetchone())["c"] == 2  # revision 0 + completed revision 1
 
 
 async def test_revision_ops_do_not_affect_skill_mcp(shared):

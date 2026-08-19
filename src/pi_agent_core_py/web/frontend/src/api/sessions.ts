@@ -2,9 +2,13 @@
 
 import type {
   CreateSessionRequest,
+  BranchSessionRequest,
+  ForkSessionRequest,
   RenameSessionRequest,
+  SessionLane,
   SessionListResponse,
   SessionSummary,
+  SessionTreeResponse,
 } from "../types"
 import { requestJson } from "./client"
 
@@ -40,6 +44,56 @@ export function deleteSession(sessionId: string) {
   return requestJson<{ ok: boolean; deleted_files: number }>(
     `/api/sessions/${encodeURIComponent(sessionId)}`,
     { method: "DELETE" },
+  )
+}
+
+/** GET append-only entry path；includeAll=true 时附完整树。 */
+export function getSessionTree(
+  sessionId: string,
+  options: { lane?: string; includeAll?: boolean } = {},
+) {
+  const params = new URLSearchParams()
+  if (options.lane) params.set("lane", options.lane)
+  if (options.includeAll) params.set("include_all", "true")
+  const query = params.size ? `?${params.toString()}` : ""
+  return requestJson<SessionTreeResponse>(
+    `/api/sessions/${encodeURIComponent(sessionId)}/tree${query}`,
+  )
+}
+
+/** 从指定 entry（省略时为 source lane leaf）创建 fork。 */
+export function forkSession(sessionId: string, payload: ForkSessionRequest) {
+  return requestJson<{ lane: SessionLane }>(
+    `/api/sessions/${encodeURIComponent(sessionId)}/fork`,
+    { method: "POST", body: payload },
+  )
+}
+
+/** 把 lane leaf 移回当前路径上的 entry；null 表示根。 */
+export function branchSession(sessionId: string, payload: BranchSessionRequest) {
+  return requestJson<{ lane: SessionLane }>(
+    `/api/sessions/${encodeURIComponent(sessionId)}/branch`,
+    { method: "POST", body: payload },
+  )
+}
+
+/** 切换 active lane，并让 legacy messages 投影跟随。 */
+export function setActiveLane(sessionId: string, lane: string) {
+  return requestJson<{ lane: SessionLane }>(
+    `/api/sessions/${encodeURIComponent(sessionId)}/active-lane`,
+    { method: "PATCH", body: { lane } },
+  )
+}
+
+/** 写入 append-only label fact；null 清除当前 label。 */
+export function setEntryLabel(
+  sessionId: string,
+  entryId: string,
+  label: string | null,
+) {
+  return requestJson<{ entry_id: string; label: string | null }>(
+    `/api/sessions/${encodeURIComponent(sessionId)}/entries/${encodeURIComponent(entryId)}/label`,
+    { method: "PUT", body: { label } },
   )
 }
 

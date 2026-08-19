@@ -1237,7 +1237,8 @@ class ExtensionSQLiteStore:
     ) -> PersistedMessageRevision:
         """Finalize running revision → completed，原子切换 active assistant content。
 
-        **D2-3 核心**——单 BEGIN IMMEDIATE transaction 内 10 步，事务中**不**做任何
+        **D2-3 核心**——单 BEGIN IMMEDIATE transaction 内完成 revision、tree 与
+        active projection 切换，事务中**不**做任何
         Agent 调用 / 网络 / 文件 I/O / sleep / 不可控 await。
 
         步骤：
@@ -1250,7 +1251,8 @@ class ExtensionSQLiteStore:
             7. UPDATE 旧 completed → superseded
             8. UPDATE 本 running → completed + 写 candidate
             9. UPDATE messages.content_json（保留 id / idx / created_at）
-            10. commit
+            10. append immutable session entry + 移动 active lane leaf
+            11. commit
 
         步骤 7 必须先于 8——否则违反 uq_web_message_revision_active。
 
@@ -1379,11 +1381,101 @@ class ExtensionSQLiteStore:
                     "finalize failed: target message row missing or not assistant"
                 )
 
+            # 10. append-only tree：从 active path 的目标 assistant 起重建 suffix，
+            # 旧 suffix 作为 sibling branch 保留。通常 assistant 就是 leaf；复制
+            # trailing entries 也兼容“最新 assistant 后仍有 tool result”的历史数据。
+            cursor = await db.execute(
+                "SELECT lanes.name, lanes.leaf_entry_id "
+                "FROM sessions "
+                "JOIN session_lanes AS lanes "
+                "ON lanes.session_id = sessions.id "
+                "AND lanes.name = sessions.active_lane "
+                "WHERE sessions.id = ?",
+                (session_id,),
+            )
+            lane_row = await cursor.fetchone()
+            await cursor.close()
+            if lane_row is None:
+                raise ExtensionStoreError(
+                    "finalize failed: active session lane is missing"
+                )
+            cursor = await db.execute(
+                "WITH RECURSIVE path("
+                "id, parent_id, message_id, role, content_json, created_at, depth"
+                ") AS ("
+                "SELECT id, parent_id, message_id, role, content_json, created_at, 0 "
+                "FROM session_entries WHERE session_id = ? AND id = ? "
+                "UNION ALL "
+                "SELECT parent.id, parent.parent_id, parent.message_id, parent.role, "
+                "parent.content_json, parent.created_at, path.depth + 1 "
+                "FROM session_entries AS parent "
+                "JOIN path ON parent.id = path.parent_id "
+                "WHERE parent.session_id = ?"
+                ") SELECT id, parent_id, message_id, role, content_json, created_at "
+                "FROM path ORDER BY depth DESC",
+                (session_id, lane_row["leaf_entry_id"], session_id),
+            )
+            path_rows = list(await cursor.fetchall())
+            await cursor.close()
+            target_index = next(
+                (
+                    index
+                    for index, path_entry in enumerate(path_rows)
+                    if path_entry["message_id"] == assistant_id
+                ),
+                None,
+            )
+            if target_index is None:
+                raise ExtensionStoreError(
+                    "finalize failed: assistant is not on the active session path"
+                )
+            cursor = await db.execute(
+                "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq "
+                "FROM session_entries WHERE session_id = ?",
+                (session_id,),
+            )
+            seq_row = await cursor.fetchone()
+            await cursor.close()
+            next_seq = int(seq_row["next_seq"]) if seq_row is not None else 0
+            parent_id = path_rows[target_index]["parent_id"]
+            leaf_entry_id: str | None = None
+            for suffix_index, path_entry in enumerate(path_rows[target_index:]):
+                entry_id = f"entry-{_now_ms()}-{uuid.uuid4().hex[:8]}"
+                content_json = (
+                    candidate_content_json
+                    if suffix_index == 0
+                    else path_entry["content_json"]
+                )
+                await db.execute(
+                    "INSERT INTO session_entries "
+                    "(id, session_id, seq, parent_id, message_id, role, "
+                    "content_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        entry_id,
+                        session_id,
+                        next_seq + suffix_index,
+                        parent_id,
+                        path_entry["message_id"],
+                        path_entry["role"],
+                        content_json,
+                        path_entry["created_at"],
+                    ),
+                )
+                parent_id = entry_id
+                leaf_entry_id = entry_id
+            assert leaf_entry_id is not None
+            tree_now = _now_ms()
+            await db.execute(
+                "UPDATE session_lanes SET leaf_entry_id = ?, updated_at = ? "
+                "WHERE session_id = ? AND name = ?",
+                (leaf_entry_id, tree_now, session_id, lane_row["name"]),
+            )
+
             # 推 session.updated_at——注意 sessions 表用 INTEGER（ms timestamp），
             # 不要与 revision 表的 TEXT (ISO) 混淆
             await db.execute(
                 "UPDATE sessions SET updated_at = ? WHERE id = ?",
-                (_now_ms(), session_id),
+                (tree_now, session_id),
             )
 
             await db.commit()

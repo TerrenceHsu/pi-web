@@ -37,7 +37,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 from uuid import uuid4
 
 from fastapi import (
@@ -3450,11 +3450,208 @@ def create_app(
                 "created_at": s.created_at,
                 "updated_at": s.updated_at,
                 "metadata": s.metadata,
+                "active_lane": s.active_lane,
                 "is_current": s.id == state.current_session_id,
             }
             for s in sessions
         ]
         return {"count": len(items), "sessions": items}
+
+    def _raise_session_tree_error(error: Exception) -> NoReturn:
+        from ..session_sqlite import (
+            SessionBranchError,
+            SessionEntryNotFoundError,
+            SessionLaneExistsError,
+            SessionLaneNotFoundError,
+            SessionNotFoundError,
+        )
+
+        if isinstance(
+            error,
+            (SessionNotFoundError, SessionEntryNotFoundError, SessionLaneNotFoundError),
+        ):
+            raise HTTPException(status_code=404, detail=str(error)) from None
+        if isinstance(error, (SessionBranchError, SessionLaneExistsError)):
+            raise HTTPException(status_code=409, detail=str(error)) from None
+        if isinstance(error, ValueError):
+            raise HTTPException(status_code=422, detail=str(error)) from None
+        raise error
+
+    def _ensure_session_tree_idle(sid: str) -> None:
+        if sid in state.active_request_by_session:
+            raise HTTPException(
+                status_code=409,
+                detail="session tree cannot change while a request is active",
+            )
+
+    async def _sync_current_session_tree_projection(sid: str) -> None:
+        if state.current_session_id != sid or state.session_store is None:
+            return
+        from ..messages import Message
+
+        messages = await state.session_store.list_messages(sid)
+        harness.agent.state.messages = cast(list[Message], list(messages))
+
+    @app.get("/api/sessions/{sid}")
+    async def get_session_by_id(sid: str) -> dict[str, Any]:
+        store = state.session_store
+        if store is None:
+            raise HTTPException(status_code=503, detail="session store unavailable")
+        session = await store.get_session(sid)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        return {
+            "id": session.id,
+            "title": session.title,
+            "created_at": session.created_at,
+            "updated_at": session.updated_at,
+            "metadata": session.metadata,
+            "active_lane": session.active_lane,
+            "is_current": session.id == state.current_session_id,
+        }
+
+    @app.get("/api/sessions/{sid}/tree")
+    async def get_session_tree(
+        sid: str,
+        lane: str | None = None,
+        include_all: bool = False,
+    ) -> dict[str, Any]:
+        """读取 lane path；``include_all`` 额外返回完整 append-only tree。"""
+        store = state.session_store
+        if store is None:
+            raise HTTPException(status_code=503, detail="session store unavailable")
+        try:
+            session = await store.get_session(sid)
+            if session is None:
+                from ..session_sqlite import SessionNotFoundError
+
+                raise SessionNotFoundError(f"session {sid!r} 不存在")
+            selected_lane = lane or session.active_lane
+            lanes = await store.list_lanes(sid)
+            entries = await store.list_entries(sid, selected_lane)
+            all_entries = await store.list_all_entries(sid) if include_all else None
+        except Exception as error:
+            _raise_session_tree_error(error)
+
+        def serialize_entry(entry: Any) -> dict[str, Any]:
+            return {
+                "id": entry.id,
+                "session_id": entry.session_id,
+                "seq": entry.seq,
+                "parent_id": entry.parent_id,
+                "message_id": entry.message_id,
+                "role": entry.role,
+                "message": serialize_message(entry.message),
+                "created_at": entry.created_at,
+                "label": entry.label,
+            }
+
+        return {
+            "session_id": sid,
+            "active_lane": session.active_lane,
+            "lane": selected_lane,
+            "leaf_entry_id": entries[-1].id if entries else None,
+            "lanes": [lane_item.model_dump(mode="json") for lane_item in lanes],
+            "entries": [serialize_entry(entry) for entry in entries],
+            **(
+                {"all_entries": [serialize_entry(entry) for entry in all_entries]}
+                if all_entries is not None
+                else {}
+            ),
+        }
+
+    @app.post("/api/sessions/{sid}/fork")
+    async def post_session_fork(
+        sid: str, payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        store = state.session_store
+        if store is None:
+            raise HTTPException(status_code=503, detail="session store unavailable")
+        _ensure_session_tree_idle(sid)
+        name = payload.get("name")
+        source_lane = payload.get("source_lane")
+        activate = payload.get("activate", False)
+        if not isinstance(name, str):
+            raise HTTPException(status_code=422, detail="name must be a string")
+        if source_lane is not None and not isinstance(source_lane, str):
+            raise HTTPException(status_code=422, detail="source_lane must be a string")
+        if not isinstance(activate, bool):
+            raise HTTPException(status_code=422, detail="activate must be a boolean")
+        try:
+            if "at_entry_id" in payload:
+                at_entry_id = payload["at_entry_id"]
+                if at_entry_id is not None and not isinstance(at_entry_id, str):
+                    raise ValueError("at_entry_id must be a string or null")
+            else:
+                at_entry_id = await store.get_active_leaf(sid, source_lane)
+            lane_item = await store.fork(
+                sid,
+                name,
+                at_entry_id=at_entry_id,
+                source_lane=source_lane,
+                activate=activate,
+            )
+            if activate:
+                await _sync_current_session_tree_projection(sid)
+        except Exception as error:
+            _raise_session_tree_error(error)
+        return {"lane": lane_item.model_dump(mode="json")}
+
+    @app.post("/api/sessions/{sid}/branch")
+    async def post_session_branch(
+        sid: str, payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        store = state.session_store
+        if store is None:
+            raise HTTPException(status_code=503, detail="session store unavailable")
+        _ensure_session_tree_idle(sid)
+        entry_id = payload.get("entry_id")
+        lane = payload.get("lane")
+        if entry_id is not None and not isinstance(entry_id, str):
+            raise HTTPException(status_code=422, detail="entry_id must be a string or null")
+        if lane is not None and not isinstance(lane, str):
+            raise HTTPException(status_code=422, detail="lane must be a string")
+        try:
+            lane_item = await store.branch(sid, entry_id, lane=lane)
+            if lane_item.is_active:
+                await _sync_current_session_tree_projection(sid)
+        except Exception as error:
+            _raise_session_tree_error(error)
+        return {"lane": lane_item.model_dump(mode="json")}
+
+    @app.patch("/api/sessions/{sid}/active-lane")
+    async def patch_session_active_lane(
+        sid: str, payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        store = state.session_store
+        if store is None:
+            raise HTTPException(status_code=503, detail="session store unavailable")
+        _ensure_session_tree_idle(sid)
+        lane = payload.get("lane")
+        if not isinstance(lane, str):
+            raise HTTPException(status_code=422, detail="lane must be a string")
+        try:
+            lane_item = await store.set_active_lane(sid, lane)
+            await _sync_current_session_tree_projection(sid)
+        except Exception as error:
+            _raise_session_tree_error(error)
+        return {"lane": lane_item.model_dump(mode="json")}
+
+    @app.put("/api/sessions/{sid}/entries/{entry_id}/label")
+    async def put_session_entry_label(
+        sid: str, entry_id: str, payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        store = state.session_store
+        if store is None:
+            raise HTTPException(status_code=503, detail="session store unavailable")
+        label = payload.get("label")
+        if label is not None and not isinstance(label, str):
+            raise HTTPException(status_code=422, detail="label must be a string or null")
+        try:
+            entry = await store.set_label(sid, entry_id, label)
+        except Exception as error:
+            _raise_session_tree_error(error)
+        return {"entry_id": entry.id, "label": entry.label}
 
     @app.get("/api/sessions/{sid}/context-budget")
     async def get_session_context_budget(sid: str) -> dict[str, Any]:
@@ -3676,6 +3873,7 @@ def create_app(
             "created_at": s.created_at,
             "updated_at": s.updated_at,
             "metadata": s.metadata,
+            "active_lane": s.active_lane,
         }
 
     @app.patch("/api/sessions/{sid}", response_model=None)
@@ -3708,6 +3906,7 @@ def create_app(
             "created_at": s.created_at,
             "updated_at": s.updated_at,
             "metadata": s.metadata,
+            "active_lane": s.active_lane,
         }
 
     @app.delete("/api/sessions/{sid}", response_model=None)

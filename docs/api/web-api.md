@@ -34,7 +34,7 @@
 
 ---
 
-## Sessions（P0-1 sqlite 多会话）
+## Sessions（SQLite append-only tree + lane）
 
 ### `GET /api/sessions`
 
@@ -52,6 +52,7 @@ session 列表（spec 复数路径），按 `updated_at` desc 排序。
       "created_at": 1783260347184,
       "updated_at": 1783260347184,
       "metadata": {},
+      "active_lane": "main",
       "is_current": true
     }
   ]
@@ -78,11 +79,57 @@ session 列表（spec 复数路径），按 `updated_at` desc 排序。
   "title": "new chat",
   "created_at": ...,
   "updated_at": ...,
-  "metadata": {}
+  "metadata": {},
+  "active_lane": "main"
 }
 ```
 
 **Response 503**: session store 未初始化（`create_app(db_path=)` 没设）。
+
+### `GET /api/sessions/{sid}`
+
+读取单个 Session 元数据，返回结构与 Session list item 相同。
+
+### `GET /api/sessions/{sid}/tree`
+
+读取指定 lane 的 root-to-leaf entry path。查询参数 `lane` 缺省为
+`active_lane`；`include_all=true` 时额外返回按 append seq 排序的
+`all_entries`，其中包含已离开 active path 的旧分支。
+
+每个 entry 暴露 `id`、`seq`、`parent_id`、稳定 `message_id`、强类型
+`message`、`label` 与时间戳。每个 lane 暴露 `name`、`leaf_entry_id` 和
+`is_active`。
+
+### `POST /api/sessions/{sid}/fork`
+
+```json
+{
+  "name": "alternate",
+  "at_entry_id": "entry-...",
+  "source_lane": "main",
+  "activate": true
+}
+```
+
+`at_entry_id` 省略时使用 source lane 当前 leaf；显式 `null` 表示从根创建。
+目标必须位于 source lane 当前路径。fork 不移动原 lane。
+
+### `POST /api/sessions/{sid}/branch`
+
+`{"lane":"main","entry_id":"entry-..."}` 把 lane leaf 移回路径中的祖先；
+`entry_id: null` 回到根。若操作 active lane，兼容 messages 投影同步重建。
+
+### `PATCH /api/sessions/{sid}/active-lane`
+
+`{"lane":"alternate"}` 切换 active lane，并原子更新 messages 投影。
+
+### `PUT /api/sessions/{sid}/entries/{entry_id}/label`
+
+`{"label":"checkpoint"}` 追加 label fact；`label: null` 清除当前 label。
+历史 fact 不会被覆盖或删除。
+
+Tree mutation 在该 Session 有 active request 时返回 409；lane/entry 不存在返回
+404；跨 lane path 的 branch/fork 或重名 lane 返回 409。
 
 ### `PATCH /api/sessions/{sid}`
 

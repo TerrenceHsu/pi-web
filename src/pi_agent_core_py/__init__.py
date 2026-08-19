@@ -234,12 +234,18 @@ from .session import (
     serialize_messages,
 )
 
-# SQLite 线性 session 存储（P0-1）
+# SQLite append-only session tree + active-lane projection
 from .session_sqlite import (
+    SessionBranchError,
+    SessionEntryNotFoundError,
+    SessionLaneExistsError,
+    SessionLaneNotFoundError,
     SessionNotFoundError,
     SessionSerializationError,
     SQLiteSession,
+    SQLiteSessionEntry,
     SQLiteSessionError,
+    SQLiteSessionLane,
     SQLiteSessionStore,
     SQLiteStoredMessage,
     SQLiteStoredSnapshot,
@@ -458,11 +464,17 @@ __all__ = [
     # P0-1 sqlite session
     "SQLiteSessionStore",
     "SQLiteSession",
+    "SQLiteSessionEntry",
+    "SQLiteSessionLane",
     "SQLiteStoredMessage",
     "SQLiteStoredSnapshot",
     "SQLiteSessionError",
     "SessionNotFoundError",
     "SessionSerializationError",
+    "SessionLaneNotFoundError",
+    "SessionLaneExistsError",
+    "SessionEntryNotFoundError",
+    "SessionBranchError",
     # session_sync (Step 13)
     "SessionAutoSavePolicy",
     "SessionSyncConfig",

@@ -221,6 +221,95 @@ def test_sessions_response_shape_compat(web_client):
 
 
 # ============================================================================
+# append-only Session tree / lanes
+# ============================================================================
+
+
+def test_session_tree_branch_fork_label_and_active_leaf(web_client):
+    client, _, _ = web_client
+    session = client.post("/api/sessions", json={"title": "tree"}).json()
+    sid = session["id"]
+    assert session["active_lane"] == "main"
+    assert client.post(
+        "/api/prompt", json={"text": "question", "session_id": sid}
+    ).status_code == 200
+
+    tree = client.get(f"/api/sessions/{sid}/tree?include_all=true").json()
+    assert tree["active_lane"] == "main"
+    assert tree["lane"] == "main"
+    assert tree["leaf_entry_id"] == tree["entries"][-1]["id"]
+    assert len(tree["entries"]) >= 2
+    root_id = tree["entries"][0]["id"]
+
+    label = client.put(
+        f"/api/sessions/{sid}/entries/{root_id}/label",
+        json={"label": "checkpoint"},
+    )
+    assert label.status_code == 200
+    assert label.json()["label"] == "checkpoint"
+
+    fork = client.post(
+        f"/api/sessions/{sid}/fork",
+        json={"name": "alternate", "at_entry_id": root_id, "activate": True},
+    )
+    assert fork.status_code == 200
+    assert fork.json()["lane"]["is_active"] is True
+    assert client.get(f"/api/sessions/{sid}").json()["active_lane"] == "alternate"
+    assert client.get(f"/api/messages?session_id={sid}").json()["count"] == 1
+
+    switched = client.patch(
+        f"/api/sessions/{sid}/active-lane", json={"lane": "main"}
+    )
+    assert switched.status_code == 200
+    assert client.get(f"/api/messages?session_id={sid}").json()["count"] >= 2
+
+    branched = client.post(
+        f"/api/sessions/{sid}/branch",
+        json={"lane": "main", "entry_id": root_id},
+    )
+    assert branched.status_code == 200
+    assert branched.json()["lane"]["leaf_entry_id"] == root_id
+    assert client.get(f"/api/messages?session_id={sid}").json()["count"] == 1
+
+    final_tree = client.get(
+        f"/api/sessions/{sid}/tree?lane=main&include_all=true"
+    ).json()
+    assert final_tree["entries"][0]["label"] == "checkpoint"
+    assert len(final_tree["all_entries"]) >= 2
+
+
+def test_session_tree_mutation_validation(web_client):
+    client, _, app = web_client
+    sid = client.post("/api/sessions", json={"title": "tree"}).json()["id"]
+
+    first = client.post(
+        f"/api/sessions/{sid}/fork",
+        json={"name": "review", "at_entry_id": None},
+    )
+    assert first.status_code == 200
+    duplicate = client.post(
+        f"/api/sessions/{sid}/fork",
+        json={"name": "review", "at_entry_id": None},
+    )
+    assert duplicate.status_code == 409
+    assert client.patch(
+        f"/api/sessions/{sid}/active-lane", json={"lane": "missing"}
+    ).status_code == 404
+    assert client.put(
+        f"/api/sessions/{sid}/entries/missing/label", json={"label": "x"}
+    ).status_code == 404
+
+    app.state.web.active_request_by_session[sid] = "request-in-flight"
+    try:
+        busy = client.post(
+            f"/api/sessions/{sid}/branch", json={"entry_id": None}
+        )
+        assert busy.status_code == 409
+    finally:
+        app.state.web.active_request_by_session.pop(sid, None)
+
+
+# ============================================================================
 # 10: busy prompt 仍 409
 # ============================================================================
 

@@ -93,14 +93,21 @@ def _build_snapshot(status="completed") -> any:
 
 @pytest.mark.asyncio
 async def test_init_creates_tables(tmp_path):
-    """init 后 sessions / messages / snapshots 表存在。"""
+    """init 后 legacy projection 与 append-only tree 表都存在。"""
 
     s = SQLiteSessionStore(tmp_path / "x.db")
     await s.init()
     try:
         # 内部连接能查到
         db = s._require_db()
-        for table in ("sessions", "messages", "snapshots"):
+        for table in (
+            "sessions",
+            "messages",
+            "snapshots",
+            "session_entries",
+            "session_lanes",
+            "session_facts",
+        ):
             cur = await db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
                 (table,),
