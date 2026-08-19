@@ -413,9 +413,19 @@ test.describe("Smoke 9: session rename + delete", () => {
   test("delete session via confirm dialog", async ({ page }) => {
     await page.goto("/")
 
-    // 先记录当前 session 数量
-    const initialCount = await page.locator('[data-testid="session-item"]').count()
-    expect(initialCount).toBeGreaterThan(0)
+    // 创建并锁定本测试自己的 target；不能在异步列表尚未加载时立即 count。
+    await expect(page.locator('[data-testid="new-chat-button"]')).toBeVisible()
+    await expect(page).toHaveURL(/\/chat\/[^/]+$/)
+    const previousUrl = page.url()
+    await page.locator('[data-testid="new-chat-button"]').click()
+    await expect(page).not.toHaveURL(previousUrl)
+    await expect(page).toHaveURL(/\/chat\/[^/]+$/)
+    const sessions = page.locator('[data-testid="session-item"]')
+    const target = page.locator('[data-testid="session-item"].active')
+    await expect(target).toBeVisible()
+    const targetId = new URL(page.url()).pathname.split("/").at(-1)
+    expect(targetId).toBeTruthy()
+    const initialCount = await sessions.count()
 
     // 自动接受 confirm
     page.on("dialog", async (dialog) => {
@@ -423,16 +433,24 @@ test.describe("Smoke 9: session rename + delete", () => {
       await dialog.accept()
     })
 
-    // hover + 点 delete（第一个 session）
-    await page.locator('[data-testid="session-item"]').first().hover()
-    await page.locator('[data-testid="session-delete-btn"]').first().click()
+    // hover + 删除刚创建的 session
+    await target.hover()
+    await target.locator('[data-testid="session-delete-btn"]').click()
 
-    // session 数量减 1（或保持——若删的是 active 则切到 default）
+    // Active target 被删除后路由离开其 ID，后端列表也不再包含它。
+    // 删除唯一 Session 时产品会自动创建 fallback，因此 UI 总数可保持不变。
+    await expect(page).not.toHaveURL(new RegExp(`/chat/${targetId}$`))
     await expect
-      .poll(async () => page.locator('[data-testid="session-item"]').count(), {
+      .poll(async () => {
+        const response = await page.request.get("/api/sessions")
+        if (!response.ok()) return true
+        const body = await response.json()
+        return (body.sessions || []).some((session: any) => session.id === targetId)
+      }, {
         timeout: 5_000,
       })
-      .toBeLessThanOrEqual(initialCount)
+      .toBe(false)
+    expect(await sessions.count()).toBeLessThanOrEqual(initialCount)
   })
 })
 

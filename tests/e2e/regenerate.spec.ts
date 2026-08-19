@@ -388,7 +388,13 @@ test.describe("Regenerate 8: next turn uses new active", () => {
     // 再发一条 user message
     await page.locator("[data-testid='chat-input-field']").fill("next turn")
     await page.locator("[data-testid='send-button']").click()
-    await expect(page.locator("[data-testid='send-button']")).toBeVisible({
+    // Send 在 Pinia 切到 running 前仍会短暂可见，不能把它当作完成信号。
+    // 等第二条 persisted assistant，确保后端已完成并完成前端 reconcile。
+    await expect(
+      page.locator(
+        "[data-testid='assistant-message'][data-persisted='true']",
+      ),
+    ).toHaveCount(2, {
       timeout: 20_000,
     })
 

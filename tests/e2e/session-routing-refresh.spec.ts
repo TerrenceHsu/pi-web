@@ -33,6 +33,17 @@ async function sendMessage(page: Page, text: string): Promise<void> {
   await waitUntilIdle(page)
 }
 
+async function isolateAdminLogin(page: Page): Promise<void> {
+  // The suite-wide storageState token must remain valid for specs that run
+  // after this logout test. Replace this context's cookie with a fresh admin
+  // session so Sign out revokes only the test-local token.
+  const response = await page.request.post("/api/auth/login", {
+    headers: { "X-PI-Agent-UI": "1" },
+    data: { name: "admin", password: "123456" },
+  })
+  expect(response.ok(), await response.text()).toBe(true)
+}
+
 test.describe.serial("P2-A Session route and full refresh recovery", () => {
   test("Session switch synchronizes URL and browser history", async ({ page }) => {
     await page.goto("/")
@@ -181,6 +192,7 @@ test.describe.serial("P2-A Session route and full refresh recovery", () => {
   })
 
   test("logout clears route and Alice cannot inherit the admin workspace", async ({ page }) => {
+    await isolateAdminLogin(page)
     const marker = `admin-private-${Date.now()}`
     const adminSession = await createSession(page, `admin-private-${Date.now()}`)
     await page.goto(`/chat/${adminSession.id}`)
