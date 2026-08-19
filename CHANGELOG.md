@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### ToolResult usage 与 deferred-tool metadata（2026-08-20）
+
+- `ToolResult`、`ToolResultMessage` 与 `LLMToolResultMessage` 新增可选工具自身 usage 和 `added_tool_names`；usage 明确不并入主 LLM 上下文计费
+- 元数据贯穿 tool execution update/end、message start/end、下一轮 provider context、Request/Turn Snapshot、SessionMemory、SQLite 与 Web JSON；历史数据缺字段时安全回退为 `None` / `[]`
+- `added_tool_names` 仅标记已在 `Context.tools` 中的工具从该结果起可用，不触发 ToolRegistry 变更；after hook 可覆盖 usage，但不能伪造或删除加载点
+- 新增 3 项端到端契约测试并扩展 SQLite 回归；定向 173 passed，完整后端 3665 passed / 83.78% coverage，前端 394/394，Ruff / strict Mypy / typecheck / ESLint / production build 全部通过
+
 ### Agent public runtime state（2026-08-19）
 
 - `AgentState` 新增 secret-free `AgentModelState(provider/api/id)`、完整 `ThinkingLevel`、`is_streaming`、`streaming_message`、只读语义的 `pending_tool_calls` 与 `error_message`

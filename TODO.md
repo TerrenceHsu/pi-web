@@ -1,6 +1,6 @@
 # Current TODO
 
-> 校准日期：**2026-08-19**。本文件只保留尚未完成或明确延期的事项；已完成阶段不再复制数百行历史记录，统一由 [`STATUS.md`](STATUS.md)、[`CHANGELOG.md`](CHANGELOG.md) 和 `docs/validation/` 追溯。
+> 校准日期：**2026-08-20**。本文件只保留尚未完成或明确延期的事项；已完成阶段不再复制数百行历史记录，统一由 [`STATUS.md`](STATUS.md)、[`CHANGELOG.md`](CHANGELOG.md) 和 `docs/validation/` 追溯。
 
 ## 当前收敛执行顺序
 
@@ -33,7 +33,7 @@
 - [ ] 扩展图片内容块，不再把图片统一降级为 `image_unsupported`（按当前决定暂缓）
 - [x] 增加细粒度 text/thinking/tool-call start/delta/end 流事件：Provider 统一输出带 `content_index` 的完整块生命周期，Agent 维护 partial message 并兼容旧 delta-only / whole-tool-call 流；工具仅在 `toolcall_end` 后进入执行（定向回归 62 passed；全量非网络回归 3655 passed）
 - [x] 补齐 model、thinking level、streaming message、pending tool calls 等公开 Agent 状态（`AgentState`、动态 client model 投影、Web JSON 契约与 reset/error 生命周期均已覆盖；新增 4 项核心契约测试，完整后端 3662 passed）
-- [ ] 对齐 ToolResult 的 usage 和动态 added-tool metadata
+- [x] 对齐 ToolResult 的 usage 和动态 added-tool metadata（`ToolResult` → message / event / LLM boundary / Snapshot / Session / SQLite / Web JSON 全链路保留；`added_tool_names` 仅标记 `Context.tools` 的 provider 加载点，不注册工具且 after hook 不可伪造；定向回归 173 passed，完整后端 3665 passed）
 - [ ] 扩展 ToolResult 图片内容（随图片内容块继续延期，不进入下一项）
 
 ### 4. P2 — Session、Compaction 与持久化
@@ -90,5 +90,6 @@
 | Persistent Keyring preflight | ✅ `ada31fc` |
 | ToolResult ordering + MCP UTF-8 | ✅ `e7bf8f3` |
 | Agent semantics + controls + stream lifecycle | ✅ `c214d28` |
+| ToolResult usage + deferred-tool metadata | ✅ `b6baea8` |
 
-当前代码基线的验证结果见 [`STATUS.md`](STATUS.md#2026-08-19-当前验证基线)。
+当前代码基线的验证结果见 [`STATUS.md`](STATUS.md#2026-08-20-当前验证基线)。

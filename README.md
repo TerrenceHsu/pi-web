@@ -220,7 +220,7 @@ D:\miniconda\envs\pipy\python.exe scripts/dev_web_app.py
 
 ## 测试
 
-当前代码基线的准确数字见 [`STATUS.md`](STATUS.md#2026-08-19-当前验证基线)。2026-08-19 CI 等价校准结果：Backend **3655 passed / 6 skipped / 12 deselected**、coverage **83.73%**，Ruff/Mypy 全绿；Frontend lint/typecheck/build 全绿，最近 Vitest **394/394**；完整 Playwright **45/45**；真实 DDGS + GLM **3/3**。
+当前代码基线的准确数字见 [`STATUS.md`](STATUS.md#2026-08-20-当前验证基线)。2026-08-20 校准结果：Backend **3665 passed / 6 skipped / 12 deselected**、coverage **83.78%**，Ruff/Mypy 全绿；Frontend lint/typecheck/build 全绿，Vitest **394/394**；完整 Playwright **45/45** 与真实 DDGS + GLM **3/3** 沿用最近发布前门禁结果。
 
 ### Backend offline
 
