@@ -6,7 +6,7 @@
 
 | 项 | 当前事实 |
 |---|---|
-| 代码基线 | `51ce3c7` — `test(e2e): isolate full-suite state and completion waits` |
+| 代码基线 | `848ae1d` — `feat(agent): expose public runtime state` |
 | 分支 | `master` |
 | 最新 release tag | `v0.0.27-secure-credentials` @ `de05c66`；当前代码基线尚未打新 tag |
 | Python / API 版本 | `0.0.28`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
@@ -37,6 +37,7 @@
 | ToolResult 顺序与 MCP UTF-8 | ✅ 完成 | `e7bf8f3` |
 | Agent 语义正确性与控制队列 | ✅ 完成 | `c214d28`；串行 preflight、终态收敛、steering/follow-up、全局 tool execution |
 | Thinking 与细粒度流生命周期 | ✅ 完成 | `c214d28`；text/thinking/tool-call start/delta/end |
+| Agent 公开运行时状态 | ✅ 完成 | `848ae1d`；model / thinking level / streaming message / pending tool calls / error message |
 | 全仓 Ruff / strict Mypy / CI 收敛 | ✅ 完成 | Ruff 0；Mypy 114 files / 0 issues；Python CI timeout 30 分钟 |
 | Release metadata 与 MIT License | ✅ 完成 | `8a6ff2e`；Python/API/前端统一 `0.0.28`，wheel 携带根许可证 |
 | 当前发布前浏览器/联网门禁 | ✅ 完成 | `51ce3c7`；Playwright 45/45，DDGS + GLM 真实 smoke 3/3 |
@@ -58,6 +59,7 @@
 - Agent 支持独立 steering / follow-up 队列及 `all` / `one-at-a-time` 消费模式；活跃请求期间普通 prompt/continue 明确拒绝
 - 全局 `tool_execution` 可强制批次串行；逐工具 `execution_mode="sequential"` 可在并行全局模式下收紧执行
 - Assistant thinking/reasoning 内容可保留 provider signature/redacted payload；text/thinking/tool-call 均有完整 start/delta/end 流事件
+- `AgentState` 公开 secret-free model 身份、thinking level、请求流状态、当前 partial message、执行中 tool-call ID 与最近 assistant error；Web `/api/state` 使用同一事实源
 
 ## 数据与生命周期
 
@@ -75,20 +77,19 @@
 
 ## 2026-08-19 当前验证基线
 
-Backend 全量数字基于 `c214d28` 提交前的等价暂存内容实际复跑；版本/许可证提交
-`8a6ff2e` 另行通过全量静态检查、版本定向测试、前端构建与 wheel 元数据验证；
-`51ce3c7` 的等价内容通过完整 Playwright 与最终真实网络 smoke。
-Vitest 沿用 2026-08-18 的已验证结果：
+Backend 全量数字基于 `848ae1d` 的等价暂存内容实际复跑；版本/许可证提交
+`8a6ff2e` 另行通过 wheel 元数据验证；`51ce3c7` 的等价内容通过完整
+Playwright 与最终真实网络 smoke：
 
 | 验证 | 结果 | 备注 |
 |---|---|---|
 | Ruff 全量 | **PASS** | `ruff check src tests`；0 errors |
 | strict Mypy 全量 | **PASS** | `mypy src/pi_agent_core_py`；114 files / 0 issues |
-| Backend CI 全量 + coverage | **3655 passed, 6 skipped, 12 deselected** | `pytest tests -m "not slow" --tb=short -q` 等价运行；83.73% coverage；864.59s；58 warnings |
-| 受影响后端定向回归 | **1111 passed, 3 skipped** | Agent/Web/Knowledge/Credential/Provider 范围；无失败 |
+| Backend CI 全量 + coverage | **3662 passed, 6 skipped, 12 deselected** | `pytest tests -m "not slow" --tb=short -q`；83.78% coverage；1003.00s；58 warnings；工作区 `basetemp` + cacheprovider disabled |
+| Agent 公开状态定向回归 | **137 passed** | Agent、Harness、stream、Provider runtime 与 Web state；系统 temp ACL 阻断项改用工作区 `basetemp` 后通过 |
 | DDGS + GLM 真实 smoke | **3/3 passed** | 固定 secret-safe 脚本；DDGS 1 项 + GLM 2 项；24.63s；未输出凭证 |
 | 真实测试门禁回归 | **3 skipped** | 手工选择 `-m integration` 但未设置 `PI_RUN_INTEGRATION=1`，确认不触网 |
-| Frontend Vitest 全量 | **394/394 passed** | 26 files；2026-08-18 结果 |
+| Frontend Vitest 全量 | **394/394 passed** | 26 files；2026-08-19 实际复跑 |
 | Frontend typecheck | **PASS** | `vue-tsc --noEmit` |
 | Frontend ESLint | **PASS** | `eslint . --max-warnings=0` |
 | Frontend production build | **PASS** | `vite build`；仅既有 mixed dynamic/static import warning |
@@ -143,7 +144,7 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 ## 建议下一步
 
-1. 继续 pi-agent 对齐：公开 model、thinking level、streaming message、pending tool calls 等 Agent 状态。
+1. 继续 pi-agent 对齐：补齐 ToolResult 图片内容、usage 与动态 added-tool metadata。
 2. `0.0.28` tag/push 仍需单独决定；仓库当前尚无 remote。
 
 未完成事项的唯一清单见 [`TODO.md`](TODO.md)。使用与架构说明见 [`README.md`](README.md)。

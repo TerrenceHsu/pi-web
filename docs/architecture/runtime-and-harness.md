@@ -69,11 +69,16 @@ run_event_loop(agent, prompt, *, tools, hooks, initial_messages)
 - `state: AgentState`（mutable，运行时状态）
 
 `AgentState` 包含：
-- `messages: list[AgentMessage]`（当前对话历史 + 本轮新增）
-- `phase`（idle / running / steering / aborting）
-- `last_stop_reason`
+- `model: AgentModelState`（当前 client 的 secret-free `provider/api/id` 投影）
+- `thinking_level`（`off` 到 `max` 的公开配置）
+- `messages: list[AgentMessage]`（当前对话历史；message end 即可观察，agent end 终态校准）
+- `status`（idle / running / aborting / error）与 queue / request 计数
+- `is_streaming`、`streaming_message`、`pending_tool_calls`（运行时瞬态字段）
+- `error_message`（最近失败或中止的 assistant turn）与 `last_error`（Agent/subscriber 异常诊断）
 
-`Agent` 自身**不**调度——它只暴露 `run_prompt` / `run_continue` 给 Harness。Loop 逻辑在 `loop.py`，Hook 调用在 loop 内。
+`Agent` 持有单 worker 请求队列并暴露 `prompt` / `continue_`、steering、follow-up
+和 abort；具体 LLM/tool turn 逻辑仍在 `loop.py`，Hook 调用在 loop 内。Harness
+在外层编排请求 hooks、Snapshot、Skill/MCP 与持久化。
 
 ## 4. Harness
 

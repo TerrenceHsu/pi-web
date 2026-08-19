@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Agent public runtime state（2026-08-19）
+
+- `AgentState` 新增 secret-free `AgentModelState(provider/api/id)`、完整 `ThinkingLevel`、`is_streaming`、`streaming_message`、只读语义的 `pending_tool_calls` 与 `error_message`
+- message start/update/end 与 tool execution start/end 直接驱动公开瞬态状态；request 完成、Agent 异常和 reset 统一清理，model projection 随 request-scoped client 切换
+- `/api/state` 与前端 `AgentStateSummary` 暴露同一契约，并修正 queue size 读取不存在 `state.queue` 的旧 fallback
+- 新增核心生命周期与 Web JSON 回归；完整后端 3662 passed、83.78% coverage，前端 394/394，Ruff / strict Mypy / typecheck / ESLint / production build 全部通过
+
 ### Release maintenance（2026-08-19）
 
 - Python package、workspace FastAPI、Auth gateway FastAPI、前端 package 与 lockfile 统一为未打 tag 的 `0.0.28`；FastAPI 元数据直接复用 Python `__version__`
