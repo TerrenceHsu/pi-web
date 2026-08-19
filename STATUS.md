@@ -62,6 +62,7 @@
 - Assistant thinking/reasoning 内容可保留 provider signature/redacted payload；text/thinking/tool-call 均有完整 start/delta/end 流事件
 - `AgentState` 公开 secret-free model 身份、thinking level、请求流状态、当前 partial message、执行中 tool-call ID 与最近 assistant error；Web `/api/state` 使用同一事实源
 - ToolResult 可携带工具自身 usage 与 `added_tool_names`；usage 不并入主 LLM 上下文计费，added names 只标记 `Context.tools` 的 provider 加载点且不能由 after hook 伪造
+- SQLite Session 使用 append-only parent-entry tree；命名 lane 持久化 active leaf，支持 branch、fork、append-only label fact 与重启恢复；`messages` 是 active lane 的兼容投影
 
 ## 数据与生命周期
 
@@ -79,7 +80,7 @@
 
 ## 2026-08-20 当前验证基线
 
-Backend 全量数字基于 `b6baea8` 实际复跑；版本/许可证提交 `8a6ff2e`
+Backend 全量数字基于 `43c1d0a` 实际复跑；版本/许可证提交 `8a6ff2e`
 另行通过 wheel 元数据验证；`51ce3c7` 的等价内容通过完整 Playwright 与最终
 真实网络 smoke：
 
@@ -87,12 +88,13 @@ Backend 全量数字基于 `b6baea8` 实际复跑；版本/许可证提交 `8a6f
 |---|---|---|
 | Ruff 全量 | **PASS** | `ruff check src tests`；0 errors |
 | strict Mypy 全量 | **PASS** | `mypy src/pi_agent_core_py`；114 files / 0 issues |
-| Backend CI 全量 + coverage | **3665 passed, 6 skipped, 12 deselected** | `pytest tests -m "not slow" --tb=short -q`；83.78% coverage；1028.16s；58 warnings；工作区 `basetemp` + cacheprovider disabled |
+| Backend CI 全量 + coverage | **3681 passed, 6 skipped, 12 deselected** | `pytest tests -m "not slow" --tb=short -q`；83.84% coverage；499.69s；58 warnings；工作区 `basetemp` + cacheprovider disabled |
+| Session tree 定向回归 | **69 passed** | immutable entry/lane、旧库迁移、branch/fork/label/active leaf、重启、Web API、revision sibling 与 trailing suffix |
 | ToolResult metadata 定向回归 | **173 passed** | usage / added names、hook 边界、消息/事件、provider context、Snapshot、Session/SQLite、Web serializer 与旧数据默认值 |
 | Agent 公开状态定向回归 | **137 passed** | Agent、Harness、stream、Provider runtime 与 Web state；系统 temp ACL 阻断项改用工作区 `basetemp` 后通过 |
 | DDGS + GLM 真实 smoke | **3/3 passed** | 固定 secret-safe 脚本；DDGS 1 项 + GLM 2 项；24.63s；未输出凭证 |
 | 真实测试门禁回归 | **3 skipped** | 手工选择 `-m integration` 但未设置 `PI_RUN_INTEGRATION=1`，确认不触网 |
-| Frontend Vitest 全量 | **394/394 passed** | 26 files；2026-08-20 实际复跑 |
+| Frontend Vitest 全量 | **399/399 passed** | 27 files；2026-08-20 实际复跑 |
 | Frontend typecheck | **PASS** | `vue-tsc --noEmit` |
 | Frontend ESLint | **PASS** | `eslint . --max-warnings=0` |
 | Frontend production build | **PASS** | `vite build`；仅既有 mixed dynamic/static import warning |
@@ -126,6 +128,7 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 - Context Budget 是带安全余量的确定性近似，不是 Provider 官方 tokenizer
 - Context compaction 由用户手动触发，默认摘要器为本地规则式；`/checkpointer` 才调用当前 LLM
 - Regenerate 仅支持最新 Assistant，不提供历史 revision 切换 UI
+- Session tree 的 Core/Web API 已完成；当前聊天 UI 尚无可视化 branch/lane navigator
 - MCP HTTP transport 仍是 placeholder；当前可用 transport 为 stdio
 - `added_tool_names` 已保留到 provider 边界，但当前 OpenAI/Anthropic-compatible adapters 不实现原生 deferred tool loading，仍按完整 ToolRegistry 发送工具
 
@@ -148,7 +151,7 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 ## 建议下一步
 
-1. 继续 pi-agent 对齐：评估 append-only 会话树或 lane-based Session，明确 branch、fork、label 与 active leaf 语义。
+1. 继续 pi-agent 对齐：引入 durable operation/recovery，避免整份 JSON 覆盖和跨资源非原子发布。
 2. `0.0.28` tag/push 仍需单独决定；仓库当前尚无 remote。
 
 未完成事项的唯一清单见 [`TODO.md`](TODO.md)。使用与架构说明见 [`README.md`](README.md)。

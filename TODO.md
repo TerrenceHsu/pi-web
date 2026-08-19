@@ -38,7 +38,7 @@
 
 ### 4. P2 — Session、Compaction 与持久化
 
-- [ ] 评估并迁移 append-only 会话树或 lane-based Session；支持 branch、fork、label 和 active leaf
+- [x] 评估并迁移 append-only 会话树或 lane-based Session；支持 branch、fork、label 和 active leaf（完成：独立 immutable parent-entry tree + 命名 lane leaf；旧 `messages` 保留为 active lane 兼容投影；旧线性库幂等回填 `main`；Regenerate 创建 sibling branch 并兼容 trailing ToolResult suffix；Core/Web/前端 API、设计文档与重启回归齐备；提交 `43c1d0a`；完整后端 3681 passed / 83.84%，前端 399/399）
 - [ ] 引入 durable operation/recovery，避免整份 JSON 覆盖和非原子发布
 - [ ] 将 compaction 默认边界改为完整 turn，并补齐 token/window、前缀摘要和重试语义
 
