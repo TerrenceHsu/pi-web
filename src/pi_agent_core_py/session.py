@@ -14,7 +14,7 @@ Step 12 引入：
 - `SessionMemory`           ——会话对象（包装 SessionState，提供 append / restore / clear / 序列化）
 - `SessionStore`            ——持久化抽象（save / load / exists）
 - `InMemorySessionStore`    ——内存实现（用于测试 / 临时会话）
-- `JsonFileSessionStore`    ——JSON 文件实现（简单持久化）
+- `JsonFileSessionStore`    ——append-only JSON journal（torn-tail recovery）
 - `serialize_message`       ——Message → dict
 - `serialize_messages`      ——list[Message] → list[dict]
 - `deserialize_message`     ——dict → Message
@@ -36,8 +36,10 @@ Branch Summary / 自动摘要 / 自动压缩上下文。
 from __future__ import annotations
 
 import abc
+import asyncio
 import copy
 import json
+import os
 import re
 import time
 import uuid
@@ -432,7 +434,7 @@ class SessionStore(abc.ABC):
 
     @abc.abstractmethod
     async def save(self, session: SessionMemory) -> None:
-        """保存 session。覆盖式——同名 session_id 覆盖旧数据。"""
+        """Durably save the latest session state."""
         ...
 
     @abc.abstractmethod
@@ -508,7 +510,7 @@ def _validate_session_id(session_id: str) -> None:
 
 
 class JsonFileSessionStore(SessionStore):
-    """JSON 文件 SessionStore——每个 session 一个 `{id}.json` 文件。
+    """Append-only JSON journal——每个 session 一个 `{id}.json` 文件。
 
     构造：
 
@@ -518,20 +520,153 @@ class JsonFileSessionStore(SessionStore):
 
     - 自动创建 root_dir
     - session_id 必须匹配 `^[A-Za-z0-9_.-]{1,128}$`，防路径穿越
-    - 当前实现用同步 IO 包一层 async——Step 12 可接受；后续可换 aiofiles
+    - 新文件写 header + snapshot；后续 save 每次只追加一个 snapshot record
+    - 旧单对象 JSON 在第一次 save 时通过 temp + replace 一次性迁移
+    - 启动读取可截断 torn final record；中间损坏仍明确报错
+    - resolved save 会 flush + fsync；同实例内按 session 串行 append
     """
 
     def __init__(self, root_dir: str | Path) -> None:
         self.root_dir = Path(root_dir)
         self.root_dir.mkdir(parents=True, exist_ok=True)
+        self._locks: dict[str, asyncio.Lock] = {}
 
     def _path_for(self, session_id: str) -> Path:
         _validate_session_id(session_id)
         return self.root_dir / f"{session_id}.json"
 
+    def _lock_for(self, session_id: str) -> asyncio.Lock:
+        lock = self._locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[session_id] = lock
+        return lock
+
+    @staticmethod
+    def _journal_line(value: dict[str, Any]) -> bytes:
+        return (
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+
+    def _journal_bytes(
+        self,
+        session_id: str,
+        snapshots: list[dict[str, Any]],
+    ) -> bytes:
+        chunks = [
+            self._journal_line({
+                "kind": "session_journal",
+                "version": 1,
+                "session_id": session_id,
+            })
+        ]
+        chunks.extend(
+            self._journal_line({"kind": "snapshot", "snapshot": snapshot})
+            for snapshot in snapshots
+        )
+        return b"".join(chunks)
+
+    @staticmethod
+    def _atomic_replace(path: Path, raw: bytes) -> None:
+        temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temp_path.open("wb") as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temp_path.replace(path)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+
+    def _load_path(
+        self, path: Path, *, repair_torn_tail: bool,
+    ) -> tuple[SessionMemory, bool]:
+        raw = path.read_bytes()
+        lines = raw.splitlines(keepends=True)
+        if not lines:
+            raise ValueError(f"empty session file: {path.name}")
+        try:
+            first = json.loads(lines[0].decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            # Pretty-printed legacy JSON commonly starts with a line containing
+            # only ``{``; parse the complete document before classifying it.
+            return SessionMemory.from_json(raw.decode("utf-8")), False
+        if not (
+            isinstance(first, dict)
+            and first.get("kind") == "session_journal"
+            and first.get("version") == 1
+        ):
+            return SessionMemory.from_json(raw.decode("utf-8")), False
+
+        latest: SessionMemory | None = None
+        offset = len(lines[0])
+        last_good_offset = offset
+        for index, line in enumerate(lines[1:], start=1):
+            if not line.strip():
+                offset += len(line)
+                last_good_offset = offset
+                continue
+            try:
+                record = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                is_tail = index == len(lines) - 1
+                if repair_torn_tail and is_tail and latest is not None:
+                    with path.open("r+b") as stream:
+                        stream.truncate(last_good_offset)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    break
+                raise
+            if not isinstance(record, dict) or record.get("kind") != "snapshot":
+                raise ValueError(
+                    f"invalid session journal record at line {index + 1}"
+                )
+            snapshot = record.get("snapshot")
+            if not isinstance(snapshot, dict):
+                raise ValueError(
+                    f"invalid session journal snapshot at line {index + 1}"
+                )
+            latest = SessionMemory.from_dict(snapshot)
+            offset += len(line)
+            last_good_offset = offset
+        if latest is None:
+            raise ValueError(f"session journal has no snapshot: {path.name}")
+        return latest, True
+
     async def save(self, session: SessionMemory) -> None:
         path = self._path_for(session.id)
-        path.write_text(session.to_json(indent=2), encoding="utf-8")
+        async with self._lock_for(session.id):
+            snapshot = session.to_dict()
+            if not path.exists():
+                self._atomic_replace(
+                    path, self._journal_bytes(session.id, [snapshot])
+                )
+                return
+            previous, is_journal = self._load_path(
+                path, repair_torn_tail=True
+            )
+            if not is_journal:
+                self._atomic_replace(
+                    path,
+                    self._journal_bytes(
+                        session.id, [previous.to_dict(), snapshot]
+                    ),
+                )
+                return
+            with path.open("ab") as stream:
+                stream.write(self._journal_line({
+                    "kind": "snapshot",
+                    "snapshot": snapshot,
+                }))
+                stream.flush()
+                os.fsync(stream.fileno())
 
     async def load(self, session_id: str) -> SessionMemory:
         path = self._path_for(session_id)
@@ -539,8 +674,11 @@ class JsonFileSessionStore(SessionStore):
             raise FileNotFoundError(
                 f"JsonFileSessionStore: session {session_id!r} 不存在 ({path})"
             )
-        text = path.read_text(encoding="utf-8")
-        return SessionMemory.from_json(text)
+        async with self._lock_for(session_id):
+            session, _is_journal = self._load_path(
+                path, repair_torn_tail=True
+            )
+            return session
 
     async def exists(self, session_id: str) -> bool:
         # 与 save / load 一致——非法 session_id 抛 ValueError，不静默返回 False

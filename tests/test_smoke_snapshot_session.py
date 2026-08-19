@@ -122,6 +122,48 @@ async def test_json_file_store_load_corrupt_json_raises_or_recovers(tmp_path) ->
 
 
 @pytest.mark.asyncio
+async def test_json_file_store_appends_snapshots_and_recovers_torn_tail(
+    tmp_path,
+) -> None:
+    store = JsonFileSessionStore(tmp_path)
+    session = SessionMemory(session_id="journal", title="first")
+    await store.save(session)
+    session.set_title("second")
+    await store.save(session)
+
+    path = tmp_path / "journal.json"
+    records = path.read_text(encoding="utf-8").splitlines()
+    assert len(records) == 3
+    assert json.loads(records[0])["kind"] == "session_journal"
+    assert (await store.load("journal")).state.title == "second"
+
+    with path.open("ab") as stream:
+        stream.write(b'{"kind":"snapshot","snapshot":')
+    recovered = await store.load("journal")
+    assert recovered.state.title == "second"
+    assert path.read_bytes().endswith(b"\n")
+
+
+@pytest.mark.asyncio
+async def test_json_file_store_migrates_legacy_object_once(tmp_path) -> None:
+    path = tmp_path / "legacy.json"
+    legacy = SessionMemory(session_id="legacy", title="old")
+    path.write_text(legacy.to_json(indent=2), encoding="utf-8")
+    store = JsonFileSessionStore(tmp_path)
+
+    legacy.set_title("new")
+    await store.save(legacy)
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert json.loads(lines[0]) == {
+        "kind": "session_journal",
+        "session_id": "legacy",
+        "version": 1,
+    }
+    assert (await store.load("legacy")).state.title == "new"
+
+
+@pytest.mark.asyncio
 async def test_session_serialize_deserialize_preserves_types(tmp_path) -> None:
     """session JSON 往返后 message 类型不退化成 dict。"""
     fake = FakeClient([[TextDeltaEvent(delta="ok"), DoneEvent(stop_reason="stop")]])

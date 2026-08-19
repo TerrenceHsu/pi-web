@@ -12,6 +12,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ..llm_messages import LLMUserMessage
@@ -63,6 +64,113 @@ class CheckpointSource:
     source_sha256: str
     message_count: int
     chunks: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CheckpointerRecoverySummary:
+    """Secret-free startup/manual recovery counters."""
+
+    scanned: int = 0
+    completed: int = 0
+    aborted: int = 0
+    conflicts: int = 0
+
+
+async def recover_checkpointer_operations(
+    session_store: Any,
+    file_store: Any,
+    *,
+    session_id: str | None = None,
+) -> CheckpointerRecoverySummary:
+    """Reduce every open checkpointer operation from durable evidence.
+
+    Recovery never calls the provider. A matching source marker proves that
+    Memory.md was published; the store then atomically resets the original
+    lane only if its immutable source leaf is unchanged. Missing evidence
+    aborts the intent, while contradictory evidence or a moved leaf becomes a
+    visible conflict and preserves all messages.
+    """
+    from ..session_sqlite import SessionOperationConflictError
+
+    operations = await session_store.list_open_operations(
+        kind="checkpointer", session_id=session_id
+    )
+    completed = 0
+    aborted = 0
+    conflicts = 0
+    for operation in operations:
+        source_sha256 = operation.payload.get("source_sha256")
+        if not (
+            isinstance(source_sha256, str)
+            and re.fullmatch(r"[0-9a-f]{64}", source_sha256)
+            and source_sha256 == operation.dedupe_key
+        ):
+            await session_store.finish_operation(
+                operation.id,
+                outcome="conflict",
+                payload={"code": "invalid_checkpoint_intent"},
+            )
+            conflicts += 1
+            continue
+
+        memory_ref = await file_store.get_by_logical_path(
+            operation.session_id, SESSION_MEMORY_PATH
+        )
+        memory_hash: str | None = None
+        actual_sha256: str | None = None
+        if memory_ref is not None:
+            memory_bytes = Path(memory_ref.path).read_bytes()  # noqa: ASYNC240
+            actual_sha256 = hashlib.sha256(memory_bytes).hexdigest()
+            memory_hash = extract_checkpoint_source_hash(
+                memory_bytes.decode("utf-8", errors="replace")
+            )
+
+        if memory_hash != source_sha256:
+            outcome = "conflict" if operation.effect_committed else "aborted"
+            await session_store.finish_operation(
+                operation.id,
+                outcome=outcome,
+                payload={
+                    "code": (
+                        "checkpoint_evidence_changed"
+                        if operation.effect_committed
+                        else "checkpoint_effect_not_committed"
+                    )
+                },
+            )
+            if outcome == "conflict":
+                conflicts += 1
+            else:
+                aborted += 1
+            continue
+
+        assert memory_ref is not None
+        await session_store.mark_operation_effect_committed(
+            operation.id,
+            {
+                "file_id": memory_ref.id,
+                "file_sha256": actual_sha256,
+                "logical_path": SESSION_MEMORY_PATH,
+            },
+        )
+        try:
+            await session_store.complete_operation_and_reset_lane(operation.id)
+        except SessionOperationConflictError:
+            await session_store.finish_operation(
+                operation.id,
+                outcome="conflict",
+                payload={"code": "checkpoint_source_leaf_changed"},
+            )
+            conflicts += 1
+        else:
+            completed += 1
+
+    return CheckpointerRecoverySummary(
+        scanned=len(operations),
+        completed=completed,
+        aborted=aborted,
+        conflicts=conflicts,
+    )
 
 
 def parse_slash_command(value: Any) -> tuple[str, str]:
@@ -287,9 +395,11 @@ __all__ = [
     "SLASH_COMMANDS",
     "CheckpointerError",
     "CheckpointSource",
+    "CheckpointerRecoverySummary",
     "build_checkpoint_source",
     "extract_checkpoint_source_hash",
     "generate_checkpoint_memory",
     "parse_slash_command",
+    "recover_checkpointer_operations",
     "render_memory_document",
 ]

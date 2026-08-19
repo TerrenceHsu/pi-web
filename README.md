@@ -33,11 +33,12 @@
 ### Session 工作区与记忆
 
 - 对话历史以 append-only entry tree 持久化；命名 lane 支持 fork、branch、label 与重启后 active leaf 恢复
+- lane operation 使用 append-only intent/effect/finish records；Checkpointer 可在进程退出后凭 source leaf/hash 幂等前滚
 - 当前 active lane 会物化为兼容消息视图，因此现有聊天、Regenerate、Export 与 Context 工具无需理解树结构
 - 每个 Session 初始化独立目录和唯一根 `AGENT.md`
 - 用户上传文件保存在当前 Session；Agent 可调用 `list_files`、`view_file`、`write_file`
 - 文件树可查看、下载、删除和刷新；`AGENT.md`、`Memory.md` 可用 SHA-256 乐观锁编辑
-- `/checkpointer` 使用当前 Session 绑定的 LLM 总结对话到累计 `Memory.md`，成功后清空当前消息窗口
+- `/checkpointer` 使用当前 Session 绑定的 LLM 总结对话到累计 `Memory.md`；文件以 immutable generation 原子发布，成功后在同一 SQLite 事务清空原 lane 并完成 operation
 - 重新登录或重启后恢复同账号的 Session、历史消息、受管文件和配置
 
 ### Provider 与凭证

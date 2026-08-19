@@ -27,6 +27,12 @@ export interface AgentStateSummary {
   error_message: string | null
   snapshot_count: number
   event_count: number
+  durable_recovery: {
+    scanned: number
+    completed: number
+    aborted: number
+    conflicts: number
+  }
 }
 
 export interface EventsResponse {

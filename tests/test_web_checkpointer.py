@@ -178,14 +178,14 @@ def test_checkpointer_provider_failure_keeps_messages_and_files(tmp_path: Path) 
     dispose_app(app)
 
 
-def test_checkpointer_clear_failure_rolls_back_memory_and_keeps_messages(
+def test_checkpointer_clear_failure_is_retried_from_durable_operation(
     tmp_path: Path,
 ) -> None:
     app, _fake = _build_app(
         tmp_path,
         [
             _script("answer"),
-            _script("# Memory\n\n## Work completed\n- Must be rolled back."),
+            _script("# Memory\n\n## Work completed\n- Durable result."),
         ],
     )
     with TestClient(app) as client:
@@ -196,14 +196,12 @@ def test_checkpointer_clear_failure_rolls_back_memory_and_keeps_messages(
         ).status_code == 200
 
         store = app.state.web.session_store
-        original_replace_messages = store.replace_messages
+        original_complete = store.complete_operation_and_reset_lane
 
-        async def fail_clear(session_id: str, messages: list[Any]) -> None:
-            if session_id == sid and not messages:
-                raise RuntimeError("simulated database commit failure")
-            await original_replace_messages(session_id, messages)
+        async def fail_clear(_operation_id: str):
+            raise RuntimeError("simulated database commit failure")
 
-        store.replace_messages = fail_clear  # type: ignore[method-assign]
+        store.complete_operation_and_reset_lane = fail_clear  # type: ignore[method-assign]
         started = _execute(client, sid)
         terminal = _wait_for_request(client, started.json()["request_id"])
 
@@ -211,8 +209,102 @@ def test_checkpointer_clear_failure_rolls_back_memory_and_keeps_messages(
         assert terminal["error_type"] == "checkpoint_commit_failed"
         assert client.get(f"/api/messages?session_id={sid}").json()["count"] == 2
         files = client.get(f"/api/sessions/{sid}/files").json()["files"]
-        assert all(item["logical_path"] != "Memory.md" for item in files)
+        assert [item["logical_path"] for item in files].count("Memory.md") == 1
+
+        store.complete_operation_and_reset_lane = original_complete
+        retried = _execute(client, sid)
+        recovered = _wait_for_request(client, retried.json()["request_id"])
+        assert recovered["status"] == "completed"
+        assert recovered["result_summary"]["idempotent_recovery"] is True
+        assert client.get(f"/api/messages?session_id={sid}").json()["count"] == 0
     dispose_app(app)
+
+
+def test_checkpointer_startup_recovery_finishes_published_memory(
+    tmp_path: Path,
+) -> None:
+    app, _fake = _build_app(
+        tmp_path,
+        [
+            _script("answer"),
+            _script("# Memory\n\n## Work completed\n- Survives restart."),
+        ],
+    )
+    with TestClient(app) as client:
+        sid = _create_session(client)
+        assert client.post(
+            "/api/prompt",
+            json={"session_id": sid, "text": "recover after restart"},
+        ).status_code == 200
+        store = app.state.web.session_store
+
+        async def fail_clear(_operation_id: str):
+            raise RuntimeError("simulated crash boundary")
+
+        store.complete_operation_and_reset_lane = fail_clear  # type: ignore[method-assign]
+        started = _execute(client, sid)
+        terminal = _wait_for_request(client, started.json()["request_id"])
+        assert terminal["status"] == "error"
+        assert client.get(f"/api/messages?session_id={sid}").json()["count"] == 2
+    dispose_app(app)
+
+    recovered_app, recovered_fake = _build_app(tmp_path, [])
+    with TestClient(recovered_app) as client:
+        assert client.get(f"/api/messages?session_id={sid}").json()["count"] == 0
+        state = client.get("/api/state").json()
+        assert state["durable_recovery"] == {
+            "scanned": 1,
+            "completed": 1,
+            "aborted": 0,
+            "conflicts": 0,
+        }
+        assert recovered_fake.all_messages_calls == []
+    dispose_app(recovered_app)
+
+
+def test_checkpointer_recovery_preserves_messages_when_source_leaf_changed(
+    tmp_path: Path,
+) -> None:
+    app, _fake = _build_app(
+        tmp_path,
+        [
+            _script("answer"),
+            _script("# Memory\n\n## Work completed\n- Older checkpoint."),
+            _script("newer answer"),
+        ],
+    )
+    with TestClient(app) as client:
+        sid = _create_session(client)
+        assert client.post(
+            "/api/prompt", json={"session_id": sid, "text": "older"}
+        ).status_code == 200
+        store = app.state.web.session_store
+
+        async def fail_clear(_operation_id: str):
+            raise RuntimeError("simulated crash boundary")
+
+        store.complete_operation_and_reset_lane = fail_clear  # type: ignore[method-assign]
+        started = _execute(client, sid)
+        assert _wait_for_request(client, started.json()["request_id"])[
+            "status"
+        ] == "error"
+        assert client.post(
+            "/api/prompt", json={"session_id": sid, "text": "newer"}
+        ).status_code == 200
+        assert client.get(f"/api/messages?session_id={sid}").json()["count"] == 4
+    dispose_app(app)
+
+    recovered_app, recovered_fake = _build_app(tmp_path, [])
+    with TestClient(recovered_app) as client:
+        assert client.get(f"/api/messages?session_id={sid}").json()["count"] == 4
+        assert client.get("/api/state").json()["durable_recovery"] == {
+            "scanned": 1,
+            "completed": 0,
+            "aborted": 0,
+            "conflicts": 1,
+        }
+        assert recovered_fake.all_messages_calls == []
+    dispose_app(recovered_app)
 
 
 def test_checkpointer_updates_one_cumulative_memory_file(tmp_path: Path) -> None:

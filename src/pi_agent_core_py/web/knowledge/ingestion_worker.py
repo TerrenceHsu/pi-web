@@ -309,9 +309,9 @@ class IngestionWorkerManager:
 
         Per directive §三十 — uses bounded wait; not busy-loop.
 
-        Note: ``idle`` is defined as **no active Job AND no claimable pending
-        (status='uploaded') Document in the DB**. Uses a non-claiming SELECT
-        so it doesn't accidentally move Documents to 'extracting'.
+        Note: ``idle`` is defined as **no active Job, no claimable pending
+        Document, and no durable running Job in the DB**. The non-claiming
+        SELECT does not move Documents to ``extracting``.
 
         Returns:
             ``True`` if idle within ``timeout``; ``False`` on timeout.
@@ -321,9 +321,12 @@ class IngestionWorkerManager:
             deadline = time.monotonic() + timeout
 
         while True:
-            # Idle check: no active Job + no uploaded Documents
+            # Idle check: no process-local active Job and no durable pending/
+            # running work. The durable query closes the small claim window
+            # after SQLite moves a document to extracting but before this
+            # worker assigns ``_active_job_id``.
             if self._active_job_id is None:
-                if not await self._has_uploaded_documents():
+                if not await self._has_unfinished_ingestion_work():
                     return True
 
             if deadline is not None:
@@ -334,15 +337,19 @@ class IngestionWorkerManager:
             else:
                 await asyncio.sleep(0.05)
 
-    async def _has_uploaded_documents(self) -> bool:
-        """Non-claiming peek — returns True if any 'uploaded' Document exists.
+    async def _has_unfinished_ingestion_work(self) -> bool:
+        """Return True for a claimable document or durable running Job.
 
-        Friend access to KnowledgeStore (read-only SELECT).
+        One SQLite statement gives a consistent snapshot across the atomic
+        claim transition (uploaded → extracting + running Job).
         """
         db = self._store._require_db()
         async with db.execute(
-            "SELECT 1 FROM knowledge_documents "
-            "WHERE status = 'uploaded' LIMIT 1"
+            "SELECT 1 WHERE "
+            "EXISTS (SELECT 1 FROM knowledge_documents "
+            "        WHERE status = 'uploaded') "
+            "OR EXISTS (SELECT 1 FROM knowledge_ingestion_jobs "
+            "           WHERE status = 'running')"
         ) as cursor:
             row = await cursor.fetchone()
         return row is not None

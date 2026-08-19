@@ -1,7 +1,8 @@
 # Append-only Session Tree 设计
 
-> 状态：实现基线；2026-08-20。该设计只覆盖 Session tree / lane 语义，
-> durable operation recovery 与 turn-boundary compaction 仍是后续独立事项。
+> 状态：实现基线；2026-08-20。本文聚焦 Session tree / lane 语义；durable
+> operation 已见 [`DURABLE_OPERATIONS.md`](DURABLE_OPERATIONS.md)，turn-boundary
+> compaction 仍是后续独立事项。
 
 ## 决策
 
@@ -22,6 +23,8 @@ revision 和 export 继续读取这一投影；`session_entries` 才是分支历
   lane leaf 是可移动指针，`main` 不可删除。
 - `session_facts`：append-only 的 `(session_id, seq, kind, entry_id, value_json,
   created_at)`；label 以同一 entry 最新 seq 为准，写 `null` 表示清除。
+- `session_operations` / `session_operation_records`：lane operation identity 与
+  append-only intent/effect/finish log；tree 仍只保存 conversation。
 - `sessions.active_lane`：当前兼容投影对应的 lane；旧库迁移时默认 `main`。
 
 旧库首次打开时按 `messages.idx` 建 parent chain，并把 `main` leaf 指到最后一条；
@@ -53,8 +56,9 @@ revision 和 export 继续读取这一投影；`session_entries` 才是分支历
    immutable entry payload。
 3. branch/fork 的 Session、lane、entry 归属全部在事务内校验，禁止跨 Session
    parent、环和悬空 leaf。
-4. 本项不承诺进程崩溃后的 operation replay；SQLite 单事务只保证单次树变更
-   与兼容投影原子。跨资源恢复属于下一项 durable operation/recovery。
+4. durable operation 只在 finish 需要移动 lane 时复用 tree 原子事务；operation
+   log 不进入消息上下文。当前自动恢复覆盖 Checkpointer，普通 run/tool replay
+   仍不在本文的 tree 契约内。
 
 ## 验收
 

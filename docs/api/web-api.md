@@ -241,9 +241,11 @@ Slash command 是独立的 Session 操作；命令文本不会作为 UserMessage
 }
 ```
 
-客户端通过 `GET /api/requests/{request_id}` 轮询终态。成功时 `result_summary` 包含 `memory_file_id`、`memory_logical_path=Memory.md`、`source_message_count`、`source_sha256` 和 `idempotent_recovery`。
+客户端通过 `GET /api/requests/{request_id}` 轮询终态。成功时 `result_summary` 包含 `memory_file_id`、`memory_logical_path=Memory.md`、`source_message_count`、`source_sha256`、`durable_operation_id` 和 `idempotent_recovery`。
 
-提交语义为“先写入或更新 `Memory.md`，再清空当前 Session messages”。Provider 或文件写入失败不会清空消息；消息清空失败会补偿删除新 Memory 或恢复旧版本。进程在两个步骤之间意外退出时，原消息仍存在，重复执行会凭 source SHA-256 跳过重复 LLM 总结并完成清空。
+提交语义为“先持久化 operation intent，再发布 `Memory.md`，最后在一个 SQLite 事务内清空原 lane 并完成 operation”。Provider 或文件发布失败不会清空消息；文件已经发布但 SQLite 收尾失败时不反向覆盖文件，operation 保持 open，重试或启动恢复凭 source SHA-256 前滚完成且不重复调用 LLM。恢复还会核对接受 operation 时的 immutable source leaf；leaf 已变化则标记 conflict 并保留所有新消息。
+
+`Memory.md` 更新使用 immutable content generation，`metadata.json` 的原子 replace 是 commit point。应用启动在接受请求前扫描未完成 Checkpointer operation；`GET /api/state` 的 `durable_recovery` 返回本次启动的 `scanned` / `completed` / `aborted` / `conflicts` 计数。
 
 成功仅清空当前 Session 的 canonical messages 与当前 UI 消息流；Session、`AGENT.md`、其它文件和 snapshots 保留。后续 Prompt/Regenerate 自动加载最多 32 KiB `Memory.md`，并将其标记为不可信历史事实而非行为指令。
 
@@ -251,7 +253,7 @@ Slash command 是独立的 Session 操作；命令文本不会作为 UserMessage
 
 **Response 404**: Session 不存在。
 
-**Response 409**: 当前工作区忙、该 Session 已有 active request，或没有消息可总结（`nothing_to_checkpoint`）。
+**Response 409**: 当前工作区忙、该 Session 已有 active request、存在无法自动收敛的其它 durable operation，或没有消息可总结（`nothing_to_checkpoint`）。
 
 **Response 503**: 服务关闭中，或 Session/File store 不可用。
 

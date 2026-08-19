@@ -26,6 +26,7 @@ import asyncio
 import hashlib
 import json
 import mimetypes
+import os
 import re
 import time
 import uuid
@@ -292,10 +293,11 @@ class VirtualFileStore:
     # ------------------------------------------------------------------
 
     async def init(self) -> None:
-        """创建 root_dir（幂等）。"""
+        """创建 root_dir，并收敛上次退出留下的托管文件 generation。"""
         if self._initialized:
             return
         self._root_dir.mkdir(parents=True, exist_ok=True)
+        self._recover_managed_files()
         self._initialized = True
 
     async def ensure_session_folder(self, session_id: str) -> Path:
@@ -367,12 +369,82 @@ class VirtualFileStore:
             return None
 
     def _write_metadata(self, file_dir: Path, ref: FileRef) -> None:
-        """写 metadata.json。"""
+        """以同目录 temp + replace 原子发布 metadata pointer。"""
         meta_path = file_dir / "metadata.json"
-        meta_path.write_text(
-            json.dumps(ref.model_dump(mode="json"), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        temp_path = file_dir / f".metadata.{uuid.uuid4().hex}.tmp"
+        raw = json.dumps(
+            ref.model_dump(mode="json"), ensure_ascii=False, indent=2
+        ).encode("utf-8")
+        try:
+            with temp_path.open("wb") as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temp_path.replace(meta_path)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+
+    def _recover_managed_files(self) -> None:
+        """Repair old interrupted writes and remove unreferenced temp generations.
+
+        ``metadata.json`` is the commit pointer. New writes never mutate its
+        referenced content file. The legacy in-place update protocol may leave
+        a ``*.bak`` or content/metadata hash mismatch; both states are repaired
+        conservatively before the store becomes visible.
+        """
+        if not self._root_dir.is_dir():
+            return
+        for session_dir in self._root_dir.iterdir():
+            if not session_dir.is_dir():
+                continue
+            for file_dir in session_dir.iterdir():
+                if not file_dir.is_dir():
+                    continue
+                ref = self._read_metadata(file_dir)
+                if ref is None:
+                    continue
+                target = Path(ref.path)
+                try:
+                    self._resolve_and_check(target, expect_under=file_dir)
+                except UnsafeFilenameError:
+                    continue
+                if not target.is_file():
+                    backups = sorted(
+                        (
+                            child for child in file_dir.iterdir()
+                            if child.is_file() and child.name.endswith(".bak")
+                        ),
+                        key=lambda child: child.stat().st_mtime_ns,
+                        reverse=True,
+                    )
+                    if backups:
+                        try:
+                            backups[0].replace(target)
+                        except OSError:
+                            continue
+                if not target.is_file():
+                    continue
+                actual_size = target.stat().st_size
+                actual_sha = _sha256_of_file(target)
+                if ref.size != actual_size or ref.sha256 != actual_sha:
+                    ref = ref.model_copy(update={
+                        "size": actual_size,
+                        "sha256": actual_sha,
+                        "updated_at": max(
+                            ref.updated_at or ref.created_at,
+                            int(target.stat().st_mtime * 1000),
+                        ),
+                    })
+                    self._write_metadata(file_dir, ref)
+                for child in file_dir.iterdir():
+                    if child == target or child.name == "metadata.json":
+                        continue
+                    if child.is_file():
+                        try:
+                            child.unlink(missing_ok=True)
+                        except OSError:
+                            pass
 
     async def _unique_logical_path(
         self,
@@ -494,6 +566,8 @@ class VirtualFileStore:
                         )
                     sha.update(chunk)
                     f.write(chunk)
+                f.flush()
+                os.fsync(f.fileno())
         except FileStoreError:
             raise
         except Exception as e:
@@ -703,7 +777,12 @@ class VirtualFileStore:
         origin: Literal["system", "upload", "agent", "user", "legacy"] | None = "user",
         purpose: Literal["file", "agent_instructions", "memory"] | None = None,
     ) -> FileRef:
-        """用 sha256 乐观锁原子更新一个托管 UTF-8 文本文件。"""
+        """用 sha256 乐观锁和 immutable generation 原子更新文本文件。
+
+        新正文先写入独立 generation；一次 ``metadata.json`` replace 是唯一
+        commit point。进程在 commit 前退出时旧 metadata 仍指向旧正文，commit
+        后退出时则只会留下可清理的旧 generation，不会出现正文/metadata 半套。
+        """
         if not isinstance(content, str):
             raise FileStoreError("content must be a string")
         raw = content.encode("utf-8")
@@ -722,55 +801,40 @@ class VirtualFileStore:
                     limit=self._max_session_size,
                 )
 
-            target_path = Path(ref.path)
+            prior_path = Path(ref.path)
             file_dir = self._file_dir(session_id, file_id)
-            self._resolve_and_check(target_path, expect_under=file_dir)
-            temp_path = file_dir / f".{ref.name}.{uuid.uuid4().hex}.tmp"
-            backup_path = file_dir / f".{ref.name}.{uuid.uuid4().hex}.bak"
-            meta_path = file_dir / "metadata.json"
-            meta_temp = file_dir / f".metadata.{uuid.uuid4().hex}.tmp"
-            for candidate in (temp_path, backup_path, meta_temp):
-                self._resolve_and_check(candidate, expect_under=file_dir)
+            self._resolve_and_check(prior_path, expect_under=file_dir)
+            generation_path = file_dir / f".content-{uuid.uuid4().hex}.blob"
+            self._resolve_and_check(generation_path, expect_under=file_dir)
 
             updated = ref.model_copy(update={
                 "size": len(raw),
                 "sha256": hashlib.sha256(raw).hexdigest(),
+                "path": str(generation_path),
                 "origin": origin or ref.origin,
                 "purpose": purpose or ref.purpose,
                 "updated_at": _now_ms(),
             })
             try:
-                temp_path.write_bytes(raw)
-                meta_temp.write_text(
-                    json.dumps(
-                        updated.model_dump(mode="json"),
-                        ensure_ascii=False,
-                        indent=2,
-                    ),
-                    encoding="utf-8",
-                )
-                target_path.replace(backup_path)  # noqa: ASYNC240
-                temp_path.replace(target_path)
-                meta_temp.replace(meta_path)
-                try:
-                    backup_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                with generation_path.open("wb") as stream:
+                    stream.write(raw)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                self._write_metadata(file_dir, updated)
             except Exception as e:
                 try:
-                    if backup_path.exists():
-                        target_path.unlink(missing_ok=True)  # noqa: ASYNC240
-                        backup_path.replace(target_path)
-                except Exception:
+                    generation_path.unlink(missing_ok=True)
+                except OSError:
                     pass
-                for candidate in (temp_path, meta_temp):
-                    try:
-                        candidate.unlink(missing_ok=True)
-                    except Exception:
-                        pass
                 raise FileStoreError(
                     f"update_text failed for {ref.name!r}: {type(e).__name__}: {e}"
                 ) from e
+            try:
+                if prior_path != generation_path:
+                    prior_path.unlink(missing_ok=True)  # noqa: ASYNC240
+            except OSError:
+                # metadata 已提交；旧 generation 只是可在下次 init 清理的孤儿。
+                pass
             return updated
 
     # ------------------------------------------------------------------

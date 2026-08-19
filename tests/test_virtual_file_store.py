@@ -239,6 +239,66 @@ async def test_write_text_never_overwrites_same_named_file(store):
 
 
 @pytest.mark.asyncio
+async def test_update_text_commits_by_atomic_metadata_pointer(store):
+    from pathlib import Path
+
+    first = await store.write_text("sess-1", "memory.md", "old")
+    first_path = Path(first.path)
+    updated = await store.update_text(
+        "sess-1", first.id, "new", expected_sha256=first.sha256
+    )
+
+    assert Path(updated.path) != first_path
+    assert Path(updated.path).read_text(encoding="utf-8") == "new"  # noqa: ASYNC240
+    assert not first_path.exists()  # noqa: ASYNC240
+    assert (await store.get_for_session("sess-1", first.id)).path == updated.path
+
+
+@pytest.mark.asyncio
+async def test_update_text_metadata_failure_keeps_old_generation(
+    store, monkeypatch
+):
+    from pathlib import Path
+
+    first = await store.write_text("sess-1", "memory.md", "old")
+    original = store._write_metadata
+
+    def fail_metadata(*_args, **_kwargs):
+        raise OSError("simulated metadata failure")
+
+    monkeypatch.setattr(store, "_write_metadata", fail_metadata)
+    with pytest.raises(Exception, match="simulated metadata failure"):
+        await store.update_text(
+            "sess-1", first.id, "new", expected_sha256=first.sha256
+        )
+    monkeypatch.setattr(store, "_write_metadata", original)
+
+    restored = await store.get_for_session("sess-1", first.id)
+    assert restored.sha256 == first.sha256
+    assert Path(restored.path).read_text(encoding="utf-8") == "old"  # noqa: ASYNC240
+    file_dir = Path(first.path).parent
+    assert not list(file_dir.glob(".content-*.blob"))
+
+
+@pytest.mark.asyncio
+async def test_init_repairs_legacy_content_metadata_mismatch(tmp_path):
+    from pathlib import Path
+
+    root = tmp_path / "uploads"
+    first_store = VirtualFileStore(root)
+    ref = await first_store.write_text("sess-1", "memory.md", "old")
+    Path(ref.path).write_text("published", encoding="utf-8")  # noqa: ASYNC240
+
+    reopened = VirtualFileStore(root)
+    await reopened.init()
+    recovered = await reopened.get_for_session("sess-1", ref.id)
+
+    assert recovered.size == len(b"published")
+    assert recovered.sha256 != ref.sha256
+    assert Path(recovered.path).read_text(encoding="utf-8") == "published"  # noqa: ASYNC240
+
+
+@pytest.mark.asyncio
 async def test_write_text_honours_file_and_session_limits(tmp_path):
     file_limited = VirtualFileStore(tmp_path / "file-limit", max_file_size=3)
     with pytest.raises(FileTooLargeError):

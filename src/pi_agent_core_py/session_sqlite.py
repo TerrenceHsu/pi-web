@@ -10,6 +10,8 @@
   （不会退化成 dict）
 - 并发 `append_message` 用 `BEGIN IMMEDIATE` + `SELECT MAX(idx)+1` 保证 idx 单调
 - snapshot 表存 TurnSnapshot 完整 dict（`to_dict()` / `model_validate()`）
+- lane operation intent/result 使用 append-only records；需要改变 lane 的 finish
+  与 leaf move 在同一个 SQLite 事务提交
 
 异常体系：
 - `SQLiteSessionError` 基类
@@ -17,7 +19,7 @@
 - `SessionSerializationError` —— JSON 反序列化失败 / 未知 type
 
 不实现：
-- durable operation replay（后续独立实现）
+- provider / tool 调用的通用自动重放（目前仅提供 durable operation 原语）
 - 自动 compaction（由 harness.compact_* 触发；sqlite 仅持久化）
 - 跨进程共享（单进程场景；多进程需要单独协调）
 """
@@ -28,7 +30,7 @@ import json
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import aiosqlite
 from pydantic import BaseModel
@@ -74,6 +76,10 @@ class SessionEntryNotFoundError(SQLiteSessionError):
 
 class SessionBranchError(SQLiteSessionError):
     """branch/fork 目标不在 source lane 当前路径上。"""
+
+
+class SessionOperationConflictError(SQLiteSessionError):
+    """lane 已有未完成 operation，或恢复时 source leaf 已发生变化。"""
 
 
 # ============================================================================
@@ -140,6 +146,48 @@ class SQLiteSessionLane(BaseModel):
     created_at: int
     updated_at: int
     is_active: bool = False
+
+
+OperationOutcome = Literal[
+    "completed", "aborted", "failed", "declined", "conflict"
+]
+
+
+class SQLiteOperationRecord(BaseModel):
+    """append-only durable operation record。"""
+
+    id: str
+    operation_id: str
+    session_id: str
+    seq: int
+    record_type: str
+    payload: dict[str, Any]
+    created_at: int
+
+
+class SQLiteSessionOperation(BaseModel):
+    """durable lane operation 及其 append-only record reduction。"""
+
+    id: str
+    session_id: str
+    lane: str
+    kind: str
+    dedupe_key: str
+    source_leaf_id: str | None
+    payload: dict[str, Any]
+    created_at: int
+    records: tuple[SQLiteOperationRecord, ...] = ()
+    outcome: OperationOutcome | None = None
+
+    @property
+    def is_open(self) -> bool:
+        return self.outcome is None
+
+    @property
+    def effect_committed(self) -> bool:
+        return any(
+            record.record_type == "effect_committed" for record in self.records
+        )
 
 
 # ============================================================================
@@ -240,6 +288,28 @@ def _deserialize_snapshot(content_json: str) -> RequestSnapshot:
         raise SessionSerializationError(
             f"RequestSnapshot 反序列化失败：{type(e).__name__}: {e}"
         ) from e
+
+
+def _serialize_operation_payload(payload: dict[str, Any] | None) -> str:
+    """Serialize a secret-safe operation payload as one JSON object."""
+    try:
+        return json.dumps(payload or {}, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError) as e:
+        raise SessionSerializationError(
+            f"operation payload 不是 JSON-safe object：{type(e).__name__}: {e}"
+        ) from e
+
+
+def _deserialize_operation_payload(content_json: str) -> dict[str, Any]:
+    try:
+        value = json.loads(content_json)
+    except json.JSONDecodeError as e:
+        raise SessionSerializationError(
+            f"operation payload JSON 解析失败：{e.msg}"
+        ) from e
+    if not isinstance(value, dict):
+        raise SessionSerializationError("operation payload 必须是 JSON object")
+    return value
 
 
 # ============================================================================
@@ -375,6 +445,33 @@ class SQLiteSessionStore:
                 UNIQUE (session_id, seq)
             );
 
+            CREATE TABLE IF NOT EXISTS session_operations (
+                id              TEXT PRIMARY KEY,
+                session_id      TEXT NOT NULL,
+                lane            TEXT NOT NULL,
+                kind            TEXT NOT NULL,
+                dedupe_key      TEXT NOT NULL,
+                source_leaf_id  TEXT,
+                payload_json    TEXT NOT NULL DEFAULT '{}',
+                created_at      INTEGER NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                FOREIGN KEY (source_leaf_id) REFERENCES session_entries(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS session_operation_records (
+                id              TEXT PRIMARY KEY,
+                operation_id    TEXT NOT NULL,
+                session_id      TEXT NOT NULL,
+                seq             INTEGER NOT NULL,
+                record_type     TEXT NOT NULL,
+                payload_json    TEXT NOT NULL DEFAULT '{}',
+                created_at      INTEGER NOT NULL,
+                FOREIGN KEY (operation_id) REFERENCES session_operations(id)
+                    ON DELETE CASCADE,
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                UNIQUE (session_id, seq)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_messages_session_idx
                 ON messages(session_id, idx);
 
@@ -392,6 +489,12 @@ class SQLiteSessionStore:
 
             CREATE INDEX IF NOT EXISTS idx_session_facts_entry
                 ON session_facts(session_id, entry_id, kind, seq);
+
+            CREATE INDEX IF NOT EXISTS idx_session_operations_lane
+                ON session_operations(session_id, lane, created_at);
+
+            CREATE INDEX IF NOT EXISTS idx_session_operation_records_operation
+                ON session_operation_records(operation_id, seq);
             """
         )
         await self._migrate_session_tree()
@@ -1304,6 +1407,382 @@ class SQLiteSessionStore:
                 raise
 
     # ------------------------------------------------------------------
+    # durable lane operations
+    # ------------------------------------------------------------------
+
+    async def _next_operation_seq(self, session_id: str) -> int:
+        db = self._require_db()
+        cur = await db.execute(
+            "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq "
+            "FROM session_operation_records WHERE session_id = ?",
+            (session_id,),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        return int(row["next_seq"]) if row is not None else 0
+
+    async def _insert_operation_record(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        record_type: str,
+        payload: dict[str, Any] | None = None,
+        created_at: int | None = None,
+    ) -> SQLiteOperationRecord:
+        """Insert one record inside the caller's active transaction."""
+        db = self._require_db()
+        now = _now_ms() if created_at is None else created_at
+        seq = await self._next_operation_seq(session_id)
+        record_id = _gen_id("oprec")
+        payload_json = _serialize_operation_payload(payload)
+        await db.execute(
+            "INSERT INTO session_operation_records "
+            "(id, operation_id, session_id, seq, record_type, payload_json, "
+            "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                record_id,
+                operation_id,
+                session_id,
+                seq,
+                record_type,
+                payload_json,
+                now,
+            ),
+        )
+        return SQLiteOperationRecord(
+            id=record_id,
+            operation_id=operation_id,
+            session_id=session_id,
+            seq=seq,
+            record_type=record_type,
+            payload=dict(payload or {}),
+            created_at=now,
+        )
+
+    async def _operation_from_row(
+        self, row: aiosqlite.Row,
+    ) -> SQLiteSessionOperation:
+        db = self._require_db()
+        cur = await db.execute(
+            "SELECT id, operation_id, session_id, seq, record_type, "
+            "payload_json, created_at FROM session_operation_records "
+            "WHERE operation_id = ? ORDER BY seq",
+            (row["id"],),
+        )
+        record_rows = list(await cur.fetchall())
+        await cur.close()
+        records = tuple(
+            SQLiteOperationRecord(
+                id=record["id"],
+                operation_id=record["operation_id"],
+                session_id=record["session_id"],
+                seq=record["seq"],
+                record_type=record["record_type"],
+                payload=_deserialize_operation_payload(record["payload_json"]),
+                created_at=record["created_at"],
+            )
+            for record in record_rows
+        )
+        outcome: OperationOutcome | None = None
+        for record in records:
+            if record.record_type != "operation_finished":
+                continue
+            value = record.payload.get("outcome")
+            if value not in {
+                "completed", "aborted", "failed", "declined", "conflict"
+            }:
+                raise SessionSerializationError(
+                    f"operation {row['id']!r} has invalid outcome {value!r}"
+                )
+            outcome = value
+        return SQLiteSessionOperation(
+            id=row["id"],
+            session_id=row["session_id"],
+            lane=row["lane"],
+            kind=row["kind"],
+            dedupe_key=row["dedupe_key"],
+            source_leaf_id=row["source_leaf_id"],
+            payload=_deserialize_operation_payload(row["payload_json"]),
+            created_at=row["created_at"],
+            records=records,
+            outcome=outcome,
+        )
+
+    async def get_operation(
+        self, operation_id: str,
+    ) -> SQLiteSessionOperation | None:
+        db = self._require_db()
+        cur = await db.execute(
+            "SELECT id, session_id, lane, kind, dedupe_key, source_leaf_id, "
+            "payload_json, created_at FROM session_operations WHERE id = ?",
+            (operation_id,),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        return await self._operation_from_row(row) if row is not None else None
+
+    async def list_open_operations(
+        self,
+        *,
+        kind: str | None = None,
+        session_id: str | None = None,
+    ) -> list[SQLiteSessionOperation]:
+        """Return operations without an ``operation_finished`` record."""
+        db = self._require_db()
+        clauses = [
+            "NOT EXISTS (SELECT 1 FROM session_operation_records AS r "
+            "WHERE r.operation_id = o.id AND r.record_type = "
+            "'operation_finished')"
+        ]
+        params: list[Any] = []
+        if kind is not None:
+            clauses.append("o.kind = ?")
+            params.append(kind)
+        if session_id is not None:
+            clauses.append("o.session_id = ?")
+            params.append(session_id)
+        cur = await db.execute(
+            "SELECT o.id, o.session_id, o.lane, o.kind, o.dedupe_key, "
+            "o.source_leaf_id, o.payload_json, o.created_at "
+            "FROM session_operations AS o WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY o.created_at, o.id",
+            tuple(params),
+        )
+        rows = list(await cur.fetchall())
+        await cur.close()
+        return [await self._operation_from_row(row) for row in rows]
+
+    async def start_operation(
+        self,
+        session_id: str,
+        *,
+        kind: str,
+        dedupe_key: str,
+        payload: dict[str, Any] | None = None,
+        lane: str | None = None,
+        operation_id: str | None = None,
+    ) -> SQLiteSessionOperation:
+        """Persist an operation intent before any external effect starts.
+
+        One lane may have only one open operation. A retry with the same
+        ``kind`` and ``dedupe_key`` resumes that operation instead of creating
+        a second intent.
+        """
+        db = self._require_db()
+        if not kind.strip() or not dedupe_key:
+            raise ValueError("operation kind and dedupe_key must be non-empty")
+        payload_json = _serialize_operation_payload(payload)
+        created_id = operation_id or _gen_id("op")
+        now = _now_ms()
+        reused_id: str | None = None
+        async with self._write_lock:
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                lane_name = lane or await self._active_lane_name(session_id)
+                lane_row = await self._lane_row(session_id, lane_name)
+                cur = await db.execute(
+                    "SELECT o.id, o.kind, o.dedupe_key, o.source_leaf_id "
+                    "FROM session_operations AS o "
+                    "WHERE o.session_id = ? AND o.lane = ? AND NOT EXISTS "
+                    "(SELECT 1 FROM session_operation_records AS r "
+                    "WHERE r.operation_id = o.id AND r.record_type = "
+                    "'operation_finished') ORDER BY o.created_at LIMIT 1",
+                    (session_id, lane_name),
+                )
+                open_row = await cur.fetchone()
+                await cur.close()
+                if open_row is not None:
+                    if (
+                        open_row["kind"] == kind
+                        and open_row["dedupe_key"] == dedupe_key
+                        and open_row["source_leaf_id"]
+                        == lane_row["leaf_entry_id"]
+                    ):
+                        reused_id = str(open_row["id"])
+                        await db.commit()
+                    else:
+                        raise SessionOperationConflictError(
+                            f"session {session_id!r} lane {lane_name!r} already "
+                            f"has open operation {open_row['id']!r}"
+                        )
+                else:
+                    await db.execute(
+                        "INSERT INTO session_operations "
+                        "(id, session_id, lane, kind, dedupe_key, "
+                        "source_leaf_id, payload_json, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            created_id,
+                            session_id,
+                            lane_name,
+                            kind,
+                            dedupe_key,
+                            lane_row["leaf_entry_id"],
+                            payload_json,
+                            now,
+                        ),
+                    )
+                    await self._insert_operation_record(
+                        operation_id=created_id,
+                        session_id=session_id,
+                        record_type="operation_started",
+                        payload=payload,
+                        created_at=now,
+                    )
+                    await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        result = await self.get_operation(reused_id or created_id)
+        assert result is not None
+        return result
+
+    async def mark_operation_effect_committed(
+        self,
+        operation_id: str,
+        payload: dict[str, Any] | None = None,
+    ) -> SQLiteOperationRecord:
+        """Append the external-effect evidence once; repeated calls are safe."""
+        db = self._require_db()
+        async with self._write_lock:
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                operation = await self.get_operation(operation_id)
+                if operation is None:
+                    raise SessionNotFoundError(
+                        f"operation {operation_id!r} 不存在"
+                    )
+                existing = next(
+                    (
+                        record for record in operation.records
+                        if record.record_type == "effect_committed"
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    await db.commit()
+                    return existing
+                if not operation.is_open:
+                    raise SessionOperationConflictError(
+                        f"operation {operation_id!r} is already finished"
+                    )
+                record = await self._insert_operation_record(
+                    operation_id=operation.id,
+                    session_id=operation.session_id,
+                    record_type="effect_committed",
+                    payload=payload,
+                )
+                await db.commit()
+                return record
+            except Exception:
+                await db.rollback()
+                raise
+
+    async def finish_operation(
+        self,
+        operation_id: str,
+        *,
+        outcome: OperationOutcome,
+        payload: dict[str, Any] | None = None,
+    ) -> SQLiteSessionOperation:
+        """Append one terminal record without changing the conversation tree."""
+        db = self._require_db()
+        async with self._write_lock:
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                operation = await self.get_operation(operation_id)
+                if operation is None:
+                    raise SessionNotFoundError(
+                        f"operation {operation_id!r} 不存在"
+                    )
+                if operation.outcome is not None:
+                    await db.commit()
+                    return operation
+                finish_payload = dict(payload or {})
+                finish_payload["outcome"] = outcome
+                await self._insert_operation_record(
+                    operation_id=operation.id,
+                    session_id=operation.session_id,
+                    record_type="operation_finished",
+                    payload=finish_payload,
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        result = await self.get_operation(operation_id)
+        assert result is not None
+        return result
+
+    async def complete_operation_and_reset_lane(
+        self, operation_id: str,
+    ) -> SQLiteSessionOperation:
+        """Atomically clear the operation lane and append completed.
+
+        The lane must still point at the immutable source leaf captured by
+        ``operation_started``. A later append therefore turns recovery into an
+        explicit conflict instead of deleting newer messages.
+        """
+        db = self._require_db()
+        now = _now_ms()
+        async with self._write_lock:
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                operation = await self.get_operation(operation_id)
+                if operation is None:
+                    raise SessionNotFoundError(
+                        f"operation {operation_id!r} 不存在"
+                    )
+                if operation.outcome is not None:
+                    if operation.outcome == "completed":
+                        await db.commit()
+                        return operation
+                    raise SessionOperationConflictError(
+                        f"operation {operation_id!r} finished as "
+                        f"{operation.outcome!r}"
+                    )
+                if not operation.effect_committed:
+                    raise SessionOperationConflictError(
+                        f"operation {operation_id!r} has no committed effect"
+                    )
+                lane_row = await self._lane_row(
+                    operation.session_id, operation.lane
+                )
+                current_leaf = lane_row["leaf_entry_id"]
+                if current_leaf != operation.source_leaf_id:
+                    raise SessionOperationConflictError(
+                        f"operation {operation_id!r} source leaf changed"
+                    )
+                await db.execute(
+                    "UPDATE session_lanes SET leaf_entry_id = NULL, "
+                    "updated_at = ? WHERE session_id = ? AND name = ?",
+                    (now, operation.session_id, operation.lane),
+                )
+                active_lane = await self._active_lane_name(operation.session_id)
+                if active_lane == operation.lane:
+                    await self._materialize_path(operation.session_id, [])
+                await self._insert_operation_record(
+                    operation_id=operation.id,
+                    session_id=operation.session_id,
+                    record_type="operation_finished",
+                    payload={"outcome": "completed"},
+                    created_at=now,
+                )
+                await db.execute(
+                    "UPDATE sessions SET updated_at = ? WHERE id = ?",
+                    (now, operation.session_id),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        result = await self.get_operation(operation_id)
+        assert result is not None
+        return result
+
+    # ------------------------------------------------------------------
     # snapshot CRUD
     # ------------------------------------------------------------------
 
@@ -1358,12 +1837,16 @@ __all__ = [
     "SessionLaneExistsError",
     "SessionEntryNotFoundError",
     "SessionBranchError",
+    "SessionOperationConflictError",
     # 数据模型
     "SQLiteSession",
     "SQLiteStoredMessage",
     "SQLiteStoredSnapshot",
     "SQLiteSessionEntry",
     "SQLiteSessionLane",
+    "SQLiteOperationRecord",
+    "SQLiteSessionOperation",
+    "OperationOutcome",
     # 主类
     "SQLiteSessionStore",
 ]

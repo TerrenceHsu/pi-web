@@ -59,6 +59,7 @@ from fastapi.responses import (
 
 from .. import __version__
 from ..harness import AgentHarness
+from ..session_sqlite import SessionOperationConflictError
 from ..skills import SkillSelection
 from .approvals import ToolApprovalManager
 from .checkpointer import (
@@ -71,6 +72,7 @@ from .checkpointer import (
     extract_checkpoint_source_hash,
     generate_checkpoint_memory,
     parse_slash_command,
+    recover_checkpointer_operations,
 )
 from .providers.runtime import (
     ProviderInitializationError,
@@ -486,6 +488,27 @@ def create_app(
         else:
             state.file_store = None
             state.uploads_dir = None
+
+        # P2 durable operations: reduce accepted checkpointer intents before
+        # requests can observe the workspace. Recovery is evidence-only and
+        # never calls the provider; a changed source leaf preserves messages.
+        if state.file_store is not None:
+            recovery = await recover_checkpointer_operations(
+                session_store, state.file_store
+            )
+            state.durable_recovery_summary = {
+                "scanned": recovery.scanned,
+                "completed": recovery.completed,
+                "aborted": recovery.aborted,
+                "conflicts": recovery.conflicts,
+            }
+        else:
+            state.durable_recovery_summary = {
+                "scanned": 0,
+                "completed": 0,
+                "aborted": 0,
+                "conflicts": 0,
+            }
 
         # file_store 可用 → 注册 list_files / view_file / write_file。
         # 工具执行期间必须优先绑定 request 的 session；UI 当前选中项只作为
@@ -2744,8 +2767,9 @@ def create_app(
     async def _run_checkpointer_core(
         session_id: str,
         source: CheckpointSource,
+        operation_id: str,
     ) -> dict[str, Any]:
-        """生成/提交 Memory.md；只有文件保存成功后才清空 canonical messages。"""
+        """Publish Memory.md, then atomically finish and reset its source lane."""
         store = state.session_store
         file_store = state.file_store
         if store is None or file_store is None:
@@ -2772,7 +2796,13 @@ def create_app(
                 == source.source_sha256
             )
             updated_ref = memory_ref
-            created_memory = False
+            operation = await store.get_operation(operation_id)
+            if operation is None:
+                raise CheckpointerError(
+                    "checkpoint_operation_missing",
+                    "The durable checkpoint operation is unavailable.",
+                )
+            resumed_operation = operation.effect_committed
 
             if not already_committed:
                 try:
@@ -2795,52 +2825,64 @@ def create_app(
                         ),
                     )
                 except PromptRuntimeError as e:
+                    try:
+                        await store.finish_operation(
+                            operation_id,
+                            outcome="failed",
+                            payload={"code": e.error_type[:100]},
+                        )
+                    except Exception:
+                        pass
                     raise CheckpointerError(e.error_type, e.message) from None
 
-                if memory_ref is None:
-                    updated_ref = await file_store.write_text(
-                        session_id,
-                        SESSION_MEMORY_PATH,
-                        memory_text,
-                        content_type="text/markdown",
-                        origin="agent",
-                        purpose="memory",
-                    )
-                    created_memory = True
-                else:
-                    updated_ref = await file_store.update_text(
-                        session_id,
-                        memory_ref.id,
-                        memory_text,
-                        expected_sha256=memory_ref.sha256,
-                        origin="agent",
-                        purpose="memory",
-                    )
+                try:
+                    if memory_ref is None:
+                        updated_ref = await file_store.write_text(
+                            session_id,
+                            SESSION_MEMORY_PATH,
+                            memory_text,
+                            content_type="text/markdown",
+                            origin="agent",
+                            purpose="memory",
+                        )
+                    else:
+                        updated_ref = await file_store.update_text(
+                            session_id,
+                            memory_ref.id,
+                            memory_text,
+                            expected_sha256=memory_ref.sha256,
+                            origin="agent",
+                            purpose="memory",
+                        )
+                except Exception as e:
+                    try:
+                        await store.finish_operation(
+                            operation_id,
+                            outcome="failed",
+                            payload={"code": "checkpoint_publish_failed"},
+                        )
+                    except Exception:
+                        pass
+                    raise CheckpointerError(
+                        "checkpoint_publish_failed",
+                        f"Could not publish Memory.md: {type(e).__name__}",
+                    ) from None
 
             assert updated_ref is not None
             try:
-                await store.replace_messages(session_id, [])
+                await store.mark_operation_effect_committed(
+                    operation_id,
+                    {
+                        "file_id": updated_ref.id,
+                        "file_sha256": updated_ref.sha256,
+                        "logical_path": updated_ref.logical_path,
+                    },
+                )
+                await store.complete_operation_and_reset_lane(operation_id)
             except Exception as e:
-                # Best-effort compensation. A process crash between these writes still
-                # leaves both Memory.md and the original messages, never data loss; the
-                # source hash makes a retry idempotent.
-                try:
-                    if created_memory:
-                        await file_store.delete_for_session(
-                            session_id,
-                            updated_ref.id,
-                        )
-                    elif not already_committed and memory_ref is not None:
-                        await file_store.update_text(
-                            session_id,
-                            memory_ref.id,
-                            prior_text or "",
-                            expected_sha256=updated_ref.sha256,
-                            origin=memory_ref.origin,
-                            purpose=memory_ref.purpose,
-                        )
-                except Exception:
-                    pass
+                # Do not compensate an acknowledged external publish. The open
+                # operation plus Memory source marker is sufficient for retry or
+                # startup recovery to finish exactly the original immutable leaf.
                 raise CheckpointerError(
                     "checkpoint_commit_failed",
                     f"Could not clear the conversation: {type(e).__name__}",
@@ -2854,12 +2896,14 @@ def create_app(
                 "memory_logical_path": updated_ref.logical_path,
                 "source_message_count": source.message_count,
                 "source_sha256": source.source_sha256,
-                "idempotent_recovery": already_committed,
+                "durable_operation_id": operation_id,
+                "idempotent_recovery": already_committed or resumed_operation,
             }
 
     async def _run_checkpointer_background(
         web_request: WebRunRequest,
         source: CheckpointSource,
+        operation_id: str,
     ) -> None:
         """Managed async runner for /checkpointer."""
         assert web_request.session_id is not None
@@ -2869,13 +2913,56 @@ def create_app(
         state.current_request_session_id = web_request.session_id
         web_request.event_start_sequence = state.next_event_sequence
         try:
-            result = await _run_checkpointer_core(web_request.session_id, source)
+            result = await _run_checkpointer_core(
+                web_request.session_id, source, operation_id
+            )
         except asyncio.CancelledError:
-            web_request.status = "aborted"
-            web_request.error = "cancelled"
-            web_request.abort_reason = web_request.abort_reason or "task_cancelled"
-            web_request.ended_at = _now_utc()
-            raise
+            # If Memory.md crossed its commit point, cancellation must converge
+            # forward; otherwise close the no-effect intent as aborted.
+            store = state.session_store
+            file_store = state.file_store
+            if store is not None and file_store is not None:
+                try:
+                    await asyncio.shield(
+                        recover_checkpointer_operations(
+                            store,
+                            file_store,
+                            session_id=web_request.session_id,
+                        )
+                    )
+                    operation = await asyncio.shield(
+                        store.get_operation(operation_id)
+                    )
+                except Exception:
+                    operation = None
+                if operation is not None and operation.outcome == "completed":
+                    web_request.status = "completed"
+                    web_request.result_summary = {
+                        "command": CHECKPOINTER_COMMAND,
+                        "source_message_count": source.message_count,
+                        "source_sha256": source.source_sha256,
+                        "durable_operation_id": operation_id,
+                        "idempotent_recovery": True,
+                    }
+                    if state.current_session_id == web_request.session_id:
+                        harness.agent.state.messages = []
+                    web_request.ended_at = _now_utc()
+                else:
+                    web_request.status = "aborted"
+                    web_request.error = "cancelled"
+                    web_request.abort_reason = (
+                        web_request.abort_reason or "task_cancelled"
+                    )
+                    web_request.ended_at = _now_utc()
+                    raise
+            else:
+                web_request.status = "aborted"
+                web_request.error = "cancelled"
+                web_request.abort_reason = (
+                    web_request.abort_reason or "task_cancelled"
+                )
+                web_request.ended_at = _now_utc()
+                raise
         except CheckpointerError as e:
             web_request.status = "error"
             web_request.error = e.message[:500]
@@ -3267,6 +3354,7 @@ def create_app(
             "error_message": agent_state.error_message,
             "snapshot_count": len(harness.snapshots),
             "event_count": len(state.event_buffer),
+            "durable_recovery": dict(state.durable_recovery_summary),
         }
 
     # ========================================================================
@@ -5913,6 +6001,8 @@ def create_app(
         # Reserve the same global execution slot used by prompt/regenerate.
         # No await is allowed between the idle check and this assignment.
         state.running = True
+        request_id = f"req_{uuid4().hex[:16]}"
+        durable_operation = None
         try:
             store = state.session_store
             if store is None or state.file_store is None:
@@ -5953,10 +6043,49 @@ def create_app(
                         }
                     },
                 )
+            operation_payload = {
+                "source_sha256": source.source_sha256,
+                "source_message_count": source.message_count,
+                "memory_logical_path": SESSION_MEMORY_PATH,
+            }
+            try:
+                durable_operation = await store.start_operation(
+                    session_id,
+                    kind="checkpointer",
+                    dedupe_key=source.source_sha256,
+                    operation_id=f"op_{uuid4().hex[:20]}",
+                    payload=operation_payload,
+                )
+            except SessionOperationConflictError:
+                # A prior failed request may have left a published operation
+                # open. Reduce it before rejecting a genuinely unrelated open
+                # operation; changed leaves are marked conflict without clear.
+                await recover_checkpointer_operations(
+                    store, state.file_store, session_id=session_id
+                )
+                durable_operation = await store.start_operation(
+                    session_id,
+                    kind="checkpointer",
+                    dedupe_key=source.source_sha256,
+                    operation_id=f"op_{uuid4().hex[:20]}",
+                    payload=operation_payload,
+                )
         except CheckpointerError as e:
             return JSONResponse(
                 status_code=503,
                 content={"detail": {"code": e.code, "message": e.message}},
+            )
+        except SessionOperationConflictError:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": {
+                        "code": "durable_operation_conflict",
+                        "message": (
+                            "This session has an unfinished durable operation."
+                        ),
+                    }
+                },
             )
         except Exception as e:
             return JSONResponse(
@@ -5974,14 +6103,17 @@ def create_app(
             if session_id not in state.active_request_by_session:
                 state.running = False
 
-        request_id = f"req_{uuid4().hex[:16]}"
+        assert durable_operation is not None
         web_request = WebRunRequest(
             id=request_id,
             session_id=session_id,
             status="queued",
             created_at=_now_utc(),
             operation="checkpointer",
-            payload={"command": command},
+            payload={
+                "command": command,
+                "durable_operation_id": durable_operation.id,
+            },
         )
         state.active_requests[request_id] = web_request
         state.active_request_by_session[session_id] = request_id
@@ -5989,7 +6121,9 @@ def create_app(
         # registration; reacquire it synchronously before scheduling the task.
         state.running = True
         task = asyncio.create_task(
-            _run_checkpointer_background(web_request, source),
+            _run_checkpointer_background(
+                web_request, source, durable_operation.id
+            ),
             name=f"checkpointer_{request_id}",
         )
         web_request.task = task

@@ -195,6 +195,8 @@ class WebAppState(BaseModel):
     # P0-2: VirtualFileStore 引用（None 表示未启用文件上传路径）
     file_store: Any = None
     uploads_dir: Any = None
+    # 启动时 durable operation reducer 的 secret-free 计数。
+    durable_recovery_summary: dict[str, int] = Field(default_factory=dict)
     # P0-4 Step 2: MCP server 配置（name → WebMCPServerConfig）
     mcp_server_configs: dict[str, WebMCPServerConfig] = Field(default_factory=dict)
     # P0-4 Step 2: disabled MCP tool 全名集合

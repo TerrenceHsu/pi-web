@@ -211,6 +211,21 @@ class TestLifecycle:
 
 
 class TestPendingJobs:
+    async def test_wait_until_idle_observes_durable_running_claim(
+        self, manager, store, ingestion_store, file_store, tmp_path
+    ):
+        """The claim→active_job assignment window must not look idle."""
+        lib = await _make_library(store)
+        pdf_bytes = _text_pdf_bytes(tmp_path, ["claim window"])
+        await _make_document_with_source(
+            store, file_store, lib.id, pdf_bytes=pdf_bytes
+        )
+        claimed = await ingestion_store.claim_next_pending_document()
+
+        assert claimed is not None
+        assert manager.snapshot().active_job_id is None
+        assert await manager.wait_until_idle(timeout=0.05) is False
+
     async def test_startup_picks_up_preexisting_pending(
         self, manager, store, ingestion_store, file_store, tmp_path
     ):
