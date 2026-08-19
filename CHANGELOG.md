@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Release maintenance（2026-08-19）
+
+- Python package、workspace FastAPI、Auth gateway FastAPI、前端 package 与 lockfile 统一为未打 tag 的 `0.0.28`；FastAPI 元数据直接复用 Python `__version__`
+- 新增版本一致性回归测试，防止 Python/API/前端版本再次漂移
+- 补齐标准 MIT 根 `LICENSE`，`pyproject.toml` 改为引用该文件，并验证构建 wheel 携带许可证正文与 `License-File: LICENSE` 元数据
+
 ### P1-E Multi-Provider Switching（✅ COMPLETE / FROZEN；待 merge / tag 授权）
 
 - **Multi-provider profile / settings / session switching**——GLM / Qwen / Kimi 三家 Provider 完整支持：用户在 Settings Modal 配置 API Key + Model ID → 顶部 Provider Selector 切换 → 每个 Session 独立保存 Binding → 浏览器 reload 后恢复

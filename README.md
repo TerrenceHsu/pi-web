@@ -284,7 +284,7 @@ Playwright 测试位于 `tests/e2e/`，覆盖基础聊天、异步流、刷新�
 - 无 OCR、图片理解、向量检索、Multi-Agent、RBAC/OAuth 或公网部署
 - MCP HTTP transport 未实现；只支持 stdio
 - 历史数据中已经存在的 `U+FFFD` 无法自动恢复原字符
-- 根 `LICENSE`、版本元数据统一和 Git remote 仍待处理
+- 当前 package baseline 为 `0.0.28`，Python、FastAPI/Auth 与前端版本已统一；Git remote 仍待配置
 
 ## 项目结构
 
@@ -321,4 +321,4 @@ Playwright 测试位于 `tests/e2e/`，覆盖基础聊天、异步流、刷新�
 
 ## License
 
-`pyproject.toml` 声明 MIT；仓库根实际 `LICENSE` 文件尚未补齐，属于发布前置事项。
+本项目采用 MIT License，完整条款见 [`LICENSE`](LICENSE)。Python wheel 也携带同一许可证文件。

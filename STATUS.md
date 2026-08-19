@@ -6,16 +6,17 @@
 
 | 项 | 当前事实 |
 |---|---|
-| 代码基线 | `c214d28` — `feat(agent): align control queues and stream lifecycle` |
+| 代码基线 | `8a6ff2e` — `chore(release): align version metadata and license` |
 | 分支 | `master` |
 | 最新 release tag | `v0.0.27-secure-credentials` @ `de05c66`；当前代码基线尚未打新 tag |
-| Python 包版本 | `0.0.21`（`src/pi_agent_core_py/__init__.py` 与 FastAPI 元数据） |
-| 前端包版本 | `0.0.20` |
+| Python / API 版本 | `0.0.28`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
+| 前端包版本 | `0.0.28`（`package.json` 与 lockfile 一致） |
+| 许可证 | MIT；根 `LICENSE` 为标准正文，`pyproject.toml` 与 wheel 均直接引用/携带该文件 |
 | Git remote | 当前仓库**未配置 remote**，因此尚无可执行的 push 目标 |
 | Python | 声明支持 `>=3.11`；本机验证使用 Python 3.12.13（conda `pipy`） |
 | 产品边界 | localhost-only 本地 Agent 工作台；不是公网 SaaS |
 
-> `v0.0.27` tag 与代码/前端内嵌版本号不一致是现存 release metadata debt，不能把 tag 名误写成当前包版本。
+> `0.0.28` 是当前尚未打 tag 的 package baseline；最新既有 tag 仍是旧基线 `v0.0.27-secure-credentials`，不能据此声称已经发布 `0.0.28`。
 
 ## 当前交付状态
 
@@ -37,6 +38,7 @@
 | Agent 语义正确性与控制队列 | ✅ 完成 | `c214d28`；串行 preflight、终态收敛、steering/follow-up、全局 tool execution |
 | Thinking 与细粒度流生命周期 | ✅ 完成 | `c214d28`；text/thinking/tool-call start/delta/end |
 | 全仓 Ruff / strict Mypy / CI 收敛 | ✅ 完成 | Ruff 0；Mypy 114 files / 0 issues；Python CI timeout 30 分钟 |
+| Release metadata 与 MIT License | ✅ 完成 | `8a6ff2e`；Python/API/前端统一 `0.0.28`，wheel 携带根许可证 |
 
 ## 当前产品能力
 
@@ -72,8 +74,9 @@
 
 ## 2026-08-19 当前验证基线
 
-Backend 数字基于 `c214d28` 提交前的等价暂存内容实际复跑；提交只记录了该已验证内容。
-Frontend lint/typecheck/build 在同一内容上复跑，Vitest 沿用 2026-08-18 的已验证结果：
+Backend 全量数字基于 `c214d28` 提交前的等价暂存内容实际复跑；版本/许可证提交
+`8a6ff2e` 另行通过全量静态检查、版本定向测试、前端构建与 wheel 元数据验证。
+Vitest 沿用 2026-08-18 的已验证结果：
 
 | 验证 | 结果 | 备注 |
 |---|---|---|
@@ -87,6 +90,8 @@ Frontend lint/typecheck/build 在同一内容上复跑，Vitest 沿用 2026-08-1
 | Frontend typecheck | **PASS** | `vue-tsc --noEmit` |
 | Frontend ESLint | **PASS** | `eslint . --max-warnings=0` |
 | Frontend production build | **PASS** | `vite build`；仅既有 mixed dynamic/static import warning |
+| 版本/许可证一致性回归 | **3 passed** | Python、两个 FastAPI、前端 package/lockfile 与根 LICENSE 元数据一致 |
+| Python wheel 构建 | **PASS** | `pi_agent_core_py-0.0.28-py3-none-any.whl`；METADATA 与归档内 LICENSE 均已核验 |
 | B7 定向回归 | **248/248 passed** | SQLite Store lifecycle/open failure |
 | Keyring 定向回归 | **94/94 passed** | Runtime、launcher 与 restart 范围 |
 | 真实 Windows Keyring 探针 | **write/read = true；cleanup = true** | 随机非用户值，执行后删除 |
@@ -126,21 +131,18 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 ### 工程债务
 
-- 包版本 `0.0.21`、前端版本 `0.0.20` 与最新 tag `v0.0.27` 未统一
-- 根目录缺少实际 `LICENSE` 文件，虽然 `pyproject.toml` 声明 MIT
 - 当前无 Git remote；tag/push 需要先决定版本并配置 remote
 - 全量 Backend 有 58 条 warning，主要是 Starlette/httpx deprecation 和错误的同步测试 `asyncio` marker
 - 本机默认 pytest temp/cache 目录存在 ACL 限制；当前开发验证固定使用仓库内 `--basetemp` 并关闭 cacheprovider，避免把环境错误误判为代码失败
 
 ## 当前阻塞项
 
-无功能实现阻塞。发布动作存在三个前置条件：统一版本元数据、补齐 `LICENSE`、配置 Git remote。
+无功能实现阻塞。版本元数据和 `LICENSE` 发布门已关闭；正式 release 仍需复跑 Browser E2E / GLM smoke、决定 tag 名并在需要 push 时配置 Git remote。
 
 ## 建议下一步
 
-1. 先处理 release hygiene：统一版本并补 `LICENSE`。
-2. 再对新提交复跑完整 Browser E2E 与最终 GLM 真实 smoke。
-3. 随后继续 pi-agent 对齐：公开 model、thinking level、streaming message、pending tool calls 等 Agent 状态。
-4. tag/push 仍需单独决定；仓库当前尚无 remote。
+1. 对 `8a6ff2e` 之后的当前提交复跑完整 Browser E2E 与最终 GLM 真实 smoke。
+2. 随后继续 pi-agent 对齐：公开 model、thinking level、streaming message、pending tool calls 等 Agent 状态。
+3. `0.0.28` tag/push 仍需单独决定；仓库当前尚无 remote。
 
 未完成事项的唯一清单见 [`TODO.md`](TODO.md)。使用与架构说明见 [`README.md`](README.md)。
