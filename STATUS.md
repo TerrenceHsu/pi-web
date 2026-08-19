@@ -144,7 +144,7 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 ## 建议下一步
 
-1. 继续 pi-agent 对齐：补齐 ToolResult 图片内容、usage 与动态 added-tool metadata。
+1. 继续 pi-agent 对齐：补齐 ToolResult usage 与动态 added-tool metadata；图片内容按既有决定继续暂缓。
 2. `0.0.28` tag/push 仍需单独决定；仓库当前尚无 remote。
 
 未完成事项的唯一清单见 [`TODO.md`](TODO.md)。使用与架构说明见 [`README.md`](README.md)。

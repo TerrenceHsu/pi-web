@@ -33,7 +33,8 @@
 - [ ] 扩展图片内容块，不再把图片统一降级为 `image_unsupported`（按当前决定暂缓）
 - [x] 增加细粒度 text/thinking/tool-call start/delta/end 流事件：Provider 统一输出带 `content_index` 的完整块生命周期，Agent 维护 partial message 并兼容旧 delta-only / whole-tool-call 流；工具仅在 `toolcall_end` 后进入执行（定向回归 62 passed；全量非网络回归 3655 passed）
 - [x] 补齐 model、thinking level、streaming message、pending tool calls 等公开 Agent 状态（`AgentState`、动态 client model 投影、Web JSON 契约与 reset/error 生命周期均已覆盖；新增 4 项核心契约测试，完整后端 3662 passed）
-- [ ] 对齐 ToolResult 的图片内容、usage 和动态 added-tool metadata
+- [ ] 对齐 ToolResult 的 usage 和动态 added-tool metadata
+- [ ] 扩展 ToolResult 图片内容（随图片内容块继续延期，不进入下一项）
 
 ### 4. P2 — Session、Compaction 与持久化
 
