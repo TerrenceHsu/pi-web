@@ -6,7 +6,7 @@
 
 | 项 | 当前事实 |
 |---|---|
-| 代码基线 | `8a5c569` — `feat(session): add durable operation recovery` |
+| 代码基线 | `0c72679` — `feat(compaction): preserve complete turn semantics` |
 | 分支 | `master` |
 | 最新 release tag | `v0.0.27-secure-credentials` @ `de05c66`；当前代码基线尚未打新 tag |
 | Python / API 版本 | `0.0.28`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
@@ -40,6 +40,7 @@
 | Agent 公开运行时状态 | ✅ 完成 | `848ae1d`；model / thinking level / streaming message / pending tool calls / error message |
 | ToolResult usage 与 deferred-tool metadata | ✅ 完成 | `b6baea8`；事件、LLM 边界、Snapshot、Session/SQLite 与 Web JSON 全链路保留 |
 | Durable operation / recovery | ✅ 完成 | `8a5c569`；append-only operation records、Checkpointer restart recovery、原子文件 generation、JSON journal |
+| Complete-turn Compaction semantics | ✅ 完成 | `0c72679`；完整 turn、token/window 审计、previous-summary envelope、瞬时错误重试 |
 | 全仓 Ruff / strict Mypy / CI 收敛 | ✅ 完成 | Ruff 0；Mypy 114 files / 0 issues；Python CI timeout 30 分钟 |
 | Release metadata 与 MIT License | ✅ 完成 | `8a6ff2e`；Python/API/前端统一 `0.0.28`，wheel 携带根许可证 |
 | 当前发布前浏览器/联网门禁 | ✅ 完成 | `51ce3c7`；Playwright 45/45，DDGS + GLM 真实 smoke 3/3 |
@@ -65,6 +66,7 @@
 - ToolResult 可携带工具自身 usage 与 `added_tool_names`；usage 不并入主 LLM 上下文计费，added names 只标记 `Context.tools` 的 provider 加载点且不能由 after hook 伪造
 - SQLite Session 使用 append-only parent-entry tree；命名 lane 持久化 active leaf，支持 branch、fork、append-only label fact 与重启恢复；`messages` 是 active lane 的兼容投影
 - Session lane operation 使用 append-only intent/effect/finish records；`Memory.md` 更新以 immutable generation + 原子 metadata pointer 发布，旧 JSON Session save 使用可修复 torn tail 的 append-only journal
+- Compaction 默认按完整 user→assistant/tool-result turn 切分；token 目标不拆最新 turn，压缩前后 token/window 可审计，旧摘要按 pi-compatible envelope 迭代折叠，瞬时摘要错误可按不可变输入重试
 
 ## 数据与生命周期
 
@@ -82,7 +84,7 @@
 
 ## 2026-08-20 当前验证基线
 
-Backend 全量数字基于 `8a5c569` 等价工作区实际复跑；版本/许可证提交 `8a6ff2e`
+Backend 全量数字基于 `0c72679` 等价工作区实际复跑；版本/许可证提交 `8a6ff2e`
 另行通过 wheel 元数据验证；`51ce3c7` 的等价内容通过完整 Playwright 与最终
 真实网络 smoke：
 
@@ -90,7 +92,8 @@ Backend 全量数字基于 `8a5c569` 等价工作区实际复跑；版本/许可
 |---|---|---|
 | Ruff 全量 | **PASS** | `ruff check src tests`；0 errors |
 | strict Mypy 全量 | **PASS** | `mypy src/pi_agent_core_py`；114 files / 0 issues |
-| Backend CI 全量 + coverage | **3692 passed, 6 skipped, 12 deselected** | `pytest tests -m "not slow" --tb=short -q`；83.70% coverage；513.86s；58 warnings；工作区 `basetemp` + cacheprovider disabled |
+| Backend CI 全量 + coverage | **3698 passed, 6 skipped, 12 deselected** | `pytest tests -m "not slow" --tb=short -q`；83.76% coverage；567.21s；58 warnings；工作区 `basetemp` + cacheprovider disabled |
+| Complete-turn Compaction 定向回归 | **50 passed** | 完整 turn/token target、超预算最新 turn、token/window、previous summary、retry lifecycle、失败不改源消息、Web API 与 durable-operation 邻接回归 |
 | Durable recovery 定向回归 | **PASS** | operation intent/effect/finish、同进程无模型重试、启动前滚、source-leaf conflict 保留消息、文件 pointer rollback、JSON torn-tail / legacy migration |
 | Session tree 定向回归 | **69 passed** | immutable entry/lane、旧库迁移、branch/fork/label/active leaf、重启、Web API、revision sibling 与 trailing suffix |
 | ToolResult metadata 定向回归 | **173 passed** | usage / added names、hook 边界、消息/事件、provider context、Snapshot、Session/SQLite、Web serializer 与旧数据默认值 |
@@ -108,6 +111,7 @@ Backend 全量数字基于 `8a5c569` 等价工作区实际复跑；版本/许可
 | 真实 Windows Keyring 探针 | **write/read = true；cleanup = true** | 随机非用户值，执行后删除 |
 | MCP/DDGS UTF-8 定向回归 | **34 passed, 1 deselected** | 含真实 Python 子进程中文 round-trip |
 | Browser E2E | **45/45 passed** | Chromium；单 worker；`CI=1`；独立端口 8012；2.5m；0 retry / 0 failure |
+| Context Compaction Browser E2E | **1/1 passed** | Chromium；独立端口 8013；沙箱外真实启动浏览器；production build 由 posttest 恢复 |
 
 默认 pytest marker 排除真实 LLM、真实外网 integration 和 Docker；额外门禁还要求
 `PI_RUN_INTEGRATION=1`。因此 Offline Backend 基线不依赖 API Key、DDGS 网络或
@@ -154,7 +158,8 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 ## 建议下一步
 
-1. 继续 pi-agent 对齐：将 compaction 默认边界改为完整 turn，并补齐 token/window、前缀摘要和重试语义。
-2. `0.0.28` tag/push 仍需单独决定；仓库当前尚无 remote。
+1. 清理 Backend 现有 58 条 Starlette/httpx deprecation 与同步测试误用 asyncio marker warning。
+2. Provider 官方 tokenizer 与自动 compaction 仍是可选增强；当前 estimator/manual trigger 契约已经明确。
+3. `0.0.28` tag/push 仍需单独决定；仓库当前尚无 remote。
 
 未完成事项的唯一清单见 [`TODO.md`](TODO.md)。使用与架构说明见 [`README.md`](README.md)。

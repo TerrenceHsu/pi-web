@@ -40,7 +40,7 @@
 
 - [x] 评估并迁移 append-only 会话树或 lane-based Session；支持 branch、fork、label 和 active leaf（完成：独立 immutable parent-entry tree + 命名 lane leaf；旧 `messages` 保留为 active lane 兼容投影；旧线性库幂等回填 `main`；Regenerate 创建 sibling branch 并兼容 trailing ToolResult suffix；Core/Web/前端 API、设计文档与重启回归齐备；提交 `43c1d0a`；完整后端 3681 passed / 83.84%，前端 399/399）
 - [x] 引入 durable operation/recovery，避免整份 JSON 覆盖和非原子发布（完成：SQLite lane operation 使用 append-only intent/effect/finish records；Checkpointer 固定 immutable source leaf/hash，Memory 以 immutable generation + 原子 metadata pointer 发布，lane reset 与 completed 同事务；启动/同进程重试可无 LLM 前滚，leaf 变化时保留消息并标记 conflict；旧 `JsonFileSessionStore` 迁移为 append-only journal + torn-tail recovery；完整后端 3692 passed / 83.70%，前端 399/399；提交 `8a5c569`）
-- [ ] 将 compaction 默认边界改为完整 turn，并补齐 token/window、前缀摘要和重试语义
+- [x] 将 compaction 默认边界改为完整 turn，并补齐 token/window、前缀摘要和重试语义（完成：默认及 token 目标均只保留完整 user→assistant/tool-result turn，最新超预算 turn 不拆；Core/Web 记录 canonical preflight 的压缩前后 token、context window 与 output reserve；摘要以 pi-compatible `<summary>` envelope 注入并显式折叠 previous summary；瞬时网络/限流错误按不可变输入重试，鉴权/协议/类型/取消不重试，失败不改源消息；提交 `0c72679`；完整后端 3698 passed / 83.76%，前端 399/399，定向 Playwright 1/1）
 
 ## P0 — Release 与文档卫生
 
@@ -91,5 +91,6 @@
 | ToolResult ordering + MCP UTF-8 | ✅ `e7bf8f3` |
 | Agent semantics + controls + stream lifecycle | ✅ `c214d28` |
 | ToolResult usage + deferred-tool metadata | ✅ `b6baea8` |
+| Complete-turn Compaction semantics | ✅ `0c72679` |
 
 当前代码基线的验证结果见 [`STATUS.md`](STATUS.md#2026-08-20-当前验证基线)。

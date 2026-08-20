@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Complete-turn compaction semantics（2026-08-20）
+
+- `CompactionConfig` 默认边界从 message 改为完整 turn；固定 turn 数与 `keep_recent_tokens` 均只在 user 边界切分，最新 turn 即使超目标也不会拆散 tool-call/tool-result
+- compaction 与 preflight 共用 `mixed-char-v1` estimator；Core/Web 返回压缩前后 message/input/projected tokens、context window、output reserve 与比例，Web 同时返回 canonical `budget_before` / `budget`
+- SummaryMessage 以 pi-compatible `<summary>` envelope 注入 Provider；连续 compaction 通过 `previous_summary` 折叠旧摘要，不重复卷入展示前缀
+- 新增显式 `CompactionRetryPolicy` 与 retry lifecycle callback；仅重试 timeout/connection/rate-limit/stream 瞬时错误，每次使用同一 prepared input 的新副本，失败或耗尽不改 Agent/Session 源消息
+- 验证：完整后端 3698 passed、6 skipped、12 deselected、coverage 83.76%；Ruff 0、strict Mypy 114 files / 0 issues；前端 399/399、lint/typecheck/build 通过；Context Compaction Playwright 1/1 通过
+
 ### Durable operation / recovery（2026-08-20）
 
 - SQLite Session 新增 lane-scoped durable operation identity 与 append-only `operation_started` / `effect_committed` / `operation_finished` records；相同 intent 重试复用，lane reset 与 completed 在同一事务提交
