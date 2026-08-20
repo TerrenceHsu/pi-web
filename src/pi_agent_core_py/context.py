@@ -50,6 +50,13 @@ TransformContextFn = Callable[
 ]
 
 
+SUMMARY_CONTEXT_PREFIX = (
+    "The conversation history before this point was compacted into the "
+    "following summary:\n\n<summary>\n\n"
+)
+SUMMARY_CONTEXT_SUFFIX = "\n\n</summary>"
+
+
 async def transform_context(messages: list[AgentMessage]) -> list[AgentMessage]:
     """默认上下文转换：原样返回。
 
@@ -77,7 +84,7 @@ def convert_to_llm(messages: list[AgentMessage]) -> list[LLMMessage]:
       - CustomMessage     → 默认过滤掉（不发给 LLM）
 
     Step 15：
-      - SummaryMessage    → LLMUserMessage（"[Conversation Summary]\\n..."）
+      - SummaryMessage    → LLMUserMessage（pi-compatible `<summary>` envelope）
         让 LLM 看到摘要，但不引入新的 LLM role——保持 LLMMessage 模型不变。
 
     本函数是同步的——纯映射，无 I/O。
@@ -123,12 +130,13 @@ def convert_to_llm(messages: list[AgentMessage]) -> list[LLMMessage]:
                 timestamp=m.timestamp,
             ))
         elif isinstance(m, SummaryMessage):
-            # Step 15：摘要转成 LLMUserMessage——加 "[Conversation Summary]" 前缀
+            # 摘要作为带稳定语义前缀的 user context 注入。正文仍单独持久化，
+            # 避免多次 compaction 时把展示前缀重复卷入摘要。
             # 不引入新 LLM role；保持 LLMMessage 模型不变
             text = "\n".join(c.text for c in m.content)
             out.append(LLMUserMessage(
                 content=[TextContent(
-                    text=f"[Conversation Summary]\n{text}"
+                    text=f"{SUMMARY_CONTEXT_PREFIX}{text}{SUMMARY_CONTEXT_SUFFIX}"
                 )],
                 timestamp=m.created_at,
             ))
@@ -198,6 +206,8 @@ def _render_file_block_to_text(block: FileBlock) -> str:
 
 __all__ = [
     "TransformContextFn",
+    "SUMMARY_CONTEXT_PREFIX",
+    "SUMMARY_CONTEXT_SUFFIX",
     "transform_context",
     "convert_to_llm",
 ]

@@ -48,6 +48,11 @@ def test_context_budget_unknown_model_and_turn_safe_compaction(tmp_path) -> None
         body = compacted.json()
         assert body["compacted_message_count"] == 4
         assert body["retained_message_count"] == 2
+        assert body["budget_before"]["estimate"]["estimated_input_tokens"] > 0
+        assert body["token_stats"]["estimated_input_tokens_before"] == (
+            body["budget_before"]["estimate"]["estimated_input_tokens"]
+        )
+        assert body["token_stats"]["message_tokens_after"] > 0
 
         messages = client.get(
             f"/api/messages?session_id={session_id}"

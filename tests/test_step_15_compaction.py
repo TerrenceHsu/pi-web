@@ -122,7 +122,8 @@ def test_convert_to_llm_summary_message():
     # 转成 LLMUserMessage
     assert llm_msgs[0].role == "user"
     text = llm_msgs[0].content[0].text
-    assert "[Conversation Summary]" in text
+    assert text.startswith("The conversation history before this point was compacted")
+    assert "<summary>" in text
     assert "历史摘要内容" in text
 
 
@@ -184,6 +185,7 @@ async def test_compact_messages_normal():
 async def test_compact_messages_keep_zero():
     msgs = _make_messages(5)
     config = CompactionConfig(
+        boundary_mode="message",
         keep_last_n_messages=0,
         min_messages_to_compact=3,
     )
@@ -645,7 +647,11 @@ async def test_compaction_retains_recent_in_order():
     for i in range(10):
         msgs.append(UserMessage(content=[TextContent(text=f"u{i}")]))
 
-    config = CompactionConfig(keep_last_n_messages=3, min_messages_to_compact=5)
+    config = CompactionConfig(
+        boundary_mode="message",
+        keep_last_n_messages=3,
+        min_messages_to_compact=5,
+    )
     result = await compact_messages(msgs, config=config)
 
     retained_texts = [m["content"][0]["text"] for m in result.retained_messages]

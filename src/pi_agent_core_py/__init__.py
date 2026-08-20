@@ -28,7 +28,12 @@ from .compaction import (
     CompactionConfig,
     CompactionInput,
     CompactionResult,
+    CompactionRetryCallback,
+    CompactionRetryEvent,
+    CompactionRetryPolicy,
+    CompactionRetryPredicate,
     CompactionSource,
+    CompactionTokenStats,
     SummaryGenerator,
     compact_messages,
     create_branch_summary,
@@ -46,6 +51,7 @@ from .context_budget import (
     ContextEstimate,
     classify_context_budget,
     estimate_context,
+    estimate_message_tokens,
     estimate_text_tokens,
 )
 
@@ -406,6 +412,7 @@ __all__ = [
     "ContextEstimate",
     "classify_context_budget",
     "estimate_context",
+    "estimate_message_tokens",
     "estimate_text_tokens",
     # hooks
     "BeforeToolCallFn",
@@ -502,8 +509,13 @@ __all__ = [
     # compaction (Step 15)——SummaryMessage / SummaryType 已在 messages 段导出，不重复
     "CompactionConfig",
     "CompactionInput",
+    "CompactionRetryCallback",
+    "CompactionRetryEvent",
+    "CompactionRetryPolicy",
+    "CompactionRetryPredicate",
     "CompactionResult",
     "CompactionSource",
+    "CompactionTokenStats",
     "BranchSummary",
     "BranchSummaryConfig",
     "SummaryGenerator",

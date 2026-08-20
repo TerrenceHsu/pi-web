@@ -7,7 +7,7 @@
 Step 15 新增：
 - `SummaryMessage`：compaction 生成的上下文摘要消息
 - `Message` / `AgentMessage` union 加入 `SummaryMessage`
-- `convert_to_llm` 把 SummaryMessage → LLMUserMessage("[Conversation Summary]\n...")
+- `convert_to_llm` 把 SummaryMessage → 带 `<summary>` envelope 的 LLMUserMessage
 
 P0-3 新增：
 - `FileBlock`：UserMessage.content 里的文件元信息块（不发全文）

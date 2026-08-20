@@ -119,6 +119,17 @@ def _with_margin(value: int) -> int:
     return math.ceil(value * SAFETY_MARGIN)
 
 
+def estimate_message_tokens(messages: Sequence[LLMMessage]) -> int:
+    """Estimate the provider-visible message portion of a context.
+
+    Keeping this calculation public lets compaction use the exact same
+    conservative estimator as preflight instead of maintaining a second token
+    heuristic.
+    """
+    raw = sum(_compact_json_tokens(_message_payload(message)) + 4 for message in messages)
+    return _with_margin(raw)
+
+
 def classify_context_budget(
     input_ratio: float | None,
     projected_ratio: float | None,
@@ -145,8 +156,7 @@ def estimate_context(
     reserved_output_tokens: int | None = None,
 ) -> ContextEstimate:
     system_tokens = _with_margin(estimate_text_tokens(system_prompt) + 4)
-    message_raw = sum(_compact_json_tokens(_message_payload(message)) + 4 for message in messages)
-    message_tokens = _with_margin(message_raw)
+    message_tokens = estimate_message_tokens(messages)
     tool_raw = sum(
         _compact_json_tokens({
             "name": tool.name,
@@ -190,5 +200,6 @@ __all__ = [
     "SAFETY_MARGIN",
     "classify_context_budget",
     "estimate_context",
+    "estimate_message_tokens",
     "estimate_text_tokens",
 ]

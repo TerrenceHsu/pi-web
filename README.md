@@ -221,6 +221,10 @@ D:\miniconda\envs\pipy\python.exe scripts/dev_web_app.py
 
 所有工作区 API 均受登录网关保护；未认证 HTTP 返回 401，WebSocket 关闭码为 4401。
 
+Compaction 默认只在完整 turn 边界切分，使用与 preflight 相同的 token estimator，
+并支持前序摘要折叠及瞬时 Provider 错误的显式重试策略。契约见
+[`docs/COMPACTION_SEMANTICS.md`](docs/COMPACTION_SEMANTICS.md)。
+
 ## 测试
 
 当前代码基线的准确数字见 [`STATUS.md`](STATUS.md#2026-08-20-当前验证基线)。2026-08-20 校准结果：Backend **3665 passed / 6 skipped / 12 deselected**、coverage **83.78%**，Ruff/Mypy 全绿；Frontend lint/typecheck/build 全绿，Vitest **394/394**；完整 Playwright **45/45** 与真实 DDGS + GLM **3/3** 沿用最近发布前门禁结果。

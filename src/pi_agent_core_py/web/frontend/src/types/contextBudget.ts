@@ -38,5 +38,22 @@ export interface ContextCompactionResponse {
   compacted_message_count: number
   retained_message_count: number
   snapshots_retained: number
+  token_stats: {
+    message_tokens_before: number
+    message_tokens_after: number
+    estimated_input_tokens_before: number
+    estimated_input_tokens_after: number
+    projected_tokens_before: number
+    projected_tokens_after: number
+    context_window: number | null
+    reserved_output_tokens: number
+    input_ratio_before: number | null
+    input_ratio_after: number | null
+    projected_ratio_before: number | null
+    projected_ratio_after: number | null
+    approximate: boolean
+    estimator_version: string
+  } | null
+  budget_before: ContextBudgetResponse
   budget: ContextBudgetResponse
 }

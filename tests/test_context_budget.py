@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from pi_agent_core_py.compaction import CompactionConfig, compact_messages
-from pi_agent_core_py.context import convert_to_llm
+from pi_agent_core_py.compaction import (
+    CompactionConfig,
+    CompactionRetryEvent,
+    CompactionRetryPolicy,
+    compact_messages,
+)
+from pi_agent_core_py.context import SUMMARY_CONTEXT_PREFIX, convert_to_llm
 from pi_agent_core_py.context_budget import (
     classify_context_budget,
     estimate_context,
@@ -12,10 +17,16 @@ from pi_agent_core_py.context_budget import (
 from pi_agent_core_py.messages import (
     AssistantMessage,
     FileBlock,
+    SummaryMessage,
     TextContent,
     ToolCall,
     ToolResultMessage,
     UserMessage,
+)
+from pi_agent_core_py.providers.errors import (
+    ProviderAuthenticationError,
+    ProviderRateLimitError,
+    ProviderStreamError,
 )
 from pi_agent_core_py.tools import ToolDef
 
@@ -131,7 +142,6 @@ async def test_turn_safe_compaction_never_splits_tool_call_results() -> None:
         messages,
         config=CompactionConfig(
             min_messages_to_compact=2,
-            boundary_mode="turn",
             keep_last_n_turns=1,
         ),
     )
@@ -147,4 +157,182 @@ async def test_turn_safe_compaction_never_splits_tool_call_results() -> None:
         messages[-1],
     ])
     assert converted[0].role == "user"
-    assert converted[0].content[0].text.startswith("[Conversation Summary]")
+    assert converted[0].content[0].text.startswith(SUMMARY_CONTEXT_PREFIX)
+    assert converted[0].content[0].text.endswith("</summary>")
+
+
+@pytest.mark.asyncio
+async def test_token_target_keeps_latest_oversized_turn_complete() -> None:
+    messages = [
+        UserMessage(content=[TextContent(text="old")]),
+        AssistantMessage(
+            content=[TextContent(text="old answer")],
+            api="fake", provider="fake", model="fake",
+        ),
+        UserMessage(content=[TextContent(text="latest request " * 200)]),
+        AssistantMessage(
+            content=[ToolCall(id="call-1", name="lookup")],
+            api="fake", provider="fake", model="fake", stop_reason="tool_use",
+        ),
+        ToolResultMessage(
+            tool_call_id="call-1",
+            name="lookup",
+            content=[TextContent(text="result " * 200)],
+        ),
+        AssistantMessage(
+            content=[TextContent(text="latest complete")],
+            api="fake", provider="fake", model="fake",
+        ),
+    ]
+    result = await compact_messages(
+        messages,
+        config=CompactionConfig(
+            min_messages_to_compact=2,
+            keep_recent_tokens=1,
+        ),
+    )
+    assert result.applied is True
+    assert [item["role"] for item in result.retained_messages] == [
+        "user", "assistant", "toolResult", "assistant",
+    ]
+    assert result.source is not None
+    assert result.source.retained_turn_count == 1
+    assert result.source.compacted_turn_count == 1
+
+
+@pytest.mark.asyncio
+async def test_compaction_records_canonical_token_window_before_and_after() -> None:
+    messages = [
+        item
+        for index in range(8)
+        for item in (
+            UserMessage(content=[TextContent(text=f"request {index} " * 80)]),
+            AssistantMessage(
+                content=[TextContent(text=f"answer {index} " * 80)],
+                api="fake", provider="fake", model="fake",
+            ),
+        )
+    ]
+    estimate = estimate_context(
+        system_prompt="system prompt",
+        messages=convert_to_llm(messages),
+        context_window=16_000,
+        reserved_output_tokens=1_024,
+    )
+    result = await compact_messages(
+        messages,
+        config=CompactionConfig(min_messages_to_compact=2, keep_last_n_turns=1),
+        context_estimate=estimate,
+    )
+    assert result.token_stats is not None
+    assert result.token_stats.estimated_input_tokens_before == estimate.estimated_input_tokens
+    assert result.token_stats.projected_tokens_before == estimate.projected_tokens
+    assert result.token_stats.context_window == 16_000
+    assert result.token_stats.reserved_output_tokens == 1_024
+    assert (
+        result.token_stats.estimated_input_tokens_after
+        < result.token_stats.estimated_input_tokens_before
+    )
+
+
+@pytest.mark.asyncio
+async def test_previous_summary_is_folded_once_into_next_compaction() -> None:
+    messages = [
+        SummaryMessage(content=[TextContent(text="prior durable facts")]),
+        UserMessage(content=[TextContent(text="older request")]),
+        AssistantMessage(
+            content=[TextContent(text="older answer")],
+            api="fake", provider="fake", model="fake",
+        ),
+        UserMessage(content=[TextContent(text="latest request")]),
+        AssistantMessage(
+            content=[TextContent(text="latest answer")],
+            api="fake", provider="fake", model="fake",
+        ),
+    ]
+    result = await compact_messages(
+        messages,
+        config=CompactionConfig(min_messages_to_compact=2, keep_last_n_turns=1),
+    )
+    assert result.summary_message is not None
+    text = result.summary_message.content[0].text
+    assert "## Prior Summary" in text
+    assert text.count("prior durable facts") == 1
+    assert result.summary_message.metadata["previous_summary_included"] is True
+
+
+@pytest.mark.asyncio
+async def test_retry_reuses_immutable_input_and_emits_lifecycle() -> None:
+    calls: list[list[dict[str, object]]] = []
+    events: list[CompactionRetryEvent] = []
+
+    async def generator(value):
+        calls.append(value.model_dump(mode="python")["messages_to_compact"])
+        if len(calls) == 1:
+            value.messages_to_compact.clear()
+            raise ProviderRateLimitError("temporary")
+        return "recovered summary"
+
+    result = await compact_messages(
+        [
+            UserMessage(content=[TextContent(text=f"turn {index}")])
+            for index in range(6)
+        ],
+        config=CompactionConfig(min_messages_to_compact=2, keep_last_n_turns=1),
+        summary_generator=generator,
+        retry_policy=CompactionRetryPolicy(max_attempts=2, initial_delay_ms=0),
+        retry_callback=events.append,
+    )
+    assert result.attempts == 2
+    assert len(calls[0]) == len(calls[1]) == 5
+    assert [event.phase for event in events] == [
+        "retry_scheduled", "retry_attempt_start", "retry_finished",
+    ]
+    assert events[-1].succeeded is True
+
+
+@pytest.mark.asyncio
+async def test_non_transient_summary_error_is_not_retried() -> None:
+    calls = 0
+
+    def generator(_value):
+        nonlocal calls
+        calls += 1
+        raise ProviderAuthenticationError("invalid credential")
+
+    with pytest.raises(ProviderAuthenticationError):
+        await compact_messages(
+            [UserMessage(content=[TextContent(text=str(index))]) for index in range(6)],
+            config=CompactionConfig(min_messages_to_compact=2, keep_last_n_turns=1),
+            summary_generator=generator,
+            retry_policy=CompactionRetryPolicy(max_attempts=3, initial_delay_ms=0),
+        )
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_exhaustion_keeps_source_unchanged() -> None:
+    messages = [
+        UserMessage(content=[TextContent(text=f"turn {index}")])
+        for index in range(6)
+    ]
+    source_before = [message.model_dump(mode="json") for message in messages]
+    events: list[CompactionRetryEvent] = []
+
+    def generator(value):
+        value.messages_to_compact.clear()
+        raise ProviderStreamError("connection reset")
+
+    with pytest.raises(ProviderStreamError):
+        await compact_messages(
+            messages,
+            config=CompactionConfig(min_messages_to_compact=2, keep_last_n_turns=1),
+            summary_generator=generator,
+            retry_policy=CompactionRetryPolicy(max_attempts=2, initial_delay_ms=0),
+            retry_callback=events.append,
+        )
+    assert [message.model_dump(mode="json") for message in messages] == source_before
+    assert [event.phase for event in events] == [
+        "retry_scheduled", "retry_attempt_start", "retry_finished",
+    ]
+    assert events[-1].succeeded is False

@@ -1219,7 +1219,7 @@ def create_app(
     app.state.web_tool_approval_handler = _web_tool_approval_handler
     app.state.previous_tool_approval_handler = previous_tool_approval_handler
 
-    from ..context_budget import estimate_context
+    from ..context_budget import ContextEstimate, estimate_context
     from ..loop import ModelCallDecision
 
     previous_before_model_call = harness.agent.before_model_call
@@ -2171,13 +2171,13 @@ def create_app(
             }
             return None
 
-    async def _estimate_session_context_budget(
+    async def _estimate_session_context_budget_details(
         *,
         session_id: str,
         draft_text: str = "",
         file_ids: list[str] | None = None,
         skill_selection: SkillSelection | None = None,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], ContextEstimate]:
         """Estimate the canonical Provider input without reading a secret."""
         if state.running or harness.context.phase != "idle":
             raise HTTPException(
@@ -2268,13 +2268,29 @@ def create_app(
                 capabilities.max_output_tokens if capabilities else None
             ),
         )
-        return {
+        payload = {
             "session_id": session_id,
             "provider_id": provider_id,
             "model_id": model_id,
             "capability_source": capabilities.source if capabilities else "unknown",
             "estimate": estimate.to_dict(),
         }
+        return payload, estimate
+
+    async def _estimate_session_context_budget(
+        *,
+        session_id: str,
+        draft_text: str = "",
+        file_ids: list[str] | None = None,
+        skill_selection: SkillSelection | None = None,
+    ) -> dict[str, Any]:
+        payload, _ = await _estimate_session_context_budget_details(
+            session_id=session_id,
+            draft_text=draft_text,
+            file_ids=file_ids,
+            skill_selection=skill_selection,
+        )
+        return payload
 
     async def _execute_prompt(
         validated: _PromptValidated,
@@ -3790,9 +3806,22 @@ def create_app(
                 status_code=422,
                 detail="keep_last_n_turns must be between 0 and 20",
             )
+        keep_tokens = (payload or {}).get("keep_recent_tokens")
+        if keep_tokens is not None and (
+            not isinstance(keep_tokens, int) or isinstance(keep_tokens, bool)
+        ):
+            raise HTTPException(status_code=422, detail="keep_recent_tokens must be an integer")
+        if keep_tokens is not None and (keep_tokens < 0 or keep_tokens > 10_000_000):
+            raise HTTPException(
+                status_code=422,
+                detail="keep_recent_tokens must be between 0 and 10000000",
+            )
 
         # Reserve the same single-writer slot as prompt validation. This prevents
         # a prompt from starting between the idle check and SQLite replacement.
+        budget_before, context_estimate = await _estimate_session_context_budget_details(
+            session_id=sid,
+        )
         _ensure_idle()
         state.running = True
         result = None
@@ -3821,9 +3850,11 @@ def create_app(
                     min_messages_to_compact=2,
                     boundary_mode="turn",
                     keep_last_n_turns=keep_turns,
+                    keep_recent_tokens=keep_tokens,
                     max_summary_chars=4000,
                     metadata={"trigger": "user"},
                 ),
+                context_estimate=context_estimate,
             )
             if not result.applied or result.summary_message is None:
                 raise HTTPException(
@@ -3851,6 +3882,12 @@ def create_app(
             "compacted_message_count": result.source.compacted_message_count,
             "retained_message_count": result.source.retained_message_count,
             "snapshots_retained": len(result.source.source_snapshot_ids),
+            "token_stats": (
+                result.token_stats.model_dump(mode="json")
+                if result.token_stats is not None
+                else None
+            ),
+            "budget_before": budget_before,
             "budget": budget,
         }
 

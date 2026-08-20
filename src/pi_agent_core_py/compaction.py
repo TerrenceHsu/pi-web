@@ -1,7 +1,7 @@
 """Compaction / Branch Summary（Step 15）。
 
-Compaction 把较长的历史 messages 压缩成 SummaryMessage，然后保留最近若干条原始
-messages。BranchSummary 基于当前 session / snapshots 生成分支级旁路摘要。
+Compaction 把较长的历史 messages 压缩成 SummaryMessage，然后默认保留最近若干个
+完整 turn。BranchSummary 基于当前 session / snapshots 生成分支级旁路摘要。
 
 ```text
 Compaction：
@@ -22,25 +22,33 @@ BranchSummary：
 - BranchSummary 是**旁路记录**，不改变 messages
 - 默认摘要器是**确定性 extractive summary**——不依赖外部 LLM / 联网
 - 可通过 summary_generator 注入更强摘要器
+- token 目标只决定保留多少个完整 turn，绝不拆散 tool-call / tool-result
+- 连续 compaction 把前一份摘要作为显式 previous_summary 折叠
+- 可选重试只覆盖瞬时错误，且每次尝试使用同一份准备输入
 
 Step 15 **不做**：Vector Memory / RAG / Long-term Memory / 自动后台压缩 / 数据库。
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, Field
 
+from .context import convert_to_llm
+from .context_budget import ContextEstimate, estimate_message_tokens
 from .messages import (
+    AgentMessage,
     Message,
     SummaryMessage,
     TextContent,
 )
+from .providers.errors import ProviderRateLimitError, ProviderStreamError
 from .snapshot import RequestSnapshot
 
 
@@ -57,7 +65,9 @@ class CompactionConfig(BaseModel):
     """Compaction 行为配置。
 
     字段：
-      keep_last_n_messages    compact 后保留最近多少条原始 messages
+      boundary_mode           默认 turn；message 仅作为显式旧兼容模式
+      keep_last_n_turns       turn 模式按数量保留最近完整 turn
+      keep_recent_tokens      可选 token 目标；设置后优先于 turn 数量
       min_messages_to_compact messages 总数小于该值时不执行 compaction
       include_tool_results    摘要文本是否包含 ToolResultMessage 内容
       include_snapshot_ids    SummaryMessage.metadata 是否记录 snapshot ids
@@ -66,8 +76,11 @@ class CompactionConfig(BaseModel):
       metadata                配置级 metadata
     """
     keep_last_n_messages: int = 8
-    boundary_mode: Literal["message", "turn"] = "message"
+    boundary_mode: Literal["message", "turn"] = "turn"
     keep_last_n_turns: int = 4
+    keep_recent_tokens: int | None = None
+    context_window: int | None = None
+    reserved_output_tokens: int = 0
     min_messages_to_compact: int = 12
     include_tool_results: bool = True
     include_snapshot_ids: bool = True
@@ -89,6 +102,8 @@ class CompactionSource(BaseModel):
 
     source_snapshot_ids: list[str] = Field(default_factory=list)
     source_turn_count: int = 0
+    retained_turn_count: int = 0
+    compacted_turn_count: int = 0
 
     started_at: int = Field(default_factory=_now_ms)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -111,9 +126,47 @@ class CompactionInput(BaseModel):
     """
     messages_to_compact: list[dict[str, Any]] = Field(default_factory=list)
     retained_messages: list[dict[str, Any]] = Field(default_factory=list)
+    previous_summary: str | None = None
     snapshots: list[dict[str, Any]] = Field(default_factory=list)
     config: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CompactionTokenStats(BaseModel):
+    """Token/window audit data produced with the shared preflight estimator."""
+
+    message_tokens_before: int
+    message_tokens_after: int
+    estimated_input_tokens_before: int
+    estimated_input_tokens_after: int
+    projected_tokens_before: int
+    projected_tokens_after: int
+    context_window: int | None = None
+    reserved_output_tokens: int = 0
+    input_ratio_before: float | None = None
+    input_ratio_after: float | None = None
+    projected_ratio_before: float | None = None
+    projected_ratio_after: float | None = None
+    approximate: bool = True
+    estimator_version: str = "mixed-char-v1"
+
+
+class CompactionRetryPolicy(BaseModel):
+    """Retry transient summary-generation failures without changing input."""
+
+    max_attempts: int = 1
+    initial_delay_ms: int = 250
+    backoff_multiplier: float = 2.0
+    max_delay_ms: int = 4_000
+
+
+class CompactionRetryEvent(BaseModel):
+    phase: Literal["retry_scheduled", "retry_attempt_start", "retry_finished"]
+    attempt: int
+    max_attempts: int
+    delay_ms: int = 0
+    error_type: str | None = None
+    succeeded: bool | None = None
 
 
 class CompactionResult(BaseModel):
@@ -137,6 +190,8 @@ class CompactionResult(BaseModel):
     retained_messages: list[dict[str, Any]] = Field(default_factory=list)
     new_messages: list[dict[str, Any]] = Field(default_factory=list)
     source: CompactionSource | None = None
+    token_stats: CompactionTokenStats | None = None
+    attempts: int = 0
     created_at: int = Field(default_factory=_now_ms)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -157,6 +212,11 @@ SummaryGenerator = Callable[
     [CompactionInput],
     str | Awaitable[str],
 ]
+CompactionRetryCallback = Callable[
+    [CompactionRetryEvent],
+    None | Awaitable[None],
+]
+CompactionRetryPredicate = Callable[[BaseException], bool]
 
 
 # ============================================================================
@@ -237,7 +297,7 @@ def default_summary_generator(input: CompactionInput) -> str:
             assistant_outs.append(text)
         elif role == "toolResult":
             tool_results.append(text)
-        elif role == "summary":
+        elif role == "summary" and input.previous_summary is None:
             summary_texts.append(text)
 
     sections: list[str] = ["# Conversation Summary"]
@@ -247,9 +307,12 @@ def default_summary_generator(input: CompactionInput) -> str:
     sections.append(f"- Compacted messages: {len(compacted)}")
     sections.append(f"- Retained messages: {retained_count}")
 
-    if summary_texts:
+    prior_summary = input.previous_summary
+    if prior_summary or summary_texts:
         sections.append("")
         sections.append("## Prior Summary")
+        if prior_summary:
+            sections.append(prior_summary)
         for s in summary_texts:
             sections.append(f"- {s}")
 
@@ -286,12 +349,218 @@ def default_summary_generator(input: CompactionInput) -> str:
 # ============================================================================
 
 
+def _turn_count(messages: list[Message]) -> int:
+    return sum(1 for message in messages if getattr(message, "role", None) == "user")
+
+
+def _message_token_count(messages: list[Message]) -> int:
+    agent_messages = cast(list[AgentMessage], list(messages))
+    return estimate_message_tokens(convert_to_llm(agent_messages))
+
+
+def _split_at_complete_turn(
+    messages: list[Message],
+    config: CompactionConfig,
+) -> tuple[list[Message], list[Message]]:
+    user_boundaries = [
+        index
+        for index, message in enumerate(messages)
+        if getattr(message, "role", None) == "user"
+    ]
+    if not user_boundaries:
+        return [], list(messages)
+
+    keep_tokens = config.keep_recent_tokens
+    if keep_tokens is not None:
+        if keep_tokens == 0:
+            return list(messages), []
+        retain_from = user_boundaries[-1]
+        retained_tokens = _message_token_count(list(messages[retain_from:]))
+        # Always keep the latest complete turn, even when that single turn is
+        # larger than the target. Splitting it can orphan tool-call/results.
+        for position in range(len(user_boundaries) - 2, -1, -1):
+            boundary = user_boundaries[position]
+            turn_end = user_boundaries[position + 1]
+            turn_tokens = _message_token_count(list(messages[boundary:turn_end]))
+            if retained_tokens + turn_tokens > keep_tokens:
+                break
+            retain_from = boundary
+            retained_tokens += turn_tokens
+        if retain_from == user_boundaries[0]:
+            return [], list(messages)
+        return list(messages[:retain_from]), list(messages[retain_from:])
+
+    keep_turns = config.keep_last_n_turns
+    if keep_turns == 0:
+        return list(messages), []
+    if len(user_boundaries) <= keep_turns:
+        return [], list(messages)
+    retain_from = user_boundaries[-keep_turns]
+    return list(messages[:retain_from]), list(messages[retain_from:])
+
+
+def _ratio(tokens: int, context_window: int | None) -> float | None:
+    if context_window is None or context_window <= 0:
+        return None
+    return tokens / context_window
+
+
+def _token_stats(
+    before: list[Message],
+    after: list[Message],
+    config: CompactionConfig,
+    context_estimate: ContextEstimate | None,
+) -> CompactionTokenStats:
+    message_before = _message_token_count(before)
+    message_after = _message_token_count(after)
+    if context_estimate is not None:
+        fixed_tokens = max(
+            0,
+            context_estimate.estimated_input_tokens - context_estimate.message_tokens,
+        )
+        estimated_before = context_estimate.estimated_input_tokens
+        projected_before = context_estimate.projected_tokens
+        reserve = context_estimate.reserved_output_tokens
+        context_window = context_estimate.context_window
+        approximate = context_estimate.approximate
+        estimator_version = context_estimate.estimator_version
+    else:
+        fixed_tokens = 0
+        estimated_before = message_before
+        reserve = config.reserved_output_tokens
+        projected_before = estimated_before + reserve
+        context_window = config.context_window
+        approximate = True
+        estimator_version = "mixed-char-v1"
+    estimated_after = fixed_tokens + message_after
+    projected_after = estimated_after + reserve
+    return CompactionTokenStats(
+        message_tokens_before=message_before,
+        message_tokens_after=message_after,
+        estimated_input_tokens_before=estimated_before,
+        estimated_input_tokens_after=estimated_after,
+        projected_tokens_before=projected_before,
+        projected_tokens_after=projected_after,
+        context_window=context_window,
+        reserved_output_tokens=reserve,
+        input_ratio_before=_ratio(estimated_before, context_window),
+        input_ratio_after=_ratio(estimated_after, context_window),
+        projected_ratio_before=_ratio(projected_before, context_window),
+        projected_ratio_after=_ratio(projected_after, context_window),
+        approximate=approximate,
+        estimator_version=estimator_version,
+    )
+
+
+def _default_retry_predicate(error: BaseException) -> bool:
+    return isinstance(
+        error,
+        (TimeoutError, ConnectionError, ProviderRateLimitError, ProviderStreamError),
+    )
+
+
+async def _notify_retry(
+    callback: CompactionRetryCallback | None,
+    event: CompactionRetryEvent,
+) -> None:
+    if callback is None:
+        return
+    result = callback(event)
+    if inspect.isawaitable(result):
+        await result
+
+
+async def _generate_summary_with_retry(
+    generator_input: CompactionInput,
+    generator: SummaryGenerator,
+    policy: CompactionRetryPolicy,
+    predicate: CompactionRetryPredicate,
+    callback: CompactionRetryCallback | None,
+) -> tuple[str, int]:
+    input_snapshot = generator_input.model_dump(mode="python")
+    had_retry = False
+    for attempt in range(1, policy.max_attempts + 1):
+        if attempt > 1:
+            await _notify_retry(
+                callback,
+                CompactionRetryEvent(
+                    phase="retry_attempt_start",
+                    attempt=attempt,
+                    max_attempts=policy.max_attempts,
+                ),
+            )
+        try:
+            # A generator may mutate its input. Every attempt gets a fresh deep
+            # validation from the same prepared snapshot.
+            attempt_input = CompactionInput.model_validate(input_snapshot)
+            result_text = generator(attempt_input)
+            if inspect.isawaitable(result_text):
+                result_text = await result_text
+            if not isinstance(result_text, str):
+                raise TypeError(
+                    "summary_generator 必须返回 str 或 Awaitable[str]；"
+                    f"实际类型：{type(result_text).__name__}"
+                )
+        except Exception as error:
+            can_retry = predicate(error) and attempt < policy.max_attempts
+            if not can_retry:
+                if had_retry:
+                    await _notify_retry(
+                        callback,
+                        CompactionRetryEvent(
+                            phase="retry_finished",
+                            attempt=attempt,
+                            max_attempts=policy.max_attempts,
+                            error_type=type(error).__name__,
+                            succeeded=False,
+                        ),
+                    )
+                raise
+            had_retry = True
+            delay = min(
+                policy.max_delay_ms,
+                round(
+                    policy.initial_delay_ms
+                    * (policy.backoff_multiplier ** (attempt - 1))
+                ),
+            )
+            await _notify_retry(
+                callback,
+                CompactionRetryEvent(
+                    phase="retry_scheduled",
+                    attempt=attempt + 1,
+                    max_attempts=policy.max_attempts,
+                    delay_ms=delay,
+                    error_type=type(error).__name__,
+                ),
+            )
+            if delay > 0:
+                await asyncio.sleep(delay / 1000)
+        else:
+            if had_retry:
+                await _notify_retry(
+                    callback,
+                    CompactionRetryEvent(
+                        phase="retry_finished",
+                        attempt=attempt,
+                        max_attempts=policy.max_attempts,
+                        succeeded=True,
+                    ),
+                )
+            return result_text, attempt
+    raise AssertionError("unreachable compaction retry state")
+
+
 async def compact_messages(
     messages: list[Message],
     *,
     snapshots: list[RequestSnapshot] | None = None,
     config: CompactionConfig | None = None,
     summary_generator: SummaryGenerator | None = None,
+    context_estimate: ContextEstimate | None = None,
+    retry_policy: CompactionRetryPolicy | None = None,
+    retry_predicate: CompactionRetryPredicate | None = None,
+    retry_callback: CompactionRetryCallback | None = None,
 ) -> CompactionResult:
     """对 messages 执行 compaction——返回 CompactionResult。
 
@@ -321,6 +590,15 @@ async def compact_messages(
         raise ValueError(
             f"CompactionConfig.keep_last_n_turns 不能为负，实际：{cfg.keep_last_n_turns}"
         )
+    if cfg.keep_recent_tokens is not None and cfg.keep_recent_tokens < 0:
+        raise ValueError(
+            "CompactionConfig.keep_recent_tokens 不能为负，"
+            f"实际：{cfg.keep_recent_tokens}"
+        )
+    if cfg.context_window is not None and cfg.context_window <= 0:
+        raise ValueError("CompactionConfig.context_window 必须 > 0")
+    if cfg.reserved_output_tokens < 0:
+        raise ValueError("CompactionConfig.reserved_output_tokens 不能为负")
     if cfg.min_messages_to_compact < 1:
         raise ValueError(
             f"CompactionConfig.min_messages_to_compact 必须 >= 1，"
@@ -330,12 +608,20 @@ async def compact_messages(
         raise ValueError(
             f"CompactionConfig.max_summary_chars 必须 > 0，实际：{cfg.max_summary_chars}"
         )
+    policy = retry_policy or CompactionRetryPolicy()
+    if policy.max_attempts < 1:
+        raise ValueError("CompactionRetryPolicy.max_attempts 必须 >= 1")
+    if policy.initial_delay_ms < 0 or policy.max_delay_ms < 0:
+        raise ValueError("CompactionRetryPolicy delay 不能为负")
+    if policy.backoff_multiplier < 1:
+        raise ValueError("CompactionRetryPolicy.backoff_multiplier 必须 >= 1")
 
     # Step 2: 不足最小条数
     if len(messages) < cfg.min_messages_to_compact:
         return CompactionResult(
             applied=False,
             reason="not_enough_messages",
+            token_stats=_token_stats(messages, messages, cfg, context_estimate),
             metadata={
                 "message_count": len(messages),
                 "min_required": cfg.min_messages_to_compact,
@@ -345,24 +631,7 @@ async def compact_messages(
     # Step 3: 切分
     keep_n = cfg.keep_last_n_messages
     if cfg.boundary_mode == "turn":
-        user_boundaries = [
-            index
-            for index, message in enumerate(messages)
-            if getattr(message, "role", None) == "user"
-        ]
-        if not user_boundaries:
-            retained = list(messages)
-            compacted = []
-        elif cfg.keep_last_n_turns == 0:
-            retained = []
-            compacted = list(messages)
-        elif len(user_boundaries) <= cfg.keep_last_n_turns:
-            retained = list(messages)
-            compacted = []
-        else:
-            retain_from = user_boundaries[-cfg.keep_last_n_turns]
-            compacted = list(messages[:retain_from])
-            retained = list(messages[retain_from:])
+        compacted, retained = _split_at_complete_turn(messages, cfg)
     elif keep_n == 0:
         retained = []
         compacted = list(messages)
@@ -375,6 +644,7 @@ async def compact_messages(
         return CompactionResult(
             applied=False,
             reason="nothing_to_compact",
+            token_stats=_token_stats(messages, messages, cfg, context_estimate),
             metadata={"message_count": len(messages), "keep_last_n": keep_n},
         )
 
@@ -385,24 +655,32 @@ async def compact_messages(
     retained_dicts = serialize_messages(retained)
     snapshot_dicts = [s.to_dict() for s in (snapshots or [])]
     snapshot_ids = [s.id for s in (snapshots or [])]
+    previous_summary_parts = [
+        "\n".join(block.text for block in message.content).strip()
+        for message in compacted
+        if isinstance(message, SummaryMessage)
+    ]
+    previous_summary = "\n\n---\n\n".join(
+        part for part in previous_summary_parts if part
+    ) or None
 
     generator_input = CompactionInput(
         messages_to_compact=compacted_dicts,
         retained_messages=retained_dicts,
+        previous_summary=previous_summary,
         snapshots=snapshot_dicts,
         config=cfg.model_dump(mode="json"),
         metadata={"summary_title": cfg.summary_title},
     )
 
     gen = summary_generator or default_summary_generator
-    result_text = gen(generator_input)
-    if inspect.isawaitable(result_text):
-        result_text = await result_text
-    if not isinstance(result_text, str):
-        raise TypeError(
-            "summary_generator 必须返回 str 或 Awaitable[str]；"
-            f"实际类型：{type(result_text).__name__}"
-        )
+    result_text, attempts = await _generate_summary_with_retry(
+        generator_input,
+        gen,
+        policy,
+        retry_predicate or _default_retry_predicate,
+        retry_callback,
+    )
 
     # Step 6: 生成 SummaryMessage
     summary_metadata: dict[str, Any] = {
@@ -410,6 +688,9 @@ async def compact_messages(
         "keep_last_n_messages": cfg.keep_last_n_messages,
         "boundary_mode": cfg.boundary_mode,
         "keep_last_n_turns": cfg.keep_last_n_turns,
+        "keep_recent_tokens": cfg.keep_recent_tokens,
+        "previous_summary_included": previous_summary is not None,
+        "retry_attempts": attempts,
         "include_tool_results": cfg.include_tool_results,
         **dict(cfg.metadata),
     }
@@ -421,21 +702,26 @@ async def compact_messages(
         content=[TextContent(text=result_text)],
         source_message_count=len(compacted),
         source_snapshot_ids=snapshot_ids if cfg.include_snapshot_ids else [],
-        source_turn_count=len(snapshot_ids),
+        source_turn_count=_turn_count(compacted),
         metadata=summary_metadata,
     )
 
-    # Step 7: new_messages
+    # Step 7/8: token audit data uses the canonical preflight estimate when
+    # supplied, then the summary metadata records the same stable projection.
+    after_messages = [summary_msg, *retained]
+    token_stats = _token_stats(messages, after_messages, cfg, context_estimate)
+    summary_msg.metadata["token_stats"] = token_stats.model_dump(mode="json")
     summary_dict = summary_msg.model_dump(mode="json")
     new_messages = [summary_dict, *retained_dicts]
 
-    # Step 8: 构造 source + result
     source = CompactionSource(
         source_message_count=len(messages),
         retained_message_count=len(retained),
         compacted_message_count=len(compacted),
         source_snapshot_ids=snapshot_ids,
-        source_turn_count=len(snapshot_ids),
+        source_turn_count=_turn_count(messages),
+        retained_turn_count=_turn_count(retained),
+        compacted_turn_count=_turn_count(compacted),
         metadata=dict(cfg.metadata),
     )
 
@@ -446,6 +732,8 @@ async def compact_messages(
         retained_messages=retained_dicts,
         new_messages=new_messages,
         source=source,
+        token_stats=token_stats,
+        attempts=attempts,
         metadata={
             "config": cfg.model_dump(mode="json"),
             "generator": (
@@ -609,10 +897,12 @@ async def create_branch_summary(
 __all__ = [
     # Configs / Inputs / Results
     "CompactionConfig", "CompactionSource",
-    "CompactionInput", "CompactionResult",
+    "CompactionInput", "CompactionResult", "CompactionTokenStats",
+    "CompactionRetryPolicy", "CompactionRetryEvent",
     "BranchSummaryConfig", "BranchSummary",
     # Generator
-    "SummaryGenerator", "default_summary_generator",
+    "SummaryGenerator", "CompactionRetryCallback", "CompactionRetryPredicate",
+    "default_summary_generator",
     # Functions
     "compact_messages", "create_branch_summary",
 ]

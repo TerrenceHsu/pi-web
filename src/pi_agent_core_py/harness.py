@@ -91,12 +91,16 @@ from .compaction import (
     BranchSummaryConfig,
     CompactionConfig,
     CompactionResult,
+    CompactionRetryCallback,
+    CompactionRetryPolicy,
+    CompactionRetryPredicate,
     SummaryGenerator,
     compact_messages,
 )
 from .compaction import (
     create_branch_summary as _create_branch_summary_fn,
 )
+from .context_budget import ContextEstimate
 from .events import AgentEvent, AgentRequestType
 from .mcp import (
     MCPAgentTool,
@@ -1560,6 +1564,10 @@ class AgentHarness:
         *,
         config: CompactionConfig | None = None,
         summary_generator: SummaryGenerator | None = None,
+        context_estimate: ContextEstimate | None = None,
+        retry_policy: CompactionRetryPolicy | None = None,
+        retry_predicate: CompactionRetryPredicate | None = None,
+        retry_callback: CompactionRetryCallback | None = None,
     ) -> CompactionResult:
         """基于 agent.state.messages 压缩当前上下文。
 
@@ -1581,6 +1589,10 @@ class AgentHarness:
             snapshots=list(self.snapshots),
             config=config,
             summary_generator=summary_generator,
+            context_estimate=context_estimate,
+            retry_policy=retry_policy,
+            retry_predicate=retry_predicate,
+            retry_callback=retry_callback,
         )
         self.last_compaction_result = result
 
@@ -1603,6 +1615,10 @@ class AgentHarness:
         *,
         config: CompactionConfig | None = None,
         summary_generator: SummaryGenerator | None = None,
+        context_estimate: ContextEstimate | None = None,
+        retry_policy: CompactionRetryPolicy | None = None,
+        retry_predicate: CompactionRetryPredicate | None = None,
+        retry_callback: CompactionRetryCallback | None = None,
     ) -> CompactionResult:
         """基于 session.messages 压缩——以 session 为权威源。
 
@@ -1620,6 +1636,10 @@ class AgentHarness:
             snapshots=self.session.get_snapshots(),
             config=config,
             summary_generator=summary_generator,
+            context_estimate=context_estimate,
+            retry_policy=retry_policy,
+            retry_predicate=retry_predicate,
+            retry_callback=retry_callback,
         )
         self.last_compaction_result = result
 

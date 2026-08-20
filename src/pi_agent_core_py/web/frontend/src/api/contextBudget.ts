@@ -24,9 +24,18 @@ export function estimateContextBudget(
 export function compactContext(
   sessionId: string,
   keepLastNTurns = 4,
+  keepRecentTokens?: number,
 ): Promise<ContextCompactionResponse> {
   return requestJson<ContextCompactionResponse>(
     `/api/sessions/${encodeURIComponent(sessionId)}/context/compact`,
-    { method: "POST", body: { keep_last_n_turns: keepLastNTurns } },
+    {
+      method: "POST",
+      body: {
+        keep_last_n_turns: keepLastNTurns,
+        ...(keepRecentTokens === undefined
+          ? {}
+          : { keep_recent_tokens: keepRecentTokens }),
+      },
+    },
   )
 }

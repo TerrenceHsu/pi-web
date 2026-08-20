@@ -178,6 +178,33 @@ Agent 当前 messages。**P0-1 起支持 `?session_id=`**：
 
 **Query**: `session_id: string | null`
 
+### `GET /api/sessions/{sid}/context-budget`
+
+返回当前 Provider 绑定下的确定性上下文预算估算。`estimate` 分别列出 system、
+messages、tools、output reserve、projected tokens、context window 与占用比例；
+`approximate=true` 表示当前使用安全余量 estimator，而非 Provider 官方 tokenizer。
+
+### `POST /api/sessions/{sid}/context-budget/estimate`
+
+Body 可包含尚未发送的 `text`、`file_ids` 与 `skill_names`，只读估算发送后的预算，
+不写入 Session。请求运行期间返回 409。
+
+### `POST /api/sessions/{sid}/context/compact`
+
+```json
+{
+  "keep_last_n_turns": 4,
+  "keep_recent_tokens": 20000
+}
+```
+
+默认从完整 turn 边界切分；`keep_recent_tokens` 可省略，提供时优先于 turn 数量。
+最新 turn 即使超过目标也完整保留，不会留下孤立 tool result。成功响应包含
+`token_stats`、`budget_before` 与压缩后的 `budget`，以及压缩/保留 message 计数。
+没有可压缩的完整 turn 时返回 409；字段类型或范围非法返回 422。
+
+详细语义见 [Compaction Semantics](../COMPACTION_SEMANTICS.md)。
+
 **Response 200**:
 
 ```json
