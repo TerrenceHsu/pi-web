@@ -16,10 +16,11 @@ import { ref } from "vue"
 
 import * as filesApi from "../api/files"
 import { ApiError } from "../api/client"
-import type { FileRef } from "../types"
+import type { FileRef, WorkspaceState } from "../types"
 
 export const useFileStore = defineStore("files", () => {
   const filesBySession = ref<Record<string, FileRef[]>>({})
+  const workspaceBySession = ref<Record<string, WorkspaceState>>({})
   const pendingAttachments = ref<FileRef[]>([])
   const loading = ref(false)
   const uploading = ref(false)
@@ -31,6 +32,7 @@ export const useFileStore = defineStore("files", () => {
     try {
       const resp = await filesApi.listFiles(sessionId)
       filesBySession.value[sessionId] = resp.files
+      workspaceBySession.value[sessionId] = resp.workspace
     } catch (e: any) {
       error.value = e instanceof ApiError ? e.detail : String(e?.message ?? e)
     } finally {
@@ -42,10 +44,13 @@ export const useFileStore = defineStore("files", () => {
     uploading.value = true
     error.value = null
     try {
-      const resp = await filesApi.uploadFiles(sessionId, files)
+      const resp = await filesApi.uploadFiles(sessionId, files, {
+        expectedWorkspaceRevision: workspaceBySession.value[sessionId]?.revision,
+      })
       // 合并到 session 缓存
       const existing = filesBySession.value[sessionId] ?? []
       filesBySession.value[sessionId] = [...existing, ...resp.files]
+      workspaceBySession.value[sessionId] = resp.workspace
       // 同时进入 pending（用户可在 composer 中移除）
       pendingAttachments.value.push(...resp.files)
       return resp
@@ -58,9 +63,7 @@ export const useFileStore = defineStore("files", () => {
   }
 
   function removePendingAttachment(fileId: string) {
-    pendingAttachments.value = pendingAttachments.value.filter(
-      (f) => f.id !== fileId,
-    )
+    pendingAttachments.value = pendingAttachments.value.filter((f) => f.id !== fileId)
   }
 
   function clearPendingAttachments() {
@@ -70,9 +73,14 @@ export const useFileStore = defineStore("files", () => {
   async function deleteFile(sessionId: string, fileId: string) {
     error.value = null
     try {
-      await filesApi.deleteFile(sessionId, fileId)
       const existing = filesBySession.value[sessionId] ?? []
+      const current = existing.find((file) => file.id === fileId)
+      const resp = await filesApi.deleteFile(sessionId, fileId, {
+        expectedSha256: current?.sha256,
+        expectedWorkspaceRevision: workspaceBySession.value[sessionId]?.revision,
+      })
       filesBySession.value[sessionId] = existing.filter((f) => f.id !== fileId)
+      workspaceBySession.value[sessionId] = resp.workspace
       // 同时从 pending 中移除
       removePendingAttachment(fileId)
     } catch (e: any) {
@@ -104,11 +112,13 @@ export const useFileStore = defineStore("files", () => {
         fileId,
         content,
         expectedSha256,
+        workspaceBySession.value[sessionId]?.revision,
       )
       const existing = filesBySession.value[sessionId] ?? []
       filesBySession.value[sessionId] = existing.map((file) =>
         file.id === fileId ? resp.file : file,
       )
+      workspaceBySession.value[sessionId] = resp.workspace
       return resp.file
     } catch (e: any) {
       error.value = e instanceof ApiError ? e.detail : String(e?.message ?? e)
@@ -123,6 +133,7 @@ export const useFileStore = defineStore("files", () => {
 
   function resetWorkspace() {
     filesBySession.value = {}
+    workspaceBySession.value = {}
     pendingAttachments.value = []
     loading.value = false
     uploading.value = false
@@ -131,6 +142,7 @@ export const useFileStore = defineStore("files", () => {
 
   return {
     filesBySession,
+    workspaceBySession,
     pendingAttachments,
     loading,
     uploading,

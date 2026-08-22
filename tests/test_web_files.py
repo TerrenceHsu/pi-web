@@ -178,7 +178,7 @@ def test_agent_md_is_editable_versioned_and_protected(web_client):
     )
     assert forbidden.status_code == 403
     assert forbidden.json()["detail"] == (
-        "only AGENT.md and Memory.md are editable here"
+        "only Workspace Markdown files are editable here"
     )
 
 
@@ -658,3 +658,93 @@ def test_upload_returns_correct_mime(web_client):
         files=[_upload_payload(b"\x89PNG fake", "image.png", "image/png")],
     )
     assert r.json()["files"][0]["mime"] == "image/png"
+
+
+def test_workspace_markdown_crud_and_revision_conflicts(web_client):
+    client, _, _, _ = web_client
+    sid = _make_session(client, "workspace-phase-2")
+
+    snapshot = client.get(f"/api/sessions/{sid}/workspace")
+    assert snapshot.status_code == 200
+    assert snapshot.json()["workspace"]["revision"] == 0
+    assert snapshot.json()["count"] == 2
+
+    uploaded = client.post(
+        f"/api/sessions/{sid}/files",
+        params={"expected_workspace_revision": 0, "relative_folder": "demo"},
+        files=[_upload_payload(b"print('ok')", "main.py", "text/x-python")],
+    )
+    assert uploaded.status_code == 200
+    assert uploaded.json()["files"][0]["logical_path"] == "scripts/demo/main.py"
+    assert uploaded.json()["workspace"]["revision"] == 1
+
+    stale_upload = client.post(
+        f"/api/sessions/{sid}/files",
+        params={"expected_workspace_revision": 0},
+        files=[_upload_payload(b"stale", "stale.txt")],
+    )
+    assert stale_upload.status_code == 409
+    assert stale_upload.json()["errors"][0]["current_revision"] == 1
+
+    created = client.post(
+        f"/api/sessions/{sid}/workspace/markdown",
+        json={
+            "logical_path": "docs/plan.md",
+            "content": "# Plan",
+            "expected_workspace_revision": 1,
+        },
+    )
+    assert created.status_code == 200
+    created_body = created.json()
+    assert created_body["file"]["logical_path"] == "docs/plan.md"
+    assert created_body["workspace"]["revision"] == 2
+
+    duplicate = client.post(
+        f"/api/sessions/{sid}/workspace/markdown",
+        json={
+            "logical_path": "docs/plan.md",
+            "content": "duplicate",
+            "expected_workspace_revision": 2,
+        },
+    )
+    assert duplicate.status_code == 409
+
+    file_ref = created_body["file"]
+    updated = client.put(
+        f"/api/sessions/{sid}/files/{file_ref['id']}/content",
+        json={
+            "content": "# Updated",
+            "expected_sha256": file_ref["sha256"],
+            "expected_workspace_revision": 2,
+        },
+    )
+    assert updated.status_code == 200
+    updated_body = updated.json()
+    assert updated_body["workspace"]["revision"] == 3
+
+    moved = client.patch(
+        f"/api/sessions/{sid}/files/{file_ref['id']}",
+        json={
+            "logical_path": "notes/final.md",
+            "expected_sha256": updated_body["file"]["sha256"],
+            "expected_workspace_revision": 3,
+        },
+    )
+    assert moved.status_code == 200
+    assert moved.json()["file"]["logical_path"] == "notes/final.md"
+    assert moved.json()["workspace"]["revision"] == 4
+
+    stale_delete = client.delete(
+        f"/api/sessions/{sid}/files/{file_ref['id']}",
+        params={"expected_workspace_revision": 3},
+    )
+    assert stale_delete.status_code == 409
+    deleted = client.delete(
+        f"/api/sessions/{sid}/files/{file_ref['id']}",
+        params={
+            "expected_sha256": moved.json()["file"]["sha256"],
+            "expected_workspace_revision": 4,
+        },
+    )
+    assert deleted.status_code == 200
+    assert deleted.json()["workspace"]["revision"] == 5

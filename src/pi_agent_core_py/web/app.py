@@ -36,7 +36,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, NoReturn, cast
 from uuid import uuid4
 
@@ -4618,10 +4618,21 @@ def create_app(
             "updated_at": ref.updated_at,
         }
 
+    def _serialize_workspace_state(workspace: Any) -> dict[str, Any]:
+        return {
+            "schema_version": workspace.schema_version,
+            "session_id": workspace.session_id,
+            "revision": workspace.revision,
+            "created_at": workspace.created_at,
+            "updated_at": workspace.updated_at,
+        }
+
     @app.post("/api/sessions/{sid}/files", response_model=None)
     async def post_session_files(
         sid: str,
         files: list[UploadFile] = File(default=[]),  # noqa: B008
+        relative_folder: str | None = None,
+        expected_workspace_revision: int | None = None,
     ) -> dict[str, Any] | JSONResponse:
         """上传一个或多个文件到指定 session。
 
@@ -4646,6 +4657,16 @@ def create_app(
                 status_code=404,
                 content={"detail": f"session {sid!r} not found"},
             )
+        if (
+            expected_workspace_revision is not None
+            and expected_workspace_revision < 0
+        ):
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": "expected_workspace_revision must be non-negative"
+                },
+            )
 
         file_store = _require_file_store()
         from .files import (
@@ -4653,14 +4674,23 @@ def create_app(
             FileTooLargeError,
             SessionStorageLimitError,
             UnsafeFilenameError,
+            WorkspaceVersionConflictError,
         )
 
         saved: list[dict[str, Any]] = []
         errors: list[dict[str, Any]] = []
+        next_expected_revision = expected_workspace_revision
         for upload in files:
             try:
-                ref = await file_store.save(sid, upload)
+                ref = await file_store.save(
+                    sid,
+                    upload,
+                    relative_folder=relative_folder,
+                    expected_workspace_revision=next_expected_revision,
+                )
                 saved.append(_serialize_managed_file(ref))
+                workspace = await file_store.get_workspace_state(sid)
+                next_expected_revision = workspace.revision
             except FileTooLargeError as e:
                 errors.append({
                     "filename": upload.filename or "<unknown>",
@@ -4679,6 +4709,15 @@ def create_app(
                     "error_type": "UnsafeFilenameError",
                     "error": str(e),
                 })
+            except WorkspaceVersionConflictError as e:
+                errors.append({
+                    "filename": upload.filename or "<unknown>",
+                    "error_type": "WorkspaceVersionConflictError",
+                    "error": str(e),
+                    "expected_revision": e.expected,
+                    "current_revision": e.current,
+                })
+                break
             except FileStoreError as e:
                 errors.append({
                     "filename": upload.filename or "<unknown>",
@@ -4691,13 +4730,18 @@ def create_app(
             status_code = 413 if any(
                 e["error_type"] in ("FileTooLargeError", "SessionStorageLimitError")
                 for e in errors
+            ) else 409 if any(
+                e["error_type"] == "WorkspaceVersionConflictError"
+                for e in errors
             ) else 400
+        workspace = await file_store.get_workspace_state(sid)
         return JSONResponse(
             status_code=status_code,
             content={
                 "count": len(saved),
                 "files": saved,
                 "errors": errors,
+                "workspace": _serialize_workspace_state(workspace),
             },
         )
 
@@ -4718,9 +4762,124 @@ def create_app(
             )
         file_store = _require_file_store()
         files = await file_store.list_session(sid)
+        workspace = await file_store.get_workspace_state(sid)
         return {
             "count": len(files),
             "files": [_serialize_managed_file(f) for f in files],
+            "workspace": _serialize_workspace_state(workspace),
+        }
+
+    @app.get("/api/sessions/{sid}/workspace", response_model=None)
+    async def get_session_workspace(sid: str) -> dict[str, Any] | JSONResponse:
+        """Return the complete logical Workspace snapshot and its revision."""
+        store = state.session_store
+        if store is None:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "session store not initialized"},
+            )
+        if await store.get_session(sid) is None:
+            return JSONResponse(
+                status_code=404,
+                content={"detail": f"session {sid!r} not found"},
+            )
+        file_store = _require_file_store()
+        await file_store.ensure_session_workspace(sid)
+        files = await file_store.list_session(sid)
+        workspace = await file_store.get_workspace_state(sid)
+        return {
+            "workspace": _serialize_workspace_state(workspace),
+            "count": len(files),
+            "files": [_serialize_managed_file(ref) for ref in files],
+        }
+
+    @app.post("/api/sessions/{sid}/workspace/markdown", response_model=None)
+    async def post_session_workspace_markdown(
+        sid: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | JSONResponse:
+        """Create an ordinary Markdown file at an exact logical path."""
+        from .files import (
+            FileStoreError,
+            FileTooLargeError,
+            SessionStorageLimitError,
+            UnsafeFilenameError,
+            WorkspacePathConflictError,
+            WorkspaceVersionConflictError,
+            is_markdown_filename,
+            normalize_workspace_logical_path,
+        )
+
+        store = state.session_store
+        if store is None:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "session store not initialized"},
+            )
+        if await store.get_session(sid) is None:
+            return JSONResponse(
+                status_code=404,
+                content={"detail": f"session {sid!r} not found"},
+            )
+        logical_path = payload.get("logical_path")
+        content = payload.get("content")
+        expected_revision = payload.get("expected_workspace_revision")
+        if not isinstance(logical_path, str):
+            return JSONResponse(
+                status_code=422,
+                content={"detail": "logical_path must be a string"},
+            )
+        if not isinstance(content, str):
+            return JSONResponse(
+                status_code=422,
+                content={"detail": "content must be a string"},
+            )
+        if (
+            expected_revision is not None
+            and (
+                isinstance(expected_revision, bool)
+                or not isinstance(expected_revision, int)
+                or expected_revision < 0
+            )
+        ):
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": "expected_workspace_revision must be a non-negative integer"
+                },
+            )
+
+        file_store = _require_file_store()
+        try:
+            normalized = normalize_workspace_logical_path(logical_path)
+            path = PurePosixPath(normalized)
+            if not is_markdown_filename(path.name):
+                raise UnsafeFilenameError(
+                    "Workspace Markdown files must use .md, .markdown, or .mdx"
+                )
+            parent = "" if str(path.parent) == "." else str(path.parent)
+            created = await file_store.write_text(
+                sid,
+                path.name,
+                content,
+                content_type="text/markdown",
+                folder=parent or None,
+                origin="user",
+                expected_workspace_revision=expected_revision,
+                unique_logical_path=False,
+            )
+        except (WorkspacePathConflictError, WorkspaceVersionConflictError) as e:
+            return JSONResponse(status_code=409, content={"detail": str(e)})
+        except UnsafeFilenameError as e:
+            return JSONResponse(status_code=400, content={"detail": str(e)})
+        except (FileTooLargeError, SessionStorageLimitError) as e:
+            return JSONResponse(status_code=413, content={"detail": str(e)})
+        except FileStoreError as e:
+            return JSONResponse(status_code=500, content={"detail": str(e)})
+        workspace = await file_store.get_workspace_state(sid)
+        return {
+            "file": _serialize_managed_file(created),
+            "workspace": _serialize_workspace_state(workspace),
         }
 
     @app.get("/api/sessions/{sid}/files/{fid}", response_model=None)
@@ -4777,13 +4936,16 @@ def create_app(
         fid: str,
         payload: dict[str, Any],
     ) -> dict[str, Any] | JSONResponse:
-        """更新根 ``AGENT.md`` / ``Memory.md``；sha256 乐观锁防静默覆盖。"""
+        """更新根文件或普通 Markdown；sha256/revision 乐观锁防静默覆盖。"""
         from .files import (
+            FileAccessDeniedError,
             FileStoreError,
             FileTooLargeError,
             FileVersionConflictError,
             SessionStorageLimitError,
             VirtualFileNotFoundError,
+            WorkspaceVersionConflictError,
+            is_markdown_filename,
         )
 
         store = state.session_store
@@ -4799,6 +4961,7 @@ def create_app(
             )
         content = payload.get("content")
         expected_sha256 = payload.get("expected_sha256")
+        expected_revision = payload.get("expected_workspace_revision")
         if not isinstance(content, str):
             return JSONResponse(
                 status_code=422,
@@ -4809,15 +4972,32 @@ def create_app(
                 status_code=422,
                 content={"detail": "expected_sha256 must be a string"},
             )
+        if (
+            expected_revision is not None
+            and (
+                isinstance(expected_revision, bool)
+                or not isinstance(expected_revision, int)
+                or expected_revision < 0
+            )
+        ):
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": "expected_workspace_revision must be a non-negative integer"
+                },
+            )
 
         file_store = _require_file_store()
         try:
             current = await file_store.get_for_session(sid, fid)
-            if current.purpose not in {"agent_instructions", "memory"}:
+            if (
+                current.purpose not in {"agent_instructions", "memory"}
+                and not is_markdown_filename(current.name)
+            ):
                 return JSONResponse(
                     status_code=403,
                     content={
-                        "detail": "only AGENT.md and Memory.md are editable here"
+                        "detail": "only Workspace Markdown files are editable here"
                     },
                 )
             updated = await file_store.update_text(
@@ -4825,16 +5005,107 @@ def create_app(
                 fid,
                 content,
                 expected_sha256=expected_sha256,
+                expected_workspace_revision=expected_revision,
             )
         except VirtualFileNotFoundError as e:
             return JSONResponse(status_code=404, content={"detail": str(e)})
-        except FileVersionConflictError as e:
+        except FileAccessDeniedError as e:
+            return JSONResponse(status_code=403, content={"detail": str(e)})
+        except (FileVersionConflictError, WorkspaceVersionConflictError) as e:
             return JSONResponse(status_code=409, content={"detail": str(e)})
         except (FileTooLargeError, SessionStorageLimitError) as e:
             return JSONResponse(status_code=413, content={"detail": str(e)})
         except FileStoreError as e:
             return JSONResponse(status_code=500, content={"detail": str(e)})
-        return {"file": _serialize_managed_file(updated)}
+        workspace = await file_store.get_workspace_state(sid)
+        return {
+            "file": _serialize_managed_file(updated),
+            "workspace": _serialize_workspace_state(workspace),
+        }
+
+    @app.patch("/api/sessions/{sid}/files/{fid}", response_model=None)
+    async def patch_session_file(
+        sid: str,
+        fid: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | JSONResponse:
+        """Move or rename an ordinary Markdown file in the logical tree."""
+        from .files import (
+            FileAccessDeniedError,
+            FileStoreError,
+            FileVersionConflictError,
+            UnsafeFilenameError,
+            VirtualFileNotFoundError,
+            WorkspacePathConflictError,
+            WorkspaceVersionConflictError,
+        )
+
+        store = state.session_store
+        if store is None:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "session store not initialized"},
+            )
+        if await store.get_session(sid) is None:
+            return JSONResponse(
+                status_code=404,
+                content={"detail": f"session {sid!r} not found"},
+            )
+        logical_path = payload.get("logical_path")
+        expected_sha256 = payload.get("expected_sha256")
+        expected_revision = payload.get("expected_workspace_revision")
+        if not isinstance(logical_path, str):
+            return JSONResponse(
+                status_code=422,
+                content={"detail": "logical_path must be a string"},
+            )
+        if expected_sha256 is not None and not isinstance(expected_sha256, str):
+            return JSONResponse(
+                status_code=422,
+                content={"detail": "expected_sha256 must be a string"},
+            )
+        if (
+            expected_revision is not None
+            and (
+                isinstance(expected_revision, bool)
+                or not isinstance(expected_revision, int)
+                or expected_revision < 0
+            )
+        ):
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": "expected_workspace_revision must be a non-negative integer"
+                },
+            )
+        file_store = _require_file_store()
+        try:
+            moved = await file_store.move_file(
+                sid,
+                fid,
+                logical_path,
+                expected_sha256=expected_sha256,
+                expected_workspace_revision=expected_revision,
+            )
+        except VirtualFileNotFoundError as e:
+            return JSONResponse(status_code=404, content={"detail": str(e)})
+        except FileAccessDeniedError as e:
+            return JSONResponse(status_code=403, content={"detail": str(e)})
+        except (
+            FileVersionConflictError,
+            WorkspacePathConflictError,
+            WorkspaceVersionConflictError,
+        ) as e:
+            return JSONResponse(status_code=409, content={"detail": str(e)})
+        except UnsafeFilenameError as e:
+            return JSONResponse(status_code=400, content={"detail": str(e)})
+        except FileStoreError as e:
+            return JSONResponse(status_code=500, content={"detail": str(e)})
+        workspace = await file_store.get_workspace_state(sid)
+        return {
+            "file": _serialize_managed_file(moved),
+            "workspace": _serialize_workspace_state(workspace),
+        }
 
     @app.get("/api/files/{fid}", response_model=None)
     async def get_file_compat(
@@ -4850,7 +5121,10 @@ def create_app(
 
     @app.delete("/api/files/{fid}", response_model=None)
     async def delete_file_compat(
-        fid: str, session_id: str | None = None,
+        fid: str,
+        session_id: str | None = None,
+        expected_sha256: str | None = None,
+        expected_workspace_revision: int | None = None,
     ) -> dict[str, Any] | JSONResponse:
         """兼容删除入口：必须 query 参数 session_id。"""
         if not session_id:
@@ -4858,18 +5132,28 @@ def create_app(
                 status_code=400,
                 content={"detail": "session_id query parameter is required"},
             )
-        return await delete_session_file(session_id, fid)
+        return await delete_session_file(
+            session_id,
+            fid,
+            expected_sha256,
+            expected_workspace_revision,
+        )
 
     @app.delete("/api/sessions/{sid}/files/{fid}", response_model=None)
     async def delete_session_file(
-        sid: str, fid: str,
+        sid: str,
+        fid: str,
+        expected_sha256: str | None = None,
+        expected_workspace_revision: int | None = None,
     ) -> dict[str, Any] | JSONResponse:
         """删除 session 内单文件（推荐入口）。"""
         from .files import (
             FileAccessDeniedError,
             FileStoreError,
+            FileVersionConflictError,
             UnsafeFilenameError,
             VirtualFileNotFoundError,
+            WorkspaceVersionConflictError,
         )
 
         store = state.session_store
@@ -4884,6 +5168,16 @@ def create_app(
                 status_code=404,
                 content={"detail": f"session {sid!r} not found"},
             )
+        if (
+            expected_workspace_revision is not None
+            and expected_workspace_revision < 0
+        ):
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": "expected_workspace_revision must be non-negative"
+                },
+            )
         file_store = _require_file_store()
         try:
             current = await file_store.get_for_session(sid, fid)
@@ -4897,7 +5191,12 @@ def create_app(
                         )
                     },
                 )
-            await file_store.delete_for_session(sid, fid)
+            await file_store.delete_for_session(
+                sid,
+                fid,
+                expected_sha256=expected_sha256,
+                expected_workspace_revision=expected_workspace_revision,
+            )
         except VirtualFileNotFoundError as e:
             return JSONResponse(
                 status_code=404, content={"detail": str(e)},
@@ -4910,11 +5209,20 @@ def create_app(
             return JSONResponse(
                 status_code=400, content={"detail": str(e)},
             )
+        except (FileVersionConflictError, WorkspaceVersionConflictError) as e:
+            return JSONResponse(
+                status_code=409, content={"detail": str(e)},
+            )
         except FileStoreError as e:
             return JSONResponse(
                 status_code=500, content={"detail": str(e)},
             )
-        return {"deleted": True, "file_id": fid}
+        workspace = await file_store.get_workspace_state(sid)
+        return {
+            "deleted": True,
+            "file_id": fid,
+            "workspace": _serialize_workspace_state(workspace),
+        }
 
     # ========================================================================
     # MCP

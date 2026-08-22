@@ -1,4 +1,13 @@
-// Files 类型（P0-2 VirtualFileStore + P0-3 FileBlock 注入）。
+// Files 类型（WorkspaceStore + FileBlock 注入）。
+
+/** Session Workspace 的持久化乐观锁状态。 */
+export interface WorkspaceState {
+  schema_version: 1
+  session_id: string
+  revision: number
+  created_at: number
+  updated_at: number
+}
 
 /** 文件被分类后的 format——后端 tools/view_file.py 的 _classify_format 决定。 */
 export type FileFormat =
@@ -36,7 +45,11 @@ export interface FileRef {
 export interface FileListResponse {
   count: number
   files: FileRef[]
+  workspace: WorkspaceState
 }
+
+/** GET /api/sessions/{sid}/workspace response。 */
+export type WorkspaceSnapshotResponse = FileListResponse
 
 /**
  * POST /api/sessions/{sid}/files response。
@@ -50,19 +63,27 @@ export interface FileUploadResponse {
     filename: string
     error_type: string
     error: string
+    expected_revision?: number
+    current_revision?: number
   }>
+  workspace: WorkspaceState
 }
 
 /** DELETE /api/sessions/{sid}/files/{fid} response。 */
 export interface DeleteFileResponse {
   deleted: boolean
   file_id: string
+  workspace: WorkspaceState
 }
 
 /** PUT /api/sessions/{sid}/files/{fid}/content response。 */
 export interface UpdateTextFileResponse {
   file: FileRef
+  workspace: WorkspaceState
 }
+
+/** Markdown create/move 使用相同的文件 + revision envelope。 */
+export type WorkspaceFileMutationResponse = UpdateTextFileResponse
 
 /**
  * UserMessage.content 中 FileBlock——与 src/pi_agent_core_py/messages.py 同步。

@@ -168,10 +168,11 @@ export async function uploadForm<T>(
   formData: FormData,
   options: {
     method?: "POST" | "PUT"
+    query?: Record<string, string | number | boolean | undefined | null>
     signal?: AbortSignal
   } = {},
 ): Promise<T> {
-  const url = API_BASE + path
+  const url = buildUrl(path, options.query)
   // 注意：不传 Content-Type——浏览器需要为 multipart 自动生成 boundary
   const headers = createUiHeaders({ Accept: "application/json" })
   let resp: Response

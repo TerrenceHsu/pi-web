@@ -16,8 +16,8 @@
 [`docs/design/workspace-sandbox-integration.md`](docs/design/workspace-sandbox-integration.md)。
 
 - [x] **阶段 1：统一 `WorkspaceStore` 与初始化 `Memory.md`**（完成）：以 `WorkspaceStore` 作为 Session 文件唯一规范事实源，`VirtualFileStore` 仅为同一实现的兼容别名；新旧 Session 均幂等拥有唯一根 `AGENT.md` 与 `Memory.md`，迁移保留已有正文/file id 并规范大小写等价旧路径与 purpose，两个固定根文件均禁止删除；Ruff PASS、strict Mypy 141 files / 0 issues、Workspace/文件/Auth/Checkpointer 定向 125 passed（`-W error`）、Backend CI 3857 passed / 8 skipped / 12 deselected、83.69% coverage
-- [ ] **阶段 2：代码与 Markdown 规则**：代码写入和代码上传默认进入惰性 `scripts/`；支持安全相对目录、Markdown 创建/更新/移动/删除、逐文件 SHA 与 Workspace revision 冲突检查
-- [ ] **阶段 3：右侧 Workspace 面板**：桌面三栏与窄屏 drawer；提供 Files / Sandbox / Changes，复用现有 Sandbox 状态、日志、Diff 与审批发布组件
+- [x] **阶段 2：代码与 Markdown 规则**（完成）：`WorkspaceStore` 按扩展名把 Agent 写入和用户上传的代码统一映射到惰性逻辑根 `scripts/`，安全相对目录自动约束在其下；新增普通 Markdown 精确创建、正文更新、移动/重命名和删除 API，固定根文件继续受保护；每个 Session 以隐藏 `.workspace.json` 持久化单调 revision，mutation 同时支持逐文件 SHA 与 Workspace revision 乐观锁，失败保持文件树/revision 不变，删除 tombstone 和状态 temp 可在重启时收敛；Agent `write_file`/`list_files` 与前端 API/types/store 返回 revision。全量 Ruff PASS、strict Mypy 141 files / 0 issues、阶段定向 Backend 116 passed、Frontend typecheck/lint 与 Vitest 405/405 passed
+- [ ] **阶段 3：右侧 Workspace 成果面板**：Agent 创建或更新 `.md`、`.py` 等成果文件后自动刷新并在右侧栏展示；桌面使用三栏、窄屏降级为 drawer，支持目录树、Markdown 预览/编辑、代码查看、下载与用户上传，并提供 Sandbox / Changes 状态及审批发布入口
 - [ ] **阶段 4：统一 Sandbox 快照与发布目标**：从 `WorkspaceStore` 物化 E2B 快照，固定验证和用户确认后事务发布回同一 Workspace，保护根文件与系统路径并原子提升 revision
 - [ ] **阶段 5：固定文档转换工作流**：建立不可变原件、转换任务和 manifest，依次支持 PDF→Markdown、DOCX→Markdown、XLSX→摘要/CSV/schema；OCR 明确延期
 - [ ] **阶段 6：完整验收**：Backend/Frontend 静态检查和测试、Workspace Browser E2E、刷新/重启/并发冲突回归，以及真实 E2B Python 写入、验证和发布 smoke

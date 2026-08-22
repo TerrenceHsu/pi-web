@@ -79,6 +79,7 @@ class ListFilesTool(AgentTool):
 
         try:
             refs = await self._file_store.list_session(sid)
+            workspace = await self._file_store.get_workspace_state(sid)
         except Exception as e:
             return ToolResult(
                 tool_call_id=tool_call_id,
@@ -98,6 +99,7 @@ class ListFilesTool(AgentTool):
             "files": items,
             "count": len(items),
             "session_id": sid,
+            "workspace_revision": workspace.revision,
         }
 
         # 同时给一段简短文本——LLM 单步读得到结果（不必解析 JSON 也能聊）

@@ -23,7 +23,8 @@ class WriteFileTool(AgentTool):
         "Create a new UTF-8 text file in the current conversation session folder. "
         "The file is isolated to the current session and becomes available to "
         "list_files, view_file, download, and the user interface. This tool always "
-        "creates a new managed file and never overwrites an existing file."
+        "creates a new managed file and never overwrites an existing file. Code "
+        "files are automatically placed below the logical scripts/ directory."
     )
     parameters = {
         "type": "object",
@@ -42,7 +43,8 @@ class WriteFileTool(AgentTool):
                 "type": "string",
                 "description": (
                     "Optional relative folder in the Session tree, for example "
-                    "outputs or reports/2026. Absolute paths and .. are forbidden."
+                    "outputs or reports/2026. For code this folder is below scripts/. "
+                    "Absolute paths and .. are forbidden."
                 ),
                 "maxLength": 512,
             },
@@ -114,6 +116,7 @@ class WriteFileTool(AgentTool):
                 folder=folder,
                 origin="agent",
             )
+            workspace = await self._file_store.get_workspace_state(session_id)
         except FileTooLargeError as exc:
             return _error(
                 tool_call_id,
@@ -157,6 +160,7 @@ class WriteFileTool(AgentTool):
             "size": ref.size,
             "sha256": ref.sha256,
             "session_id": session_id,
+            "workspace_revision": workspace.revision,
         }
         return ToolResult(
             tool_call_id=tool_call_id,

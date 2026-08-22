@@ -6,7 +6,7 @@
 
 | 项 | 当前事实 |
 |---|---|
-| 代码基线 | 当前 HEAD 包含 Coding Sandbox P0 第 0–10 项、可靠性收敛、内容完整性标记与 Workspace 阶段 1；父基线为 `0c72679` |
+| 代码基线 | 当前工作树基于 `ea19648`，包含 Coding Sandbox P0 第 0–10 项、可靠性收敛、内容完整性标记与 Workspace 阶段 1–2 |
 | 分支 | `master` |
 | 最新 release tag | `v0.0.27-secure-credentials` @ `de05c66`；当前代码基线尚未打新 tag |
 | Python / API 版本 | `0.0.28`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
@@ -20,7 +20,7 @@
 
 ## 当前交付状态
 
-既有产品能力均已进入 `master`；Coding Sandbox P0 第 0–10 项和 Workspace 阶段 1 已完成，后续仍按 `TODO.md` 推进：
+既有提交均已进入 `master`；Coding Sandbox P0 第 0–10 项和 Workspace 阶段 1–2 已完成，后续仍按 `TODO.md` 推进：
 
 | 能力 | 状态 | 代表性基线 |
 |---|---|---|
@@ -29,6 +29,7 @@
 | Knowledge PDF → Markdown → FTS5 → Citation | ✅ 完成 | P2-R4 final `7faf635`；P2-R5 final `6527be5` |
 | 登录与账号工作区隔离 | ✅ 完成 | `b529bbc` |
 | Session Workspace、`AGENT.md`、`Memory.md`、`/checkpointer` | ✅ 完成 | `WorkspaceStore` 为唯一规范事实源；新旧 Session 幂等初始化两个固定根文件，保留旧正文/file id；设计见 `docs/design/workspace-sandbox-integration.md` |
+| Workspace 代码/Markdown 规则与 revision | ✅ 完成 | 代码统一映射到逻辑 `scripts/**`；Markdown CRUD、逐文件 SHA 与持久 Workspace revision 冲突契约已接入 Store/Web/Agent/Frontend API |
 | P0 Runtime 上游契约对齐 | ✅ 完成 | `b529bbc` |
 | Session URL 与整页刷新恢复 | ✅ 完成 | `f30da56` |
 | Human Approval + Context Budget/Compaction UI | ✅ 完成 | `924b047` |
@@ -55,6 +56,8 @@
 - 每个账号拥有独立的 Session、消息、文件、Skills、MCP、Knowledge、Provider/Credential 配置
 - Session 路由为 `/chat/{session_id}`；刷新恢复准确 Session、历史、文件树、`AGENT.md`、`Memory.md` 及当前请求状态
 - 每个 Session 由唯一 `WorkspaceStore` 初始化独立文件夹和唯一根 `AGENT.md`、`Memory.md`；启动时幂等补齐旧 Session，保留已有正文/file id，两个根文件不可删除；`VirtualFileStore` 仅为同一实现的兼容别名
+- Agent 写入或用户上传的代码按扩展名自动进入逻辑 `scripts/**`；普通 Markdown 支持安全路径创建、编辑、移动/重命名和删除，`AGENT.md`/`Memory.md` 继续使用专用权限
+- Workspace revision 以隐藏状态持久化；上传、创建、更新、移动和删除可同时校验 revision 与逐文件 SHA，过期客户端收到 409 而不会静默覆盖
 - `/checkpointer` 使用当前 Session Provider 把对话累计总结到 `Memory.md`；接受时持久化 source leaf/hash，文件发布后原子清空原 lane，进程退出可幂等前滚
 - 支持 Prompt、Stop、Regenerate 最新 Assistant、Markdown Export、实时事件、请求恢复和精确 ToolCall 审批
 - Provider Profile、Session Model Binding、Context Window 与 Max Output Tokens 持久化；UI 管理 GLM/Qwen/Kimi
@@ -104,6 +107,7 @@ Backend 全量数字基于当前含 Coding Sandbox P0 第 0–10 项的工作区
 | strict Mypy 全量 | **PASS** | `mypy src --strict`；141 files / 0 issues；CI 已覆盖独立 `coding_sandbox` 包、Web 生命周期薄适配与消息完整性检测 |
 | Backend CI 全量 + coverage | **3857 passed, 8 skipped, 12 deselected** | `pytest tests -m "not slow" --tb=short -q`；83.69% coverage；616.44s；包含 Workspace 阶段 1 回归 |
 | Workspace 阶段 1 定向回归 | **125 passed** | `VirtualFileStore` 兼容别名、双根初始化、并发幂等、旧路径/purpose 迁移、固定根删除保护、Checkpointer/Auth/重启；`-W error` 下 0 warning |
+| Workspace 阶段 2 定向回归 | **116 passed** | 代码 `scripts/**` 映射、安全逻辑路径、revision 持久/冲突、Markdown CRUD、Agent 工具与 Web API；使用 `--no-cov` 定向运行 |
 | Coding Sandbox 安全矩阵 | **151 passed, 2 skipped** | 离线 Fake/E2B 契约、路径/命令/网络/凭证攻击、故障注入、validation/artifact 篡改、Publisher 冲突/回滚/崩溃恢复，以及退役 Provider 空字段兼容迁移；Windows capability skip |
 | Sandbox Web 生命周期/API | **7 passed** | SQLite operation/event 恢复、启动 `interrupted` 收敛、snapshot seed、验证失败不得冻结/发布且真实工作区字节级不变、取消，以及 disabled/missing/latest API 边界 |
 | 真实 E2B + Publisher 安全 smoke | **PASS** | 9 个代码工具、故意验证失败与冻结拒绝、恢复重验、制品冻结/签名、本机冲突且工作区字节级不变、commit、幂等 retry、Sandbox destroy；20.577s；未输出凭证 |
@@ -155,7 +159,7 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 ### 文件与 Knowledge
 
-- Session 文件已经统一到 `WorkspaceStore` 事实源，但物理布局仍沿用 `uploads/{session_id}`；代码归一到惰性 `scripts/`、右侧 Workspace 面板以及 Sandbox 发布回该事实源属于后续阶段
+- Session 文件已经统一到 `WorkspaceStore` 事实源，代码也已归一到逻辑 `scripts/**`；物理布局仍沿用 `uploads/{session_id}`，右侧 Workspace 面板与 Sandbox 发布回该事实源属于后续阶段
 - Session Folder 的 `view_file` 只对文本/Markdown/HTML/CSV/Parquet提供正文或结构化预览；Session PDF 只返回元信息
 - Knowledge 子系统可解析文本型 PDF；扫描件进入 `needs_ocr`，当前无 OCR、图片理解或视觉模型
 - Knowledge 检索使用 SQLite FTS5/BM25，不使用向量数据库或 embedding
@@ -173,7 +177,7 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 ## 建议下一步
 
-1. 实施 Workspace 阶段 2：代码写入/上传归一到惰性 `scripts/`，补齐 Markdown mutation 与 revision 冲突契约。
+1. 实施 Workspace 阶段 3：增加右侧 Workspace 成果面板；Agent 生成或更新 `.md`、`.py` 等文件后按 revision 自动刷新、提示并展示成果，同时接入文件树、预览/编辑、上传和下载。
 2. 维持 E2B Sandbox 的真实 smoke、安全矩阵和发布事务门禁；第二 Provider 的具体接入暂不实施。
 3. 评估本地初始账号 `admin / 123456` 的改密入口；在入口完成前继续保持 localhost-only。
 4. `0.0.28` tag/push 仍需单独决定，仓库当前尚无 remote。

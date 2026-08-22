@@ -30,9 +30,12 @@ from pi_agent_core_py.web.files import (
     UnsafeFilenameError,
     VirtualFileNotFoundError,
     VirtualFileStore,
+    WorkspacePathConflictError,
     WorkspaceStore,
+    WorkspaceVersionConflictError,
     _extended_length_path,
     normalize_logical_path,
+    normalize_workspace_logical_path,
     sanitize_filename,
 )
 
@@ -192,17 +195,22 @@ async def test_ensure_session_workspace_seeds_persistent_root_files(store):
 
 @pytest.mark.asyncio
 async def test_workspace_migrates_legacy_root_paths_without_replacing_files(store):
-    legacy_agent = await store.write_text(
+    await store.ensure_session_folder("sess-legacy-roots")
+    legacy_agent = await store._write_text_unlocked(
         "sess-legacy-roots",
         "agent.md",
         "# Existing instructions\n",
+        logical_path="agent.md",
+        content_type="text/markdown",
         origin="user",
         purpose="file",
     )
-    legacy_memory = await store.write_text(
+    legacy_memory = await store._write_text_unlocked(
         "sess-legacy-roots",
         "memory.md",
         "# Existing memory\n\nKeep this.\n",
+        logical_path="memory.md",
+        content_type="text/markdown",
         origin="user",
         purpose="file",
     )
@@ -311,7 +319,7 @@ async def test_write_text_never_overwrites_same_named_file(store):
 async def test_update_text_commits_by_atomic_metadata_pointer(store):
     from pathlib import Path
 
-    first = await store.write_text("sess-1", "memory.md", "old")
+    first = await store.write_text("sess-1", "notes.md", "old")
     first_path = Path(first.path)
     updated = await store.update_text(
         "sess-1", first.id, "new", expected_sha256=first.sha256
@@ -329,7 +337,7 @@ async def test_update_text_metadata_failure_keeps_old_generation(
 ):
     from pathlib import Path
 
-    first = await store.write_text("sess-1", "memory.md", "old")
+    first = await store.write_text("sess-1", "notes.md", "old")
     original = store._write_metadata
 
     def fail_metadata(*_args, **_kwargs):
@@ -355,7 +363,7 @@ async def test_init_repairs_legacy_content_metadata_mismatch(tmp_path):
 
     root = tmp_path / "uploads"
     first_store = VirtualFileStore(root)
-    ref = await first_store.write_text("sess-1", "memory.md", "old")
+    ref = await first_store.write_text("sess-1", "notes.md", "old")
     Path(ref.path).write_text("published", encoding="utf-8")  # noqa: ASYNC240
 
     reopened = VirtualFileStore(root)
@@ -681,3 +689,123 @@ async def test_update_text_with_legacy_plain_metadata_path(store, tmp_path):
         origin="agent", purpose="memory",
     )
     assert Path(updated.path).read_text(encoding="utf-8") == "v2"  # noqa: ASYNC240
+
+
+# ============================================================================
+# Phase 2 Workspace tree + revision semantics
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_code_files_are_placed_below_scripts(store):
+    agent_code = await store.write_text("sess-code", "main.py", "print('ok')")
+    nested_code = await store.write_text(
+        "sess-code",
+        "util.ts",
+        "export {}",
+        folder="packages/core",
+    )
+    uploaded_code = await store.save(
+        "sess-code",
+        _upload(b"fn main() {}", "main.rs"),
+        relative_folder="src",
+    )
+    markdown = await store.write_text(
+        "sess-code",
+        "README.md",
+        "# Read me",
+        folder="docs",
+    )
+
+    assert agent_code.logical_path == "scripts/main.py"
+    assert nested_code.logical_path == "scripts/packages/core/util.ts"
+    assert uploaded_code.logical_path == "scripts/src/main.rs"
+    assert markdown.logical_path == "docs/README.md"
+
+
+@pytest.mark.parametrize(
+    "logical_path",
+    ["../escape.md", "docs/../escape.md", "/root.md", "C:/root.md", "a\\b.md"],
+)
+def test_workspace_logical_paths_are_strict(logical_path):
+    with pytest.raises(UnsafeFilenameError):
+        normalize_workspace_logical_path(logical_path)
+
+
+@pytest.mark.asyncio
+async def test_workspace_revision_is_persistent_and_rejects_stale_mutations(tmp_path):
+    root = tmp_path / "revision-uploads"
+    first_store = WorkspaceStore(root)
+    await first_store.ensure_session_workspace("sess-revision")
+    initial = await first_store.get_workspace_state("sess-revision")
+    assert initial.revision == 0
+
+    created = await first_store.write_text(
+        "sess-revision",
+        "notes.md",
+        "one",
+        expected_workspace_revision=0,
+        unique_logical_path=False,
+    )
+    assert (await first_store.get_workspace_state("sess-revision")).revision == 1
+    with pytest.raises(WorkspaceVersionConflictError) as conflict:
+        await first_store.update_text(
+            "sess-revision",
+            created.id,
+            "stale",
+            expected_sha256=created.sha256,
+            expected_workspace_revision=0,
+        )
+    assert conflict.value.current == 1
+
+    reopened = WorkspaceStore(root)
+    await reopened.init()
+    assert (await reopened.get_workspace_state("sess-revision")).revision == 1
+
+
+@pytest.mark.asyncio
+async def test_exact_markdown_create_move_and_delete_use_revision(store):
+    await store.ensure_session_workspace("sess-crud")
+    created = await store.write_text(
+        "sess-crud",
+        "plan.md",
+        "v1",
+        folder="docs",
+        expected_workspace_revision=0,
+        unique_logical_path=False,
+    )
+    with pytest.raises(WorkspacePathConflictError):
+        await store.write_text(
+            "sess-crud",
+            "plan.md",
+            "duplicate",
+            folder="docs",
+            expected_workspace_revision=1,
+            unique_logical_path=False,
+        )
+
+    moved = await store.move_file(
+        "sess-crud",
+        created.id,
+        "notes/renamed.md",
+        expected_sha256=created.sha256,
+        expected_workspace_revision=1,
+    )
+    assert moved.logical_path == "notes/renamed.md"
+    assert (await store.get_workspace_state("sess-crud")).revision == 2
+
+    with pytest.raises(WorkspaceVersionConflictError):
+        await store.delete_for_session(
+            "sess-crud",
+            moved.id,
+            expected_sha256=moved.sha256,
+            expected_workspace_revision=1,
+        )
+    deleted = await store.delete_for_session(
+        "sess-crud",
+        moved.id,
+        expected_sha256=moved.sha256,
+        expected_workspace_revision=2,
+    )
+    assert deleted.id == moved.id
+    assert (await store.get_workspace_state("sess-crud")).revision == 3

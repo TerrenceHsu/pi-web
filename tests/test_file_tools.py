@@ -120,6 +120,21 @@ async def test_write_file_output_is_visible_to_list_and_view(file_store):
 
 
 @pytest.mark.asyncio
+async def test_write_file_puts_code_in_scripts_and_reports_revision(file_store):
+    write_tool = _make_write_tool(file_store)
+    written = await write_tool.execute(
+        "tc-code",
+        {"filename": "main.py", "content": "print('ok')", "folder": "demo"},
+    )
+
+    assert written.details["logical_path"] == "scripts/demo/main.py"
+    assert written.details["workspace_revision"] == 1
+    list_tool, _, _ = _make_tool_pair(file_store)
+    listed = await list_tool.execute("tc-list", {})
+    assert listed.details["workspace_revision"] == 1
+
+
+@pytest.mark.asyncio
 async def test_write_file_rejects_invalid_arguments_and_missing_session(file_store):
     write_tool = _make_write_tool(file_store)
     assert (await write_tool.execute("tc-1", {})).details["error_type"] == (

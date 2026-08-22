@@ -34,7 +34,7 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from fastapi import UploadFile
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 # ============================================================================
 # 常量
@@ -52,6 +52,53 @@ AGENT_INSTRUCTIONS_PATH = "AGENT.md"
 
 #: Session 根目录中的持久记忆文件。
 MEMORY_PATH = "Memory.md"
+
+#: Agent 与用户代码的唯一逻辑根。目录在第一份代码出现时自然进入文件树。
+SCRIPTS_PATH = "scripts"
+
+#: Workspace revision 的隐藏持久化状态；不属于用户可见文件树。
+WORKSPACE_STATE_FILENAME = ".workspace.json"
+
+#: 明确视为可执行/工程代码的扩展名。配置和普通文本不自动搬入 scripts。
+CODE_EXTENSIONS: frozenset[str] = frozenset({
+    ".bash",
+    ".c",
+    ".cc",
+    ".cjs",
+    ".cpp",
+    ".cs",
+    ".css",
+    ".fish",
+    ".go",
+    ".h",
+    ".hh",
+    ".hpp",
+    ".java",
+    ".js",
+    ".jsx",
+    ".kt",
+    ".kts",
+    ".less",
+    ".lua",
+    ".mjs",
+    ".php",
+    ".py",
+    ".pyi",
+    ".r",
+    ".rb",
+    ".rs",
+    ".scss",
+    ".sh",
+    ".sql",
+    ".svelte",
+    ".swift",
+    ".ts",
+    ".tsx",
+    ".vue",
+    ".zsh",
+})
+
+MARKDOWN_EXTENSIONS: frozenset[str] = frozenset({".md", ".markdown", ".mdx"})
 
 #: 新 Session 的安全模板；已有内容不会在登录或重启时被覆盖。
 DEFAULT_AGENT_INSTRUCTIONS = """# AGENT.md
@@ -134,6 +181,22 @@ class FileVersionConflictError(FileStoreError):
     """文件更新时 expected sha256 与当前版本不一致。"""
 
 
+class WorkspaceVersionConflictError(FileStoreError):
+    """Workspace mutation 使用了过期 revision。"""
+
+    def __init__(self, expected: int, current: int):
+        self.expected = expected
+        self.current = current
+        super().__init__(
+            f"workspace changed since it was opened: expected revision "
+            f"{expected}, current revision {current}"
+        )
+
+
+class WorkspacePathConflictError(FileStoreError):
+    """目标逻辑路径已被另一个文件占用。"""
+
+
 # ============================================================================
 # FileRef
 # ============================================================================
@@ -163,6 +226,16 @@ class FileRef(BaseModel):
         if self.updated_at is None:
             self.updated_at = self.created_at
         return self
+
+
+class WorkspaceState(BaseModel):
+    """Session Workspace 的持久化并发状态。"""
+
+    schema_version: Literal[1] = 1
+    session_id: str
+    revision: int = Field(ge=0)
+    created_at: int
+    updated_at: int
 
 
 # ============================================================================
@@ -221,6 +294,82 @@ def normalize_logical_path(filename: str, folder: str | None = None) -> str:
         raise UnsafeFilenameError("logical folder contains an unsafe segment")
     safe_parts = [sanitize_filename(part) for part in raw_parts]
     return "/".join([*safe_parts, safe_name])
+
+
+def normalize_workspace_logical_path(logical_path: str) -> str:
+    """严格校验用户/Agent 提供的 Workspace 相对 POSIX 路径。"""
+    if not isinstance(logical_path, str) or not logical_path:
+        raise UnsafeFilenameError("workspace logical path must be non-empty")
+    if logical_path != logical_path.strip():
+        raise UnsafeFilenameError("workspace logical path cannot have outer whitespace")
+    if len(logical_path) > 1024:
+        raise UnsafeFilenameError("workspace logical path is too long")
+    if "\\" in logical_path:
+        raise UnsafeFilenameError("workspace logical path must use '/' separators")
+    if logical_path.startswith("/") or re.match(r"^[A-Za-z]:", logical_path):
+        raise UnsafeFilenameError("workspace logical path must be relative")
+    if any(ord(char) < 32 or ord(char) == 127 for char in logical_path):
+        raise UnsafeFilenameError("workspace logical path contains control characters")
+
+    parts = logical_path.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        raise UnsafeFilenameError("workspace logical path contains an unsafe segment")
+    if parts[0].casefold() == ".pi-agent":
+        raise UnsafeFilenameError(".pi-agent is reserved for system state")
+    for part in parts:
+        if len(part) > _MAX_FILENAME_LEN:
+            raise UnsafeFilenameError("workspace path segment is too long")
+        if sanitize_filename(part) != part:
+            raise UnsafeFilenameError(
+                f"workspace logical path contains an unsafe segment: {part!r}"
+            )
+    return "/".join(parts)
+
+
+def is_code_filename(filename: str) -> bool:
+    """Return whether a filename belongs under the managed scripts root."""
+    return PurePosixPath(filename.casefold()).suffix in CODE_EXTENSIONS
+
+
+def is_markdown_filename(filename: str) -> bool:
+    """Return whether a filename is an editable Markdown document."""
+    return PurePosixPath(filename.casefold()).suffix in MARKDOWN_EXTENSIONS
+
+
+def workspace_logical_path(
+    filename: str,
+    folder: str | None = None,
+    *,
+    purpose: Literal["file", "agent_instructions", "memory"] = "file",
+) -> str:
+    """Resolve a managed file into its canonical Workspace logical path."""
+    safe_name = sanitize_filename(filename)
+    if purpose == "agent_instructions":
+        return AGENT_INSTRUCTIONS_PATH
+    if purpose == "memory":
+        return MEMORY_PATH
+
+    normalized_folder: str | None = None
+    if folder is not None and folder.strip():
+        normalized_folder = normalize_workspace_logical_path(folder)
+    if is_code_filename(safe_name):
+        if normalized_folder is None:
+            normalized_folder = SCRIPTS_PATH
+        elif normalized_folder.casefold() != SCRIPTS_PATH and not (
+            normalized_folder.casefold().startswith(f"{SCRIPTS_PATH}/")
+        ):
+            normalized_folder = f"{SCRIPTS_PATH}/{normalized_folder}"
+
+    logical_path = normalize_logical_path(safe_name, normalized_folder)
+    logical_path = normalize_workspace_logical_path(logical_path)
+    if logical_path.casefold() in {
+        AGENT_INSTRUCTIONS_PATH.casefold(),
+        MEMORY_PATH.casefold(),
+    }:
+        raise UnsafeFilenameError(
+            "AGENT.md and Memory.md are reserved Workspace root files"
+        )
+    return logical_path
 
 
 def _guess_mime(filename: str, content_type: str | None) -> str:
@@ -344,6 +493,96 @@ class WorkspaceStore:
             self._session_locks[session_id] = lock
         return lock
 
+    def _workspace_state_path(self, session_id: str) -> Path:
+        return self._session_dir(session_id) / WORKSPACE_STATE_FILENAME
+
+    def _read_workspace_state_unlocked(
+        self,
+        session_id: str,
+    ) -> WorkspaceState | None:
+        state_path = self._workspace_state_path(session_id)
+        if not state_path.is_file():
+            return None
+        try:
+            state = WorkspaceState.model_validate_json(
+                state_path.read_text(encoding="utf-8")
+            )
+        except Exception as exc:
+            raise FileStoreError("workspace revision state is invalid") from exc
+        if state.session_id != session_id:
+            raise FileStoreError("workspace revision state belongs to another session")
+        return state
+
+    def _write_workspace_state_unlocked(self, state: WorkspaceState) -> None:
+        session_dir = self._session_dir(state.session_id)
+        state_path = self._workspace_state_path(state.session_id)
+        temp_path = session_dir / f".workspace.{uuid.uuid4().hex}.tmp"
+        self._resolve_and_check(state_path, expect_under=session_dir)
+        self._resolve_and_check(temp_path, expect_under=session_dir)
+        raw = json.dumps(
+            state.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        try:
+            with temp_path.open("wb") as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temp_path.replace(state_path)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+
+    async def _ensure_workspace_state_unlocked(
+        self,
+        session_id: str,
+    ) -> WorkspaceState:
+        await self.ensure_session_folder(session_id)
+        existing = self._read_workspace_state_unlocked(session_id)
+        if existing is not None:
+            return existing
+        now = _now_ms()
+        created = WorkspaceState(
+            session_id=session_id,
+            revision=0,
+            created_at=now,
+            updated_at=now,
+        )
+        self._write_workspace_state_unlocked(created)
+        return created
+
+    @staticmethod
+    def _check_workspace_revision(
+        state: WorkspaceState,
+        expected_workspace_revision: int | None,
+    ) -> None:
+        if (
+            expected_workspace_revision is not None
+            and expected_workspace_revision != state.revision
+        ):
+            raise WorkspaceVersionConflictError(
+                expected_workspace_revision,
+                state.revision,
+            )
+
+    def _advance_workspace_revision_unlocked(
+        self,
+        state: WorkspaceState,
+    ) -> WorkspaceState:
+        advanced = state.model_copy(update={
+            "revision": state.revision + 1,
+            "updated_at": _now_ms(),
+        })
+        self._write_workspace_state_unlocked(advanced)
+        return advanced
+
+    async def get_workspace_state(self, session_id: str) -> WorkspaceState:
+        """Read or migrate the persistent Workspace revision state."""
+        async with self._session_lock(session_id):
+            return await self._ensure_workspace_state_unlocked(session_id)
+
     # ------------------------------------------------------------------
     # 内部辅助：路径构造 + 边界检查
     # ------------------------------------------------------------------
@@ -430,8 +669,25 @@ class WorkspaceStore:
         for session_dir in self._root_dir.iterdir():
             if not session_dir.is_dir():
                 continue
+            for child in list(session_dir.iterdir()):
+                if (
+                    child.is_file()
+                    and child.name.startswith(".workspace.")
+                    and child.suffix == ".tmp"
+                ):
+                    try:
+                        child.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                elif child.is_dir() and child.name.startswith(".deleted-"):
+                    try:
+                        for tombstone_child in child.iterdir():
+                            tombstone_child.unlink(missing_ok=True)
+                        child.rmdir()
+                    except OSError:
+                        pass
             for file_dir in session_dir.iterdir():
-                if not file_dir.is_dir():
+                if not file_dir.is_dir() or file_dir.name.startswith("."):
                     continue
                 ref = self._read_metadata(file_dir)
                 if ref is None:
@@ -511,6 +767,35 @@ class WorkspaceStore:
         self,
         session_id: str,
         upload: UploadFile,
+        *,
+        relative_folder: str | None = None,
+        expected_workspace_revision: int | None = None,
+    ) -> FileRef:
+        """Persist one upload and atomically advance its Workspace revision."""
+        async with self._session_lock(session_id):
+            state = await self._ensure_workspace_state_unlocked(session_id)
+            self._check_workspace_revision(state, expected_workspace_revision)
+            ref = await self._save_unlocked(
+                session_id,
+                upload,
+                relative_folder=relative_folder,
+            )
+            try:
+                self._advance_workspace_revision_unlocked(state)
+            except Exception:
+                try:
+                    self._delete_file_dir_unlocked(session_id, ref.id)
+                except Exception:
+                    pass
+                raise
+            return ref
+
+    async def _save_unlocked(
+        self,
+        session_id: str,
+        upload: UploadFile,
+        *,
+        relative_folder: str | None,
     ) -> FileRef:
         """保存上传文件到 uploads/{session_id}/{file_id}/{safe_filename}。
 
@@ -532,7 +817,7 @@ class WorkspaceStore:
         safe_name = sanitize_filename(original_name)
         logical_path = await self._unique_logical_path(
             session_id,
-            normalize_logical_path(safe_name),
+            workspace_logical_path(safe_name, relative_folder),
         )
 
         # 预检 session 总量
@@ -665,6 +950,8 @@ class WorkspaceStore:
         folder: str | None = None,
         origin: Literal["system", "agent", "user"] = "agent",
         purpose: Literal["file", "agent_instructions", "memory"] = "file",
+        expected_workspace_revision: int | None = None,
+        unique_logical_path: bool = True,
     ) -> FileRef:
         """在 session 工作目录创建一个新的 UTF-8 文本文件。
 
@@ -673,13 +960,30 @@ class WorkspaceStore:
         文件名清理、路径边界、单文件大小和 session 总容量与上传路径一致。
         """
         safe_name = sanitize_filename(filename)
-        requested_path = normalize_logical_path(safe_name, folder)
+        requested_path = workspace_logical_path(
+            safe_name,
+            folder,
+            purpose=purpose,
+        )
         async with self._session_lock(session_id):
-            logical_path = await self._unique_logical_path(
-                session_id,
-                requested_path,
-            )
-            return await self._write_text_unlocked(
+            state = await self._ensure_workspace_state_unlocked(session_id)
+            self._check_workspace_revision(state, expected_workspace_revision)
+            if unique_logical_path:
+                logical_path = await self._unique_logical_path(
+                    session_id,
+                    requested_path,
+                )
+            else:
+                existing = await self.get_by_logical_path(
+                    session_id,
+                    requested_path,
+                )
+                if existing is not None:
+                    raise WorkspacePathConflictError(
+                        f"workspace path {requested_path!r} already exists"
+                    )
+                logical_path = requested_path
+            ref = await self._write_text_unlocked(
                 session_id,
                 safe_name,
                 content,
@@ -688,6 +992,15 @@ class WorkspaceStore:
                 origin=origin,
                 purpose=purpose,
             )
+            try:
+                self._advance_workspace_revision_unlocked(state)
+            except Exception:
+                try:
+                    self._delete_file_dir_unlocked(session_id, ref.id)
+                except Exception:
+                    pass
+                raise
+            return ref
 
     async def _write_text_unlocked(
         self,
@@ -841,11 +1154,12 @@ class WorkspaceStore:
                 # perspective. Existing roots are never deleted on recovery.
                 for ref in reversed(created):
                     try:
-                        await self.delete_for_session(session_id, ref.id)
+                        self._delete_file_dir_unlocked(session_id, ref.id)
                     except Exception:
                         pass
                 raise
 
+            await self._ensure_workspace_state_unlocked(session_id)
             return session_dir, agent_ref
 
     async def update_text(
@@ -855,6 +1169,7 @@ class WorkspaceStore:
         content: str,
         *,
         expected_sha256: str | None = None,
+        expected_workspace_revision: int | None = None,
         origin: Literal["system", "upload", "agent", "user", "legacy"] | None = "user",
         purpose: Literal["file", "agent_instructions", "memory"] | None = None,
     ) -> FileRef:
@@ -871,6 +1186,8 @@ class WorkspaceStore:
             raise FileTooLargeError(size=len(raw), limit=self._max_file_size)
 
         async with self._session_lock(session_id):
+            state = await self._ensure_workspace_state_unlocked(session_id)
+            self._check_workspace_revision(state, expected_workspace_revision)
             ref = await self.get_for_session(session_id, file_id)
             if expected_sha256 is not None and expected_sha256 != ref.sha256:
                 raise FileVersionConflictError("file changed since it was opened")
@@ -911,12 +1228,84 @@ class WorkspaceStore:
                     f"update_text failed for {ref.name!r}: {type(e).__name__}: {e}"
                 ) from e
             try:
+                self._advance_workspace_revision_unlocked(state)
+            except Exception as exc:
+                try:
+                    self._write_metadata(file_dir, ref)
+                    generation_path.unlink(missing_ok=True)
+                except Exception as rollback_exc:
+                    raise FileStoreError(
+                        "workspace revision update and file rollback failed"
+                    ) from rollback_exc
+                raise FileStoreError(
+                    "workspace revision update failed; file update was rolled back"
+                ) from exc
+            try:
                 if prior_path != generation_path:
                     prior_path.unlink(missing_ok=True)  # noqa: ASYNC240
             except OSError:
                 # metadata 已提交；旧 generation 只是可在下次 init 清理的孤儿。
                 pass
             return updated
+
+    async def move_file(
+        self,
+        session_id: str,
+        file_id: str,
+        logical_path: str,
+        *,
+        expected_sha256: str | None = None,
+        expected_workspace_revision: int | None = None,
+    ) -> FileRef:
+        """Move/rename an editable Markdown entry without moving content bytes."""
+        target_path = normalize_workspace_logical_path(logical_path)
+        target_name = PurePosixPath(target_path).name
+        if not is_markdown_filename(target_name):
+            raise UnsafeFilenameError("Markdown files must keep a Markdown extension")
+        if target_path.casefold() in {
+            AGENT_INSTRUCTIONS_PATH.casefold(),
+            MEMORY_PATH.casefold(),
+        }:
+            raise UnsafeFilenameError("fixed Workspace root files cannot be moved")
+
+        async with self._session_lock(session_id):
+            state = await self._ensure_workspace_state_unlocked(session_id)
+            self._check_workspace_revision(state, expected_workspace_revision)
+            ref = await self.get_for_session(session_id, file_id)
+            if ref.purpose != "file" or not is_markdown_filename(ref.name):
+                raise UnsafeFilenameError("only ordinary Markdown files can be moved")
+            if expected_sha256 is not None and expected_sha256 != ref.sha256:
+                raise FileVersionConflictError("file changed since it was opened")
+            occupied = await self.get_by_logical_path(session_id, target_path)
+            if occupied is not None and occupied.id != file_id:
+                raise WorkspacePathConflictError(
+                    f"workspace path {target_path!r} already exists"
+                )
+            if ref.logical_path == target_path:
+                return ref
+
+            moved = ref.model_copy(update={
+                "name": target_name,
+                "logical_path": target_path,
+                "mime": _guess_mime(target_name, "text/markdown"),
+                "origin": "user",
+                "updated_at": _now_ms(),
+            })
+            file_dir = self._file_dir(session_id, file_id)
+            self._write_metadata(file_dir, moved)
+            try:
+                self._advance_workspace_revision_unlocked(state)
+            except Exception as exc:
+                try:
+                    self._write_metadata(file_dir, ref)
+                except Exception as rollback_exc:
+                    raise FileStoreError(
+                        "workspace revision update and move rollback failed"
+                    ) from rollback_exc
+                raise FileStoreError(
+                    "workspace revision update failed; move was rolled back"
+                ) from exc
+            return moved
 
     # ------------------------------------------------------------------
     # get / list
@@ -992,7 +1381,7 @@ class WorkspaceStore:
             return []
         out: list[FileRef] = []
         for file_dir in session_dir.iterdir():
-            if not file_dir.is_dir():
+            if not file_dir.is_dir() or file_dir.name.startswith("."):
                 continue
             ref = self._read_metadata(file_dir)
             if ref is not None:
@@ -1022,6 +1411,19 @@ class WorkspaceStore:
     # delete
     # ------------------------------------------------------------------
 
+    def _delete_file_dir_unlocked(self, session_id: str, file_id: str) -> None:
+        file_dir = self._file_dir(session_id, file_id)
+        try:
+            for child in file_dir.iterdir():
+                child.unlink(missing_ok=True)
+            file_dir.rmdir()
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            raise FileStoreError(
+                f"delete failed for {file_id!r}: {type(exc).__name__}: {exc}"
+            ) from exc
+
     async def delete(self, file_id: str) -> None:
         """删除单文件（不带 session 校验，扫库定位）。
 
@@ -1030,40 +1432,69 @@ class WorkspaceStore:
         ref = await self.get(file_id)
         if ref is None:
             raise VirtualFileNotFoundError(f"file {file_id!r} not found")
-        file_dir = self._file_dir(ref.session_id, file_id)
-        # 删整个 file_dir
-        try:
-            for child in file_dir.iterdir():
-                child.unlink(missing_ok=True)
-            file_dir.rmdir()
-        except FileNotFoundError:
-            pass
-        except Exception as e:
-            raise FileStoreError(
-                f"delete failed for {file_id!r}: {type(e).__name__}: {e}"
-            ) from e
+        await self.delete_for_session(ref.session_id, file_id)
 
     async def delete_for_session(
-        self, session_id: str, file_id: str,
+        self,
+        session_id: str,
+        file_id: str,
+        *,
+        expected_sha256: str | None = None,
+        expected_workspace_revision: int | None = None,
     ) -> FileRef:
         """session 隔离删除：返回被删的 FileRef。
 
         - 文件不存在 → VirtualFileNotFoundError
         - 跨 session → FileAccessDeniedError
         """
-        ref = await self.get_for_session(session_id, file_id)
-        file_dir = self._file_dir(session_id, file_id)
-        try:
-            for child in file_dir.iterdir():
-                child.unlink(missing_ok=True)
-            file_dir.rmdir()
-        except FileNotFoundError:
-            pass
-        except Exception as e:
-            raise FileStoreError(
-                f"delete failed for {file_id!r}: {type(e).__name__}: {e}"
-            ) from e
-        return ref
+        async with self._session_lock(session_id):
+            state = await self._ensure_workspace_state_unlocked(session_id)
+            self._check_workspace_revision(state, expected_workspace_revision)
+            ref = await self.get_for_session(session_id, file_id)
+            if expected_sha256 is not None and expected_sha256 != ref.sha256:
+                raise FileVersionConflictError("file changed since it was opened")
+
+            file_dir = self._file_dir(session_id, file_id)
+            tombstone = self._session_dir(session_id) / (
+                f".deleted-{file_id}-{uuid.uuid4().hex}"
+            )
+            self._resolve_and_check(
+                tombstone,
+                expect_under=self._session_dir(session_id),
+            )
+            try:
+                file_dir.replace(tombstone)
+            except FileNotFoundError as exc:
+                raise VirtualFileNotFoundError(
+                    f"file {file_id!r} not found in session {session_id!r}"
+                ) from exc
+            except Exception as exc:
+                raise FileStoreError(
+                    f"delete failed for {file_id!r}: {type(exc).__name__}: {exc}"
+                ) from exc
+
+            try:
+                self._advance_workspace_revision_unlocked(state)
+            except Exception as exc:
+                try:
+                    tombstone.replace(file_dir)
+                except Exception as rollback_exc:
+                    raise FileStoreError(
+                        "workspace revision update and delete rollback failed"
+                    ) from rollback_exc
+                raise FileStoreError(
+                    "workspace revision update failed; delete was rolled back"
+                ) from exc
+
+            try:
+                for child in tombstone.iterdir():
+                    child.unlink(missing_ok=True)
+                tombstone.rmdir()
+            except OSError:
+                # Deletion is already committed. Hidden tombstones are ignored
+                # by readers and cleaned during the next store initialization.
+                pass
+            return ref
 
     async def delete_session_files(self, session_id: str) -> int:
         """删除 session 下所有文件；返回删除的文件数。
@@ -1083,13 +1514,21 @@ class WorkspaceStore:
             for file_dir in session_dir.iterdir():
                 if not file_dir.is_dir():
                     continue
+                count_as_file = not file_dir.name.startswith(".")
                 try:
                     for child in file_dir.iterdir():
                         child.unlink(missing_ok=True)
                     file_dir.rmdir()
-                    count += 1
+                    if count_as_file:
+                        count += 1
                 except Exception:
                     continue
+            for child in session_dir.iterdir():
+                if child.is_file() and (
+                    child.name == WORKSPACE_STATE_FILENAME
+                    or child.name.startswith(".workspace.")
+                ):
+                    child.unlink(missing_ok=True)
             session_dir.rmdir()
         except Exception:
             pass
@@ -1107,6 +1546,10 @@ __all__ = [
     "DEFAULT_MAX_SESSION_SIZE",
     "AGENT_INSTRUCTIONS_PATH",
     "MEMORY_PATH",
+    "SCRIPTS_PATH",
+    "WORKSPACE_STATE_FILENAME",
+    "CODE_EXTENSIONS",
+    "MARKDOWN_EXTENSIONS",
     "DEFAULT_AGENT_INSTRUCTIONS",
     "DEFAULT_MEMORY",
     # 异常
@@ -1117,11 +1560,18 @@ __all__ = [
     "SessionStorageLimitError",
     "UnsafeFilenameError",
     "FileVersionConflictError",
+    "WorkspaceVersionConflictError",
+    "WorkspacePathConflictError",
     # 数据模型
     "FileRef",
+    "WorkspaceState",
     # 工具函数
     "sanitize_filename",
     "normalize_logical_path",
+    "normalize_workspace_logical_path",
+    "is_code_filename",
+    "is_markdown_filename",
+    "workspace_logical_path",
     # 主类
     "WorkspaceStore",
     "VirtualFileStore",

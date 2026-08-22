@@ -1,6 +1,6 @@
 # Workspace 与 Coding Sandbox 一体化设计
 
-> 状态：阶段 1 已完成，阶段 2 待实施
+> 状态：阶段 1–2 已完成，阶段 3 待实施
 > 日期：2026-08-22
 > 范围：Session Workspace、Agent 文件工具、E2B Coding Sandbox、安全发布与后续文档转换
 
@@ -84,9 +84,10 @@ workspace/
 阶段 1 在既有 metadata-per-file 存储上建立规范 `WorkspaceStore` 名称，并保留
 `VirtualFileStore` 兼容别名。已有 `uploads/{session_id}` 数据不复制、不改路径，避免产生
 双事实源；启动时幂等补齐缺失的 `Memory.md`，并把大小写等价的旧根文件规范为固定路径与
-purpose。后续可在不改变 API 的前提下迁移物理布局。
+purpose。阶段 2 在每个 Session 目录中增加隐藏 `.workspace.json` 状态文件，持久化单调
+revision；该文件不进入用户文件树或容量统计。后续仍可在不改变 API 的前提下迁移物理布局。
 
-后续模型字段：
+当前模型字段：
 
 - Workspace：`session_id`、`revision`、`created_at`、`updated_at`。
 - Entry：`id`、`logical_path`、`kind`、`origin`、`purpose`、`mime`、`size`、`sha256`、
@@ -139,9 +140,13 @@ Sandbox 只获得可公开的 Workspace 快照，不获得本机绝对路径、�
 ## 8. 右侧 Workspace 面板
 
 桌面布局改为左侧 Sessions、中间 Chat、右侧 Workspace；窄屏把右侧面板降级为 drawer。
+右侧栏首先是 Agent 成果的交付面：Agent 完成或更新 `.md`、`.py` 等 Workspace 文件后，
+前端依据 mutation 响应中的 Workspace revision 自动刷新文件树，并选中或提示最新成果；用户无需
+从聊天文本中寻找物理路径，也不需要手动刷新页面。
 面板包含：
 
-- **Files**：目录树、上传、新建 Markdown、查看/下载、固定根文件编辑。
+- **Files**：目录树、Agent 最新成果提示、上传、新建 Markdown、Markdown 预览/编辑、代码查看、
+  下载与固定根文件编辑。
 - **Sandbox**：当前 operation、运行日志和固定验证结果。
 - **Changes**：发布前 diff、冲突提示、确认发布和历史结果。
 
@@ -180,10 +185,19 @@ Agent 不能把二进制正文直接提交给 LLM。上传后由服务端排队�
 - 完成 Markdown 创建、更新、移动、删除及冲突 API。
 - 引入 Workspace revision 与批量 mutation 契约。
 
+实施结果：已完成。代码扩展名由服务端确定，未指定目录时映射到 `scripts/<filename>`；指定
+安全目录时映射到 `scripts/<relative_folder>/<filename>`，已带 `scripts/` 的路径不会重复加前缀。
+普通 Markdown 提供精确路径 create、正文 update、metadata-only move/rename 和 delete；创建/移动
+不允许占用既有大小写等价路径，`AGENT.md` 与 `Memory.md` 不能作为普通文件创建、移动或删除。
+上传/创建/更新/移动/删除每成功一次把持久 Workspace revision 提升一次，并可同时校验旧 revision
+与逐文件 SHA；冲突返回 HTTP 409。现有 `write_file`/`list_files` 工具和前端 API/store 均传递最新
+revision。物理内容仍保持 metadata-per-file 布局，逻辑 `scripts/` 不产生第二份文件。
+
 ### 阶段 3：右侧 Workspace 面板
 
 - 三栏桌面布局与窄屏 drawer。
-- 文件树、根文件编辑、上传、新建 Markdown、预览与实时刷新。
+- Agent 创建/更新 `.md`、`.py` 等成果后，按 Workspace revision 自动刷新、提示并展示最新成果。
+- 文件树、根文件编辑、上传、新建 Markdown、Markdown 预览/编辑、代码查看与下载。
 - 复用 Sandbox/Changes 视图和统一 store。
 
 ### 阶段 4：统一 Sandbox 快照与发布目标
