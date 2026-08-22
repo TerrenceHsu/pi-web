@@ -2,6 +2,7 @@ import { createApp } from "vue"
 import { createPinia } from "pinia"
 
 import App from "./App.vue"
+import { useChatStore } from "./stores/chatStore"
 import "./styles.css"
 
 const app = createApp(App)
@@ -28,14 +29,11 @@ const shouldExposeHooks =
   import.meta.env.DEV || import.meta.env.VITE_E2E_HOOKS === "true"
 
 if (shouldExposeHooks && typeof window !== "undefined") {
-  // lazy import 避免循环依赖
-  void import("./stores/chatStore").then(({ useChatStore }) => {
-    ;(window as any).__storeHooks = {
-      chatStore: () => useChatStore(),
-    }
-    // P1-B3-4: E2E socket 控制 hook——模拟"非主动网络断线"触发 reconnect + replay
-    ;(window as any).__e2eHooks = {
-      closeEventSocket: () => useChatStore().closeEventSocketForTest(),
-    }
-  })
+  ;(window as any).__storeHooks = {
+    chatStore: () => useChatStore(),
+  }
+  // P1-B3-4: E2E socket 控制 hook——模拟"非主动网络断线"触发 reconnect + replay
+  ;(window as any).__e2eHooks = {
+    closeEventSocket: () => useChatStore().closeEventSocketForTest(),
+  }
 }

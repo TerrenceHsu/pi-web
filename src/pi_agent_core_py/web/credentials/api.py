@@ -410,7 +410,7 @@ def safe_validation_response(exc: RequestValidationError) -> JSONResponse:
         fields.append({"path": path, "code": code})
 
     return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         content={
             "error": {
                 "code": "request_validation_failed",
@@ -502,7 +502,7 @@ def credential_error_to_response(exc: Exception) -> JSONResponse | None:
         )
     if isinstance(exc, CredentialInputError):
         return _credential_error_response(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             "invalid_input",
             "Credential input is invalid.",
         )

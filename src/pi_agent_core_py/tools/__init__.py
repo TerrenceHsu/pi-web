@@ -284,6 +284,11 @@ class ToolRegistry:
 # 绑定 VirtualFileStore + session_id_getter 后注册。
 # ruff: noqa: E402, I001
 from .list_files import ListFilesTool, create_list_files_tool
+from .coding_sandbox import (
+    CodingSandboxTool,
+    create_coding_sandbox_tools,
+    create_coding_validation_tool,
+)
 from .view_file import (
     DEFAULT_MAX_BYTES as VIEW_FILE_DEFAULT_MAX_BYTES,
     DEFAULT_MAX_ROWS as VIEW_FILE_DEFAULT_MAX_ROWS,
@@ -299,6 +304,7 @@ __all__ = [
     "ToolDef", "ToolResult", "ToolUpdateCallback", "AgentTool", "ToolRegistry",
     # 内置工具
     "WebSearchTool",
+    "CodingSandboxTool", "create_coding_sandbox_tools", "create_coding_validation_tool",
     # P0-3 内置工具
     "ListFilesTool", "create_list_files_tool",
     "ViewFileTool", "create_view_file_tool",

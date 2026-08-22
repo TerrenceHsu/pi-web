@@ -20,9 +20,10 @@ from ..messages import TextContent
 from ..model_client import ModelClient
 from ..session import serialize_messages
 from ..stream_events import DoneEvent, ErrorEvent, TextDeltaEvent
+from .files import MEMORY_PATH
 
 CHECKPOINTER_COMMAND = "/checkpointer"
-SESSION_MEMORY_PATH = "Memory.md"
+SESSION_MEMORY_PATH = MEMORY_PATH
 MAX_MEMORY_CHARS = 32_000
 _MAX_PRIOR_MEMORY_CHARS = 16_000
 _TRANSCRIPT_CHUNK_CHARS = 12_000

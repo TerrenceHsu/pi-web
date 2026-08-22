@@ -71,11 +71,20 @@ def _upload_payload(content: bytes, filename: str = "test.txt", content_type: st
 
 
 def _ordinary_files(payload):
-    return [f for f in payload["files"] if f.get("purpose") != "agent_instructions"]
+    return [
+        f for f in payload["files"]
+        if f.get("purpose") not in {"agent_instructions", "memory"}
+    ]
 
 
 def _agent_instructions_file(payload):
     matches = [f for f in payload["files"] if f.get("purpose") == "agent_instructions"]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _memory_file(payload):
+    matches = [f for f in payload["files"] if f.get("purpose") == "memory"]
     assert len(matches) == 1
     return matches[0]
 
@@ -113,11 +122,15 @@ def test_default_and_new_sessions_have_eager_folders(web_client):
     sid = _make_session(client, "folder-backed")
     assert (tmp_path / "uploads" / sid).is_dir()
     listed = client.get(f"/api/sessions/{sid}/files").json()
-    assert listed["count"] == 1
+    assert listed["count"] == 2
     agent_md = _agent_instructions_file(listed)
+    memory_md = _memory_file(listed)
     assert agent_md["logical_path"] == "AGENT.md"
     assert agent_md["origin"] == "system"
+    assert memory_md["logical_path"] == "Memory.md"
+    assert memory_md["origin"] == "system"
     assert "path" not in agent_md
+    assert "path" not in memory_md
 
 
 def test_agent_md_is_editable_versioned_and_protected(web_client):
@@ -149,6 +162,10 @@ def test_agent_md_is_editable_versioned_and_protected(web_client):
     assert stale.status_code == 409
     assert client.delete(
         f"/api/sessions/{sid}/files/{agent_md['id']}"
+    ).status_code == 409
+    memory_md = _memory_file(listed)
+    assert client.delete(
+        f"/api/sessions/{sid}/files/{memory_md['id']}"
     ).status_code == 409
 
     ordinary = client.post(
@@ -238,9 +255,10 @@ def test_conversation_and_agent_md_persist_across_workspace_reopen(tmp_path):
         assert "persisted answer" in str(messages["messages"])
         listed = client.get(f"/api/sessions/{sid}/files").json()
         agent_md = _agent_instructions_file(listed)
-        assert listed["count"] == 1
+        assert listed["count"] == 2
         downloaded = client.get(f"/api/sessions/{sid}/files/{agent_md['id']}")
         assert downloaded.text == custom
+        assert _memory_file(listed)["logical_path"] == "Memory.md"
     dispose_app(second_app)
 
 
@@ -274,7 +292,7 @@ def test_agent_can_create_file_in_active_session_and_user_can_download(tmp_path)
         assert response.status_code == 200
 
         listed = client.get(f"/api/sessions/{sid}/files").json()
-        assert listed["count"] == 2
+        assert listed["count"] == 3
         generated = _ordinary_files(listed)[0]
         assert generated["name"] == "agent-result.md"
         downloaded = client.get(
@@ -319,9 +337,9 @@ def test_list_session_files(web_client):
     r = client.get(f"/api/sessions/{sid}/files")
     assert r.status_code == 200
     data = r.json()
-    assert data["count"] == 3
+    assert data["count"] == 4
     names = [f["name"] for f in data["files"]]
-    assert set(names) == {"AGENT.md", "a.txt", "b.txt"}
+    assert set(names) == {"AGENT.md", "Memory.md", "a.txt", "b.txt"}
 
 
 def test_list_files_isolated_by_session(web_client):
@@ -411,8 +429,9 @@ def test_delete_via_compat_endpoint(web_client):
 
     # 再列出应为空
     remaining = client.get(f"/api/sessions/{sid}/files").json()
-    assert remaining["count"] == 1
+    assert remaining["count"] == 2
     _agent_instructions_file(remaining)
+    _memory_file(remaining)
 
 
 def test_delete_via_session_endpoint(web_client):
@@ -536,7 +555,7 @@ def test_upload_session_total_over_limit_returns_413(web_client):
     assert r2.status_code == 413
     assert r2.json()["errors"][0]["error_type"] == "SessionStorageLimitError"
     # 第一次的文件应仍在
-    assert client.get(f"/api/sessions/{sid}/files").json()["count"] == 2
+    assert client.get(f"/api/sessions/{sid}/files").json()["count"] == 3
 
 
 # ============================================================================
@@ -600,12 +619,12 @@ def test_delete_session_cascades_uploads(web_client):
         f"/api/sessions/{sid}/files",
         files=[_upload_payload(b"b", "b.txt")],
     )
-    assert client.get(f"/api/sessions/{sid}/files").json()["count"] == 3
+    assert client.get(f"/api/sessions/{sid}/files").json()["count"] == 4
 
     # 删 session
     r = client.delete(f"/api/sessions/{sid}")
     assert r.status_code == 200
-    assert r.json()["deleted_files"] == 3
+    assert r.json()["deleted_files"] == 4
 
     # uploads/sid 目录应被删
     session_dir = tmp_path / "uploads" / sid

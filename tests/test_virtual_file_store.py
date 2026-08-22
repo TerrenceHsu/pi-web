@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import io
 
 import pytest
@@ -19,6 +20,8 @@ from pi_agent_core_py.web.files import (
     AGENT_INSTRUCTIONS_PATH,
     DEFAULT_MAX_FILE_SIZE,
     DEFAULT_MAX_SESSION_SIZE,
+    DEFAULT_MEMORY,
+    MEMORY_PATH,
     FileAccessDeniedError,
     FileRef,
     FileTooLargeError,
@@ -27,6 +30,8 @@ from pi_agent_core_py.web.files import (
     UnsafeFilenameError,
     VirtualFileNotFoundError,
     VirtualFileStore,
+    WorkspaceStore,
+    _extended_length_path,
     normalize_logical_path,
     sanitize_filename,
 )
@@ -132,7 +137,10 @@ async def test_init_idempotent(tmp_path):
 @pytest.mark.asyncio
 async def test_ensure_session_folder_is_eager_and_idempotent(store, tmp_path):
     session_dir = await store.ensure_session_folder("sess-1")
-    assert session_dir == (tmp_path / "uploads" / "sess-1").resolve()
+    # Windows 下 store 根路径统一为 \\?\ 扩展长度形式；比较前同样归一
+    assert session_dir == _extended_length_path(
+        (tmp_path / "uploads" / "sess-1").resolve()
+    )
     assert session_dir.is_dir()
     assert await store.ensure_session_folder("sess-1") == session_dir
 
@@ -144,14 +152,24 @@ async def test_ensure_session_folder_rejects_path_traversal(store):
 
 
 @pytest.mark.asyncio
-async def test_ensure_session_workspace_seeds_one_persistent_agent_md(store):
+async def test_ensure_session_workspace_seeds_persistent_root_files(store):
     _, first = await store.ensure_session_workspace("sess-1")
     _, second = await store.ensure_session_workspace("sess-1")
+    assert WorkspaceStore is VirtualFileStore
     assert first.id == second.id
     assert first.logical_path == AGENT_INSTRUCTIONS_PATH
     assert first.purpose == "agent_instructions"
     assert first.origin == "system"
-    assert len(await store.list_session("sess-1")) == 1
+    files = await store.list_session("sess-1")
+    assert [ref.logical_path for ref in files] == [
+        AGENT_INSTRUCTIONS_PATH,
+        MEMORY_PATH,
+    ]
+    memory = await store.get_by_logical_path("sess-1", MEMORY_PATH)
+    assert memory is not None
+    assert memory.purpose == "memory"
+    assert memory.origin == "system"
+    assert __import__("pathlib").Path(memory.path).read_text() == DEFAULT_MEMORY
 
     custom = "# AGENT.md\n\nKeep this.\n"
     await store.update_text(
@@ -170,6 +188,57 @@ async def test_ensure_session_workspace_seeds_one_persistent_agent_md(store):
             "stale",
             expected_sha256=first.sha256,
         )
+
+
+@pytest.mark.asyncio
+async def test_workspace_migrates_legacy_root_paths_without_replacing_files(store):
+    legacy_agent = await store.write_text(
+        "sess-legacy-roots",
+        "agent.md",
+        "# Existing instructions\n",
+        origin="user",
+        purpose="file",
+    )
+    legacy_memory = await store.write_text(
+        "sess-legacy-roots",
+        "memory.md",
+        "# Existing memory\n\nKeep this.\n",
+        origin="user",
+        purpose="file",
+    )
+
+    _, migrated_agent = await store.ensure_session_workspace(
+        "sess-legacy-roots"
+    )
+    migrated_memory = await store.get_by_logical_path(
+        "sess-legacy-roots", MEMORY_PATH
+    )
+
+    assert migrated_agent.id == legacy_agent.id
+    assert migrated_agent.logical_path == AGENT_INSTRUCTIONS_PATH
+    assert migrated_agent.purpose == "agent_instructions"
+    assert migrated_memory is not None
+    assert migrated_memory.id == legacy_memory.id
+    assert migrated_memory.logical_path == MEMORY_PATH
+    assert migrated_memory.purpose == "memory"
+    assert __import__("pathlib").Path(migrated_memory.path).read_text() == (
+        "# Existing memory\n\nKeep this.\n"
+    )
+    assert len(await store.list_session("sess-legacy-roots")) == 2
+
+
+@pytest.mark.asyncio
+async def test_workspace_root_initialization_is_concurrency_safe(store):
+    results = await asyncio.gather(*(
+        store.ensure_session_workspace("sess-concurrent")
+        for _ in range(8)
+    ))
+
+    assert len({agent.id for _, agent in results}) == 1
+    files = await store.list_session("sess-concurrent")
+    assert [ref.logical_path for ref in files].count(AGENT_INSTRUCTIONS_PATH) == 1
+    assert [ref.logical_path for ref in files].count(MEMORY_PATH) == 1
+    assert len(files) == 2
 
 
 # ============================================================================
@@ -494,7 +563,9 @@ async def test_save_path_traversal_filename_sanitized(store, tmp_path):
     from pathlib import Path
 
     target = Path(ref.path).resolve()  # noqa: ASYNC240
-    assert target.is_relative_to((tmp_path / "uploads").resolve())  # noqa: ASYNC240
+    assert target.is_relative_to(
+        _extended_length_path((tmp_path / "uploads").resolve())
+    )  # noqa: ASYNC240
 
 
 @pytest.mark.asyncio
@@ -551,3 +622,62 @@ def test_default_constants_match_spec():
 async def asyncio_sleep_ms(ms: int) -> None:
     import asyncio
     await asyncio.sleep(ms / 1000)
+
+
+# ============================================================================
+# Windows 长路径（MAX_PATH）回归
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_write_text_survives_windows_max_path(tmp_path):
+    """深层嵌套 root 下叶子路径超过 260 字符时写入仍成功。
+
+    Windows 未启用 LongPathsEnabled 时，普通路径 ≥260 的文件 IO 会以
+    FileNotFoundError 失败；store 根路径统一扩展长度前缀后必须正常。
+    非 Windows 平台长路径原生可用，本测试同样应通过。
+    """
+    deep_root = tmp_path
+    # 每层 60 字符 × 5 层，确保叶子路径在任何平台都足够深
+    for _ in range(5):
+        deep_root = deep_root / ("d" * 60)
+    store = VirtualFileStore(deep_root)
+    await store.init()
+    ref = await store.write_text(
+        "sess-1", ("f" * 80) + ".md", "# deep",
+        origin="agent", purpose="file",
+    )
+    from pathlib import Path
+
+    assert Path(ref.path).read_text(encoding="utf-8") == "# deep"  # noqa: ASYNC240
+    fetched = await store.get_for_session("sess-1", ref.id)
+    assert fetched.sha256 == ref.sha256
+
+
+@pytest.mark.asyncio
+async def test_update_text_with_legacy_plain_metadata_path(store, tmp_path):
+    """旧版 metadata.json 存普通（无扩展前缀）路径时 update_text 不误判越界。"""
+    import json
+    import os as _os
+    from pathlib import Path
+
+    ref = await store.write_text(
+        "sess-legacy", "Memory.md", "v1",
+        origin="agent", purpose="memory",
+    )
+    # 把 metadata.json 改写为历史版本的普通路径形式
+    file_dir = Path(ref.path).parent
+    meta_path = file_dir / "metadata.json"
+    payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    legacy = _os.path.abspath(payload["path"])  # noqa: ASYNC240
+    if legacy.startswith("\\\\?\\"):
+        legacy = legacy[4:]
+    payload["path"] = legacy
+    meta_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    updated = await store.update_text(
+        "sess-legacy", ref.id, "v2",
+        expected_sha256=ref.sha256,
+        origin="agent", purpose="memory",
+    )
+    assert Path(updated.path).read_text(encoding="utf-8") == "v2"  # noqa: ASYNC240

@@ -43,9 +43,6 @@ from pi_agent_core_py.web.providers.runtime import (
     RequestProviderSelection,
 )
 
-pytestmark = pytest.mark.asyncio
-
-
 # ============================================================================
 # Fakes
 # ============================================================================

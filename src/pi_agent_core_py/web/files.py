@@ -1,4 +1,4 @@
-"""VirtualFileStore —— 会话级工作目录与文件存储（P0-2）。
+"""WorkspaceStore —— 会话级 Workspace 与文件存储。
 
 设计要点：
 - 每个 session 初始化一个目录：`uploads/{session_id}/`
@@ -50,6 +50,9 @@ DEFAULT_MAX_SESSION_SIZE = 100 * 1024 * 1024
 #: Session 根目录中的 Agent 指令文件（用户明确要求使用单数文件名）。
 AGENT_INSTRUCTIONS_PATH = "AGENT.md"
 
+#: Session 根目录中的持久记忆文件。
+MEMORY_PATH = "Memory.md"
+
 #: 新 Session 的安全模板；已有内容不会在登录或重启时被覆盖。
 DEFAULT_AGENT_INSTRUCTIONS = """# AGENT.md
 
@@ -68,6 +71,9 @@ Describe the objective of this session here.
 - Add preferred output formats or folders here.
 """
 
+#: 新 Session 的空记忆文档；Checkpointer 首次运行后会原子替换其正文。
+DEFAULT_MEMORY = "# Memory\n"
+
 #: 流式读 chunk 大小：64 KB
 _CHUNK_SIZE = 64 * 1024
 
@@ -85,7 +91,7 @@ _SAFE_FILENAME_RE = re.compile(r"[^\w.\- \u4e00-\u9fff]+", flags=re.UNICODE)
 
 
 class FileStoreError(Exception):
-    """VirtualFileStore 基类异常。"""
+    """WorkspaceStore 基类异常。"""
 
 
 class VirtualFileNotFoundError(FileStoreError):
@@ -237,18 +243,37 @@ def _sha256_of_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _extended_length_path(path: Path) -> Path:
+    r"""把绝对路径归一为 Windows 扩展长度形式（``\\?\C:\...``）。
+
+    未启用 LongPathsEnabled 注册表项时，普通路径超过 260 字符的文件 IO
+    会以 FileNotFoundError / OSError 失败。store 的目录层级
+    ``root/session_id/file_id/.<name>.<uuid>.tmp`` 在深嵌套 temp 目录下
+    很容易越界；在根路径统一加 ``\\?\`` 前缀后所有派生路径自动支持
+    32k 字符。非 Windows 平台与已带前缀的路径原样返回。
+    """
+    if os.name != "nt":
+        return path
+    text = os.path.abspath(os.fspath(path))
+    if text.startswith("\\\\?\\"):
+        return Path(text)
+    if text.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + text.lstrip("\\"))
+    return Path("\\\\?\\" + text)
+
+
 # ============================================================================
-# VirtualFileStore
+# WorkspaceStore
 # ============================================================================
 
 
-class VirtualFileStore:
-    """会话级文件存储。
+class WorkspaceStore:
+    """Session Workspace 的唯一文件事实源。
 
     生命周期：
-        store = VirtualFileStore(root_dir="./uploads")
+        store = WorkspaceStore(root_dir="./uploads")
         await store.init()                          # 创建 root_dir
-        await store.ensure_session_folder(sid)     # 初始化 session 工作目录
+        await store.ensure_session_workspace(sid)  # 初始化两个固定根文件
         ref = await store.save(session_id, upload)  # 流式读取 upload
         ref = await store.write_text(sid, name, content)  # Agent 创建文本文件
         ref2 = await store.get_for_session(sid, fid)
@@ -266,7 +291,7 @@ class VirtualFileStore:
         max_file_size: int = DEFAULT_MAX_FILE_SIZE,
         max_session_size: int = DEFAULT_MAX_SESSION_SIZE,
     ):
-        self._root_dir = Path(root_dir)
+        self._root_dir = _extended_length_path(Path(root_dir))
         self._max_file_size = max_file_size
         self._max_session_size = max_session_size
         self._initialized = False
@@ -363,7 +388,14 @@ class VirtualFileStore:
             return None
         try:
             payload = json.loads(meta_path.read_text(encoding="utf-8"))
-            return FileRef.model_validate(payload)
+            ref = FileRef.model_validate(payload)
+            # 历史版本 metadata 里可能存普通路径；统一归一为与
+            # _root_dir 相同的 Windows 扩展长度形式，保证
+            # _resolve_and_check 两侧可比、update_text 等消费方可用
+            normalized = _extended_length_path(Path(ref.path))
+            if os.fspath(normalized) != ref.path:
+                ref = ref.model_copy(update={"path": os.fspath(normalized)})
+            return ref
         except Exception:
             # 损坏 metadata 静默忽略；上层视为 file not found
             return None
@@ -734,38 +766,87 @@ class VirtualFileStore:
         self,
         session_id: str,
     ) -> tuple[Path, FileRef]:
-        """幂等初始化 Session 目录和唯一根 ``AGENT.md``。"""
+        """幂等初始化 Session 目录及唯一固定根文件。
+
+        ``AGENT.md`` 和 ``Memory.md`` 都在 Session 创建时出现。旧 Session
+        缺少任一文件时在启动恢复中补齐；大小写等价的旧逻辑路径会被规范为
+        固定大小写，同时保留正文、file id 和时间戳。
+
+        返回值暂时保留历史 ``(session_dir, agent_ref)`` 契约；新调用方应把
+        store 本身视为 Workspace API，并按逻辑路径读取根文件。
+        """
         session_dir = await self.ensure_session_folder(session_id)
         async with self._session_lock(session_id):
-            existing = await self.get_by_logical_path(
+            created: list[FileRef] = []
+            agent_ref = await self.get_by_logical_path(
                 session_id,
                 AGENT_INSTRUCTIONS_PATH,
             )
-            if existing is not None:
+            if agent_ref is not None:
                 if (
-                    existing.purpose != "agent_instructions"
-                    or existing.logical_path != AGENT_INSTRUCTIONS_PATH
+                    agent_ref.purpose != "agent_instructions"
+                    or agent_ref.logical_path != AGENT_INSTRUCTIONS_PATH
                 ):
-                    existing = existing.model_copy(update={
+                    agent_ref = agent_ref.model_copy(update={
                         "logical_path": AGENT_INSTRUCTIONS_PATH,
                         "purpose": "agent_instructions",
                     })
                     self._write_metadata(
-                        self._file_dir(session_id, existing.id),
-                        existing,
+                        self._file_dir(session_id, agent_ref.id),
+                        agent_ref,
                     )
-                return session_dir, existing
+            else:
+                agent_ref = await self._write_text_unlocked(
+                    session_id,
+                    AGENT_INSTRUCTIONS_PATH,
+                    DEFAULT_AGENT_INSTRUCTIONS,
+                    logical_path=AGENT_INSTRUCTIONS_PATH,
+                    content_type="text/markdown",
+                    origin="system",
+                    purpose="agent_instructions",
+                )
+                created.append(agent_ref)
 
-            created = await self._write_text_unlocked(
-                session_id,
-                AGENT_INSTRUCTIONS_PATH,
-                DEFAULT_AGENT_INSTRUCTIONS,
-                logical_path=AGENT_INSTRUCTIONS_PATH,
-                content_type="text/markdown",
-                origin="system",
-                purpose="agent_instructions",
-            )
-            return session_dir, created
+            try:
+                memory_ref = await self.get_by_logical_path(
+                    session_id,
+                    MEMORY_PATH,
+                )
+                if memory_ref is not None:
+                    if (
+                        memory_ref.purpose != "memory"
+                        or memory_ref.logical_path != MEMORY_PATH
+                    ):
+                        memory_ref = memory_ref.model_copy(update={
+                            "logical_path": MEMORY_PATH,
+                            "purpose": "memory",
+                        })
+                        self._write_metadata(
+                            self._file_dir(session_id, memory_ref.id),
+                            memory_ref,
+                        )
+                else:
+                    memory_ref = await self._write_text_unlocked(
+                        session_id,
+                        MEMORY_PATH,
+                        DEFAULT_MEMORY,
+                        logical_path=MEMORY_PATH,
+                        content_type="text/markdown",
+                        origin="system",
+                        purpose="memory",
+                    )
+                    created.append(memory_ref)
+            except BaseException:
+                # New Session creation is all-or-nothing from the caller's
+                # perspective. Existing roots are never deleted on recovery.
+                for ref in reversed(created):
+                    try:
+                        await self.delete_for_session(session_id, ref.id)
+                    except Exception:
+                        pass
+                raise
+
+            return session_dir, agent_ref
 
     async def update_text(
         self,
@@ -1015,12 +1096,19 @@ class VirtualFileStore:
         return count
 
 
+# Backward-compatible import for downstream users. Both names reference the
+# exact same implementation and storage; this is not a second file store.
+VirtualFileStore = WorkspaceStore
+
+
 __all__ = [
     # 常量
     "DEFAULT_MAX_FILE_SIZE",
     "DEFAULT_MAX_SESSION_SIZE",
     "AGENT_INSTRUCTIONS_PATH",
+    "MEMORY_PATH",
     "DEFAULT_AGENT_INSTRUCTIONS",
+    "DEFAULT_MEMORY",
     # 异常
     "FileStoreError",
     "VirtualFileNotFoundError",
@@ -1035,5 +1123,6 @@ __all__ = [
     "sanitize_filename",
     "normalize_logical_path",
     # 主类
+    "WorkspaceStore",
     "VirtualFileStore",
 ]

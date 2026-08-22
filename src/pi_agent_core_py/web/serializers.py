@@ -23,6 +23,8 @@ from typing import Any, cast
 
 from pydantic import BaseModel
 
+from .content_integrity import detect_content_warnings
+
 # ============================================================================
 # to_json_safe —— 兜底序列化器
 # ============================================================================
@@ -84,8 +86,14 @@ def serialize_message(message: Any) -> dict[str, Any]:
     `serialize_persisted_message` 配合 `SQLiteStoredMessage`。
     """
     if isinstance(message, BaseModel):
-        return message.model_dump(mode="json")
-    return cast("dict[str, Any]", to_json_safe(message))
+        payload = message.model_dump(mode="json")
+    else:
+        payload = cast("dict[str, Any]", to_json_safe(message))
+    warnings = detect_content_warnings(payload)
+    if warnings:
+        payload = dict(payload)
+        payload["content_warnings"] = warnings
+    return payload
 
 
 def serialize_persisted_message(stored: Any) -> dict[str, Any]:

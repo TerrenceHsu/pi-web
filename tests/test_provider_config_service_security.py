@@ -15,9 +15,6 @@ from pi_agent_core_py.web.providers.config_service import (
     ProviderProfileView,
 )
 
-pytestmark = pytest.mark.asyncio
-
-
 # ============================================================================
 # 1. Service does not depend on SecretStoreRouter
 # ============================================================================

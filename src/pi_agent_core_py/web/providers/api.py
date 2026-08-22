@@ -346,7 +346,7 @@ def provider_profile_error_to_response(
     )):
         # These are service-level normalization errors——422 safe validation
         return _provider_profile_error_response(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             "request_validation_failed",
             "Request payload failed validation.",
         )

@@ -74,6 +74,7 @@ from .checkpointer import (
     parse_slash_command,
     recover_checkpointer_operations,
 )
+from .content_integrity import summarize_content_integrity
 from .providers.runtime import (
     ProviderInitializationError,
     ProviderSelectionDisabledError,
@@ -95,7 +96,10 @@ from .serializers import (
 from .state import WebAppState, WebMCPServerConfig, WebRunRequest
 
 if TYPE_CHECKING:
-    from .files import VirtualFileStore
+    from coding_sandbox import ArtifactSigner
+    from coding_sandbox.admin import SandboxBackendFactory
+
+    from .files import WorkspaceStore
 
 # ============================================================================
 # 常量
@@ -337,6 +341,11 @@ def create_app(
     # True=强制启用（前置条件同 Credential API）
     # False=禁用——不打开 Store、不挂路由、不改 Session 创建
     enable_provider_profiles_api: bool | None = None,
+    # Managed coding sandbox admin API. None follows the credential API's
+    # localhost/file-database safety prerequisites; True enforces them.
+    enable_coding_sandbox_api: bool | None = None,
+    coding_sandbox_backend_factory: SandboxBackendFactory | None = None,
+    coding_sandbox_artifact_signer: ArtifactSigner | None = None,
     # P2-R1: Knowledge Library subsystem root directory.
     # None = 不启用（默认；保持向后兼容）；传入 Path 时启用：
     #   - 在 <knowledge_root>/knowledge.db 打开独立 aiosqlite connection
@@ -374,7 +383,7 @@ def create_app(
         db_path: P0-1 SQLiteSessionStore 的 sqlite 文件路径。None（默认）= 用
             `:memory:` 内存库（每个 app 实例独立，进程退出即丢）；测试场景常用。
             生产场景传文件路径以持久化。
-        uploads_dir: P0-2 VirtualFileStore 的根目录。None（默认）= 不启用文件
+        uploads_dir: WorkspaceStore 的物理数据根。None（默认）= 不启用 Workspace
             上传路径；所有 `/api/.../files` endpoint 返回 503。生产场景传目录路径。
         max_file_size: 单文件大小上限，默认 25 MB
         max_session_upload_size: 单 session 总上传上限，默认 100 MB
@@ -384,6 +393,7 @@ def create_app(
         "hook": None,
         "sse_clients": set(),
         "ws_clients": set(),
+        "coding_sandbox_tool_names": set(),
     }
     # Agent file tools may run concurrently for different sessions. A task-local
     # binding prevents one request from observing another request's global web
@@ -412,6 +422,24 @@ def create_app(
         # 不静默降级——必须显式修正
         raise RuntimeError(
             f"credential web security configuration error: {e}"
+        ) from e
+
+    from .coding_sandbox.runtime import (
+        SandboxRuntimeConfigurationError,
+        resolve_sandbox_runtime_configuration,
+    )
+
+    try:
+        _sandbox_resolved = resolve_sandbox_runtime_configuration(
+            enable_api=enable_coding_sandbox_api,
+            credential_runtime_enabled=_cred_resolved.runtime_enabled,
+            credential_api_enabled=_cred_resolved.api_enabled,
+            trusted_host_enabled=_cred_resolved.trusted_host_enabled,
+            db_path=db_path,
+        )
+    except SandboxRuntimeConfigurationError as e:
+        raise RuntimeError(
+            f"coding sandbox web security configuration error: {e}"
         ) from e
 
     # ========================================================================
@@ -465,12 +493,12 @@ def create_app(
         await model_capability_store.init()
         state.model_capability_store = model_capability_store
 
-        # Session 工作目录：初始化 VirtualFileStore，并为所有已有 session
+        # Session Workspace：初始化唯一 WorkspaceStore，并为所有已有 session
         # 立即创建独立目录（而不是等第一次上传时才惰性出现）。
         if uploads_dir is not None:
-            from .files import VirtualFileStore
+            from .files import WorkspaceStore
 
-            file_store = VirtualFileStore(
+            file_store = WorkspaceStore(
                 uploads_dir,
                 max_file_size=max_file_size,
                 max_session_size=max_session_upload_size,
@@ -482,7 +510,13 @@ def create_app(
                 state.file_store = file_store
                 state.uploads_dir = Path(uploads_dir)
             except Exception:
-                # 文件存储不可用不阻塞 app 启动；endpoint 走 503
+                # 文件存储不可用不阻塞 app 启动；endpoint 走 503。
+                # 但必须留下完整 traceback，避免深层文件系统错误只表现为下游 503。
+                _logger.exception(
+                    "WorkspaceStore init failed; file endpoints will return 503 "
+                    "(uploads_dir=%s)",
+                    uploads_dir,
+                )
                 state.file_store = None
                 state.uploads_dir = None
         else:
@@ -556,6 +590,20 @@ def create_app(
         state.extension_store = extension_store
         state.skill_mutation_lock = asyncio.Lock()
 
+        async def _close_startup_sqlite_stores() -> None:
+            """Close core stores when startup fails before lifespan yield."""
+
+            try:
+                await extension_store.close()
+            except Exception:
+                pass
+            try:
+                await session_store.close()
+            except Exception:
+                pass
+            state.extension_store = None
+            state.session_store = None
+
         # P1-D2-6: sweep 遗留 running revisions → interrupted
         # **必须在 restore Skills/MCP 之前**——sweep 只依赖 session/extension SQLite，
         # 不应被 MCP 连接超时延迟；即使 MCP restore 失败，stale running revision
@@ -566,6 +614,10 @@ def create_app(
                 completed_at=datetime.now(UTC).isoformat()
             )
         except Exception as e:
+            # The lifespan has not yielded yet, so FastAPI will not execute the
+            # normal shutdown section below. Close both startup-owned stores
+            # here or a failed sweep leaks the aiosqlite connection into GC.
+            await _close_startup_sqlite_stores()
             # 安全摘要——不含 content / SQL / 绝对路径 / traceback / secret
             raise RuntimeError(
                 f"startup sweep failed: {type(e).__name__}"
@@ -799,6 +851,7 @@ def create_app(
                 cred_runtime_cm = credential_runtime_context(cred_cfg)
             except Exception as e:
                 # 配置错误——拒绝启动（不静默降级）
+                await _close_startup_sqlite_stores()
                 raise RuntimeError(
                     f"credential runtime config error: {type(e).__name__}"
                 ) from e
@@ -806,6 +859,94 @@ def create_app(
         if cred_runtime_cm is not None:
             _app.state.credential_runtime = await cred_runtime_cm.__aenter__()
             try:
+                async def _session_exists_cb(session_id: str) -> bool:
+                    if state.session_store is None:
+                        return False
+                    try:
+                        session = await state.session_store.get_session(session_id)
+                    except Exception:
+                        return False
+                    return session is not None
+
+                sandbox_runtime_cm = None
+                if _sandbox_resolved.runtime_enabled:
+                    from coding_sandbox import HMACSHA256ArtifactSigner
+
+                    from .coding_sandbox.runtime import sandbox_runtime_context
+
+                    database_path = await asyncio.to_thread(
+                        Path(str(db_path)).resolve,
+                        strict=False,
+                    )
+                    artifact_signer = coding_sandbox_artifact_signer
+                    if artifact_signer is None:
+                        artifact_signer = HMACSHA256ArtifactSigner(
+                            key_id="web-runtime-v1",
+                            secret=uuid4().bytes + uuid4().bytes,
+                        )
+
+                    async def _sandbox_event_sink(event: Any) -> None:
+                        await _emit_web_payload(
+                            {
+                                "type": event.event_type,
+                                "operation_id": event.operation_id,
+                                "operation_sequence": event.sequence,
+                                **event.payload,
+                            },
+                            f"sandbox:{event.operation_id}",
+                            event.session_id,
+                        )
+
+                    sandbox_runtime_cm = sandbox_runtime_context(
+                        database_path=str(db_path),
+                        credential_service=_app.state.credential_runtime.service,
+                        backend_factory=coding_sandbox_backend_factory,
+                        artifact_signer=artifact_signer,
+                        session_exists=_session_exists_cb,
+                        projects_root=(
+                            database_path.parent / "coding-sandbox-projects"
+                        ),
+                        publisher_state_root=(
+                            database_path.parent / "coding-sandbox-publisher"
+                        ),
+                        staging_root=(
+                            database_path.parent / "coding-sandbox-staging"
+                        ),
+                        event_sink=_sandbox_event_sink,
+                    )
+                    _app.state.coding_sandbox_runtime = (
+                        await sandbox_runtime_cm.__aenter__()
+                    )
+                    lifecycle = _app.state.coding_sandbox_runtime.lifecycle
+                    if lifecycle is not None:
+                        from ..tools import (
+                            create_coding_sandbox_tools,
+                            create_coding_validation_tool,
+                        )
+
+                        def _coding_workspace() -> Any:
+                            session_id = (
+                                tool_session_context.get()
+                                or state.current_request_session_id
+                            )
+                            return lifecycle.workspace_for_session(session_id)
+
+                        coding_tools = create_coding_sandbox_tools(
+                            workspace_getter=_coding_workspace
+                        )
+                        coding_tools.append(
+                            create_coding_validation_tool(
+                                workspace_getter=_coding_workspace
+                            )
+                        )
+                        registered_names: set[str] = container[
+                            "coding_sandbox_tool_names"
+                        ]
+                        for coding_tool in coding_tools:
+                            if not harness.agent.tools.has(coding_tool.name):
+                                harness.agent.tools.register(coding_tool)
+                                registered_names.add(coding_tool.name)
+
                 # P1-E2-3B1: Provider Config runtime nested inside credential runtime.
                 # Depends on CredentialService (safe API) — must init AFTER credential
                 # runtime entered, shutdown BEFORE credential runtime exits.
@@ -813,17 +954,6 @@ def create_app(
                     from .providers.config_runtime import (
                         provider_config_runtime_context,
                     )
-
-                    # Build session_exists callback bound to current session_store.
-                    # SQLiteSessionStore.get_session returns None for not-found (no raise).
-                    async def _session_exists_cb(session_id: str) -> bool:
-                        if state.session_store is None:
-                            return False
-                        try:
-                            session = await state.session_store.get_session(session_id)
-                        except Exception:
-                            return False
-                        return session is not None
 
                     pc_runtime_cm = provider_config_runtime_context(
                         database_path=str(db_path),
@@ -861,6 +991,16 @@ def create_app(
                     _app.state.request_provider_runtime = None
                     yield
             finally:
+                registered_names = container["coding_sandbox_tool_names"]
+                for tool_name in tuple(registered_names):
+                    harness.agent.tools.unregister(tool_name)
+                registered_names.clear()
+                _app.state.coding_sandbox_runtime = None
+                if sandbox_runtime_cm is not None:
+                    try:
+                        await sandbox_runtime_cm.__aexit__(None, None, None)
+                    except Exception:
+                        pass
                 _app.state.credential_runtime = None
                 _app.state.request_provider_runtime = None
                 try:
@@ -869,6 +1009,7 @@ def create_app(
                     pass
         else:
             _app.state.credential_runtime = None
+            _app.state.coding_sandbox_runtime = None
             _app.state.provider_config_runtime = None
             _app.state.request_provider_runtime = None
             yield
@@ -984,7 +1125,7 @@ def create_app(
                 await knowledge_store_to_close.close()
             except Exception:
                 pass
-        # VirtualFileStore 不需要 close（纯文件 IO），保留目录给后续进程用
+        # WorkspaceStore 不需要 close（纯文件 IO），保留目录给后续进程用
 
     app = FastAPI(
         title="pi-agent-core-py · Trace Viewer",
@@ -1012,6 +1153,7 @@ def create_app(
     app.state.event_buffer_max_size = event_buffer_max_size
     # P1-E1-4A: credential_runtime placeholder——lifespan 启动时填入
     app.state.credential_runtime = None
+    app.state.coding_sandbox_runtime = None
     # P1-E2-3B1: provider_config_runtime placeholder——lifespan 启动时填入
     app.state.provider_config_runtime = None
     # M1-5: request_provider_runtime placeholder——仅 cred + pc runtime 都启用时填入
@@ -1092,6 +1234,26 @@ def create_app(
             (
                 ProviderProfileBodyLimitMiddleware,
                 {"max_bytes": _pc_ws_cfg.max_request_body_bytes},
+            ),
+        )
+
+    if _sandbox_resolved.api_enabled:
+        from .coding_sandbox.api import (
+            SandboxBodyLimitMiddleware,
+            build_coding_sandbox_router,
+        )
+        from .local_web_security import default_web_security_config as _sandbox_ws
+
+        _sandbox_ws_cfg = _sandbox_ws(
+            extra_hosts=credential_extra_hosts,
+            extra_ui_origins=credential_extra_ui_origins,
+        )
+        app.include_router(build_coding_sandbox_router(_sandbox_ws_cfg))
+        _pending_middlewares.insert(
+            0,
+            (
+                SandboxBodyLimitMiddleware,
+                {"max_bytes": _sandbox_ws_cfg.max_request_body_bytes},
             ),
         )
 
@@ -3393,9 +3555,13 @@ def create_app(
         """
         if session_id is None:
             msgs = list(harness.agent.state.messages)
+            serialized_messages = [serialize_message(m) for m in msgs]
             return {
                 "count": len(msgs),
-                "messages": [serialize_message(m) for m in msgs],
+                "messages": serialized_messages,
+                "content_integrity": summarize_content_integrity(
+                    serialized_messages
+                ),
             }
 
         store = state.session_store
@@ -3414,10 +3580,14 @@ def create_app(
                 status_code=404,
                 content={"detail": f"session {session_id!r} not found"},
             )
+        serialized_messages = [
+            serialize_persisted_message(message) for message in stored_msgs
+        ]
         return {
             "count": len(stored_msgs),
             "session_id": session_id,
-            "messages": [serialize_persisted_message(m) for m in stored_msgs],
+            "messages": serialized_messages,
+            "content_integrity": summarize_content_integrity(serialized_messages),
         }
 
     # ========================================================================
@@ -4420,14 +4590,14 @@ def create_app(
     # Files（P0-2）
     # ========================================================================
 
-    def _require_file_store() -> VirtualFileStore:
+    def _require_file_store() -> WorkspaceStore:
         """统一拿 file_store；未启用返回 503 detail。"""
         if state.file_store is None:
             raise HTTPException(
                 status_code=503,
                 detail="file store not initialized; create_app(uploads_dir=...)",
             )
-        return cast("VirtualFileStore", state.file_store)
+        return cast("WorkspaceStore", state.file_store)
 
     def _serialize_managed_file(ref: Any) -> dict[str, Any]:
         """返回逻辑文件 metadata，绝不暴露物理磁盘路径。"""
@@ -4717,11 +4887,14 @@ def create_app(
         file_store = _require_file_store()
         try:
             current = await file_store.get_for_session(sid, fid)
-            if current.purpose == "agent_instructions":
+            if current.purpose in {"agent_instructions", "memory"}:
                 return JSONResponse(
                     status_code=409,
                     content={
-                        "detail": "AGENT.md is required; edit its content instead"
+                        "detail": (
+                            "AGENT.md and Memory.md are required; edit their "
+                            "content instead"
+                        )
                     },
                 )
             await file_store.delete_for_session(sid, fid)

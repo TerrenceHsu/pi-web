@@ -92,9 +92,14 @@ def _wait_for_terminal(
         )
         assert resp.status_code == 200, resp.text
         body = resp.json()
+        latest_job = body.get("latest_job")
+        job_is_terminal = latest_job is None or latest_job.get("status") in {
+            "completed",
+            "failed",
+        }
         if body["document_status"] in (
             "normalizing", "needs_ocr", "failed", "ready"
-        ):
+        ) and job_is_terminal:
             return body
         time.sleep(0.05)
     raise TimeoutError(f"Document {doc_id} did not reach terminal in {timeout}s")

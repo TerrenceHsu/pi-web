@@ -11,7 +11,11 @@ from __future__ import annotations
 
 import pytest
 
-from pi_agent_core_py.context import convert_to_llm
+from pi_agent_core_py.context import (
+    SUMMARY_CONTEXT_PREFIX,
+    SUMMARY_CONTEXT_SUFFIX,
+    convert_to_llm,
+)
 from pi_agent_core_py.llm_messages import (
     LLMAssistantMessage,
     LLMToolResultMessage,
@@ -103,11 +107,13 @@ def test_custom_message_filtered() -> None:
 
 
 def test_summary_message_becomes_user_with_prefix() -> None:
-    """SummaryMessage → LLMUserMessage（带 [Conversation Summary] 前缀）。"""
+    """SummaryMessage → LLMUserMessage（带 <summary> envelope 前缀）。"""
     s = SummaryMessage(content=[TextContent(text="旧对话内容...")])
     out = convert_to_llm([s])
     assert isinstance(out[0], LLMUserMessage)
-    assert "[Conversation Summary]" in out[0].content[0].text
+    assert out[0].content[0].text.startswith(SUMMARY_CONTEXT_PREFIX)
+    assert "旧对话内容..." in out[0].content[0].text
+    assert out[0].content[0].text.endswith(SUMMARY_CONTEXT_SUFFIX)
 
 
 def test_empty_messages_returns_empty_list() -> None:

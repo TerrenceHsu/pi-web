@@ -1,6 +1,6 @@
 # Current TODO
 
-> 校准日期：**2026-08-20**。本文件只保留尚未完成或明确延期的事项；已完成阶段不再复制数百行历史记录，统一由 [`STATUS.md`](STATUS.md)、[`CHANGELOG.md`](CHANGELOG.md) 和 `docs/validation/` 追溯。
+> 校准日期：**2026-08-22**。本文件只保留尚未完成或明确延期的事项；已完成阶段不再复制数百行历史记录，统一由 [`STATUS.md`](STATUS.md)、[`CHANGELOG.md`](CHANGELOG.md) 和 `docs/validation/` 追溯。
 
 ## 当前收敛执行顺序
 
@@ -9,6 +9,40 @@
 - [x] **3. 统一 Python、FastAPI/Auth、前端与 release 版本号，并补齐仓库根 `LICENSE`**（完成：统一为未打 tag 的 `0.0.28`；两个 FastAPI 工厂直接复用 Python `__version__`；新增跨 Python/前端/lockfile/API 一致性测试；根 MIT `LICENSE` 已进入 wheel；提交 `8a6ff2e`）
 - [x] **4. 复跑当前提交的完整 Playwright E2E 与最终 GLM 真实 smoke**（完成：修复 full-suite 的 Regenerate 完成等待、logout 共享 token 撤销与 Session 删除路由竞态，提交 `51ce3c7`；完整 Playwright 45/45 passed；固定 DDGS 1 项 + GLM 2 项真实 smoke 3/3 passed）
 - [x] **5. 继续 pi-agent 对齐：补齐 model、thinking level、streaming message、pending tool calls 等公开 Agent 状态**（完成：新增 secret-free `AgentModelState`、完整 `ThinkingLevel`、`is_streaming` / `streaming_message` / `pending_tool_calls` / `error_message`；按消息与工具事件生命周期更新，request 结束、异常与 reset 统一清理；`/api/state` 与前端类型同步；提交 `848ae1d`）
+
+## P0 — Session Workspace 一体化
+
+完整架构、所有权边界、Sandbox 发布流和富文档转换约定见
+[`docs/design/workspace-sandbox-integration.md`](docs/design/workspace-sandbox-integration.md)。
+
+- [x] **阶段 1：统一 `WorkspaceStore` 与初始化 `Memory.md`**（完成）：以 `WorkspaceStore` 作为 Session 文件唯一规范事实源，`VirtualFileStore` 仅为同一实现的兼容别名；新旧 Session 均幂等拥有唯一根 `AGENT.md` 与 `Memory.md`，迁移保留已有正文/file id 并规范大小写等价旧路径与 purpose，两个固定根文件均禁止删除；Ruff PASS、strict Mypy 141 files / 0 issues、Workspace/文件/Auth/Checkpointer 定向 125 passed（`-W error`）、Backend CI 3857 passed / 8 skipped / 12 deselected、83.69% coverage
+- [ ] **阶段 2：代码与 Markdown 规则**：代码写入和代码上传默认进入惰性 `scripts/`；支持安全相对目录、Markdown 创建/更新/移动/删除、逐文件 SHA 与 Workspace revision 冲突检查
+- [ ] **阶段 3：右侧 Workspace 面板**：桌面三栏与窄屏 drawer；提供 Files / Sandbox / Changes，复用现有 Sandbox 状态、日志、Diff 与审批发布组件
+- [ ] **阶段 4：统一 Sandbox 快照与发布目标**：从 `WorkspaceStore` 物化 E2B 快照，固定验证和用户确认后事务发布回同一 Workspace，保护根文件与系统路径并原子提升 revision
+- [ ] **阶段 5：固定文档转换工作流**：建立不可变原件、转换任务和 manifest，依次支持 PDF→Markdown、DOCX→Markdown、XLSX→摘要/CSV/schema；OCR 明确延期
+- [ ] **阶段 6：完整验收**：Backend/Frontend 静态检查和测试、Workspace Browser E2E、刷新/重启/并发冲突回归，以及真实 E2B Python 写入、验证和发布 smoke
+
+## P0 — 托管 Coding Sandbox 与安全发布
+
+目标架构：Sandbox 自有实现固定为顶层独立包 `src/coding_sandbox`，不得反向导入
+`pi_agent_core_py`；pi-agent 只保留 Web、凭证与生命周期薄适配。控制端和真实工作区
+先保留在本机，Agent 通过 provider-neutral `SandboxBackend` 在 E2B 云 Sandbox 内编辑和
+验证代码；验证通过后只下载不可变制品，由本机 Publisher 做 SHA 冲突检查和事务发布。
+Modal 与 Local Docker 作为后续兼容后端，最终用户不需要安装 Python、Node、Conda 或 Docker。
+
+- [x] **0. 将 Coding Sandbox 迁为 `src/coding_sandbox` 独立包**（完成：核心、快照、E2B 与通用管理层全部归顶层包；`pi_agent_core_py` 仅保留 FastAPI/凭证/生命周期组合薄适配；源码 AST 与隔离进程双重门禁确保独立导入不会加载 pi-agent；wheel 包含 13 个 Sandbox 文件且无旧嵌套包；全量 Ruff PASS、strict Mypy 130 files / 0 issues、Sandbox 64 passed / 1 Windows symlink capability skipped、Web/凭证生命周期 70 passed）
+
+- [x] **1. 建立 provider-neutral Sandbox 基础层**（完成：新增默认关闭/断网的配置模型、secret-reference-only provider 配置、不可变 handle/status/command/transfer DTO、固定安全错误分类、异步 `SandboxBackend` Protocol 和完全离线 Fake Backend；命令仅接受 argv，Fake 强制资源/摘要边界与幂等销毁；全量 Ruff PASS、strict Mypy 120 files / 0 issues、离线契约 21 passed）
+- [x] **2. 建立项目快照与输入边界**（完成：生成确定性 gzip/tar 与自校验 `base-manifest.json`；默认排除 VCS、`.env`、密钥、依赖、缓存及构建目录；源文件在扫描/写入间做文件身份与 SHA-256 复核；拒绝归档落入项目、绝对/穿越/重复/大小写冲突路径、symlink/junction/reparse/special file、文件数/单文件/总量超限和 archive bomb；归档不解压即逐项限额并重算内容摘要，篡改必失败；Ruff PASS、strict Mypy 8 files / 0 issues，Sandbox 离线回归 31 passed / 1 Windows symlink capability skipped）
+- [x] **3. 实现 E2B Backend**（完成：新增 lazy/optional 官方 `AsyncSandbox` SDK Driver 和可注入离线 Driver seam；完整实现 create/attach/non-resuming status/upload/remote rehash/download/argv exec/destroy，外部 sandbox ID 与防串接 metadata 进入 secret-free handle；默认禁公网入站及出站、allowlist 显式映射，固定 `/workspace`、on-timeout kill、硬命令/传输/输出上限、取消/超时 kill、创建失败清理与可重试 destroy；非零 exit 是正常结果，paused 状态如实公开，所有异常转固定安全错误；新增 `sandbox-e2b` 可选依赖并锁定 E2B 2.43.0；全量 Ruff PASS、strict Mypy 122 files / 0 issues、Sandbox 离线回归 48 passed / 1 Windows symlink capability skipped）
+- [x] **4. 增加 E2B 管理配置与连接测试**（完成）：新增 secret-free revision/CAS SQLite 配置、CredentialService `credential_id` 窄引用、enabled/provider/template/资源/网络/配额模型，以及 localhost + UI header + Origin + 32 KiB body limit 保护的 GET/PUT/Test Connection API；连接测试强制断网、短生命周期、固定 `python3 --version` 并始终 destroy；API Key 不进入响应、配置表或 Sandbox metadata。本机安装锁定的 E2B 2.43.0，并新增隐藏双输入、官方 `e2b_` 十六进制格式门禁、Windows Keyring 往返一致性、CAS 配置、失败回滚/密钥清理和官方 SDK 独立认证探针的 `scripts/configure_e2b_sandbox.py`；无效凭证两次均安全返回 `authentication_failed` 且回滚无残留，修正为有效完整 API Key 后首次真实 `base` 探测 3844 ms 成功，持久化 Keyring Credential 的独立 `--test-only` 复验 4265 ms 成功，均确认 `python3` 可用并完成 Sandbox 销毁。当前门禁：全量 Ruff PASS、strict Mypy 130 files / 0 issues、E2B SDK 安装后定向回归 30 passed、配置/诊断 CLI 13 passed、Sandbox 回归 64 passed / 1 Windows symlink capability skipped、Web/凭证生命周期回归 70 passed、wheel 独立包边界验证 PASS、`uv lock --check` PASS
+- [x] **5. 实现 Sandbox 文件与命令工具**（完成）：在独立 `coding_sandbox` 包内新增 request-scoped `SandboxOperation`、`ContextVar` 绑定和强制 finally destroy，pi-agent 仅提供 8 个 sequential `AgentTool` 薄适配：`coding_list_files`、`coding_read_file`、`coding_search`、`coding_write_file`、`coding_apply_patch`、`coding_delete_file`、`coding_run`、`coding_diff`。文件 API 只接受已规范化相对 POSIX 路径，拒绝绝对/父级/反斜杠/control/symlink 逃逸；命令只接受有界 argv/cwd/timeout 并转发协作取消与 stdout/stderr 增量；写入走本机 0600 staging、SHA-256 upload 与远端 atomic replace，read/write 响应重算 size/hash；统一 diff 禁止 rename/duplicate/traversal 并在全部 hunk 预检后修改；operation 构造、业务异常和取消路径均清理 Sandbox，错误仅公开固定安全码。新增 Keyring-only `scripts/smoke_e2b_coding_tools.py`，真实 `base` E2B 逐项执行 8/8 工具成功并确认销毁（10719 ms）；新增离线契约 25 passed，Sandbox 定向回归 101 passed / 1 Windows symlink capability skipped；全量 Ruff PASS、strict Mypy 135 files / 0 issues、仓库 CI 3802 passed / 4 skipped / 15 deselected、coverage 83.78%（门禁 75%）
+- [x] **6. 实现固定验证门禁**（完成）：从重新核验 archive size/SHA/manifest 的不可变项目 snapshot 读取并严格解析 64 KiB 上限 `.pi-agent/sandbox.toml` v1，仅允许 1–32 个 ID 唯一的 argv/cwd/timeout required checks，固定 source SHA 与 canonical plan SHA；新增无模型命令参数的 `coding_validate`，服务端串行执行固定检查并记录 argv、exit code、termination reason、duration、定长截断 stdout/stderr 及各自 SHA、验证前后完整工作区摘要。所有 run/write/patch/delete 均提升 revision 并使旧证据失效，消费证据前再次扫描远端工作区与配置 SHA，可识别后台及带外修改；验证失败、取消、Sandbox 丢失和未执行检查均生成不可伪造的内部 evidence 并关闭门禁。真实 `base` E2B 已执行 9 个工具、验证后修改、旧证据拒绝、重新验证及销毁（19233 ms）；固定门禁离线用例 26 项，Sandbox 定向回归 126 passed / 1 Windows symlink capability skipped；全量 Ruff PASS、strict Mypy 136 files / 0 issues、仓库 CI 3828 passed / 4 skipped / 15 deselected、coverage 83.77%（门禁 75%）
+- [x] **7. 实现不可变输出制品**（完成）：`freeze_output_artifact()` 仅消费 operation 内部保存且再次核验的成功 validation evidence，导出开始即进入 fail-closed frozen 状态，永久拒绝 run/validate/write/patch/delete；固定远端 helper 通过逐层 `O_NOFOLLOW` 描述符扫描，在工作区外生成确定性 tar，完整导出自校验 manifest、binary diff、changed-file 原始字节、deleted files 与 canonical validation evidence。Provider 按预期 SHA 下载后，服务端再次计算 archive size/SHA、逐 member 校验路径/类型/配额/内容 hash/二进制分类和证据关联，再复核远端配置 SHA 与完整 workspace SHA；通过后写入 `artifacts/<sha256>.tar` 内容寻址只读文件，并以注入式、secret-free receipt 的 HMAC-SHA256 server signer 绑定 archive SHA、manifest SHA、key ID 与签名时间。新增篡改 payload、额外 member、symlink、伪造签名、缺 signer/baseline、验证过期、带外修改和冻结状态回归 7 项；真实 `base` E2B 已确认 9 个工具、验证重跑、制品冻结、签名及销毁（22047 ms）；Sandbox 定向回归 106 passed / 1 Windows symlink capability skipped，全量 Ruff PASS、strict Mypy 138 files / 0 issues、仓库 CI 3835 passed / 4 skipped / 15 deselected、coverage 83.78%（门禁 75%）
+- [x] **8. 实现本机事务 Publisher**（完成）：新增独立 `LocalTransactionalPublisher`，只消费可信 `ProjectSnapshot` 与已签名 `SandboxOutputArtifact`；跨进程项目锁内重新核验 baseline archive、artifact/signature 和完整本机 manifest，按 before/after size/SHA 生成排序 intent。替换/删除预制完整备份，新增使用 no-clobber hard-link，替换使用同目录临时文件 + `os.replace`，每次项目效果前后写 canonical、SHA hash-chained、append/flush/fsync JSONL；无 durable commit 的异常与启动事务逆序回滚，commit 后只幂等清理，支持 torn-tail 保全/截断、幂等 artifact 重试、取消等待收敛及 post-crash 用户修改冲突保护。state root 强制位于项目外，逐层拒绝 symlink/junction/reparse，Windows 状态路径使用 128-bit 目录 key；Sandbox 从不获得真实项目/state 路径。新增提交/冲突/篡改/回滚/崩溃恢复/断尾/并发锁/recovery conflict/hash-chain/reparse 回归；Sandbox 定向 146 passed / 2 capability skipped；全量 Ruff PASS、strict Mypy 139 files / 0 issues、后端 CI 3846 passed / 8 skipped / 12 deselected、coverage 83.77%；真实 `base` E2B 已完成 9 工具、验证、冻结/签名、本机 Publisher commit、幂等 retry 与 destroy（21204 ms）
+- [x] **9. 接入 Web 生命周期与 UI**（完成）：新增持久化 operation/event 状态机与会话唯一活跃操作约束，Web API 覆盖创建、恢复、事件回放、Diff、固定验证、冻结、显式审批发布、取消与丢弃；统一 WS 实时事件和有界 SQLite 事件重放。后端启动把未完成操作收敛为 `interrupted`，浏览器刷新只恢复状态/日志，绝不重放模型、命令或发布动作；Agent 的 9 个代码/验证工具按当前 Session 绑定同一 Sandbox workspace。前端新增 Sandbox Modal，展示状态、验证 stdout/stderr、patch 和日志，发布前必须再次勾选确认。门禁：Ruff PASS、strict Mypy 140 files / 0 issues、生命周期/API 6 passed、仓库 CI 3849 passed / 8 skipped / 12 deselected、83.75% coverage，前端 ESLint/typecheck/build PASS、Vitest 402/402 passed
+- [x] **10. 完成真实 E2B、完整 CI 与安全验收**（完成）：离线 Fake、E2B adapter、路径/命令/网络/凭证边界、故障注入、制品篡改、Publisher 冲突/回滚/崩溃恢复和退役 Provider 空字段兼容迁移等安全矩阵 151 passed / 2 Windows capability skipped；新增验证失败不得冻结/发布且真实工作区字节级不变的生命周期回归。真实 `base` E2B smoke 覆盖 9 个工具、首次验证成功、故意删改后的固定验证失败与冻结拒绝、恢复重验、制品冻结/签名、Publisher 本机冲突且工作区字节级不变、成功 commit、幂等 retry 和 Sandbox destroy（20577 ms，未输出凭证）；完整 Playwright 47/47 passed（新增刷新恢复不重放、验证失败 UI）；全量 Ruff PASS、strict Mypy 140 files / 0 issues、Backend CI 3851 passed / 8 skipped / 12 deselected、coverage 83.73%，前端 ESLint PASS、Vitest 402/402 passed，`uv lock --check --offline` PASS
+- [ ] **11. 增加第二后端**（暂缓）：保留 provider-neutral `SandboxBackend`、`SandboxBackendName="modal"` 与 Modal secret-reference 配置契约作为未来扩展接口；当前产品只接入并验收 E2B，Modal SDK Backend、管理配置、脚本、依赖和真实连接均不进入当前实现。Local Docker 同样留作需要代码不离开设备的后续显式选项，不作为零配置默认路径
 
 ## pi-agent Core 对齐修复顺序
 
@@ -54,11 +88,12 @@
 
 ## P1 — 可靠性与维护
 
-- [ ] 清理全量 Backend 的已知 warning：Starlette/httpx deprecated API、同步测试误用 `@pytest.mark.asyncio`
-- [ ] 修复本机 `.pytest_cache` ACL 或在开发流程中固定可写 cache 目录，避免测试通过时仍产生 cache warning
-- [ ] 为 ToolResult/UTF-8 修复增加 Browser E2E：跨轮工具卡顺序、中文 DDGS 结果和刷新恢复
-- [ ] 设计旧消息中 `U+FFFD` 的可选检测/标记工具；不得声称能恢复已丢失原字符
-- [ ] 为 Keyring 启动预检增加 Windows 实机 smoke 文档；保持非敏感探针和执行后清理约束
+- [x] 清理全量 Backend 的已知 warning（完成：Starlette 1.3+ TestClient 显式使用 HTTPX2；替换废弃 HTTP 422 常量与 raw-body API；移除同步测试误用的 asyncio module marker；修复测试文件句柄、SQLite 启动失败与 uvicorn pipe 资源泄漏；Backend 全量在 `-W error` 下 3852 passed / 5 skipped / 15 deselected，0 warning）
+- [x] 固定 pytest 可写状态目录（完成：`cache_dir=.pytest-cache-workspace`、`--basetemp=.pytest-tmp`，两者均已加入 `.gitignore`；不再访问 ACL 异常的旧 `.pytest_cache`，全量 Backend 已验证长时可写）
+- [x] 为 ToolResult/UTF-8 修复增加 Browser E2E（完成：持久化 `toolResult` 恢复为 MCP/通用工具卡，保留 call ID、tool name、error/details 与 UTF-8 内容；新增确定性两轮 DDGS 中文场景，验证 user/tool/assistant 跨轮顺序及整页刷新恢复；Playwright 全量 48/48，0 retry / 0 failure）
+- [x] 清理 Frontend 测试/构建 warning（完成：Modal 显式接管 Teleport fallthrough attrs，外部 `data-testid` 转发到 overlay 且保留 dialog 稳定 ID；主入口、Session API 与 Sidebar 统一静态导入，消除 Vite mixed-import 提示；Playwright global setup 解除 `NO_COLOR`/`FORCE_COLOR` 冲突；同时将 event-dedup 人工注入收敛为单一浏览器任务。Vitest 404/404、Playwright 48/48，三类 warning 与 retry 均为 0）
+- [x] 实现旧消息中 `U+FFFD` 的检测与标记（完成：Web 序列化时递归只读扫描 text/thinking/tool result/details/args 等 JSON 字段，返回 replacement/value 计数、受限 RFC 6901 路径和 Session 汇总；明确标记 `suspected=true`、`auto_repairable=false`，不写回 SQLite、不猜测原字符、不在元数据泄露正文片段；前端在消息与工具卡展示“疑似编码损坏”及受影响字段，刷新后保持；新增 serializer/API/Store/组件与真实 Browser E2E，Backend 全量 3856 passed / 5 skipped / 15 deselected、Vitest 405/405、Playwright 49/49）
+- [x] 为 Keyring 启动预检增加 Windows 实机 smoke 文档（完成：新增同账号/同解释器/交互式 Windows 会话前置条件，独立随机非用户值 write/read/delete/post-delete 验证、开发启动器 listen-before-probe 验收、cleanup failure-only 补救、自动化伴随回归、失败分类与最小非敏感证据模板；明确禁止真实 API Key、`keyring get` 输出、环境转储和把 `memory` 降级误记为 Keyring 通过；README 已链接操作入口）
 
 ## P2 — 可选产品迭代
 
@@ -73,7 +108,7 @@
 ## 明确延期 / Out of scope
 
 - [ ] OCR 与图片理解：扫描 PDF 当前终态为 `needs_ocr`
-- [ ] Multi-Agent、Plan Mode、Docker Sandbox/Git Integration
+- [ ] Multi-Agent、Plan Mode；托管 Coding Sandbox 已提升到 P0，Local Docker/Git provider integration 仍按其独立阶段实施
 - [ ] RBAC、OAuth、企业级多租户、TLS 公网部署、横向扩展
 - [ ] 向量数据库、embedding、hybrid retrieval；当前 Knowledge 固定为 SQLite FTS5/BM25
 - [ ] 自动 provider fallback、模型负载均衡、长期后台任务调度
@@ -93,4 +128,4 @@
 | ToolResult usage + deferred-tool metadata | ✅ `b6baea8` |
 | Complete-turn Compaction semantics | ✅ `0c72679` |
 
-当前代码基线的验证结果见 [`STATUS.md`](STATUS.md#2026-08-20-当前验证基线)。
+当前代码基线的验证结果见 [`STATUS.md`](STATUS.md#2026-08-22-当前验证基线)。

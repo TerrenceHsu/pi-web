@@ -12,7 +12,7 @@
 - binary / unsupported → 元信息 + 提示
 
 安全：
-- 跨 session 访问由 VirtualFileStore.get_for_session 强校验，本工具只拿当前 sid
+- 跨 session 访问由 WorkspaceStore.get_for_session 强校验，本工具只拿当前 sid
 - 文件读取异常一律转 ToolResult(is_error=True)，不抛出
 - 不返回 path（path 是 agent 内部细节）
 
@@ -20,7 +20,7 @@
 - max_bytes = 64 * 1024  (text / md / html excerpt)
 - max_rows = 50          (csv / parquet preview)
 
-注：VirtualFileStore / FileRef / FileStore 异常类通过 deferred import
+注：WorkspaceStore / FileRef / FileStore 异常类通过 deferred import
 （在 execute 方法内部）引入——避免 tools 子包 module-load 时触发
 web/__init__.py（FastAPI 链）形成 import 循环（agent → tools → web → app
 → harness → agent）。
@@ -39,7 +39,7 @@ from ..messages import TextContent
 from . import AgentTool, ToolResult, ToolUpdateCallback
 
 if TYPE_CHECKING:
-    from ..web.files import FileRef, VirtualFileStore
+    from ..web.files import FileRef, WorkspaceStore
 
 # ============================================================================
 # 常量
@@ -397,7 +397,7 @@ class ViewFileTool(AgentTool):
     def __init__(
         self,
         *,
-        file_store: VirtualFileStore,
+        file_store: WorkspaceStore,
         session_id_getter: Callable[[], str | None],
     ) -> None:
         self._file_store = file_store
@@ -789,7 +789,7 @@ def _error(
 
 def create_view_file_tool(
     *,
-    file_store: VirtualFileStore,
+    file_store: WorkspaceStore,
     session_id_getter: Callable[[], str | None],
 ) -> ViewFileTool:
     """factory：构造 view_file 工具，绑定 file_store + session_id_getter。"""

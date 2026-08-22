@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, ref } from "vue"
 
+import { downloadBlob } from "../../api/client"
+import { exportMarkdown } from "../../api/sessions"
 import { useAuthStore } from "../../stores/authStore"
 import { useChatStore } from "../../stores/chatStore"
 import { useSessionStore } from "../../stores/sessionStore"
@@ -10,6 +12,7 @@ import KnowledgeManagerModal from "../knowledge/KnowledgeManagerModal.vue"
 import MCPManagerModal from "../mcp/MCPManagerModal.vue"
 import ProviderSettingsModal from "../providers/ProviderSettingsModal.vue"
 import SkillManagerModal from "../skills/SkillManagerModal.vue"
+import CodingSandboxModal from "../coding-sandbox/CodingSandboxModal.vue"
 
 const authStore = useAuthStore()
 const sessionStore = useSessionStore()
@@ -22,6 +25,7 @@ const skillsOpen = ref(false)
 const mcpOpen = ref(false)
 const providerOpen = ref(false)
 const knowledgeOpen = ref(false)
+const sandboxOpen = ref(false)
 
 // 请求运行中（sending/streaming/active request）禁用 Provider Settings 入口
 const requestRunning = computed(
@@ -85,8 +89,6 @@ async function deleteSession(id: string) {
 
 async function exportSession(id: string) {
   try {
-    const { exportMarkdown } = await import("../../api/sessions")
-    const { downloadBlob } = await import("../../api/client")
     const { blob, filename } = await exportMarkdown(id)
     downloadBlob(blob, filename || "chat-export.md")
   } catch (e: any) {
@@ -122,6 +124,15 @@ async function signOut(): Promise<void> {
     </div>
 
     <nav class="sidebar-tools" aria-label="Workspace tools">
+      <button
+        class="sidebar-tool-btn"
+        data-testid="coding-sandbox-button"
+        :disabled="!activeId"
+        title="Managed coding Sandbox"
+        @click="sandboxOpen = true"
+      >
+        Sandbox
+      </button>
       <button
         class="sidebar-tool-btn"
         data-testid="skills-button"
@@ -227,6 +238,7 @@ async function signOut(): Promise<void> {
     <SkillManagerModal :open="skillsOpen" @close="skillsOpen = false" />
     <KnowledgeManagerModal :open="knowledgeOpen" @close="knowledgeOpen = false" />
     <MCPManagerModal :open="mcpOpen" @close="mcpOpen = false" />
+    <CodingSandboxModal :open="sandboxOpen" @close="sandboxOpen = false" />
     <ProviderSettingsModal
       :open="providerOpen"
       :session-id="activeId"

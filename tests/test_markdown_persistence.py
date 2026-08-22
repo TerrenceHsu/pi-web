@@ -435,7 +435,7 @@ class TestModuleBoundary:
     def _import_lines(self):
         import pi_agent_core_py.web.knowledge.markdown_persistence as mod
 
-        src = open(mod.__file__, encoding="utf-8").read()
+        src = Path(mod.__file__).read_text(encoding="utf-8")
         return [
             line for line in src.split("\n")
             if line.strip().startswith(("import ", "from "))
@@ -487,7 +487,7 @@ class TestModuleBoundary:
     def test_no_non_deterministic_calls(self):
         import pi_agent_core_py.web.knowledge.markdown_persistence as mod
 
-        src = open(mod.__file__, encoding="utf-8").read()
+        src = Path(mod.__file__).read_text(encoding="utf-8")
         # Strip docstrings/quotes
         code_lines = []
         in_string = False

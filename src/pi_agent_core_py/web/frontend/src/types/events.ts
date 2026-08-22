@@ -9,7 +9,15 @@
 
 import type { FileRef } from "./files"
 import type { ToolApprovalStatus } from "./approvals"
-import type { GenerationMetrics, MessageUsage } from "./messages"
+import type {
+  GenerationMetrics,
+  MessageContentWarning,
+  MessageUsage,
+} from "./messages"
+
+interface ContentWarningAwareItem {
+  contentWarnings?: MessageContentWarning[]
+}
 
 /**
  * P1-B2: 统一事件信封——所有 WS / SSE / GET /api/events 用同一个 schema。
@@ -75,7 +83,7 @@ export type TurnStatus = "queued" | "running" | "done" | "error"
 // ChatStreamItem —— 中间消息流的统一 item 类型（9 种 kind）
 // ============================================================================
 
-export interface UserMessageItem {
+export interface UserMessageItem extends ContentWarningAwareItem {
   kind: "user_message"
   id: string
   /** 用户输入的文本（多块 TextContent 合并后） */
@@ -91,7 +99,7 @@ export interface UserMessageItem {
   messageIndex?: number
 }
 
-export interface AssistantMessageItem {
+export interface AssistantMessageItem extends ContentWarningAwareItem {
   kind: "assistant_message"
   id: string
   content: string
@@ -110,7 +118,7 @@ export interface AssistantMessageItem {
   generationMetrics?: GenerationMetrics | null
 }
 
-export interface TurnInfoItem {
+export interface TurnInfoItem extends ContentWarningAwareItem {
   kind: "turn_info"
   id: string
   title: string
@@ -139,7 +147,7 @@ export interface ToolCallItem {
   details?: unknown
 }
 
-export interface ToolResultItem {
+export interface ToolResultItem extends ContentWarningAwareItem {
   kind: "tool_result"
   id: string
   toolName: string
@@ -150,7 +158,7 @@ export interface ToolResultItem {
   details?: unknown
 }
 
-export interface FileReadItem {
+export interface FileReadItem extends ContentWarningAwareItem {
   kind: "file_read"
   id: string
   /** view_file / list_files / write_file */
@@ -171,7 +179,7 @@ export interface SkillUsedItem {
   summary?: string
 }
 
-export interface MCPToolCallItem {
+export interface MCPToolCallItem extends ContentWarningAwareItem {
   kind: "mcp_tool_call"
   id: string
   /** mcp__server__tool 解析出的 server 部分 */
@@ -193,7 +201,7 @@ export interface ErrorItem {
   details?: unknown
 }
 
-export interface ContextSummaryItem {
+export interface ContextSummaryItem extends ContentWarningAwareItem {
   kind: "context_summary"
   id: string
   content: string

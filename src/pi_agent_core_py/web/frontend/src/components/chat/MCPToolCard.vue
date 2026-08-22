@@ -6,7 +6,13 @@ defineProps<{ item: MCPToolCallItem }>()
 </script>
 
 <template>
-  <div :class="['mcp-card', `status-${item.status}`]">
+  <div
+    :class="['mcp-card', `status-${item.status}`]"
+    data-testid="mcp-tool-card"
+    :data-tool-call-id="item.toolCallId ?? ''"
+    :data-server-name="item.serverName ?? ''"
+    :data-tool-name="item.toolName"
+  >
     <div class="mcp-row">
       <span class="mcp-icon">
         <span v-if="item.status === 'running'" class="dot-running"></span>

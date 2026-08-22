@@ -27,6 +27,7 @@ import type {
   ChatStreamItem,
   FileRef,
   MCPToolCallItem,
+  MessageContentWarning,
   PersistedMessageDto,
   ToolCallItem,
   ToolResultItem,
@@ -67,6 +68,18 @@ function textOf(msg: AgentMessage): string {
     .filter((c: any) => c && c.type === "text" && typeof c.text === "string")
     .map((c: any) => c.text)
     .join("\n")
+}
+
+function contentWarningsOf(msg: AgentMessage): MessageContentWarning[] | undefined {
+  if (!Array.isArray(msg.content_warnings) || msg.content_warnings.length === 0) {
+    return undefined
+  }
+  return msg.content_warnings.filter(
+    (warning) =>
+      warning &&
+      typeof warning.code === "string" &&
+      typeof warning.replacement_character_count === "number",
+  )
 }
 
 /** JSON-safe 字符串预览——限制长度防 UI 撑爆。 */
@@ -316,12 +329,58 @@ export const useChatStore = defineStore("chat", () => {
   // 历史消息加载
   // ----------------------------------------------------------------------
 
+  function toolResultMessageToItem(msg: AgentMessage, id: string): ChatStreamItem {
+    const toolName = msg.name || "unknown_tool"
+    const toolCallId = msg.tool_call_id
+    const status = msg.is_error ? "error" : "done"
+    const resultPreview = previewOf(textOf(msg))
+    const contentWarnings = contentWarningsOf(msg)
+
+    if (isMcpTool(toolName)) {
+      const parsed = parseMcpName(toolName)
+      return {
+        kind: "mcp_tool_call",
+        id,
+        serverName: parsed.serverName,
+        toolName: parsed.toolName,
+        toolCallId,
+        status,
+        resultPreview,
+        details: msg.details,
+        contentWarnings,
+      }
+    }
+    if (isFileTool(toolName)) {
+      return {
+        kind: "file_read",
+        id,
+        toolName,
+        toolCallId,
+        status,
+        preview: resultPreview,
+        details: msg.details,
+        contentWarnings,
+      }
+    }
+    return {
+      kind: "tool_result",
+      id,
+      toolName,
+      toolCallId,
+      status,
+      resultPreview,
+      details: msg.details,
+      contentWarnings,
+    }
+  }
+
   function messageToItem(msg: AgentMessage, id: string): ChatStreamItem | null {
     if (msg.role === "user") {
       return {
         kind: "user_message",
         id,
         content: textOf(msg) || "(empty user message)",
+        contentWarnings: contentWarningsOf(msg),
       }
     }
     if (msg.role === "assistant") {
@@ -331,6 +390,7 @@ export const useChatStore = defineStore("chat", () => {
         content: textOf(msg),
         usage: msg.usage ?? undefined,
         generationMetrics: msg.generation_metrics,
+        contentWarnings: contentWarningsOf(msg),
       }
     }
     if (msg.role === "summary") {
@@ -341,16 +401,20 @@ export const useChatStore = defineStore("chat", () => {
         sourceMessageCount: msg.source_message_count ?? 0,
         sourceTurnCount: msg.source_turn_count ?? 0,
         createdAt: msg.created_at,
+        contentWarnings: contentWarningsOf(msg),
       }
     }
-    // toolResult / 其它——历史消息中没有 tool_call 配对信息，
-    // 简化为 turn_info（避免在历史中显示一堆孤立的 tool_result card）
+    if (msg.role === "toolResult") {
+      return toolResultMessageToItem(msg, id)
+    }
+    // 未知自定义消息保留为淡化信息卡，避免丢失可见历史。
     return {
       kind: "turn_info",
       id,
       title: msg.role || "info",
       summary: textOf(msg) || "(no text)",
       muted: true,
+      contentWarnings: contentWarningsOf(msg),
     }
   }
 
@@ -373,6 +437,7 @@ export const useChatStore = defineStore("chat", () => {
         messageIndex: dto.idx,
         persisted: true,
         content: textOf(msg) || "(empty user message)",
+        contentWarnings: contentWarningsOf(msg),
       }
     }
     if (msg.role === "assistant") {
@@ -385,6 +450,7 @@ export const useChatStore = defineStore("chat", () => {
         content: textOf(msg),
         usage: msg.usage ?? undefined,
         generationMetrics: msg.generation_metrics,
+        contentWarnings: contentWarningsOf(msg),
       }
     }
     if (msg.role === "summary") {
@@ -395,7 +461,11 @@ export const useChatStore = defineStore("chat", () => {
         sourceMessageCount: msg.source_message_count ?? 0,
         sourceTurnCount: msg.source_turn_count ?? 0,
         createdAt: msg.created_at,
+        contentWarnings: contentWarningsOf(msg),
       }
+    }
+    if (msg.role === "toolResult") {
+      return toolResultMessageToItem(msg, dto.message_id)
     }
     return {
       kind: "turn_info",
@@ -403,6 +473,7 @@ export const useChatStore = defineStore("chat", () => {
       title: msg.role || "info",
       summary: textOf(msg) || "(no text)",
       muted: true,
+      contentWarnings: contentWarningsOf(msg),
     }
   }
 

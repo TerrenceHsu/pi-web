@@ -62,23 +62,20 @@ test.describe("chatStore envelope-aware behavior (P1-B2.1)", () => {
       },
     })
 
-    // 第一次注入
-    await page.evaluate((e) => {
-      ;(window as any).__storeHooks.chatStore().handleEvent(e)
+    // 在同一个浏览器任务内连续注入，避免真实 WS 后台事件夹在
+    // 两次读数之间，把无关 stream item 误判为去重失败。
+    const { before, count1, count2 } = await page.evaluate((e) => {
+      const store = (window as any).__storeHooks.chatStore()
+      const before = store.streamItems.length
+      store.handleEvent(e)
+      const count1 = store.streamItems.length
+      store.handleEvent(e)
+      const count2 = store.streamItems.length
+      return { before, count1, count2 }
     }, ev)
-    const count1 = await page.evaluate(() => {
-      return (window as any).__storeHooks.chatStore().streamItems.length
-    })
-
-    // 再次注入完全相同的 envelope（同 event_id）
-    await page.evaluate((e) => {
-      ;(window as any).__storeHooks.chatStore().handleEvent(e)
-    }, ev)
-    const count2 = await page.evaluate(() => {
-      return (window as any).__storeHooks.chatStore().streamItems.length
-    })
 
     // 同 event_id 不重复处理——streamItems 数量不变
+    expect(count1).toBeGreaterThan(before)
     expect(count2).toBe(count1)
   })
 
@@ -87,10 +84,7 @@ test.describe("chatStore envelope-aware behavior (P1-B2.1)", () => {
   }) => {
     await setupStore(page, "sess_A")
 
-    // 注入 session_B 的事件——应被过滤
-    await page.evaluate((e) => {
-      ;(window as any).__storeHooks.chatStore().handleEvent(e)
-    }, envelope({
+    const otherSessionEvent = envelope({
       eventId: "evt_other_session",
       sequence: 200,
       type: "message_start",
@@ -99,16 +93,8 @@ test.describe("chatStore envelope-aware behavior (P1-B2.1)", () => {
         type: "message_start",
         message: { role: "assistant", content: [{ type: "text", text: "from B" }] },
       },
-    }))
-    const items = await page.evaluate(() => {
-      return (window as any).__storeHooks.chatStore().streamItems.length
     })
-    expect(items).toBe(0)
-
-    // 同样事件但 session_id=A 应该被处理
-    await page.evaluate((e) => {
-      ;(window as any).__storeHooks.chatStore().handleEvent(e)
-    }, envelope({
+    const activeSessionEvent = envelope({
       eventId: "evt_active_session",
       sequence: 201,
       type: "message_start",
@@ -117,10 +103,17 @@ test.describe("chatStore envelope-aware behavior (P1-B2.1)", () => {
         type: "message_start",
         message: { role: "assistant", content: [] },
       },
-    }))
-    const itemsAfter = await page.evaluate(() => {
-      return (window as any).__storeHooks.chatStore().streamItems.length
     })
+    const { items, itemsAfter } = await page.evaluate(([other, active]) => {
+      const store = (window as any).__storeHooks.chatStore()
+      store.streamItems = []
+      store.handleEvent(other)
+      const items = store.streamItems.length
+      store.handleEvent(active)
+      return { items, itemsAfter: store.streamItems.length }
+    }, [otherSessionEvent, activeSessionEvent])
+
+    expect(items).toBe(0)
     expect(itemsAfter).toBeGreaterThan(0)
   })
 
@@ -129,31 +122,29 @@ test.describe("chatStore envelope-aware behavior (P1-B2.1)", () => {
   }) => {
     await setupStore(page, "sess_gap")
 
-    await page.evaluate((e) => {
-      ;(window as any).__storeHooks.chatStore().handleEvent(e)
-    }, envelope({
+    const first = envelope({
       eventId: "evt_gap_1",
       sequence: 300,
       type: "message_start",
       sessionId: "sess_gap",
-    }))
-    const gap1 = await page.evaluate(() => {
-      return (window as any).__storeHooks.chatStore().gapDetected
     })
-    expect(gap1).toBe(false)
-
-    // 注入 sequence=305（gap=4）——应该触发 gapDetected
-    await page.evaluate((e) => {
-      ;(window as any).__storeHooks.chatStore().handleEvent(e)
-    }, envelope({
+    const second = envelope({
       eventId: "evt_gap_2",
       sequence: 305,
       type: "message_end",
       sessionId: "sess_gap",
-    }))
-    const gap2 = await page.evaluate(() => {
-      return (window as any).__storeHooks.chatStore().gapDetected
     })
+    const { gap1, gap2 } = await page.evaluate(([first, second]) => {
+      const store = (window as any).__storeHooks.chatStore()
+      store.gapDetected = false
+      store.lastGlobalSequence = 0
+      store.handleEvent(first)
+      const gap1 = store.gapDetected
+      store.handleEvent(second)
+      return { gap1, gap2: store.gapDetected }
+    }, [first, second])
+
+    expect(gap1).toBe(false)
     expect(gap2).toBe(true)
   })
 
@@ -162,41 +153,37 @@ test.describe("chatStore envelope-aware behavior (P1-B2.1)", () => {
   }) => {
     await setupStore(page, "sess_A")
 
-    // sess_A 收 sequence=400
-    await page.evaluate((e) => {
-      ;(window as any).__storeHooks.chatStore().handleEvent(e)
-    }, envelope({
+    const first = envelope({
       eventId: "evt_cross_1",
       sequence: 400,
       type: "message_start",
       sessionId: "sess_A",
-    }))
-
-    // sess_B 收 sequence=401（前端整体 cursor 前进；但 sess_A 内部不应该报 gap）
-    await page.evaluate((e) => {
-      ;(window as any).__storeHooks.chatStore().handleEvent(e)
-    }, envelope({
+    })
+    const second = envelope({
       eventId: "evt_cross_2",
       sequence: 401,
       type: "message_start",
       sessionId: "sess_B",
-    }))
-
-    // sess_A 再收 sequence=402——按 per-session gap 判断会误报"缺 401"
-    // 但前端现在用全局 cursor，401 已经记录过，不应该 trigger gapDetected
-    await page.evaluate((e) => {
-      ;(window as any).__storeHooks.chatStore().handleEvent(e)
-    }, envelope({
+    })
+    const third = envelope({
       eventId: "evt_cross_3",
       sequence: 402,
       type: "message_end",
       sessionId: "sess_A",
-    }))
-
-    const gap = await page.evaluate(() => {
-      return (window as any).__storeHooks.chatStore().gapDetected
     })
+
+    // 同一浏览器任务内验证全局 cursor，避免真实 WS 事件插入
+    // 三次人工注入之间，产生与本断言无关的 gap。
+    const gap = await page.evaluate(([first, second, third]) => {
+      const store = (window as any).__storeHooks.chatStore()
+      store.gapDetected = false
+      store.lastGlobalSequence = 0
+      store.handleEvent(first)
+      store.handleEvent(second)
+      store.handleEvent(third)
+      return store.gapDetected
+    }, [first, second, third])
+
     expect(gap).toBe(false)
   })
 })
-

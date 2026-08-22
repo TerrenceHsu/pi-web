@@ -100,7 +100,7 @@ class TestContentLengthPreCheck:
         with TestClient(app) as client:
             r = client.post(
                 "/api/provider-hints",
-                data=big_body,
+                content=big_body,
                 headers={
                     "Content-Type": "application/json",
                     "Content-Length": "200",
@@ -631,4 +631,3 @@ class TestAsgiBodyMiddlewareEdgeCases:
         bodies = [m.get("body", b"") for m in sent if m.get("type") == "http.response.body"]
         response_body = b"".join(bodies).decode("utf-8", errors="ignore")
         assert "xxxxxxxx" not in response_body, "413 response must not echo body fragment"
-

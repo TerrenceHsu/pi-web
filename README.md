@@ -35,7 +35,7 @@
 - 对话历史以 append-only entry tree 持久化；命名 lane 支持 fork、branch、label 与重启后 active leaf 恢复
 - lane operation 使用 append-only intent/effect/finish records；Checkpointer 可在进程退出后凭 source leaf/hash 幂等前滚
 - 当前 active lane 会物化为兼容消息视图，因此现有聊天、Regenerate、Export 与 Context 工具无需理解树结构
-- 每个 Session 初始化独立目录和唯一根 `AGENT.md`
+- 每个 Session 通过唯一 `WorkspaceStore` 初始化独立目录和唯一根 `AGENT.md`、`Memory.md`；旧 `VirtualFileStore` 名称仅为兼容别名
 - 用户上传文件保存在当前 Session；Agent 可调用 `list_files`、`view_file`、`write_file`
 - 文件树可查看、下载、删除和刷新；`AGENT.md`、`Memory.md` 可用 SHA-256 乐观锁编辑
 - `/checkpointer` 使用当前 Session 绑定的 LLM 总结对话到累计 `Memory.md`；文件以 immutable generation 原子发布，成功后在同一 SQLite 事务清空原 lane 并完成 operation
@@ -131,6 +131,9 @@ $env:PI_AGENT_SECRET_BACKEND = "memory"
 
 该模式不会把 Key 自动降级写入 SQLite。
 
+Windows 实机 write/read/delete、启动器 listen-before-probe 验收和安全排障步骤见
+[`docs/guides/windows-keyring-preflight-smoke.md`](docs/guides/windows-keyring-preflight-smoke.md)。
+
 ### 3. 启动前端开发服务器
 
 另开一个 PowerShell：
@@ -196,7 +199,7 @@ D:\miniconda\envs\pipy\python.exe scripts/dev_web_app.py
         ├── uploads/
         │   └── {session_id}/
         │       ├── AGENT.md
-        │       ├── Memory.md        # 首次 checkpointer 后存在
+        │       ├── Memory.md        # Session 初始化时创建，checkpointer 累计更新
         │       └── ...
         └── knowledge/
             ├── knowledge.db

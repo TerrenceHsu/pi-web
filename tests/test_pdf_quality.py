@@ -16,6 +16,7 @@ PDFs needed (we construct ``PdfExtractionResult`` directly).
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 import pytest
 
@@ -402,42 +403,42 @@ class TestEvaluatorBoundary:
     def test_module_does_not_import_pypdf(self):
         import pi_agent_core_py.web.knowledge.pdf_quality as mod
 
-        mod_source = open(mod.__file__, encoding="utf-8").read()
+        mod_source = Path(mod.__file__).read_text(encoding="utf-8")
         assert "import pypdf" not in mod_source
         assert "from pypdf" not in mod_source
 
     def test_module_does_not_import_fastapi(self):
         import pi_agent_core_py.web.knowledge.pdf_quality as mod
 
-        mod_source = open(mod.__file__, encoding="utf-8").read()
+        mod_source = Path(mod.__file__).read_text(encoding="utf-8")
         assert "import fastapi" not in mod_source
         assert "from fastapi" not in mod_source
 
     def test_module_does_not_import_sqlite(self):
         import pi_agent_core_py.web.knowledge.pdf_quality as mod
 
-        mod_source = open(mod.__file__, encoding="utf-8").read()
+        mod_source = Path(mod.__file__).read_text(encoding="utf-8")
         assert "sqlite3" not in mod_source
         assert "aiosqlite" not in mod_source
 
     def test_module_does_not_import_network_libs(self):
         import pi_agent_core_py.web.knowledge.pdf_quality as mod
 
-        mod_source = open(mod.__file__, encoding="utf-8").read()
+        mod_source = Path(mod.__file__).read_text(encoding="utf-8")
         for forbidden in ("httpx", "requests", "urllib", "aiohttp"):
             assert f"import {forbidden}" not in mod_source
 
     def test_module_does_not_import_llm_providers(self):
         import pi_agent_core_py.web.knowledge.pdf_quality as mod
 
-        mod_source = open(mod.__file__, encoding="utf-8").read()
+        mod_source = Path(mod.__file__).read_text(encoding="utf-8")
         for forbidden in ("openai", "anthropic", "google.genai"):
             assert forbidden not in mod_source
 
     def test_module_does_not_import_ocr_or_models(self):
         import pi_agent_core_py.web.knowledge.pdf_quality as mod
 
-        mod_source = open(mod.__file__, encoding="utf-8").read()
+        mod_source = Path(mod.__file__).read_text(encoding="utf-8")
         for forbidden in (
             "tesseract",
             "surya",
@@ -451,7 +452,7 @@ class TestEvaluatorBoundary:
     def test_no_non_deterministic_calls(self):
         import pi_agent_core_py.web.knowledge.pdf_quality as mod
 
-        mod_source = open(mod.__file__, encoding="utf-8").read()
+        mod_source = Path(mod.__file__).read_text(encoding="utf-8")
         for forbidden in (
             "datetime.now",
             "time.time",

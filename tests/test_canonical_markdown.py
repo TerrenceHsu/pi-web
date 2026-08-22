@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -930,42 +931,42 @@ class TestModuleBoundary:
     def test_module_does_not_import_pypdf(self):
         import pi_agent_core_py.web.knowledge.canonical_markdown as mod
 
-        src = open(mod.__file__, encoding="utf-8").read()
+        src = Path(mod.__file__).read_text(encoding="utf-8")
         assert "import pypdf" not in src
         assert "from pypdf" not in src
 
     def test_module_does_not_import_fastapi(self):
         import pi_agent_core_py.web.knowledge.canonical_markdown as mod
 
-        src = open(mod.__file__, encoding="utf-8").read()
+        src = Path(mod.__file__).read_text(encoding="utf-8")
         assert "import fastapi" not in src
         assert "from fastapi" not in src
 
     def test_module_does_not_import_sqlite(self):
         import pi_agent_core_py.web.knowledge.canonical_markdown as mod
 
-        src = open(mod.__file__, encoding="utf-8").read()
+        src = Path(mod.__file__).read_text(encoding="utf-8")
         assert "sqlite3" not in src
         assert "aiosqlite" not in src
 
     def test_module_does_not_import_network_libs(self):
         import pi_agent_core_py.web.knowledge.canonical_markdown as mod
 
-        src = open(mod.__file__, encoding="utf-8").read()
+        src = Path(mod.__file__).read_text(encoding="utf-8")
         for forbidden in ("httpx", "requests", "urllib", "aiohttp"):
             assert f"import {forbidden}" not in src
 
     def test_module_does_not_import_llm_providers(self):
         import pi_agent_core_py.web.knowledge.canonical_markdown as mod
 
-        src = open(mod.__file__, encoding="utf-8").read()
+        src = Path(mod.__file__).read_text(encoding="utf-8")
         for forbidden in ("openai", "anthropic", "google.genai"):
             assert forbidden not in src
 
     def test_module_does_not_import_ocr_or_models(self):
         import pi_agent_core_py.web.knowledge.canonical_markdown as mod
 
-        src = open(mod.__file__, encoding="utf-8").read()
+        src = Path(mod.__file__).read_text(encoding="utf-8")
         # Check import statements only — not docstring mentions
         import_lines = [
             line for line in src.split("\n")
@@ -987,7 +988,7 @@ class TestModuleBoundary:
     def test_no_non_deterministic_calls(self):
         import pi_agent_core_py.web.knowledge.canonical_markdown as mod
 
-        src = open(mod.__file__, encoding="utf-8").read()
+        src = Path(mod.__file__).read_text(encoding="utf-8")
         # Strip docstrings/quotes; check for actual call expressions
         # Look only at lines that aren't comments or string literals
         code_lines = []
@@ -1015,7 +1016,7 @@ class TestModuleBoundary:
         # Builder must not couple to SQLite layer
         import pi_agent_core_py.web.knowledge.canonical_markdown as mod
 
-        src = open(mod.__file__, encoding="utf-8").read()
+        src = Path(mod.__file__).read_text(encoding="utf-8")
         assert "from .store" not in src
         assert "KnowledgeStore" not in src
 

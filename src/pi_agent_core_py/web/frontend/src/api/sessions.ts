@@ -10,7 +10,7 @@ import type {
   SessionSummary,
   SessionTreeResponse,
 } from "../types"
-import { requestJson } from "./client"
+import { requestBlob, requestJson } from "./client"
 
 /** GET /api/sessions——复数 spec endpoint。 */
 export function listSessions() {
@@ -104,8 +104,7 @@ export function setEntryLabel(
  * 调用方用 downloadBlob 触发浏览器下载。
  */
 export function exportMarkdown(sessionId: string) {
-  // 动态 import 避免循环依赖
-  return import("./client").then(({ requestBlob }) =>
-    requestBlob(`/api/sessions/${encodeURIComponent(sessionId)}/export/markdown`),
+  return requestBlob(
+    `/api/sessions/${encodeURIComponent(sessionId)}/export/markdown`,
   )
 }

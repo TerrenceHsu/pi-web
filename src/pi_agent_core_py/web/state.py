@@ -192,7 +192,7 @@ class WebAppState(BaseModel):
     # P0-1: SQLiteSessionStore 引用（None 表示未启用多会话路径）
     session_store: Any = None
     current_session_id: str | None = None
-    # P0-2: VirtualFileStore 引用（None 表示未启用文件上传路径）
+    # Session WorkspaceStore 引用（None 表示未启用 Workspace）
     file_store: Any = None
     uploads_dir: Any = None
     # 启动时 durable operation reducer 的 secret-free 计数。

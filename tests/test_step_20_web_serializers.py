@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from pydantic import BaseModel
 
 from pi_agent_core_py import (
@@ -21,10 +23,15 @@ from pi_agent_core_py import (
     UserMessage,
 )
 from pi_agent_core_py.snapshot import RequestSnapshot, SnapshotBuilder
+from pi_agent_core_py.web.content_integrity import (
+    detect_content_warnings,
+    summarize_content_integrity,
+)
 from pi_agent_core_py.web.serializers import (
     serialize_event,
     serialize_mcp_server_state,
     serialize_message,
+    serialize_persisted_message,
     serialize_policy_audit_record,
     serialize_session,
     serialize_skill,
@@ -89,6 +96,70 @@ def test_serialize_message_user_message() -> None:
     out = serialize_message(msg)
     assert out["role"] == "user"
     assert out["content"][0]["text"] == "hi"
+    assert "content_warnings" not in out
+
+
+def test_serialize_message_marks_suspected_unicode_replacement_characters() -> None:
+    msg = UserMessage(
+        content=[
+            TextContent(text="first \ufffd value and second \ufffd"),
+        ]
+    )
+
+    out = serialize_message(msg)
+
+    warning = out["content_warnings"][0]
+    assert warning == {
+        "code": "unicode_replacement_character",
+        "suspected": True,
+        "replacement_character_count": 2,
+        "affected_value_count": 1,
+        "affected_paths": ["/content/0/text"],
+        "paths_truncated": False,
+        "auto_repairable": False,
+    }
+    # Detection is metadata only; the serialized message is not rewritten.
+    assert out["content"][0]["text"] == "first \ufffd value and second \ufffd"
+
+
+def test_serialize_persisted_message_keeps_warning_with_stable_row_metadata() -> None:
+    stored = SimpleNamespace(
+        id="msg-corrupt",
+        session_id="sess-corrupt",
+        idx=3,
+        role="user",
+        created_at=123,
+        message=UserMessage(content=[TextContent(text="legacy \ufffd text")]),
+    )
+
+    out = serialize_persisted_message(stored)
+
+    assert out["message_id"] == "msg-corrupt"
+    assert out["message"]["content_warnings"][0][
+        "replacement_character_count"
+    ] == 1
+    assert out["content"][0]["text"] == "legacy \ufffd text"
+
+
+def test_content_warning_scans_thinking_and_tool_details_with_bounded_paths() -> None:
+    payload = {
+        "role": "assistant",
+        "content": [{"type": "thinking", "thinking": "reason \ufffd"}],
+        "details": {"tool_output": "first \ufffd second \ufffd"},
+    }
+
+    warnings = detect_content_warnings(payload, max_affected_paths=1)
+
+    assert warnings[0]["replacement_character_count"] == 3
+    assert warnings[0]["affected_value_count"] == 2
+    assert warnings[0]["affected_paths"] == ["/content/0/thinking"]
+    assert warnings[0]["paths_truncated"] is True
+    assert summarize_content_integrity(
+        [{**payload, "content_warnings": warnings}]
+    ) == {
+        "suspected_message_count": 1,
+        "replacement_character_count": 3,
+    }
 
 
 def test_serialize_event_done_event() -> None:

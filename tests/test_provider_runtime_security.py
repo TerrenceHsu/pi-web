@@ -35,8 +35,6 @@ from pi_agent_core_py.web.providers.runtime import (
     RequestProviderSelection,
 )
 
-pytestmark = pytest.mark.asyncio
-
 SECRET_MARKER = "sk-M1-4-SEC-FACTORY-MARKER-DO-NOT-LEAK"
 PROFILE_MARKER = "prof-TOP-SECRET-ID"
 CREDENTIAL_MARKER = "cred-TOP-SECRET-ID"

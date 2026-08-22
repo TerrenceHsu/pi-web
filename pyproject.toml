@@ -36,6 +36,8 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5",
+    # Starlette 1.3+ TestClient uses HTTPX2 and warns when falling back to httpx.
+    "httpx2>=2.9,<3",
     "ruff>=0.5",
     "mypy>=1.11",
     "types-jsonschema>=4",
@@ -56,6 +58,11 @@ web = [
     # InMemorySecretStore（CI / E2E / Docker）。永不 fallback 到 SQLite 明文。
     "keyring>=25",
 ]
+# Managed coding sandbox provider.  Kept as an explicit app-build extra so the
+# provider-neutral core remains importable without the cloud SDK.
+sandbox-e2b = [
+    "e2b>=2.39,<3",
+]
 # P2-R2-0 License Gate 选定 pypdf 为 R2 MVP PDF Parser。
 # 范围 pypdf>=6.0,<7（Audited baseline 6.14.2，BSD-3-Clause）。
 # 纯 Python、0 直接依赖、无模型、无 OCR、无外部网络——满足 R2 编码不变量
@@ -73,10 +80,11 @@ build-backend = "hatchling.build"
 path = "src/pi_agent_core_py/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/pi_agent_core_py"]
+packages = ["src/pi_agent_core_py", "src/coding_sandbox"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+cache_dir = ".pytest-cache-workspace"
 testpaths = ["tests"]
 markers = [
     "slow: tests that hit real LLM APIs (require API key)",
@@ -84,6 +92,7 @@ markers = [
     "docker: tests that require Docker daemon (not used in this trimmed copy)",
 ]
 addopts = [
+    "--basetemp=.pytest-tmp",
     "--cov=pi_agent_core_py",
     "--cov-report=term-missing",
     "--cov-report=xml:.coverage.xml",

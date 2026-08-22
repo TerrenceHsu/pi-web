@@ -40,7 +40,7 @@ def _build_test_harness():
 
     from pi_agent_core_py.agent import Agent
     from pi_agent_core_py.harness import AgentHarness
-    from pi_agent_core_py.messages import ToolCall
+    from pi_agent_core_py.messages import TextContent, ToolCall
     from pi_agent_core_py.model_client import (
         DoneEvent,
         FakeClient,
@@ -48,6 +48,31 @@ def _build_test_harness():
         ToolCallEvent,
     )
     from pi_agent_core_py.policy import DefaultToolPermissionPolicy
+    from pi_agent_core_py.tools import AgentTool, ToolResult
+
+    class _Utf8DdgsTool(AgentTool):
+        """Deterministic DDGS-shaped tool for UTF-8 browser regression tests."""
+
+        name = "mcp__ddgs__search_text"
+        label = "DDGS UTF-8 fixture"
+        description = "Return a deterministic Chinese search result."
+        parameters = {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        }
+
+        async def execute(self, tool_call_id, args, **kwargs):
+            del kwargs
+            query = str(args.get("query", ""))
+            turn = "第二轮" if "第二轮" in query else "第一轮"
+            text = f"中文搜索结果：{turn}北京天气晴朗，编码保持完整。"
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                name=self.name,
+                content=[TextContent(text=text)],
+                details={"query": query, "fixture": "utf8-ddgs"},
+            )
 
     # P1-B3-4: 默认 delayed（让 async prompt 测试能观察 draft 增长）；
     # 设置 PI_E2E_FAST=1 切回 fast FakeClient
@@ -71,6 +96,46 @@ def _build_test_harness():
 
                 messages = kwargs.get("messages", [])
                 messages_repr = repr(messages)
+                latest_user_repr = next(
+                    (
+                        repr(message)
+                        for message in reversed(messages)
+                        if getattr(message, "role", None) == "user"
+                    ),
+                    "",
+                )
+                if "U_FFFD_HISTORY_TEST" in latest_user_repr:
+                    yield TextDeltaEvent(delta="历史内容\ufffd疑似损坏")
+                    yield DoneEvent(stop_reason="stop")
+                    return
+                utf8_turn_count = sum(
+                    getattr(message, "role", None) == "user"
+                    and "UTF8_DDGS_TURN_" in repr(message)
+                    for message in messages
+                )
+                if utf8_turn_count:
+                    call_id = f"call_utf8_ddgs_{utf8_turn_count}"
+                    has_current_result = any(
+                        getattr(message, "role", None) == "toolResult"
+                        and getattr(message, "tool_call_id", None) == call_id
+                        for message in messages
+                    )
+                    if has_current_result:
+                        yield TextDeltaEvent(
+                            delta=f"DDGS 第{utf8_turn_count}轮处理完成"
+                        )
+                        yield DoneEvent(stop_reason="stop")
+                    else:
+                        turn_label = "第二轮" if utf8_turn_count == 2 else "第一轮"
+                        yield ToolCallEvent(
+                            tool_call=ToolCall(
+                                id=call_id,
+                                name="mcp__ddgs__search_text",
+                                arguments={"query": f"{turn_label} 北京天气"},
+                            )
+                        )
+                        yield DoneEvent(stop_reason="tool_use")
+                    return
                 approval_marker = None
                 if "P2B_APPROVAL_APPROVE" in messages_repr:
                     approval_marker = "approved-e2e.md"
@@ -112,6 +177,26 @@ def _build_test_harness():
         scripts = [list(script) for _ in range(200)]
         fake = _DelayedFakeClient(scripts)
     else:
+        class _FastFakeClient(FakeClient):
+            """Fast fixture with the same integrity-test override as delayed mode."""
+
+            async def stream(self, **kwargs):
+                messages = kwargs.get("messages", [])
+                latest_user_repr = next(
+                    (
+                        repr(message)
+                        for message in reversed(messages)
+                        if getattr(message, "role", None) == "user"
+                    ),
+                    "",
+                )
+                if "U_FFFD_HISTORY_TEST" in latest_user_repr:
+                    yield TextDeltaEvent(delta="历史内容\ufffd疑似损坏")
+                    yield DoneEvent(stop_reason="stop")
+                    return
+                async for event in super().stream(**kwargs):
+                    yield event
+
         # 默认 fast FakeClient
         one = [
             TextDeltaEvent(delta="hello from fake backend"),
@@ -119,9 +204,10 @@ def _build_test_harness():
         ]
         # D2-8.0: 同步提升 fast FakeClient 脚本数
         scripts = [list(one) for _ in range(200)]
-        fake = FakeClient(scripts)
+        fake = _FastFakeClient(scripts)
 
     agent = Agent(system_prompt="", client=fake)
+    agent.tools.register(_Utf8DdgsTool())
     harness = AgentHarness(agent, permission_policy=DefaultToolPermissionPolicy())
     # attach 一个空 SkillRegistry——让 /api/skills/upload 走 register 路径而非 422
     harness.attach_skills([])

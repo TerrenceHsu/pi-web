@@ -1,5 +1,18 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, watch } from "vue"
+import { computed, onBeforeUnmount, onMounted, useAttrs, watch } from "vue"
+
+defineOptions({ inheritAttrs: false })
+
+const attrs = useAttrs()
+const externalTestId = computed(() => {
+  const value = attrs["data-testid"]
+  return typeof value === "string" ? value : undefined
+})
+const dialogAttrs = computed(() => {
+  const forwarded = { ...attrs }
+  delete forwarded["data-testid"]
+  return forwarded
+})
 
 const props = withDefaults(
   defineProps<{
@@ -49,11 +62,17 @@ function stopPropagation(e: MouseEvent) {
 
 <template>
   <Teleport to="body">
-    <div v-if="open" class="modal-overlay" @click="onOverlayClick">
+    <div
+      v-if="open"
+      class="modal-overlay"
+      :data-testid="externalTestId"
+      @click="onOverlayClick"
+    >
       <div
         class="modal-window"
         :style="{ width }"
         data-testid="modal"
+        v-bind="dialogAttrs"
         role="dialog"
         aria-modal="true"
         @click="stopPropagation"

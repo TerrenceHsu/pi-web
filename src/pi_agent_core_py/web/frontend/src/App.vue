@@ -7,6 +7,7 @@ import ChatPanel from "./components/chat/ChatPanel.vue"
 import LoginPage from "./components/auth/LoginPage.vue"
 import { useAuthStore } from "./stores/authStore"
 import { useChatStore } from "./stores/chatStore"
+import { useCodingSandboxStore } from "./stores/codingSandboxStore"
 import { useContextBudgetStore } from "./stores/contextBudgetStore"
 import { useFileStore } from "./stores/fileStore"
 import { useMcpStore } from "./stores/mcpStore"
@@ -22,6 +23,7 @@ import {
 const authStore = useAuthStore()
 const sessionStore = useSessionStore()
 const chatStore = useChatStore()
+const codingSandboxStore = useCodingSandboxStore()
 const contextBudgetStore = useContextBudgetStore()
 const fileStore = useFileStore()
 const skillStore = useSkillStore()
@@ -71,6 +73,7 @@ async function bootstrapWorkspace(): Promise<void> {
     // 认证 Cookie 会随 WebSocket 握手发送。先连接，再恢复 active request；
     // recoverActiveRequestEvents 会把查询期间的 live event 合并去重。
     chatStore.connectEvents()
+    codingSandboxStore.connectEvents()
     await restoreWorkspaceSession(sid)
     sessionCoordinatorReady.value = true
 
@@ -91,12 +94,16 @@ async function restoreWorkspaceSession(sessionId: string | null): Promise<void> 
   chatStore.setActiveSession(sessionId)
   contextBudgetStore.resetForSession()
   fileStore.resetForSession()
-  if (!sessionId) return
+  if (!sessionId) {
+    await codingSandboxStore.restoreSession(null)
+    return
+  }
 
   await Promise.all([
     chatStore.loadMessages(sessionId),
     fileStore.loadFiles(sessionId),
     contextBudgetStore.load(sessionId),
+    codingSandboxStore.restoreSession(sessionId),
   ])
   if (version !== activationVersion || sessionStore.activeSessionId !== sessionId) return
 
@@ -133,6 +140,7 @@ function resetWorkspaceState(): void {
   skillStore.resetWorkspace()
   mcpStore.resetWorkspace()
   providerStore.resetWorkspace()
+  codingSandboxStore.resetWorkspace()
   sessionStore.resetWorkspace()
   workspaceStarted.value = false
   workspaceLoading.value = false
@@ -190,6 +198,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener("popstate", handlePopState)
   chatStore.disconnectEvents()
+  codingSandboxStore.disconnectEvents()
 })
 </script>
 

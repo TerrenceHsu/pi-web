@@ -11,7 +11,7 @@ from . import AgentTool, ToolResult, ToolUpdateCallback
 from .view_file import _classify_format
 
 if TYPE_CHECKING:
-    from ..web.files import VirtualFileStore
+    from ..web.files import WorkspaceStore
 
 
 class WriteFileTool(AgentTool):
@@ -55,7 +55,7 @@ class WriteFileTool(AgentTool):
     def __init__(
         self,
         *,
-        file_store: VirtualFileStore,
+        file_store: WorkspaceStore,
         session_id_getter: Callable[[], str | None],
     ) -> None:
         self._file_store = file_store
@@ -188,7 +188,7 @@ def _error(
 
 def create_write_file_tool(
     *,
-    file_store: VirtualFileStore,
+    file_store: WorkspaceStore,
     session_id_getter: Callable[[], str | None],
 ) -> WriteFileTool:
     return WriteFileTool(

@@ -380,26 +380,36 @@ def test_11_sse_receives_envelope(web_client):
     模式：threading 后台触发 prompt + client.stream 读 SSE。
     参考 test_integration_web_server.py::test_sse_endpoint_emits_hello_and_event。
     """
-    client, _, _ = web_client
+    client, harness, _ = web_client
     chunks: list[str] = []
     chunks_lock = threading.Lock()
+    trigger_errors: list[Exception] = []
+    portal = client.portal
+    assert portal is not None
 
     def trigger_post_after_connect() -> None:
         import time
         # 等 SSE 连接建立（server 接到 GET /api/stream 后稍延迟触发 prompt）
         time.sleep(0.2)
         try:
-            client.post("/api/prompt", json={"text": "hi"}, timeout=5.0)
-        except Exception:
-            pass
+            portal.call(harness.run_prompt, "hi")
+        except Exception as error:
+            trigger_errors.append(error)
 
-    threading.Thread(target=trigger_post_after_connect, daemon=True).start()
+    trigger_thread = threading.Thread(target=trigger_post_after_connect)
+    trigger_thread.start()
 
-    with client.stream("GET", "/api/stream?limit=2", timeout=10.0) as resp:
-        assert resp.status_code == 200
-        for line in resp.iter_lines():
-            with chunks_lock:
-                chunks.append(line)
+    try:
+        with client.stream("GET", "/api/stream?limit=2", timeout=10.0) as resp:
+            assert resp.status_code == 200
+            for line in resp.iter_lines():
+                with chunks_lock:
+                    chunks.append(line)
+    finally:
+        trigger_thread.join(timeout=5.0)
+
+    assert not trigger_thread.is_alive()
+    assert not trigger_errors
 
     joined = "\n".join(chunks)
     # 至少有 hello + 一个 event

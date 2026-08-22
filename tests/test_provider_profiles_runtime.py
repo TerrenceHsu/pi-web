@@ -26,9 +26,6 @@ from pi_agent_core_py.web.providers.config_runtime import (  # noqa: E402
     resolve_provider_profiles_api_configuration,
 )
 
-pytestmark = pytest.mark.asyncio
-
-
 # ============================================================================
 # Helpers
 # ============================================================================

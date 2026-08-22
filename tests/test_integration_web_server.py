@@ -90,13 +90,12 @@ def web_client():
     """单 harness / app / TestClient。结束时 dispose 避免 hook 累积。"""
     harness = _make_harness()
     app = create_app(harness)
-    client = TestClient(app)
-    try:
-        yield client, harness, app
-    finally:
-        client.close()
-        # TestClient.close() 触发 shutdown hook，hook 会 remove；兜底再 dispose
-        dispose_app(app)
+    with TestClient(app) as client:
+        try:
+            yield client, harness, app
+        finally:
+            # TestClient 退出会触发 shutdown hook；兜底再 dispose。
+            dispose_app(app)
 
 
 @pytest.fixture
@@ -104,12 +103,11 @@ def web_client_with_skill():
     """带 skill + allow_prompt_preview=True 的 fixture。"""
     harness = _make_harness(skills=[_skill_with_prompt()])
     app = create_app(harness, allow_prompt_preview=True)
-    client = TestClient(app)
-    try:
-        yield client, harness, app
-    finally:
-        client.close()
-        dispose_app(app)
+    with TestClient(app) as client:
+        try:
+            yield client, harness, app
+        finally:
+            dispose_app(app)
 
 
 # ============================================================================
@@ -332,26 +330,36 @@ def test_stream_with_limit_one_collects_one_event(web_client):
     """
     import threading
 
-    client, _, _ = web_client
+    client, harness, _ = web_client
 
     chunks: list[str] = []
     chunks_lock = threading.Lock()
+    trigger_errors: list[Exception] = []
+    portal = client.portal
+    assert portal is not None
 
     def trigger_post_after_connect() -> None:
         # 给 SSE 一点时间连上 hook 广播；然后 POST prompt
         time.sleep(0.5)
         try:
-            client.post("/api/prompt", json={"text": "trigger"})
-        except Exception:
-            pass
+            portal.call(harness.run_prompt, "trigger")
+        except Exception as error:
+            trigger_errors.append(error)
 
-    threading.Thread(target=trigger_post_after_connect, daemon=True).start()
+    trigger_thread = threading.Thread(target=trigger_post_after_connect)
+    trigger_thread.start()
 
-    with client.stream("GET", "/api/stream?limit=1", timeout=20.0) as resp:
-        assert resp.status_code == 200
-        for line in resp.iter_lines():
-            with chunks_lock:
-                chunks.append(line)
+    try:
+        with client.stream("GET", "/api/stream?limit=1", timeout=20.0) as resp:
+            assert resp.status_code == 200
+            for line in resp.iter_lines():
+                with chunks_lock:
+                    chunks.append(line)
+    finally:
+        trigger_thread.join(timeout=5.0)
+
+    assert not trigger_thread.is_alive()
+    assert not trigger_errors
 
     joined = "\n".join(chunks)
     # hello + 至少一个 event
@@ -557,6 +565,10 @@ if __name__ == "__main__":
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if proc.stderr is not None:
+                proc.stderr.close()
 
     pytest.fail(
         f"uvicorn subprocess 启动失败（{max_attempts} 次重试后）：{last_error}"

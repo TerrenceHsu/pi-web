@@ -6,7 +6,12 @@ defineProps<{ item: ToolResultItem }>()
 </script>
 
 <template>
-  <div :class="['result-card', `status-${item.status}`]">
+  <div
+    :class="['result-card', `status-${item.status}`]"
+    data-testid="tool-result-card"
+    :data-tool-call-id="item.toolCallId ?? ''"
+    :data-tool-name="item.toolName"
+  >
     <div class="result-row">
       <span class="result-icon">{{ item.status === 'error' ? '!' : '↳' }}</span>
       <span class="result-label">result</span>

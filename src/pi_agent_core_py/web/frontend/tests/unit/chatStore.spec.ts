@@ -295,6 +295,85 @@ describe("terminal message reconciliation", () => {
   })
 })
 
+describe("persisted ToolResult UTF-8 recovery", () => {
+  it("restores a Chinese DDGS result as an MCP card after full message reload", async () => {
+    vi.mocked(messagesApi.getMessages).mockResolvedValue({
+      count: 3,
+      session_id: "sess-1",
+      messages: [
+        {
+          message_id: "u-1",
+          session_id: "sess-1",
+          idx: 0,
+          role: "user",
+          content: [{ type: "text", text: "搜索北京天气" }],
+          created_at: 1,
+          message: { role: "user", content: [{ type: "text", text: "搜索北京天气" }] },
+        },
+        {
+          message_id: "tr-1",
+          session_id: "sess-1",
+          idx: 1,
+          role: "toolResult",
+          content: [{ type: "text", text: "中文搜索结果：北京天气晴朗" }],
+          created_at: 2,
+          message: {
+            role: "toolResult",
+            tool_call_id: "call-ddgs-1",
+            name: "mcp__ddgs__search_text",
+            is_error: false,
+            content: [{ type: "text", text: "中文搜索结果：北京天气晴朗" }],
+            details: { query: "北京天气" },
+            content_warnings: [
+              {
+                code: "unicode_replacement_character",
+                suspected: true,
+                replacement_character_count: 1,
+                affected_value_count: 1,
+                affected_paths: ["/details/legacy_text"],
+                paths_truncated: false,
+                auto_repairable: false,
+              },
+            ],
+          },
+        },
+        {
+          message_id: "a-1",
+          session_id: "sess-1",
+          idx: 2,
+          role: "assistant",
+          content: [{ type: "text", text: "已完成" }],
+          created_at: 3,
+          message: { role: "assistant", content: [{ type: "text", text: "已完成" }] },
+        },
+      ],
+    } as any)
+
+    const store = useChatStore()
+    store.setActiveSession("sess-1")
+    await store.loadMessages("sess-1")
+
+    expect(store.streamItems.map((item) => item.kind)).toEqual([
+      "user_message",
+      "mcp_tool_call",
+      "assistant_message",
+    ])
+    expect(store.streamItems[1]).toMatchObject({
+      serverName: "ddgs",
+      toolName: "search_text",
+      toolCallId: "call-ddgs-1",
+      status: "done",
+      resultPreview: "中文搜索结果：北京天气晴朗",
+      contentWarnings: [
+        expect.objectContaining({
+          code: "unicode_replacement_character",
+          affected_paths: ["/details/legacy_text"],
+        }),
+      ],
+    })
+  })
+})
+
 describe("checkpointer state", () => {
   it("clears every stream item only after the server reports completion", async () => {
     vi.useFakeTimers()

@@ -58,6 +58,23 @@ export interface GenerationMetrics {
   usage_available: boolean
 }
 
+export interface MessageContentWarning {
+  code: "unicode_replacement_character" | string
+  suspected: boolean
+  replacement_character_count: number
+  affected_value_count: number
+  /** RFC 6901 JSON Pointer paths; never content snippets. */
+  affected_paths: string[]
+  paths_truncated: boolean
+  /** U+FFFD replacement destroys the original code point, so this is false. */
+  auto_repairable: false
+}
+
+export interface MessageContentIntegritySummary {
+  suspected_message_count: number
+  replacement_character_count: number
+}
+
 /** 后端任意消息的统一形状——字段宽松，UI 按 role 分发。 */
 export interface AgentMessage {
   role: MessageRole
@@ -65,6 +82,9 @@ export interface AgentMessage {
   timestamp?: number
   /** 工具结果消息中的附加字段（非 content） */
   tool_call_id?: string
+  is_error?: boolean
+  terminate?: boolean
+  details?: Record<string, JsonValue>
   tool_calls?: JsonValue[]
   name?: string
   api?: string
@@ -80,6 +100,8 @@ export interface AgentMessage {
   source_message_count?: number
   source_turn_count?: number
   created_at?: number
+  /** Read-only Web serialization metadata; never persisted into the message. */
+  content_warnings?: MessageContentWarning[]
 }
 
 /** GET /api/messages response。 */
@@ -93,6 +115,7 @@ export interface MessagesResponse {
   messages: PersistedMessageDto[] | AgentMessage[]
   /** 后端在指定 session_id 时回填 */
   session_id?: string
+  content_integrity?: MessageContentIntegritySummary
 }
 
 /**

@@ -15,6 +15,7 @@ import ToolResultCard from "./ToolResultCard.vue"
 import TurnInfoCard from "./TurnInfoCard.vue"
 import ApprovalCard from "./ApprovalCard.vue"
 import ContextSummaryCard from "./ContextSummaryCard.vue"
+import ContentIntegrityWarning from "./ContentIntegrityWarning.vue"
 
 const props = withDefaults(
   defineProps<{
@@ -29,6 +30,10 @@ const chatStore = useChatStore()
 const providerStore = useProviderStore()
 
 const kind = computed(() => props.item.kind)
+const contentWarnings = computed(() => {
+  const warnings = (props.item as any).contentWarnings
+  return Array.isArray(warnings) ? warnings : []
+})
 const text = computed(() => {
   const it: any = props.item
   if (kind.value === "user_message" || kind.value === "assistant_message") {
@@ -155,6 +160,11 @@ _watch(
 </script>
 
 <template>
+  <ContentIntegrityWarning
+    v-if="contentWarnings.length > 0"
+    :warnings="contentWarnings"
+  />
+
   <!-- user_message -->
   <div v-if="kind === 'user_message'" class="row row-user" data-testid="user-message">
     <div class="bubble-wrap">

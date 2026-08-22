@@ -37,8 +37,6 @@ from pi_agent_core_py.web.providers.runtime import (  # noqa: E402
     RequestProviderRuntime,
 )
 
-pytestmark = pytest.mark.asyncio
-
 _UI = {"X-PI-Agent-UI": "1"}
 SECRET_MARKER = "sk-M1-5-SECURITY-SECRET-MARKER-DO-NOT-LEAK-ANYWHERE"
 

@@ -122,6 +122,37 @@ function mountBubble(item: any) {
   })
 }
 
+describe("persisted content integrity warning", () => {
+  it("marks suspected U+FFFD damage without claiming automatic recovery", () => {
+    const wrapper = mountBubble(
+      makeAssistantItem({
+        content: "legacy \ufffd text",
+        contentWarnings: [
+          {
+            code: "unicode_replacement_character",
+            suspected: true,
+            replacement_character_count: 1,
+            affected_value_count: 1,
+            affected_paths: ["/content/0/text"],
+            paths_truncated: false,
+            auto_repairable: false,
+          },
+        ],
+      }),
+    )
+
+    const warning = wrapper.get('[data-testid="content-integrity-warning"]')
+    expect(warning.attributes("data-warning-code")).toBe(
+      "unicode_replacement_character",
+    )
+    expect(warning.attributes("data-replacement-count")).toBe("1")
+    expect(warning.text()).toContain("疑似编码损坏")
+    expect(warning.text()).toContain("U+FFFD")
+    expect(warning.text()).toContain("无法自动恢复")
+    expect(warning.text()).toContain("/content/0/text")
+  })
+})
+
 // ============================================================================
 // Provider gating
 // ============================================================================

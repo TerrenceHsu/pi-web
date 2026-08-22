@@ -72,7 +72,7 @@ class FileBlock(BaseModel):
     - 图片统一以 format="image_unsupported" 注入；本轮不做图片理解
 
     字段：
-      file_id   VirtualFileStore 里的 file id（view_file 用它取内容）
+      file_id   WorkspaceStore 里的 file id（view_file 用它取内容）
       name      原始文件名（已 sanitize）
       mime      MIME 类型
       size      字节数

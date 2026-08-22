@@ -38,7 +38,7 @@ jobs:
         run: ruff check src/ tests/
 
       - name: Mypy (strict)
-        run: mypy src/pi_agent_core_py
+        run: mypy src
 
       - name: Pytest (non-slow) + coverage
         env:

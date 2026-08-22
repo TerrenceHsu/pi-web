@@ -143,9 +143,14 @@ class TestLibraryDeleteRace:
                     f"/api/knowledge/documents/{doc_id}/ingestion",
                     headers=_ui_headers(),
                 ).json()
+                latest_job = status.get("latest_job")
+                job_is_terminal = latest_job is None or latest_job.get("status") in {
+                    "completed",
+                    "failed",
+                }
                 if status["document_status"] in (
                     "normalizing", "needs_ocr", "failed"
-                ):
+                ) and job_is_terminal:
                     break
                 time.sleep(0.05)
 

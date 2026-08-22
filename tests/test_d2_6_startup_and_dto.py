@@ -33,6 +33,7 @@ from fastapi.testclient import TestClient
 
 from pi_agent_core_py.agent import Agent
 from pi_agent_core_py.harness import AgentHarness
+from pi_agent_core_py.messages import TextContent, UserMessage
 from pi_agent_core_py.model_client import DoneEvent, FakeClient, TextDeltaEvent
 from pi_agent_core_py.web.app import create_app
 from pi_agent_core_py.web.extension_store import ExtensionSQLiteStore
@@ -470,6 +471,42 @@ async def test_messages_api_returns_message_id(web_app):
         assert m["role"] in ("user", "assistant", "toolResult", "summary", "custom")
         assert "content" in m
         assert "created_at" in m
+
+
+async def test_messages_api_marks_persisted_u_fffd_without_mutating_history(web_app):
+    """A persisted replacement character is marked but never guessed or rewritten."""
+    client, _, _ = web_app
+    sid = _create_session(client)
+    state = client.app.state.web
+    original_text = "legacy \ufffd text"
+    stored = await state.session_store.append_message(
+        sid,
+        UserMessage(content=[TextContent(text=original_text)]),
+    )
+
+    resp = client.get(f"/api/messages?session_id={sid}")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["content_integrity"] == {
+        "suspected_message_count": 1,
+        "replacement_character_count": 1,
+    }
+    dto = next(
+        message
+        for message in body["messages"]
+        if message["message_id"] == stored.id
+    )
+    warning = dto["message"]["content_warnings"][0]
+    assert warning["code"] == "unicode_replacement_character"
+    assert warning["affected_paths"] == ["/content/0/text"]
+    assert warning["auto_repairable"] is False
+    assert dto["message"]["content"][0]["text"] == original_text
+
+    reloaded = await state.session_store.list_messages(sid)
+    assert isinstance(reloaded[0], UserMessage)
+    assert isinstance(reloaded[0].content[0], TextContent)
+    assert reloaded[0].content[0].text == original_text
 
 
 async def test_dto_normal_send_preserves_message_id(web_app):

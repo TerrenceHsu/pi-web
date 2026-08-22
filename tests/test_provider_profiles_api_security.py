@@ -22,8 +22,6 @@ from pi_agent_core_py import (  # noqa: E402
 )
 from pi_agent_core_py.web.app import create_app  # noqa: E402
 
-pytestmark = pytest.mark.asyncio
-
 
 def _harness() -> AgentHarness:
     client = FakeClient(

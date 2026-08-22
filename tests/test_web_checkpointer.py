@@ -162,6 +162,10 @@ def test_checkpointer_provider_failure_keeps_messages_and_files(tmp_path: Path) 
     )
     with TestClient(app) as client:
         sid = _create_session(client)
+        initial_files = client.get(f"/api/sessions/{sid}/files").json()["files"]
+        initial_memory = next(
+            item for item in initial_files if item["logical_path"] == "Memory.md"
+        )
         assert client.post(
             "/api/prompt",
             json={"session_id": sid, "text": "do not lose this"},
@@ -174,7 +178,10 @@ def test_checkpointer_provider_failure_keeps_messages_and_files(tmp_path: Path) 
         assert terminal["error_type"] == "checkpoint_provider_error"
         assert client.get(f"/api/messages?session_id={sid}").json()["count"] == 2
         files = client.get(f"/api/sessions/{sid}/files").json()["files"]
-        assert all(item["logical_path"] != "Memory.md" for item in files)
+        memories = [item for item in files if item["logical_path"] == "Memory.md"]
+        assert len(memories) == 1
+        assert memories[0]["id"] == initial_memory["id"]
+        assert memories[0]["sha256"] == initial_memory["sha256"]
     dispose_app(app)
 
 

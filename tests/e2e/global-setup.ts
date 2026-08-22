@@ -7,6 +7,11 @@ const currentDir = dirname(fileURLToPath(import.meta.url))
 export const ADMIN_AUTH_STATE = resolve(currentDir, ".auth/admin.json")
 
 export default async function globalSetup(config: FullConfig) {
+  // Playwright forces color in worker processes. Removing an inherited
+  // NO_COLOR here is propagated through global-setup's produced environment
+  // and prevents Node from warning about the contradictory pair.
+  delete process.env.NO_COLOR
+
   const baseURL = config.projects[0]?.use?.baseURL ?? "http://127.0.0.1:8000"
   await mkdir(dirname(ADMIN_AUTH_STATE), { recursive: true })
   const context = await request.newContext({ baseURL })

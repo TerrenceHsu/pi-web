@@ -4,13 +4,13 @@
 - factory pattern：`create_list_files_tool(file_store=..., session_id_getter=...)`
   避免工具内部依赖全局状态；Web app / harness 构造时显式注入依赖
 - session 隔离：通过 `session_id_getter` 拿当前 sid，调
-  `VirtualFileStore.list_session(sid)` 拿 FileRef 列表
+  `WorkspaceStore.list_session(sid)` 拿 FileRef 列表
 - 不返回 path（path 是 agent 内部细节，不应进 LLM 上下文）
 - file_store 未配置 / 缺 session_id → 返回 `ToolResult(is_error=True)`
 - 输出结构 JSON serializable；按 created_at 升序（与 store 一致）
 - format 字段对图片标 "image_unsupported"，由 _classify_format 推断
 
-注：VirtualFileStore / FileRef 通过 TYPE_CHECKING 引用——避免 tools 子包
+注：WorkspaceStore / FileRef 通过 TYPE_CHECKING 引用——避免 tools 子包
 在 module-load 阶段触发 web/__init__（FastAPI 链）形成 import 循环
 （agent.py → tools → web → app → harness → agent）。
 """
@@ -26,7 +26,7 @@ from .view_file import _classify_format
 
 if TYPE_CHECKING:
     # 仅用于类型提示——运行时不导入，避免循环依赖
-    from ..web.files import FileRef, VirtualFileStore
+    from ..web.files import FileRef, WorkspaceStore
 
 
 class ListFilesTool(AgentTool):
@@ -50,7 +50,7 @@ class ListFilesTool(AgentTool):
     def __init__(
         self,
         *,
-        file_store: VirtualFileStore,
+        file_store: WorkspaceStore,
         session_id_getter: Callable[[], str | None],
     ) -> None:
         self._file_store = file_store
@@ -137,7 +137,7 @@ def _ref_to_summary(ref: FileRef) -> dict[str, Any]:
 
 def create_list_files_tool(
     *,
-    file_store: VirtualFileStore,
+    file_store: WorkspaceStore,
     session_id_getter: Callable[[], str | None],
 ) -> ListFilesTool:
     """factory：构造 list_files 工具，绑定 file_store + session_id_getter。"""

@@ -31,8 +31,6 @@ from pi_agent_core_py.providers.registry import _DEFAULT_REGISTRY  # noqa: E402
 from pi_agent_core_py.web.app import create_app  # noqa: E402
 from pi_agent_core_py.web.providers.runtime import RequestProviderRuntime  # noqa: E402
 
-pytestmark = pytest.mark.asyncio
-
 
 def _harness() -> AgentHarness:
     client = FakeClient(
