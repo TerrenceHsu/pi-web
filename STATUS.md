@@ -6,7 +6,7 @@
 
 | 项 | 当前事实 |
 |---|---|
-| 代码基线 | 阶段前基线为 `39745c0`；当前分支包含 Coding Sandbox P0 第 0–10 项、可靠性收敛、内容完整性标记、Workspace 阶段 1–3 与 LLM Wiki 阶段 0–1 |
+| 代码基线 | 阶段 0–1 提交为 `4d64269`；当前工作树继续包含 LLM Wiki 阶段 2 的新 WikiStore、目录与 legacy retirement |
 | 分支 | `master` |
 | 最新 release tag | `v0.0.27-secure-credentials` @ `de05c66`；当前代码基线尚未打新 tag |
 | Python / API 版本 | `0.0.28`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
@@ -20,7 +20,7 @@
 
 ## 当前交付状态
 
-LLM Wiki 产品合同与 Parser Provider 阶段已完成，后续仍按 `TODO.md` 推进：
+LLM Wiki 产品合同、Parser Provider 与 Store 基础阶段已完成，后续仍按 `TODO.md` 推进：
 
 | 能力 | 状态 | 代表性基线 |
 |---|---|---|
@@ -51,6 +51,7 @@ LLM Wiki 产品合同与 Parser Provider 阶段已完成，后续仍按 `TODO.md
 | Frontend warning 收敛 | ✅ 完成 | Modal/Teleport attrs、Vite mixed import 与 Playwright color env 三类提示归零；Vitest 404/404；Playwright 48/48 |
 | 历史消息 U+FFFD 完整性标记 | ✅ 完成 | 读取时递归检测并返回计数/RFC 6901 路径，不改写 SQLite、不伪造恢复；消息与工具卡可见，刷新保持；Playwright 49/49 |
 | LLM Wiki 产品合同与 Parser Provider Gate | ✅ 阶段 0–1 完成 | 新 Wiki 设计取代 Chunk RAG 方向；Marker `2.0.0` 许可证/容器/断网/`fast_no_ocr` Gate；独立 `wiki_parser` Protocol/DTO/安全错误和完全离线 Fake，真实 Marker 尚未接入 |
+| LLM WikiStore、目录与旧库退役 Gate | ✅ 阶段 2 完成 | 独立页面中心型 schema v1、Space CRUD/CAS、Raw/Page 原子路径原语、镜像恢复与显式只读 legacy backup；默认 preserve，尚未切换旧运行时或触碰真实用户旧库 |
 
 ## 当前产品能力
 
@@ -67,7 +68,7 @@ LLM Wiki 产品合同与 Parser Provider 阶段已完成，后续仍按 `TODO.md
 - 持久化凭证默认进入 OS Keyring；开发启动器在监听端口前执行 write/read/delete 探针
 - MCP 支持 stdio tools/prompts；内置 DDGS 固定存在、不可删除，可修改返回数、地区、安全搜索、时间范围等参数
 - Knowledge Manager 支持 Library、PDF 上传、后台解析/索引、Session binding、FTS5 搜索和 Agent citation
-- LLM Wiki 替代设计的阶段 0–1 已冻结；旧 Knowledge/RAG 仍是当前可运行实现，直到后续新库、页面、审批与 UI 完成并通过退役门禁，二者不会静默共享数据
+- LLM Wiki 阶段 0–2 已冻结并实现独立 `WikiStore` 基础；旧 Knowledge/RAG 仍是当前可运行实现，新 Store 尚未接入 lifespan/API，二者不共享表或业务数据，最终退役必须显式执行备份 Gate
 - Core Runtime 的一个 Turn 等于“一次 LLM 调用 + 该调用产生的当批工具”；Snapshot 分为 RequestSnapshot 与 TurnSnapshot
 - 并行工具批次先按源序串行完成 hook、权限、审批与参数校验，再并行执行已放行工具；hook 不得改写 tool-call ID
 - Agent 支持独立 steering / follow-up 队列及 `all` / `one-at-a-time` 消费模式；活跃请求期间普通 prompt/continue 明确拒绝
@@ -95,7 +96,8 @@ LLM Wiki 产品合同与 Parser Provider 阶段已完成，后续仍按 `TODO.md
 | Session/消息/operation records/Skills/MCP/Provider/Sandbox metadata | 用户目录下 `workspace.sqlite`；Sandbox operation 与有界事件流同库持久化 |
 | Session 文件 | 用户目录下 `uploads/{session_id}/` |
 | Sandbox 本机发布区 | 用户目录下 `coding-sandbox-projects/`、`coding-sandbox-publisher/` 与 `coding-sandbox-staging/`；不暴露给云 Sandbox |
-| Knowledge | 用户目录下 `knowledge/knowledge.db` 与 `knowledge/libraries/` |
+| 旧 Knowledge（当前运行时） | 用户目录下 `knowledge/knowledge.db` 与 `knowledge/libraries/` |
+| LLM Wiki（阶段 2 基础） | 显式打开后使用 `knowledge/wiki.db`、`knowledge/spaces/` 与 `knowledge/legacy/`；当前应用启动尚不自动创建或迁移 |
 | API Key | OS Keyring、显式 session-only memory 或显式 env；不写入 SQLite 明文 |
 | Active request / pending approval / event subscribers | 当前后端进程内存；后端重启不恢复执行 |
 
@@ -107,12 +109,14 @@ Backend 全量数字基于当前含 Coding Sandbox P0 第 0–10 项的工作区
 
 | 验证 | 结果 | 备注 |
 |---|---|---|
-| Ruff 全量 | **PASS** | `ruff check src tests scripts`；0 errors；包含独立 `wiki_parser` 包与契约测试 |
-| strict Mypy 全量 | **PASS** | `mypy src --strict`；146 files / 0 issues；覆盖独立 `coding_sandbox`、`wiki_parser` 和主应用 |
-| Backend CI 全量 + coverage | **3897 passed, 8 skipped, 12 deselected** | `pytest tests -m "not slow" --tb=short -q`；83.44% coverage；625.83s；包含 LLM Wiki Parser Contract/Fake 回归 |
+| Ruff 全量 | **PASS** | `ruff check src tests scripts`；0 errors；包含 `wiki_parser` 与新 `web.wiki` |
+| strict Mypy 全量 | **PASS** | `mypy src --strict`；152 files / 0 issues；覆盖独立 `coding_sandbox`、`wiki_parser`、新 WikiStore 和主应用 |
+| Backend CI 全量 + coverage | **3949 passed, 12 skipped, 12 deselected** | `pytest tests -m "not slow" --tb=short -q`；83.35% coverage；586.34s；包含 LLM Wiki 阶段 1–2 回归 |
 | Workspace 阶段 1 定向回归 | **125 passed** | `VirtualFileStore` 兼容别名、双根初始化、并发幂等、旧路径/purpose 迁移、固定根删除保护、Checkpointer/Auth/重启；`-W error` 下 0 warning |
 | Workspace 阶段 2 定向回归 | **116 passed** | 代码 `scripts/**` 映射、安全逻辑路径、revision 持久/冲突、Markdown CRUD、Agent 工具与 Web API；使用 `--no-cov` 定向运行 |
 | LLM Wiki Parser Contract/Fake | **29 passed** | PDF-only `fast_no_ocr` DTO/Protocol、许可证 Probe、来源/制品 SHA、路径/配额、确定性 tar、取消/超时/销毁和包依赖隔离；完全离线；相关 Ruff PASS、strict Mypy 7 files / 0 issues |
+| LLM WikiStore/Files/Legacy | **52 passed, 4 skipped** | schema/version/capability/integrity、Space CRUD/双连接 CAS、路径/原子写入/镜像恢复、legacy 一致备份/故障顺序和旧 RAG import 隔离；skip 为 Windows symlink capability |
+| 新旧 Knowledge 存储邻接 | **149 passed, 5 skipped** | 新 Wiki 52 项及旧 Knowledge Store/File、SQLite open-failure 清理回归；确认新实现不破坏旧运行时 |
 | Coding Sandbox 安全矩阵 | **151 passed, 2 skipped** | 离线 Fake/E2B 契约、路径/命令/网络/凭证攻击、故障注入、validation/artifact 篡改、Publisher 冲突/回滚/崩溃恢复，以及退役 Provider 空字段兼容迁移；Windows capability skip |
 | Sandbox Web 生命周期/API | **7 passed** | SQLite operation/event 恢复、启动 `interrupted` 收敛、snapshot seed、验证失败不得冻结/发布且真实工作区字节级不变、取消，以及 disabled/missing/latest API 边界 |
 | 真实 E2B + Publisher 安全 smoke | **PASS** | 9 个代码工具、故意验证失败与冻结拒绝、恢复重验、制品冻结/签名、本机冲突且工作区字节级不变、commit、幂等 retry、Sandbox destroy；20.577s；未输出凭证 |
@@ -168,6 +172,7 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 - Session Folder 的 `view_file` 只对文本/Markdown/HTML/CSV/Parquet提供正文或结构化预览；Session PDF 只返回元信息
 - Knowledge 子系统可解析文本型 PDF；扫描件进入 `needs_ocr`，当前无 OCR、图片理解或视觉模型
 - Knowledge 检索使用 SQLite FTS5/BM25，不使用向量数据库或 embedding
+- 新 `WikiStore`、`wiki.db` schema 和 legacy retirement 已实现但未接入 Web lifespan/API；真实用户旧库仍原样保留，阶段 3 先接入 `preserve` 模式，最终切换才允许显式 `retire`
 - 旧记录中已经写入的 Unicode replacement character `U+FFFD` 仍无法从现有数据反推出原字符；当前会在读取时把它标记为“疑似编码损坏”并显示受影响字段，但不会猜测或写回所谓修复
 
 ### 工程债务
@@ -182,9 +187,9 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 ## 建议下一步
 
-1. 实施 Workspace 阶段 4：由 `WorkspaceStore` 物化 Sandbox 快照，并把验证、审批后的制品事务发布回同一 Workspace 事实源。
-2. 维持 E2B Sandbox 的真实 smoke、安全矩阵和发布事务门禁；第二 Provider 的具体接入暂不实施。
-3. 评估本地初始账号 `admin / 123456` 的改密入口；在入口完成前继续保持 localhost-only。
+1. 进入 LLM Wiki 阶段 3：以 `preserve` 模式接入新 Store/Space/Source API、不可变 PDF/HTML Raw Ingestion 与不可信 Parser artifact 导入。
+2. 接入真实 Marker 前配置本机 Docker/Podman-compatible runtime 与许可证模式；HTML Parser 和 Fake 流程本身不需要外部配置。
+3. 继续冻结 Workspace 阶段 4–6，避免与独立 Wiki Raw Source/发布路径混用。
 4. `0.0.28` tag/push 仍需单独决定，仓库当前尚无 remote。
 
 未完成事项的唯一清单见 [`TODO.md`](TODO.md)。使用与架构说明见 [`README.md`](README.md)。

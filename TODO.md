@@ -30,7 +30,7 @@
 
 - [x] **阶段 0：冻结 LLM Wiki 产品合同**：确认先创建 Wiki Space；PDF/单文件 HTML MVP；本机独立 Marker Sidecar；PDF 只提取内嵌图片；`raw/` 对 Agent 强制只读；每个来源一篇入口页并允许主题子页面；页面级 FTS5；固定页面关系和系统 `derived_from`；每个 Space 多对话；所有页面/图谱修改进入同一 Change Set 一次审批；旧库结构不迁移
 - [x] **阶段 1：重新执行 Marker Gate 并冻结 Parser Provider Contract**（完成）：审核基线固定 Marker `2.0.0`，分离 Apache-2.0 代码与修改版 OpenRAIL-M 模型许可证 Gate；发布实现固定为每任务本机 OCI 隔离容器、`fast_no_ocr`、任务期间断网，独立 venv 仅为降级开发模式；新增独立顶层 `wiki_parser` 的 immutable/extra-forbid DTO、异步 Protocol、固定安全错误、来源/制品 SHA 与配额/超时/取消/幂等销毁契约，以及完全离线确定性 Fake；主应用未引入 Marker/Torch/Surya/Transformers。Ruff PASS、strict Mypy 全仓 146 files / 0 issues、Provider/Fake 29 passed、Backend 3897 passed / 8 skipped / 12 deselected / 83.44%；Gate 见 [`docs/design/llm-wiki-marker-provider-gate.md`](docs/design/llm-wiki-marker-provider-gate.md)
-- [ ] **阶段 2：实现 WikiStore、`wiki.db` 与新目录结构**：新增 Space/Source/Artifact/Page/Revision/PageSource/Edge/ChangeSet/Conversation/Job schema 和版本门；实现 `spaces/{space_id}/raw/`、`pages/`、路径安全、原子写入与镜像恢复；把旧 `knowledge.db`/`libraries/` 收敛为只读 legacy 备份，不迁移业务数据且不未经授权删除
+- [x] **阶段 2：实现 WikiStore、`wiki.db` 与新目录结构**（完成）：新增独立 `pi_agent_core_py.web.wiki`，以三重 DB 身份/version gate、SQLite capability/integrity gate、STRICT/FK/CHECK/UNIQUE 建立 Space/Source/Artifact/Page/Revision/PageSource/Edge/ChangeSet/Item/Conversation/Job schema v1，明确不创建 Chunk/Chunk FTS；实现带跨连接 CAS/软删除状态机的 Space CRUD，固定 `spaces/{space_id}/{raw,pages}`、canonical `space.json`、全层 casefold/symlink/reparse/特殊文件防护、Raw no-clobber 与 Page atomic replace、启动镜像重建/orphan 报告/staging 隔离；显式 `retire` 在独占锁内先生成 SQLite 一致快照与逐文件 SHA 的只读 legacy backup，再清理旧固定路径，默认 `preserve` 且未触碰真实用户旧库。设计见 [`docs/design/llm-wiki-store-v1.md`](docs/design/llm-wiki-store-v1.md)；Ruff PASS、strict Mypy 152 files / 0 issues、新 Wiki 52 passed / 4 capability skipped、新旧邻接 149 passed / 5 skipped、Backend 3949 passed / 12 skipped / 12 deselected / 83.35%
 - [ ] **阶段 3：实现 PDF/HTML Raw Ingestion**：保存不可变 `source.pdf|source.html`；PDF 经本机 Marker Sidecar 输出 `parsed.md`、内嵌图片和 manifest；HTML 使用零网络独立 Parser，删除脚本/危险资源并仅允许受限 `data:` 图片；主应用把 Provider 输出作为不可信制品做路径、类型、配额和 SHA 校验
 - [ ] **阶段 4：实现 Wiki 页面、Revision 与原子 Change Set**：每个来源生成入口页草稿，允许 Agent 提出主题子页面；创建/更新/删除页面及 edge add/delete 统一生成稳定 diff；用户一次批准后全有或全无发布，任一 page version/SHA 或 graph revision 变化时整个 Change Set 标记 stale
 - [ ] **阶段 5：实现页面级 FTS5 与页面知识图谱**：只索引 active 页面当前已批准 revision；支持 `related_to`、`references`、`extends`、`contradicts`、`part_of`，强制同 Space、去重、自环/`part_of` 循环校验；`derived_from` 只由服务端依据可信来源证据维护
@@ -143,4 +143,4 @@ Modal 与 Local Docker 作为后续兼容后端，最终用户不需要安装 Py
 | ToolResult usage + deferred-tool metadata | ✅ `b6baea8` |
 | Complete-turn Compaction semantics | ✅ `0c72679` |
 
-当前代码基线的验证结果见 [`STATUS.md`](STATUS.md#2026-08-22-当前验证基线)。
+当前代码基线的验证结果见 [`STATUS.md`](STATUS.md#2026-08-23-当前验证基线)。

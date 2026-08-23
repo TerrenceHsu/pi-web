@@ -1,6 +1,6 @@
 # LLM Wiki 设计
 
-> 状态：产品合同已冻结，生产实现尚未开始
+> 状态：产品合同与阶段 1–2 存储基础已实现，Raw Ingestion 尚未开始
 >
 > 日期：2026-08-23
 >
@@ -115,6 +115,10 @@ data/
 
 SQLite `wiki.db` 是规范事实源。`pages/` 是已发布最新版本的可读镜像，可由数据库幂等重建，
 不承担并发控制或 revision 真相。
+
+Schema v1、Space CRUD、路径/原子镜像恢复和显式旧库 retirement 的实现冻结见
+[`llm-wiki-store-v1.md`](llm-wiki-store-v1.md)。阶段 2 不自动切换仍在运行的旧 Knowledge
+API/Worker；真正 retirement 必须等旧连接全部关闭后显式执行。
 
 ### 5.1 `wiki_spaces`
 
@@ -400,9 +404,11 @@ Knowledge
 
 ### 阶段 2：WikiStore 与新目录
 
-- 新建 `wiki.db` schema、migration/version gate、路径安全 Store 和 Raw/Page 镜像原语。
-- 实现旧库只读备份与新库初始化，不迁移旧业务数据。
-- 实现 Space CRUD。
+- **已完成**：新建 `wiki.db` schema v1、三重身份/version gate、路径安全 Store 和 Raw/Page
+  原子镜像/恢复原语。
+- **已完成**：实现显式旧库一致性只读备份与新库初始化，不迁移旧业务数据；当前运行时仍使用
+  preserve 模式，真实 retirement 留到旧 Worker/Store 关闭后的切换点。
+- **已完成**：实现带 CAS 和软删除状态机的 Space CRUD。
 
 ### 阶段 3：PDF/HTML Raw Ingestion
 
