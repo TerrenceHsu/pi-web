@@ -9,11 +9,14 @@ defineOptions({ name: "FileTreeNode" })
 defineProps<{
   node: SessionFileTreeNode
   sessionId: string
+  selectedFileId?: string | null
+  latestArtifactId?: string | null
 }>()
 
 const emit = defineEmits<{
   (e: "delete", fileId: string): void
   (e: "edit-file", fileId: string): void
+  (e: "select-file", fileId: string): void
 }>()
 
 const expanded = ref(true)
@@ -38,25 +41,40 @@ const expanded = ref(true)
         <span>{{ node.name }}</span>
       </button>
     </div>
-    <div v-else-if="node.file" class="tree-row file-row">
+    <div
+      v-else-if="node.file"
+      :class="[
+        'tree-row',
+        'file-row',
+        { selected: node.file.id === selectedFileId },
+      ]"
+    >
       <button
         v-if="node.file.purpose === 'agent_instructions' || node.file.purpose === 'memory'"
         type="button"
         class="tree-main editable-file"
         :aria-label="`Edit ${node.name}`"
-        @click="emit('edit-file', node.file.id)"
+        @click="emit('select-file', node.file.id); emit('edit-file', node.file.id)"
       >
         <span aria-hidden="true">{{ node.file.purpose === "memory" ? "🧠" : "⚙" }}</span>
         <span>{{ node.name }}</span>
         <span class="file-origin">
           {{ node.file.purpose === "memory" ? "memory" : "instructions" }}
         </span>
+        <span v-if="node.file.id === latestArtifactId" class="latest-badge">New</span>
       </button>
-      <span v-else class="tree-main file-label">
+      <button
+        v-else
+        type="button"
+        class="tree-main file-label"
+        :aria-label="`Open ${node.name}`"
+        @click="emit('select-file', node.file.id)"
+      >
         <span aria-hidden="true">📄</span>
         <span :title="node.path">{{ node.name }}</span>
         <span v-if="node.file.origin" class="file-origin">{{ node.file.origin }}</span>
-      </span>
+        <span v-if="node.file.id === latestArtifactId" class="latest-badge">New</span>
+      </button>
       <span class="tree-actions">
         <a
           :href="downloadFileUrl(sessionId, node.file.id)"
@@ -80,8 +98,11 @@ const expanded = ref(true)
         :key="child.kind === 'file' ? child.file?.id : child.path"
         :node="child"
         :session-id="sessionId"
+        :selected-file-id="selectedFileId"
+        :latest-artifact-id="latestArtifactId"
         @delete="emit('delete', $event)"
         @edit-file="emit('edit-file', $event)"
+        @select-file="emit('select-file', $event)"
       />
     </ul>
   </li>
@@ -99,6 +120,9 @@ const expanded = ref(true)
 }
 .tree-row:hover {
   background: var(--code-bg);
+}
+.tree-row.selected {
+  background: #eaf1ff;
 }
 .tree-main {
   display: flex;
@@ -131,6 +155,16 @@ button.tree-main {
   color: var(--muted);
   font-size: 9px;
   font-weight: 400;
+  text-transform: uppercase;
+}
+.latest-badge {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-size: 9px;
+  font-weight: 700;
   text-transform: uppercase;
 }
 .tree-actions {

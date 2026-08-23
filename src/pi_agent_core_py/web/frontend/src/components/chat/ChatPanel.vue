@@ -14,7 +14,6 @@ import MessageList from "./MessageList.vue"
 import ProviderSelector from "../providers/ProviderSelector.vue"
 import EmptyState from "../common/EmptyState.vue"
 import ErrorBanner from "../common/ErrorBanner.vue"
-import SessionFolderPanel from "./SessionFolderPanel.vue"
 import ContextBudgetBadge from "./ContextBudgetBadge.vue"
 
 const sessionStore = useSessionStore()
@@ -32,11 +31,6 @@ const contextBudget = computed(() => contextBudgetStore.getBudget(activeSessionI
 const contextBlocked = computed(() => contextBudget.value?.estimate.level === "blocked")
 const pendingAttachments = computed(() => fileStore.pendingAttachments)
 const uploading = computed(() => fileStore.uploading)
-const sessionFiles = computed(() => {
-  const sid = activeSessionId.value
-  return sid ? (fileStore.filesBySession[sid] ?? []) : []
-})
-const folderOpen = ref(true)
 const slashCommands = ref<SlashCommandDefinition[]>([
   {
     name: "/checkpointer",
@@ -49,10 +43,6 @@ const slashCommands = ref<SlashCommandDefinition[]>([
 /** 保留最后一次失败的输入文本——失败时还原，避免用户重新打字。 */
 const lastFailedText = ref<string>("")
 const chatInputRef = ref<InstanceType<typeof ChatInput> | null>(null)
-
-watch(activeSessionId, () => {
-  folderOpen.value = true
-})
 
 onMounted(async () => {
   try {
@@ -94,36 +84,6 @@ async function onUploadFiles(files: FileList | File[]) {
 
 function onRemoveAttachment(fileId: string) {
   fileStore.removePendingAttachment(fileId)
-}
-
-async function refreshFolder() {
-  if (!activeSessionId.value) return
-  await fileStore.loadFiles(activeSessionId.value)
-}
-
-async function deleteFolderFile(fileId: string) {
-  if (!activeSessionId.value) return
-  if (!window.confirm("Delete this file from the current session folder?")) return
-  await fileStore.deleteFile(activeSessionId.value, fileId)
-}
-
-async function loadFolderFileContent(fileId: string) {
-  if (!activeSessionId.value) throw new Error("No active session")
-  return fileStore.readTextFile(activeSessionId.value, fileId)
-}
-
-async function saveFolderFileContent(
-  fileId: string,
-  content: string,
-  expectedSha256: string,
-) {
-  if (!activeSessionId.value) throw new Error("No active session")
-  return fileStore.updateTextFile(
-    activeSessionId.value,
-    fileId,
-    content,
-    expectedSha256,
-  )
 }
 
 async function onSubmit(text: string) {
@@ -221,15 +181,6 @@ function dismissError() {
         :disabled="chatStore.sending"
         @compact="onCompactContext"
       />
-      <button
-        type="button"
-        class="folder-toggle"
-        :aria-expanded="folderOpen"
-        data-testid="session-folder-toggle"
-        @click="folderOpen = !folderOpen"
-      >
-        Folder {{ sessionFiles.length }}
-      </button>
       <span v-if="chatStore.checkpointing" class="header-status running">checkpointing</span>
       <span v-else-if="chatStore.pendingApprovalCount" class="header-status approval">
         approval required
@@ -238,17 +189,6 @@ function dismissError() {
       <span v-else-if="chatStore.wsConnected" class="header-status online">online</span>
       <span v-else class="header-status offline">offline</span>
     </header>
-
-    <SessionFolderPanel
-      v-if="hasSession && folderOpen && activeSessionId"
-      :files="sessionFiles"
-      :session-id="activeSessionId"
-      :loading="fileStore.loading"
-      :load-content="loadFolderFileContent"
-      :save-content="saveFolderFileContent"
-      @refresh="refreshFolder"
-      @delete="deleteFolderFile"
-    />
 
     <ErrorBanner v-if="errorMessage" :message="errorMessage" dismissible @dismiss="dismissError" />
     <div
@@ -323,17 +263,6 @@ function dismissError() {
   border-radius: 12px;
   background: var(--code-bg);
   color: var(--muted);
-}
-.folder-toggle {
-  padding: 3px 9px;
-  border-color: var(--border);
-  font-size: 11px;
-  color: var(--muted);
-  background: var(--chat-bg);
-}
-.folder-toggle[aria-expanded="true"] {
-  color: var(--accent);
-  border-color: var(--accent);
 }
 .header-status.running {
   background: #fef3c7;

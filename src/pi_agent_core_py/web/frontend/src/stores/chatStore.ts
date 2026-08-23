@@ -2053,6 +2053,7 @@ export const useChatStore = defineStore("chat", () => {
         toolCallId,
         status: isError ? "error" : "done",
         preview: resultPreview,
+        details: result,
       }
       streamItems.value.push(fileItem)
     } else if (isMcpTool(toolName)) {

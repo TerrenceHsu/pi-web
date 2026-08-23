@@ -6,7 +6,7 @@
 
 | 项 | 当前事实 |
 |---|---|
-| 代码基线 | 当前工作树基于 `ea19648`，包含 Coding Sandbox P0 第 0–10 项、可靠性收敛、内容完整性标记与 Workspace 阶段 1–2 |
+| 代码基线 | 当前工作树基于 `c35ea53`，包含 Coding Sandbox P0 第 0–10 项、可靠性收敛、内容完整性标记与 Workspace 阶段 1–3 |
 | 分支 | `master` |
 | 最新 release tag | `v0.0.27-secure-credentials` @ `de05c66`；当前代码基线尚未打新 tag |
 | Python / API 版本 | `0.0.28`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
@@ -20,7 +20,7 @@
 
 ## 当前交付状态
 
-既有提交均已进入 `master`；Coding Sandbox P0 第 0–10 项和 Workspace 阶段 1–2 已完成，后续仍按 `TODO.md` 推进：
+既有提交均已进入 `master`；Coding Sandbox P0 第 0–10 项和 Workspace 阶段 1–3 已完成，后续仍按 `TODO.md` 推进：
 
 | 能力 | 状态 | 代表性基线 |
 |---|---|---|
@@ -30,6 +30,7 @@
 | 登录与账号工作区隔离 | ✅ 完成 | `b529bbc` |
 | Session Workspace、`AGENT.md`、`Memory.md`、`/checkpointer` | ✅ 完成 | `WorkspaceStore` 为唯一规范事实源；新旧 Session 幂等初始化两个固定根文件，保留旧正文/file id；设计见 `docs/design/workspace-sandbox-integration.md` |
 | Workspace 代码/Markdown 规则与 revision | ✅ 完成 | 代码统一映射到逻辑 `scripts/**`；Markdown CRUD、逐文件 SHA 与持久 Workspace revision 冲突契约已接入 Store/Web/Agent/Frontend API |
+| 右侧 Workspace 成果面板 | ✅ 完成 | 桌面三栏/窄屏 drawer；Agent `write_file` 完成后按 file id/revision 自动聚焦成果，支持 Markdown 预览编辑、代码查看、上传下载及 Sandbox/Changes |
 | P0 Runtime 上游契约对齐 | ✅ 完成 | `b529bbc` |
 | Session URL 与整页刷新恢复 | ✅ 完成 | `f30da56` |
 | Human Approval + Context Budget/Compaction UI | ✅ 完成 | `924b047` |
@@ -58,6 +59,7 @@
 - 每个 Session 由唯一 `WorkspaceStore` 初始化独立文件夹和唯一根 `AGENT.md`、`Memory.md`；启动时幂等补齐旧 Session，保留已有正文/file id，两个根文件不可删除；`VirtualFileStore` 仅为同一实现的兼容别名
 - Agent 写入或用户上传的代码按扩展名自动进入逻辑 `scripts/**`；普通 Markdown 支持安全路径创建、编辑、移动/重命名和删除，`AGENT.md`/`Memory.md` 继续使用专用权限
 - Workspace revision 以隐藏状态持久化；上传、创建、更新、移动和删除可同时校验 revision 与逐文件 SHA，过期客户端收到 409 而不会静默覆盖
+- 桌面右栏是 Agent 成果交付面：成功生成 `.md`、`.py` 等文件后立即刷新、选中并展示，整页刷新后仍从持久 ToolResult 恢复；窄屏使用带新成果提示的 drawer
 - `/checkpointer` 使用当前 Session Provider 把对话累计总结到 `Memory.md`；接受时持久化 source leaf/hash，文件发布后原子清空原 lane，进程退出可幂等前滚
 - 支持 Prompt、Stop、Regenerate 最新 Assistant、Markdown Export、实时事件、请求恢复和精确 ToolCall 审批
 - Provider Profile、Session Model Binding、Context Window 与 Max Output Tokens 持久化；UI 管理 GLM/Qwen/Kimi
@@ -118,7 +120,7 @@ Backend 全量数字基于当前含 Coding Sandbox P0 第 0–10 项的工作区
 | Agent 公开状态定向回归 | **137 passed** | Agent、Harness、stream、Provider runtime 与 Web state；系统 temp ACL 阻断项改用工作区 `basetemp` 后通过 |
 | DDGS + GLM 真实 smoke | **3/3 passed** | 固定 secret-safe 脚本；DDGS 1 项 + GLM 2 项；24.63s；未输出凭证 |
 | 真实测试门禁回归 | **3 skipped** | 手工选择 `-m integration` 但未设置 `PI_RUN_INTEGRATION=1`，确认不触网 |
-| Frontend Vitest 全量 | **405/405 passed** | 29 files；新增 U+FFFD 消息完整性警告组件回归；0 Vue attribute warning |
+| Frontend Vitest 全量 | **409/409 passed** | 31 files；新增 Workspace 三栏/drawer、Agent 成果聚焦、Markdown 预览编辑回归；0 Vue attribute warning |
 | Frontend typecheck | **PASS** | `vue-tsc --noEmit` |
 | Frontend ESLint | **PASS** | `eslint . --max-warnings=0` |
 | Frontend production build | **PASS** | `vite build`；0 mixed dynamic/static import warning |
@@ -128,7 +130,7 @@ Backend 全量数字基于当前含 Coding Sandbox P0 第 0–10 项的工作区
 | Keyring 定向回归 | **94/94 passed** | Runtime、launcher 与 restart 范围 |
 | 真实 Windows Keyring 探针 | **write/read = true；cleanup = true** | 随机非用户值，执行后删除；同账号/同解释器复验与安全取证步骤已形成 Windows smoke 文档 |
 | MCP/DDGS UTF-8 定向回归 | **34 passed, 1 deselected** | 含真实 Python 子进程中文 round-trip |
-| Browser E2E | **49/49 passed** | Chromium；单 worker；`CI=1`；完整套件 2.3m；新增真实 U+FFFD 持久化/API/页面重载回归；0 retry / 0 failure / 0 color-env warning；production build 已恢复 |
+| Browser E2E | **52/52 passed** | Chromium；单 worker；`CI=1`；完整套件 2.5m；覆盖 Agent Python 成果自动展示/刷新恢复、Markdown 创建编辑、代码上传与窄屏 drawer；0 retry / 0 failure；production build 已恢复 |
 | Context Compaction Browser E2E | **1/1 passed** | Chromium；独立端口 8013；沙箱外真实启动浏览器；production build 由 posttest 恢复 |
 
 默认 pytest marker 排除真实 LLM、真实外网 integration 和 Docker；额外门禁还要求
@@ -159,7 +161,7 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 ### 文件与 Knowledge
 
-- Session 文件已经统一到 `WorkspaceStore` 事实源，代码也已归一到逻辑 `scripts/**`；物理布局仍沿用 `uploads/{session_id}`，右侧 Workspace 面板与 Sandbox 发布回该事实源属于后续阶段
+- Session 文件已经统一到 `WorkspaceStore` 事实源，代码也已归一到逻辑 `scripts/**`，右侧成果面板已接入；物理布局仍沿用 `uploads/{session_id}`，Sandbox 发布回该事实源属于后续阶段
 - Session Folder 的 `view_file` 只对文本/Markdown/HTML/CSV/Parquet提供正文或结构化预览；Session PDF 只返回元信息
 - Knowledge 子系统可解析文本型 PDF；扫描件进入 `needs_ocr`，当前无 OCR、图片理解或视觉模型
 - Knowledge 检索使用 SQLite FTS5/BM25，不使用向量数据库或 embedding
@@ -177,7 +179,7 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 ## 建议下一步
 
-1. 实施 Workspace 阶段 3：增加右侧 Workspace 成果面板；Agent 生成或更新 `.md`、`.py` 等文件后按 revision 自动刷新、提示并展示成果，同时接入文件树、预览/编辑、上传和下载。
+1. 实施 Workspace 阶段 4：由 `WorkspaceStore` 物化 Sandbox 快照，并把验证、审批后的制品事务发布回同一 Workspace 事实源。
 2. 维持 E2B Sandbox 的真实 smoke、安全矩阵和发布事务门禁；第二 Provider 的具体接入暂不实施。
 3. 评估本地初始账号 `admin / 123456` 的改密入口；在入口完成前继续保持 localhost-only。
 4. `0.0.28` tag/push 仍需单独决定，仓库当前尚无 remote。

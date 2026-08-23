@@ -28,10 +28,10 @@ async function dismissModalIfPresent(page: Page) {
 }
 
 // ============================================================================
-// Test 1：页面打开 + 两栏 UI 没退回调试器
+// Test 1：页面打开 + 三栏 Workspace UI 没退回调试器
 // ============================================================================
 test.describe("Smoke 1: layout", () => {
-  test("两栏 UI（sidebar + chat），无右栏 / Drawer / Trace Viewer 文案", async ({
+  test("三栏 UI（sessions + chat + Workspace results），无 Trace Viewer 文案", async ({
     page,
   }) => {
     await page.goto("/")
@@ -39,6 +39,8 @@ test.describe("Smoke 1: layout", () => {
     // 主体结构
     await expect(page.locator('[data-testid="session-sidebar"]')).toBeVisible()
     await expect(page.locator('[data-testid="chat-panel"]')).toBeVisible()
+    await expect(page.locator('[data-testid="workspace-sidebar"]')).toBeVisible()
+    await expect(page.locator('[data-testid="workspace-panel"]')).toBeVisible()
     await expect(page.locator('[data-testid="new-chat-button"]')).toBeVisible()
     await expect(page.locator('[data-testid="chat-input"]')).toBeVisible()
 

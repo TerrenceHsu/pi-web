@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from "vue"
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 
 import AppShell from "./components/layout/AppShell.vue"
 import SessionSidebar from "./components/layout/SessionSidebar.vue"
 import ChatPanel from "./components/chat/ChatPanel.vue"
+import WorkspacePanel from "./components/workspace/WorkspacePanel.vue"
 import LoginPage from "./components/auth/LoginPage.vue"
 import { useAuthStore } from "./stores/authStore"
 import { useChatStore } from "./stores/chatStore"
@@ -34,6 +35,15 @@ const workspaceLoading = ref(false)
 const sessionCoordinatorReady = ref(false)
 let activationVersion = 0
 let activeUserId: string | null = null
+const workspaceAttention = computed(() => {
+  const sid = sessionStore.activeSessionId
+  return sid ? !!fileStore.latestArtifactBySession[sid]?.unseen : false
+})
+
+function acknowledgeWorkspace(): void {
+  const sid = sessionStore.activeSessionId
+  if (sid) fileStore.acknowledgeArtifact(sid)
+}
 
 // Provider Binding 跟随 active session 切换——协调只发生在 App.vue。
 // 切到 null（无 session）→ 清状态；切到 id → 异步刷新 binding。
@@ -210,12 +220,19 @@ onBeforeUnmount(() => {
   <div v-else-if="workspaceLoading" class="auth-loading" data-testid="workspace-loading">
     Loading {{ authStore.user?.name }} workspace…
   </div>
-  <AppShell v-else>
+  <AppShell
+    v-else
+    :workspace-attention="workspaceAttention"
+    @workspace-opened="acknowledgeWorkspace"
+  >
     <template #sidebar>
       <SessionSidebar />
     </template>
     <template #main>
       <ChatPanel />
+    </template>
+    <template #workspace>
+      <WorkspacePanel />
     </template>
   </AppShell>
 </template>

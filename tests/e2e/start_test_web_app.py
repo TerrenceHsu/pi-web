@@ -137,7 +137,9 @@ def _build_test_harness():
                         yield DoneEvent(stop_reason="tool_use")
                     return
                 approval_marker = None
-                if "P2B_APPROVAL_APPROVE" in messages_repr:
+                if "WORKSPACE_RESULT_PY" in messages_repr:
+                    approval_marker = "workspace-result-e2e.py"
+                elif "P2B_APPROVAL_APPROVE" in messages_repr:
                     approval_marker = "approved-e2e.md"
                 elif "P2B_APPROVAL_DENY" in messages_repr:
                     approval_marker = "denied-e2e.md"
@@ -156,7 +158,11 @@ def _build_test_harness():
                             name="write_file",
                             arguments={
                                 "filename": approval_marker,
-                                "content": "created after human approval",
+                                "content": (
+                                    "print('workspace result ready')\n"
+                                    if approval_marker.endswith(".py")
+                                    else "created after human approval"
+                                ),
                             },
                         ))
                         yield DoneEvent(stop_reason="tool_use")

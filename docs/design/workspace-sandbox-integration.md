@@ -1,6 +1,6 @@
 # Workspace 与 Coding Sandbox 一体化设计
 
-> 状态：阶段 1–2 已完成，阶段 3 待实施
+> 状态：阶段 1–3 已完成，阶段 4 待实施
 > 日期：2026-08-22
 > 范围：Session Workspace、Agent 文件工具、E2B Coding Sandbox、安全发布与后续文档转换
 
@@ -141,7 +141,7 @@ Sandbox 只获得可公开的 Workspace 快照，不获得本机绝对路径、�
 
 桌面布局改为左侧 Sessions、中间 Chat、右侧 Workspace；窄屏把右侧面板降级为 drawer。
 右侧栏首先是 Agent 成果的交付面：Agent 完成或更新 `.md`、`.py` 等 Workspace 文件后，
-前端依据 mutation 响应中的 Workspace revision 自动刷新文件树，并选中或提示最新成果；用户无需
+前端依据 `write_file` ToolResult 或用户 mutation 响应中的 Workspace revision 自动刷新文件树，并选中或提示最新成果；用户无需
 从聊天文本中寻找物理路径，也不需要手动刷新页面。
 面板包含：
 
@@ -199,6 +199,14 @@ revision。物理内容仍保持 metadata-per-file 布局，逻辑 `scripts/` �
 - Agent 创建/更新 `.md`、`.py` 等成果后，按 Workspace revision 自动刷新、提示并展示最新成果。
 - 文件树、根文件编辑、上传、新建 Markdown、Markdown 预览/编辑、代码查看与下载。
 - 复用 Sandbox/Changes 视图和统一 store。
+
+实施结果：已完成。`AppShell` 在桌面使用 260/自适应/380px 三栏，较窄桌面收敛列宽，
+1050px 以下把同一个 Workspace 组件变为右侧 drawer，避免维护两份状态。Files 视图直接监听
+Chat Store 中成功 `write_file` 的 ToolResult，同时兼容 live result wrapper 和刷新后持久化 details；
+按 `file_id` 与 revision 只刷新必要快照、自动选中最新 Agent 成果并显示 New 标记。Markdown 使用
+禁用 raw HTML 的统一 renderer，可切换源码编辑并携带 SHA/revision 保存；代码以只读 UTF-8 源码
+展示。面板上传不会进入聊天输入框的 pending attachments。Sandbox 与 Changes 读取既有统一 store，
+展示状态、验证、日志和 diff，并复用完整 Modal 执行启动、验证、冻结、审批发布或丢弃。
 
 ### 阶段 4：统一 Sandbox 快照与发布目标
 
