@@ -1,12 +1,12 @@
 # Project Status
 
-> 当前事实快照，校准日期：**2026-08-22**。本页只描述当前代码基线；阶段性测试数字和历史决策保留在 `docs/validation/`、`CHANGELOG.md` 与归档计划中。
+> 当前事实快照，校准日期：**2026-08-23**。本页只描述当前代码基线；阶段性测试数字和历史决策保留在 `docs/validation/`、`CHANGELOG.md` 与归档计划中。
 
 ## 基线身份
 
 | 项 | 当前事实 |
 |---|---|
-| 代码基线 | 当前工作树基于 `c35ea53`，包含 Coding Sandbox P0 第 0–10 项、可靠性收敛、内容完整性标记与 Workspace 阶段 1–3 |
+| 代码基线 | 阶段前基线为 `39745c0`；当前分支包含 Coding Sandbox P0 第 0–10 项、可靠性收敛、内容完整性标记、Workspace 阶段 1–3 与 LLM Wiki 阶段 0–1 |
 | 分支 | `master` |
 | 最新 release tag | `v0.0.27-secure-credentials` @ `de05c66`；当前代码基线尚未打新 tag |
 | Python / API 版本 | `0.0.28`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
@@ -20,7 +20,7 @@
 
 ## 当前交付状态
 
-既有提交均已进入 `master`；Coding Sandbox P0 第 0–10 项和 Workspace 阶段 1–3 已完成，后续仍按 `TODO.md` 推进：
+LLM Wiki 产品合同与 Parser Provider 阶段已完成，后续仍按 `TODO.md` 推进：
 
 | 能力 | 状态 | 代表性基线 |
 |---|---|---|
@@ -50,6 +50,7 @@
 | Backend warning / pytest 状态目录 / ToolResult UTF-8 E2E | ✅ 完成 | Backend `-W error` 0 warning；cache/temp 固定到工作区；Playwright 48/48 |
 | Frontend warning 收敛 | ✅ 完成 | Modal/Teleport attrs、Vite mixed import 与 Playwright color env 三类提示归零；Vitest 404/404；Playwright 48/48 |
 | 历史消息 U+FFFD 完整性标记 | ✅ 完成 | 读取时递归检测并返回计数/RFC 6901 路径，不改写 SQLite、不伪造恢复；消息与工具卡可见，刷新保持；Playwright 49/49 |
+| LLM Wiki 产品合同与 Parser Provider Gate | ✅ 阶段 0–1 完成 | 新 Wiki 设计取代 Chunk RAG 方向；Marker `2.0.0` 许可证/容器/断网/`fast_no_ocr` Gate；独立 `wiki_parser` Protocol/DTO/安全错误和完全离线 Fake，真实 Marker 尚未接入 |
 
 ## 当前产品能力
 
@@ -66,6 +67,7 @@
 - 持久化凭证默认进入 OS Keyring；开发启动器在监听端口前执行 write/read/delete 探针
 - MCP 支持 stdio tools/prompts；内置 DDGS 固定存在、不可删除，可修改返回数、地区、安全搜索、时间范围等参数
 - Knowledge Manager 支持 Library、PDF 上传、后台解析/索引、Session binding、FTS5 搜索和 Agent citation
+- LLM Wiki 替代设计的阶段 0–1 已冻结；旧 Knowledge/RAG 仍是当前可运行实现，直到后续新库、页面、审批与 UI 完成并通过退役门禁，二者不会静默共享数据
 - Core Runtime 的一个 Turn 等于“一次 LLM 调用 + 该调用产生的当批工具”；Snapshot 分为 RequestSnapshot 与 TurnSnapshot
 - 并行工具批次先按源序串行完成 hook、权限、审批与参数校验，再并行执行已放行工具；hook 不得改写 tool-call ID
 - Agent 支持独立 steering / follow-up 队列及 `all` / `one-at-a-time` 消费模式；活跃请求期间普通 prompt/continue 明确拒绝
@@ -97,7 +99,7 @@
 | API Key | OS Keyring、显式 session-only memory 或显式 env；不写入 SQLite 明文 |
 | Active request / pending approval / event subscribers | 当前后端进程内存；后端重启不恢复执行 |
 
-## 2026-08-22 当前验证基线
+## 2026-08-23 当前验证基线
 
 Backend 全量数字基于当前含 Coding Sandbox P0 第 0–10 项的工作区实际复跑；
 版本/许可证提交 `8a6ff2e` 另行通过 wheel 元数据验证；既有 `51ce3c7` 等价内容
@@ -105,11 +107,12 @@ Backend 全量数字基于当前含 Coding Sandbox P0 第 0–10 项的工作区
 
 | 验证 | 结果 | 备注 |
 |---|---|---|
-| Ruff 全量 | **PASS** | `ruff check src tests scripts`；0 errors |
-| strict Mypy 全量 | **PASS** | `mypy src --strict`；141 files / 0 issues；CI 已覆盖独立 `coding_sandbox` 包、Web 生命周期薄适配与消息完整性检测 |
-| Backend CI 全量 + coverage | **3857 passed, 8 skipped, 12 deselected** | `pytest tests -m "not slow" --tb=short -q`；83.69% coverage；616.44s；包含 Workspace 阶段 1 回归 |
+| Ruff 全量 | **PASS** | `ruff check src tests scripts`；0 errors；包含独立 `wiki_parser` 包与契约测试 |
+| strict Mypy 全量 | **PASS** | `mypy src --strict`；146 files / 0 issues；覆盖独立 `coding_sandbox`、`wiki_parser` 和主应用 |
+| Backend CI 全量 + coverage | **3897 passed, 8 skipped, 12 deselected** | `pytest tests -m "not slow" --tb=short -q`；83.44% coverage；625.83s；包含 LLM Wiki Parser Contract/Fake 回归 |
 | Workspace 阶段 1 定向回归 | **125 passed** | `VirtualFileStore` 兼容别名、双根初始化、并发幂等、旧路径/purpose 迁移、固定根删除保护、Checkpointer/Auth/重启；`-W error` 下 0 warning |
 | Workspace 阶段 2 定向回归 | **116 passed** | 代码 `scripts/**` 映射、安全逻辑路径、revision 持久/冲突、Markdown CRUD、Agent 工具与 Web API；使用 `--no-cov` 定向运行 |
+| LLM Wiki Parser Contract/Fake | **29 passed** | PDF-only `fast_no_ocr` DTO/Protocol、许可证 Probe、来源/制品 SHA、路径/配额、确定性 tar、取消/超时/销毁和包依赖隔离；完全离线；相关 Ruff PASS、strict Mypy 7 files / 0 issues |
 | Coding Sandbox 安全矩阵 | **151 passed, 2 skipped** | 离线 Fake/E2B 契约、路径/命令/网络/凭证攻击、故障注入、validation/artifact 篡改、Publisher 冲突/回滚/崩溃恢复，以及退役 Provider 空字段兼容迁移；Windows capability skip |
 | Sandbox Web 生命周期/API | **7 passed** | SQLite operation/event 恢复、启动 `interrupted` 收敛、snapshot seed、验证失败不得冻结/发布且真实工作区字节级不变、取消，以及 disabled/missing/latest API 边界 |
 | 真实 E2B + Publisher 安全 smoke | **PASS** | 9 个代码工具、故意验证失败与冻结拒绝、恢复重验、制品冻结/签名、本机冲突且工作区字节级不变、commit、幂等 retry、Sandbox destroy；20.577s；未输出凭证 |

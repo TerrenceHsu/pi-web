@@ -80,7 +80,7 @@ build-backend = "hatchling.build"
 path = "src/pi_agent_core_py/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/pi_agent_core_py", "src/coding_sandbox"]
+packages = ["src/pi_agent_core_py", "src/coding_sandbox", "src/wiki_parser"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

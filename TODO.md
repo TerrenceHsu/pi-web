@@ -1,6 +1,6 @@
 # Current TODO
 
-> 校准日期：**2026-08-22**。本文件只保留尚未完成或明确延期的事项；已完成阶段不再复制数百行历史记录，统一由 [`STATUS.md`](STATUS.md)、[`CHANGELOG.md`](CHANGELOG.md) 和 `docs/validation/` 追溯。
+> 校准日期：**2026-08-23**。本文件只保留尚未完成或明确延期的事项；已完成阶段不再复制数百行历史记录，统一由 [`STATUS.md`](STATUS.md)、[`CHANGELOG.md`](CHANGELOG.md) 和 `docs/validation/` 追溯。
 
 ## 当前收敛执行顺序
 
@@ -18,9 +18,24 @@
 - [x] **阶段 1：统一 `WorkspaceStore` 与初始化 `Memory.md`**（完成）：以 `WorkspaceStore` 作为 Session 文件唯一规范事实源，`VirtualFileStore` 仅为同一实现的兼容别名；新旧 Session 均幂等拥有唯一根 `AGENT.md` 与 `Memory.md`，迁移保留已有正文/file id 并规范大小写等价旧路径与 purpose，两个固定根文件均禁止删除；Ruff PASS、strict Mypy 141 files / 0 issues、Workspace/文件/Auth/Checkpointer 定向 125 passed（`-W error`）、Backend CI 3857 passed / 8 skipped / 12 deselected、83.69% coverage
 - [x] **阶段 2：代码与 Markdown 规则**（完成）：`WorkspaceStore` 按扩展名把 Agent 写入和用户上传的代码统一映射到惰性逻辑根 `scripts/`，安全相对目录自动约束在其下；新增普通 Markdown 精确创建、正文更新、移动/重命名和删除 API，固定根文件继续受保护；每个 Session 以隐藏 `.workspace.json` 持久化单调 revision，mutation 同时支持逐文件 SHA 与 Workspace revision 乐观锁，失败保持文件树/revision 不变，删除 tombstone 和状态 temp 可在重启时收敛；Agent `write_file`/`list_files` 与前端 API/types/store 返回 revision。全量 Ruff PASS、strict Mypy 141 files / 0 issues、阶段定向 Backend 116 passed、Frontend typecheck/lint 与 Vitest 405/405 passed
 - [x] **阶段 3：右侧 Workspace 成果面板**（完成）：`AppShell` 改为 Sessions / Chat / Workspace 三栏，窄于 1050px 时右栏降级为带新成果提示的 drawer；右栏监听成功 `write_file` ToolResult 的 `file_id`/Workspace revision，立即刷新、选中并预览 Agent 生成的 `.md`、`.py` 等成果，整页刷新后从持久 ToolResult 恢复；Files 支持目录树、最新成果提示、用户上传（不自动附加到聊天）、Markdown 创建/安全预览/编辑、代码查看与下载，Sandbox / Changes 复用现有 operation、日志、验证、diff 和完整审批发布 Modal。Frontend typecheck/lint/build PASS、Vitest 409/409、Playwright 全量 52/52（含成果自动展示/刷新恢复、Markdown 编辑、代码上传、窄屏 drawer），0 retry / 0 failure
-- [ ] **阶段 4：统一 Sandbox 快照与发布目标**：从 `WorkspaceStore` 物化 E2B 快照，固定验证和用户确认后事务发布回同一 Workspace，保护根文件与系统路径并原子提升 revision
-- [ ] **阶段 5：固定文档转换工作流**：建立不可变原件、转换任务和 manifest，依次支持 PDF→Markdown、DOCX→Markdown、XLSX→摘要/CSV/schema；OCR 明确延期
-- [ ] **阶段 6：完整验收**：Backend/Frontend 静态检查和测试、Workspace Browser E2E、刷新/重启/并发冲突回归，以及真实 E2B Python 写入、验证和发布 smoke
+- [ ] **阶段 4：统一 Sandbox 快照与发布目标**（冻结）：从 `WorkspaceStore` 物化 E2B 快照，固定验证和用户确认后事务发布回同一 Workspace，保护根文件与系统路径并原子提升 revision；在 LLM Wiki 当前阶段完成前不进入实施
+- [ ] **阶段 5：固定文档转换工作流**（冻结）：建立不可变原件、转换任务和 manifest，依次支持 PDF→Markdown、DOCX→Markdown、XLSX→摘要/CSV/schema；OCR 明确延期；不得与独立 Knowledge/LLM Wiki 的 Raw Source 流水线混用
+- [ ] **阶段 6：完整验收**（冻结）：Backend/Frontend 静态检查和测试、Workspace Browser E2E、刷新/重启/并发冲突回归，以及真实 E2B Python 写入、验证和发布 smoke
+
+## P0 — LLM Wiki（替代 Knowledge/RAG）
+
+完整产品合同、目录与权限、Provider、Schema、Change Set、页面图谱、Knowledge Agent 和退役方案见
+[`docs/design/llm-wiki.md`](docs/design/llm-wiki.md)。旧 P2-R Knowledge/RAG 文档只作为历史基线，
+不再指导后续产品实现；Chunk 检索主链路废弃，FTS5 仅索引已批准 Wiki 页面的标题、别名和正文。
+
+- [x] **阶段 0：冻结 LLM Wiki 产品合同**：确认先创建 Wiki Space；PDF/单文件 HTML MVP；本机独立 Marker Sidecar；PDF 只提取内嵌图片；`raw/` 对 Agent 强制只读；每个来源一篇入口页并允许主题子页面；页面级 FTS5；固定页面关系和系统 `derived_from`；每个 Space 多对话；所有页面/图谱修改进入同一 Change Set 一次审批；旧库结构不迁移
+- [x] **阶段 1：重新执行 Marker Gate 并冻结 Parser Provider Contract**（完成）：审核基线固定 Marker `2.0.0`，分离 Apache-2.0 代码与修改版 OpenRAIL-M 模型许可证 Gate；发布实现固定为每任务本机 OCI 隔离容器、`fast_no_ocr`、任务期间断网，独立 venv 仅为降级开发模式；新增独立顶层 `wiki_parser` 的 immutable/extra-forbid DTO、异步 Protocol、固定安全错误、来源/制品 SHA 与配额/超时/取消/幂等销毁契约，以及完全离线确定性 Fake；主应用未引入 Marker/Torch/Surya/Transformers。Ruff PASS、strict Mypy 全仓 146 files / 0 issues、Provider/Fake 29 passed、Backend 3897 passed / 8 skipped / 12 deselected / 83.44%；Gate 见 [`docs/design/llm-wiki-marker-provider-gate.md`](docs/design/llm-wiki-marker-provider-gate.md)
+- [ ] **阶段 2：实现 WikiStore、`wiki.db` 与新目录结构**：新增 Space/Source/Artifact/Page/Revision/PageSource/Edge/ChangeSet/Conversation/Job schema 和版本门；实现 `spaces/{space_id}/raw/`、`pages/`、路径安全、原子写入与镜像恢复；把旧 `knowledge.db`/`libraries/` 收敛为只读 legacy 备份，不迁移业务数据且不未经授权删除
+- [ ] **阶段 3：实现 PDF/HTML Raw Ingestion**：保存不可变 `source.pdf|source.html`；PDF 经本机 Marker Sidecar 输出 `parsed.md`、内嵌图片和 manifest；HTML 使用零网络独立 Parser，删除脚本/危险资源并仅允许受限 `data:` 图片；主应用把 Provider 输出作为不可信制品做路径、类型、配额和 SHA 校验
+- [ ] **阶段 4：实现 Wiki 页面、Revision 与原子 Change Set**：每个来源生成入口页草稿，允许 Agent 提出主题子页面；创建/更新/删除页面及 edge add/delete 统一生成稳定 diff；用户一次批准后全有或全无发布，任一 page version/SHA 或 graph revision 变化时整个 Change Set 标记 stale
+- [ ] **阶段 5：实现页面级 FTS5 与页面知识图谱**：只索引 active 页面当前已批准 revision；支持 `related_to`、`references`、`extends`、`contradicts`、`part_of`，强制同 Space、去重、自环/`part_of` 循环校验；`derived_from` 只由服务端依据可信来源证据维护
+- [ ] **阶段 6：实现 Knowledge Agent 模式与 Space 多对话**：复用 Agent loop、消息/流、lane、compaction 和持久化，新增独立 Knowledge Prompt、内置 Wiki Skill 和工具白名单；`space_id`/`conversation_id` 由可信上下文注入，Agent 只读 Raw、只能写 Change Set staging，禁止跨 Space
+- [ ] **阶段 7：实现独立 Knowledge 页面并完成退役验收**：将现有弹窗替换为 Pages/Sources/Graph/Changes/Conversations 页面；支持来源/解析产物查看、页面阅读与 revision、图谱、统一 diff 审批和多对话；完成静态检查、Backend/Frontend/E2E、安全、并发、恢复、真实 Marker 与大文件配额验收后退役旧 API/Worker/UI
 
 ## P0 — 托管 Coding Sandbox 与安全发布
 
@@ -107,17 +122,17 @@ Modal 与 Local Docker 作为后续兼容后端，最终用户不需要安装 Py
 
 ## 明确延期 / Out of scope
 
-- [ ] OCR 与图片理解：扫描 PDF 当前终态为 `needs_ocr`
+- [ ] OCR 与图片理解：LLM Wiki MVP 不承诺扫描 PDF OCR；Marker 的 OCR 行为必须在阶段 1 独立冻结
 - [ ] Multi-Agent、Plan Mode；托管 Coding Sandbox 已提升到 P0，Local Docker/Git provider integration 仍按其独立阶段实施
 - [ ] RBAC、OAuth、企业级多租户、TLS 公网部署、横向扩展
-- [ ] 向量数据库、embedding、hybrid retrieval；当前 Knowledge 固定为 SQLite FTS5/BM25
+- [ ] 向量数据库、embedding、hybrid retrieval 与 Chunk RAG；LLM Wiki 仅保留已批准页面的 SQLite FTS5
 - [ ] 自动 provider fallback、模型负载均衡、长期后台任务调度
 
 ## 已完成基线索引
 
 | 能力 | 最终状态/提交 |
 |---|---|
-| P2-R Knowledge/RAG + Web Manager | ✅ `7faf635` / `6527be5` |
+| P2-R Knowledge/RAG + Web Manager | ✅ `7faf635` / `6527be5`；历史基线，已由 LLM Wiki 产品方向取代 |
 | Auth + Session Folder + Checkpointer + P0 Runtime | ✅ `b529bbc` |
 | P2-A Session reload recovery | ✅ `f30da56` |
 | P2-B Approval + P2-C Context Budget/Compaction | ✅ `924b047` |
