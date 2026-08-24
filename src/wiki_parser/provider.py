@@ -18,7 +18,7 @@ from .models import (
 
 @runtime_checkable
 class ParserProvider(Protocol):
-    """Uniform lifecycle implemented by Fake and local Marker Sidecars.
+    """Legacy Contract v1 lifecycle retained while Raw Ingestion migrates.
 
     Provider implementations must translate raw process/container/transport
     exceptions into fixed ``ParserError`` codes.  Handles and statuses are

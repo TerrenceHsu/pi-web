@@ -8,6 +8,7 @@ import { useChatStore } from "../../stores/chatStore"
 import { useSessionStore } from "../../stores/sessionStore"
 import { clearSessionRoute } from "../../utils/sessionRoute"
 import LoadingSpinner from "../common/LoadingSpinner.vue"
+import AboutModal from "../about/AboutModal.vue"
 import KnowledgeManagerModal from "../knowledge/KnowledgeManagerModal.vue"
 import MCPManagerModal from "../mcp/MCPManagerModal.vue"
 import ProviderSettingsModal from "../providers/ProviderSettingsModal.vue"
@@ -26,6 +27,7 @@ const mcpOpen = ref(false)
 const providerOpen = ref(false)
 const knowledgeOpen = ref(false)
 const sandboxOpen = ref(false)
+const aboutOpen = ref(false)
 
 // 请求运行中（sending/streaming/active request）禁用 Provider Settings 入口
 const requestRunning = computed(
@@ -166,6 +168,14 @@ async function signOut(): Promise<void> {
       >
         Providers
       </button>
+      <button
+        class="sidebar-tool-btn"
+        data-testid="about-source-button"
+        title="Licenses and Corresponding Source"
+        @click="aboutOpen = true"
+      >
+        About &amp; Source
+      </button>
     </nav>
 
     <div class="sidebar-section-title">Sessions</div>
@@ -244,6 +254,7 @@ async function signOut(): Promise<void> {
       :session-id="activeId"
       @close="providerOpen = false"
     />
+    <AboutModal :open="aboutOpen" @close="aboutOpen = false" />
   </div>
 </template>
 

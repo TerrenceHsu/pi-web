@@ -1,6 +1,6 @@
 # Current TODO
 
-> 校准日期：**2026-08-23**。本文件只保留尚未完成或明确延期的事项；已完成阶段不再复制数百行历史记录，统一由 [`STATUS.md`](STATUS.md)、[`CHANGELOG.md`](CHANGELOG.md) 和 `docs/validation/` 追溯。
+> 校准日期：**2026-08-24**。本文件只保留尚未完成或明确延期的事项；已完成阶段不再复制数百行历史记录，统一由 [`STATUS.md`](STATUS.md)、[`CHANGELOG.md`](CHANGELOG.md) 和 `docs/validation/` 追溯。
 
 ## 当前收敛执行顺序
 
@@ -28,14 +28,29 @@
 [`docs/design/llm-wiki.md`](docs/design/llm-wiki.md)。旧 P2-R Knowledge/RAG 文档只作为历史基线，
 不再指导后续产品实现；Chunk 检索主链路废弃，FTS5 仅索引已批准 Wiki 页面的标题、别名和正文。
 
-- [x] **阶段 0：冻结 LLM Wiki 产品合同**：确认先创建 Wiki Space；PDF/单文件 HTML MVP；本机独立 Marker Sidecar；PDF 只提取内嵌图片；`raw/` 对 Agent 强制只读；每个来源一篇入口页并允许主题子页面；页面级 FTS5；固定页面关系和系统 `derived_from`；每个 Space 多对话；所有页面/图谱修改进入同一 Change Set 一次审批；旧库结构不迁移
-- [x] **阶段 1：重新执行 Marker Gate 并冻结 Parser Provider Contract**（完成）：审核基线固定 Marker `2.0.0`，分离 Apache-2.0 代码与修改版 OpenRAIL-M 模型许可证 Gate；发布实现固定为每任务本机 OCI 隔离容器、`fast_no_ocr`、任务期间断网，独立 venv 仅为降级开发模式；新增独立顶层 `wiki_parser` 的 immutable/extra-forbid DTO、异步 Protocol、固定安全错误、来源/制品 SHA 与配额/超时/取消/幂等销毁契约，以及完全离线确定性 Fake；主应用未引入 Marker/Torch/Surya/Transformers。Ruff PASS、strict Mypy 全仓 146 files / 0 issues、Provider/Fake 29 passed、Backend 3897 passed / 8 skipped / 12 deselected / 83.44%；Gate 见 [`docs/design/llm-wiki-marker-provider-gate.md`](docs/design/llm-wiki-marker-provider-gate.md)
+- [x] **阶段 0：冻结 LLM Wiki 产品合同**：确认先创建 Wiki Space；PDF/单文件 HTML MVP；`raw/` 对 Agent 强制只读；每个来源一篇入口页并允许主题子页面；页面级 FTS5；固定页面关系和系统 `derived_from`；每个 Space 多对话；所有页面/图谱修改进入同一 Change Set 一次审批；旧库结构不迁移；明确不恢复 Chunk-RAG
+- [x] **阶段 1A：Provider Contract v1 与 Marker 历史 Gate**（完成但停止后续实施）：已验证独立 `wiki_parser` 生命周期、immutable/extra-forbid DTO、固定安全错误、来源/制品 SHA、配额/超时/取消/幂等销毁和完全离线 Fake；Marker 专属实现路线于 2026-08-23 被双 Parser 取代，历史审计仅见 [`docs/design/llm-wiki-marker-provider-gate.md`](docs/design/llm-wiki-marker-provider-gate.md)
+- [x] **阶段 1B：冻结双 PDF Parser 架构**：PyMuPDF4LLM 负责 fast，Docling 负责 accurate 与 auto 质量回退；两者只读取原始 PDF；API 固定 `auto|fast|accurate`；Docling standard/ocr Converter 启动期复用；路由/质量阈值版本化且不从 API 注入；保存 Parser/version/preset/config/质量/attempt；保持无 Chunk-RAG；PyMuPDF4LLM 选择 AGPL-3.0 合规路径。设计见 [`docs/design/llm-wiki-dual-pdf-parser.md`](docs/design/llm-wiki-dual-pdf-parser.md)
 - [x] **阶段 2：实现 WikiStore、`wiki.db` 与新目录结构**（完成）：新增独立 `pi_agent_core_py.web.wiki`，以三重 DB 身份/version gate、SQLite capability/integrity gate、STRICT/FK/CHECK/UNIQUE 建立 Space/Source/Artifact/Page/Revision/PageSource/Edge/ChangeSet/Item/Conversation/Job schema v1，明确不创建 Chunk/Chunk FTS；实现带跨连接 CAS/软删除状态机的 Space CRUD，固定 `spaces/{space_id}/{raw,pages}`、canonical `space.json`、全层 casefold/symlink/reparse/特殊文件防护、Raw no-clobber 与 Page atomic replace、启动镜像重建/orphan 报告/staging 隔离；显式 `retire` 在独占锁内先生成 SQLite 一致快照与逐文件 SHA 的只读 legacy backup，再清理旧固定路径，默认 `preserve` 且未触碰真实用户旧库。设计见 [`docs/design/llm-wiki-store-v1.md`](docs/design/llm-wiki-store-v1.md)；Ruff PASS、strict Mypy 152 files / 0 issues、新 Wiki 52 passed / 4 capability skipped、新旧邻接 149 passed / 5 skipped、Backend 3949 passed / 12 skipped / 12 deselected / 83.35%
-- [ ] **阶段 3：实现 PDF/HTML Raw Ingestion**：保存不可变 `source.pdf|source.html`；PDF 经本机 Marker Sidecar 输出 `parsed.md`、内嵌图片和 manifest；HTML 使用零网络独立 Parser，删除脚本/危险资源并仅允许受限 `data:` 图片；主应用把 Provider 输出作为不可信制品做路径、类型、配额和 SHA 校验
+- [ ] **阶段 3：实现 PDF/HTML Raw Ingestion**（进行中；Contract v1 Backend/HTML/Fake PDF、双 Parser Contract v2、Raw parse revisions、Fake v2、Contract v2 主应用编排与 AGPL Worker 合规包已完成，真实 Parser runtime 与前端待完成；设计见 [`docs/design/llm-wiki-raw-ingestion.md`](docs/design/llm-wiki-raw-ingestion.md)）
+  - [x] Source/Artifact/Job DTO、不可变 `source.pdf|source.html`、同内容冲突、固定 Raw bundle 路径、状态机与跨连接原子 parse claim
+  - [x] 零网络单文件 HTML Parser：严格 UTF-8、移除 script/style/iframe/object/embed/form 等主动内容、不获取 CSS/图片/iframe，转义来源 Markdown 注入，仅提取受 MIME/魔数/单图/总量/数量配额约束的 `data:` PNG/JPEG/WebP
+  - [x] 不可信 Parser tar 导入：重算 archive/manifest/逐文件 SHA，核验 job/source/provider/version，拒绝路径穿越、大小写重复、symlink/目录/特殊成员、未声明文件、错误 MIME/魔数、超额文件和非 UTF-8 Markdown；全部验证后才以 no-clobber/idempotent 语义写入 Raw
+  - [x] 独立 `/api/wiki` lifespan/API 与后台 Worker：旧 Chunk Knowledge 可不启动；Space/Source/Artifact/Job、上传、解析排队、原件/制品安全浏览；重启把中断 attempt 固定失败后创建新 attempt，不重放旧 Provider handle
+  - [x] Fake Provider PDF 与 HTML 集成/安全/恢复验收：Wiki 阶段 1–3 定向 `104 passed, 4 skipped`；Ruff PASS；strict Mypy 157 source files / 0 issues；Backend 全量 `3972 passed, 9 skipped, 15 deselected` / 82.78% coverage
+  - [x] 撤销未提交 Marker 专属 Sidecar/镜像/配置/测试，保留通用 Provider、Fake、Raw Ingestion 和不可信 artifact 边界
+  - [x] 升级 `wiki_parser` Contract v2：新增独立 `ParserProviderV2` 与 immutable/extra-forbid DTO，固定 `auto|fast|accurate`、hash-pinned routing config、PreflightReport/RouteDecision/QualityReport、逐页 ParsedDocument、同源 SHA 的 Attempt evidence、规范 Markdown、Artifact v2 与安全错误；`fast` 不回退，只有 `auto` 可形成 PyMuPDF4LLM quality-rejected → 原始 PDF Docling 的单次回退链。Contract v1 暂留给现有 Raw Ingestion，禁止静默混用；Ruff 全量 PASS、strict Mypy 159 files / 0 issues、v1/v2 Contract 与隔离 45 passed、阶段 3 邻接 68 passed
+  - [x] 升级 Wiki schema/Raw bundle：schema v2 以 Source `selected_parse_revision_id + selection_version + selected_at_ms` 取代 flat parser/path 字段，新增 immutable ParseAttempt/ParseRevision 与 revision-scoped Artifact；所有新 HTML 和 Contract v1 兼容 PDF 制品写入 `parses/{parse_revision_id}/{parsed.md,pages/**,images/**,manifest.json}`，`selected.json` 原子镜像且启动可由 DB 修复；重解析保留历史、失败保留旧 selected、跨连接 CAS 防 ABA、跨 Source FK fail closed。旧 schema v1 固定返回 `schema_rebuild_required`，不迁移、不覆盖；Wiki v1/v2/Raw/Worker/API 邻接 `126 passed, 4 skipped`，新增 revision 专项 5 passed，Backend 全量离线 `3994 passed, 9 skipped, 15 deselected`，Ruff PASS、strict Mypy 159 files / 0 issues
+  - [x] 实现完全离线 Fake Router/Fast/Accurate：新增独立 `FakeDualPdfParserProvider` 与内容不泄露的 Scenario/Document/Asset DTO，任务创建时核验并冻结原始 PDF 字节；覆盖 accurate/扫描/复杂 PDF 直接 Docling、auto fast 通过、auto fast 质量拒绝后单次 Docling 回退、显式 fast 拒绝且不回退、Docling 失败终止不循环、取消/销毁、hash-pinned routing config、逐页 Artifact v2 tar 与原始 PDF SHA 不变式。Fake v2 专项 10 passed，Wiki 全邻接 `136 passed, 4 skipped`，Backend 全量离线 `4004 passed, 9 skipped, 15 deselected`，Ruff PASS、strict Mypy 160 files / 0 issues
+  - [x] 接入 Contract v2 不可信 artifact 导入与现有 Wiki Ingestion/Worker/API：严格交叉核验 receipt/status/manifest/job/source/provider、archive/manifest/逐文件 SHA、规范逐页 Markdown、图片 MIME/魔数与路径/数量/大小配额；`auto|fast|accurate` 精确贯穿上传、排队和崩溃恢复，provider attempt/fallback/quality/route 证据映射为内部不可变记录，artifact 拒绝时保留成功 attempt 但不发布 revision，最终 selected parse revision 与制品/attempt 在同一事务原子提交；支持历史 job/attempt/revision 与指定 revision artifact 浏览，Contract v1 兼容路径保持显式隔离。新增 13 项回归；Wiki 全邻接 `149 passed, 4 skipped`，Backend 全量离线 `4017 passed, 9 skipped, 15 deselected`，Ruff PASS、strict Mypy 160 files / 0 issues
+  - [x] 建立独立 AGPL-3.0 Parser Worker 合规包：新增不被主 wheel 打包/导入的 `workers/wiki_parser_worker`，固定 `AGPL-3.0-only`、未经改写的 GNU 官方许可证正文及 SHA、notices、当前 scaffold 的完整 Corresponding Source manifest、Source Offer、SPDX 2.3 SBOM、自包含 smoke 与 wheel verifier；源码 API 从逐文件稳定快照生成规范路径、归一 metadata、确定性 `tar.gz` 和 file/tree/archive SHA，拒绝未声明文件、路径穿越、link/reparse/special file、配额超限及许可证篡改；主应用 `/api/about` 与侧栏 **About & Source** 显示 MIT/AGPL 分离、无担保声明和 License/Notices/SBOM/manifest/源码下载，缺少源码挂载时 fail closed。当前仅为 `runtime_ready=false` 合规 scaffold，不包含或伪装 PyMuPDF/Docling/OCR。Worker wheel 实构建及 5 项合规资产核验 PASS；Worker 自包含 smoke 1 passed；新增 Backend 7 passed、Frontend 5 passed，定向 Browser 下载 E2E 1 passed；Wiki `156 passed, 4 skipped`，Backend 全量 `4024 passed, 9 skipped, 15 deselected`，Frontend Vitest `414/414`，Ruff、主项目 strict Mypy 161 files 与 Worker strict Mypy 3 files 均通过
+  - [ ] 固定 PyMuPDF4LLM/PyMuPDF、Docling、layout/table/OCR 的版本、wheel/model hash 与许可证；实现 PyMuPDF 预检、`page_chunks=True`/OCR-off fast、Docling standard/ocr 两个启动期 Converter 和版本化 QualityEvaluator
+  - [ ] 构建断外网持久 OCI Worker并完成 fast/accurate/auto/fallback、取消/超时/崩溃恢复、SHA 篡改、配额、AGPL source offer 和代表性 PDF 实机 smoke
+  - [ ] 前端支持 Space、Source、解析状态和 Raw artifact 浏览；不得复活 Chunk 检索 UI，完整 Pages/Graph/Changes/Conversations 页面仍属于阶段 7
 - [ ] **阶段 4：实现 Wiki 页面、Revision 与原子 Change Set**：每个来源生成入口页草稿，允许 Agent 提出主题子页面；创建/更新/删除页面及 edge add/delete 统一生成稳定 diff；用户一次批准后全有或全无发布，任一 page version/SHA 或 graph revision 变化时整个 Change Set 标记 stale
 - [ ] **阶段 5：实现页面级 FTS5 与页面知识图谱**：只索引 active 页面当前已批准 revision；支持 `related_to`、`references`、`extends`、`contradicts`、`part_of`，强制同 Space、去重、自环/`part_of` 循环校验；`derived_from` 只由服务端依据可信来源证据维护
 - [ ] **阶段 6：实现 Knowledge Agent 模式与 Space 多对话**：复用 Agent loop、消息/流、lane、compaction 和持久化，新增独立 Knowledge Prompt、内置 Wiki Skill 和工具白名单；`space_id`/`conversation_id` 由可信上下文注入，Agent 只读 Raw、只能写 Change Set staging，禁止跨 Space
-- [ ] **阶段 7：实现独立 Knowledge 页面并完成退役验收**：将现有弹窗替换为 Pages/Sources/Graph/Changes/Conversations 页面；支持来源/解析产物查看、页面阅读与 revision、图谱、统一 diff 审批和多对话；完成静态检查、Backend/Frontend/E2E、安全、并发、恢复、真实 Marker 与大文件配额验收后退役旧 API/Worker/UI
+- [ ] **阶段 7：实现独立 Knowledge 页面并完成退役验收**：将现有弹窗替换为 Pages/Sources/Graph/Changes/Conversations 页面；支持来源/解析产物查看、页面阅读与 revision、图谱、统一 diff 审批和多对话；完成静态检查、Backend/Frontend/E2E、安全、并发、恢复、真实双 Parser 与大文件配额验收后退役旧 API/Worker/UI
 
 ## P0 — 托管 Coding Sandbox 与安全发布
 
@@ -122,7 +137,7 @@ Modal 与 Local Docker 作为后续兼容后端，最终用户不需要安装 Py
 
 ## 明确延期 / Out of scope
 
-- [ ] OCR 与图片理解：LLM Wiki MVP 不承诺扫描 PDF OCR；Marker 的 OCR 行为必须在阶段 1 独立冻结
+- [ ] OCR 与图片理解：Docling OCR preset 的 engine、语言、模型许可证、版本/hash、资源与真实语料质量须先通过双 Parser Gate；公式/代码/VLM enrichment 首版默认关闭
 - [ ] Multi-Agent、Plan Mode；托管 Coding Sandbox 已提升到 P0，Local Docker/Git provider integration 仍按其独立阶段实施
 - [ ] RBAC、OAuth、企业级多租户、TLS 公网部署、横向扩展
 - [ ] 向量数据库、embedding、hybrid retrieval 与 Chunk RAG；LLM Wiki 仅保留已批准页面的 SQLite FTS5

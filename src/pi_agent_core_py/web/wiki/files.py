@@ -5,13 +5,26 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
+import unicodedata
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 from .errors import WikiPathError, WikiStoreError
-from .models import WikiMirrorRepairReport, WikiSpace, WikiSpaceManifest, validate_space_id
+from .models import (
+    WikiMirrorRepairReport,
+    WikiParseRevision,
+    WikiSelectedParsePointer,
+    WikiSource,
+    WikiSourceMimeType,
+    WikiSpace,
+    WikiSpaceManifest,
+    validate_parse_revision_id,
+    validate_source_id,
+    validate_space_id,
+)
 
 WIKI_DB_FILENAME = "wiki.db"
 LEGACY_SUBDIR = "legacy"
@@ -27,6 +40,11 @@ _WINDOWS_RESERVED = {
     "prn",
     *(f"com{index}" for index in range(1, 10)),
     *(f"lpt{index}" for index in range(1, 10)),
+}
+
+_SOURCE_SUFFIX: dict[WikiSourceMimeType, str] = {
+    "application/pdf": ".pdf",
+    "text/html": ".html",
 }
 
 
@@ -200,9 +218,10 @@ class WikiFileStore:
         *,
         overwrite: bool,
         max_bytes: int,
+        allow_empty: bool = False,
     ) -> str:
         """Write one raw/page-owned file and return its SHA-256."""
-        if not content or len(content) > max_bytes:
+        if (not content and not allow_empty) or len(content) > max_bytes:
             raise WikiStoreError("file_too_large")
         normalized = self.validate_owned_relative_path(relative_path)
         target = self._owned_path(space_id, normalized)
@@ -215,6 +234,124 @@ class WikiFileStore:
         except OSError as exc:
             raise WikiStoreError("file_io_failed") from exc
         return hashlib.sha256(content).hexdigest()
+
+    def write_owned_file_once_or_verify(
+        self,
+        space_id: str,
+        relative_path: str,
+        content: bytes,
+        *,
+        max_bytes: int,
+        allow_empty: bool = False,
+    ) -> str:
+        """Create once, or accept an exact prior write from an interrupted import."""
+        if (not content and not allow_empty) or len(content) > max_bytes:
+            raise WikiStoreError("file_too_large")
+        digest = hashlib.sha256(content).hexdigest()
+        if self.owned_file_exists(space_id, relative_path):
+            previous = self.read_owned_file(
+                space_id,
+                relative_path,
+                max_bytes=max_bytes,
+            )
+            if previous != content:
+                raise WikiStoreError("file_exists")
+            return digest
+        return self.write_owned_file_atomic(
+            space_id,
+            relative_path,
+            content,
+            overwrite=False,
+            max_bytes=max_bytes,
+            allow_empty=allow_empty,
+        )
+
+    @staticmethod
+    def source_bundle_relative_path(source: WikiSource) -> str:
+        """Return the identity-bearing Raw directory for one persisted source."""
+        return PurePosixPath(source.source_relpath).parent.as_posix()
+
+    @classmethod
+    def parse_revision_relative_path(
+        cls,
+        source: WikiSource,
+        parse_revision_id: str,
+    ) -> str:
+        validate_parse_revision_id(parse_revision_id)
+        return (
+            PurePosixPath(cls.source_bundle_relative_path(source))
+            / "parses"
+            / parse_revision_id
+        ).as_posix()
+
+    @classmethod
+    def selected_parse_relative_path(cls, source: WikiSource) -> str:
+        return (
+            PurePosixPath(cls.source_bundle_relative_path(source)) / "selected.json"
+        ).as_posix()
+
+    def write_selected_parse_pointer(
+        self,
+        space_id: str,
+        source: WikiSource,
+        revision: WikiParseRevision,
+        pointer: WikiSelectedParsePointer,
+    ) -> bool:
+        """Atomically create or repair the rebuildable selected parse pointer."""
+        expected_revision_dir = self.parse_revision_relative_path(source, revision.id)
+        if (
+            pointer.source_id != source.id
+            or pointer.source_sha256 != source.source_sha256
+            or pointer.parse_revision_id != revision.id
+            or source.selected_parse_revision_id != revision.id
+            or pointer.selection_version != source.selection_version
+            or pointer.manifest_relpath != revision.manifest_relpath
+            or pointer.manifest_sha256 != revision.manifest_sha256
+            or PurePosixPath(revision.manifest_relpath).parent.as_posix()
+            != expected_revision_dir
+        ):
+            raise WikiStoreError("invalid_artifact")
+        payload = (
+            json.dumps(
+                pointer.model_dump(mode="json", by_alias=True),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        relative_path = self.selected_parse_relative_path(source)
+        previous: bytes | None = None
+        if self.owned_file_exists(space_id, relative_path):
+            previous = self.read_owned_file(space_id, relative_path, max_bytes=128 * 1024)
+        if previous == payload:
+            return False
+        self.write_owned_file_atomic(
+            space_id,
+            relative_path,
+            payload,
+            overwrite=True,
+            max_bytes=128 * 1024,
+        )
+        return previous != payload
+
+    def remove_owned_file_if_present(self, space_id: str, relative_path: str) -> bool:
+        """Remove one exact owned regular file without traversing directory trees."""
+        normalized = self.validate_owned_relative_path(relative_path)
+        path = self._owned_path(space_id, normalized)
+        if not path.exists():
+            return False
+        if _is_link_or_reparse(path):
+            raise WikiPathError("path_unsafe")
+        try:
+            info = path.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise WikiStoreError("file_io_failed") from exc
+        if not stat.S_ISREG(info.st_mode):
+            raise WikiPathError("path_unsafe")
+        path.unlink()
+        self._fsync_directory(path.parent)
+        return True
 
     def read_owned_file(
         self,
@@ -240,6 +377,63 @@ class WikiFileStore:
         if _is_link_or_reparse(path):
             raise WikiPathError("path_unsafe")
         return path.is_file()
+
+    @staticmethod
+    def source_relative_path(
+        source_id: str,
+        display_name: str,
+        mime_type: WikiSourceMimeType,
+    ) -> str:
+        """Return a deterministic identity-bearing path for one immutable source."""
+        validate_source_id(source_id)
+        suffix = _SOURCE_SUFFIX[mime_type]
+        stem = display_name
+        lowered = display_name.casefold()
+        if lowered.endswith(suffix):
+            stem = display_name[: -len(suffix)]
+        normalized = unicodedata.normalize("NFKD", stem).encode("ascii", "ignore").decode()
+        slug = re.sub(r"[^A-Za-z0-9]+", "-", normalized).strip("-").lower()
+        if not slug:
+            slug = "source"
+        directory = f"{slug[:48]}--{source_id}"
+        return f"{RAW_SUBDIR}/{directory}/source{suffix}"
+
+    def resolve_owned_regular_file(self, space_id: str, relative_path: str) -> Path:
+        """Resolve a validated owned file for an isolated provider invocation."""
+        normalized = self.validate_owned_relative_path(relative_path)
+        path = self._owned_path(space_id, normalized)
+        if _is_link_or_reparse(path):
+            raise WikiPathError("path_unsafe")
+        try:
+            info = path.stat(follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise WikiStoreError("file_not_found") from exc
+        if not stat.S_ISREG(info.st_mode):
+            raise WikiPathError("path_unsafe")
+        return path
+
+    def remove_owned_file_if_sha256(
+        self,
+        space_id: str,
+        relative_path: str,
+        expected_sha256: str,
+        *,
+        max_bytes: int,
+    ) -> bool:
+        """Rollback a just-created owned file only when its identity still matches."""
+        path = self.resolve_owned_regular_file(space_id, relative_path)
+        payload = self._read_file_bounded(path, max_bytes)
+        if hashlib.sha256(payload).hexdigest() != expected_sha256:
+            return False
+        path.unlink()
+        self._fsync_directory(path.parent)
+        raw_root = self.space_dir(space_id) / RAW_SUBDIR
+        if path.parent != raw_root:
+            try:
+                path.parent.rmdir()
+            except OSError:
+                pass
+        return True
 
     @staticmethod
     def validate_owned_relative_path(value: str) -> str:
@@ -334,7 +528,8 @@ class WikiFileStore:
             raise WikiPathError("path_unsafe")
         if target.exists() and not overwrite:
             raise WikiStoreError("file_exists")
-        temp = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+        # Keep the sibling temp name bounded for Windows paths with deep Raw revisions.
+        temp = target.with_name(f".tmp-{uuid4().hex}")
         try:
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
             if hasattr(os, "O_BINARY"):

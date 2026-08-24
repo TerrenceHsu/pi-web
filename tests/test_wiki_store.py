@@ -1,4 +1,4 @@
-"""Schema, lifecycle, Space CRUD and mirror recovery for WikiStore v1."""
+"""Schema, lifecycle, Space CRUD and mirror recovery for WikiStore v2."""
 
 from __future__ import annotations
 
@@ -63,6 +63,8 @@ async def test_fresh_schema_has_all_page_centric_tables_and_no_chunk_tables(
         "wiki_spaces",
         "wiki_sources",
         "wiki_artifacts",
+        "wiki_parse_attempts",
+        "wiki_parse_revisions",
         "wiki_pages",
         "wiki_page_revisions",
         "wiki_page_sources",
@@ -110,13 +112,38 @@ async def test_future_schema_version_fails_closed(tmp_path: Path) -> None:
     await store.close()
     with sqlite3.connect(tmp_path / "wiki.db") as connection:
         connection.execute(
-            "UPDATE wiki_schema_meta SET value = 2 WHERE key = 'schema_version'"
+            "UPDATE wiki_schema_meta SET value = ? WHERE key = 'schema_version'",
+            (WIKI_SCHEMA_VERSION + 1,),
         )
         connection.commit()
 
     with pytest.raises(WikiSchemaError) as exc_info:
         await WikiStore.open(tmp_path)
     assert exc_info.value.code == "schema_incompatible"
+
+
+async def test_retired_flat_v1_schema_requires_explicit_rebuild(tmp_path: Path) -> None:
+    path = tmp_path / "wiki.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(f"PRAGMA application_id = {WIKI_APPLICATION_ID}")
+        connection.execute("PRAGMA user_version = 1")
+        connection.execute(
+            "CREATE TABLE wiki_schema_meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO wiki_schema_meta (key, value) VALUES ('schema_version', 1)"
+        )
+        connection.execute(
+            "CREATE TABLE wiki_sources (id TEXT PRIMARY KEY, parsed_markdown_relpath TEXT)"
+        )
+        connection.commit()
+    before = path.read_bytes()
+
+    with pytest.raises(WikiSchemaError) as exc_info:
+        await WikiStore.open(tmp_path)
+
+    assert exc_info.value.code == "schema_rebuild_required"
+    assert path.read_bytes() == before
 
 
 async def test_wrong_application_id_fails_without_overwriting_file(tmp_path: Path) -> None:

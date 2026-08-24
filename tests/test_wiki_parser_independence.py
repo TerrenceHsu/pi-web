@@ -15,7 +15,12 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _PARSER_SOURCE = _REPOSITORY_ROOT / "src" / "wiki_parser"
 _FORBIDDEN_IMPORT_ROOTS = {
     "pi_agent_core_py",
+    "docling",
+    "docling_core",
+    "fitz",
     "marker",
+    "pymupdf",
+    "pymupdf4llm",
     "surya",
     "torch",
     "transformers",
@@ -23,7 +28,7 @@ _FORBIDDEN_IMPORT_ROOTS = {
 }
 
 
-def test_standalone_package_has_no_main_app_or_marker_runtime_imports() -> None:
+def test_standalone_package_has_no_main_app_or_concrete_runtime_imports() -> None:
     for source_path in _PARSER_SOURCE.rglob("*.py"):
         tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
         for node in ast.walk(tree):
@@ -40,7 +45,7 @@ def test_standalone_package_has_no_main_app_or_marker_runtime_imports() -> None:
                 )
 
 
-def test_standalone_import_does_not_load_main_app_or_marker_runtime() -> None:
+def test_standalone_import_does_not_load_main_app_or_concrete_runtime() -> None:
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(_REPOSITORY_ROOT / "src")
     forbidden = sorted(_FORBIDDEN_IMPORT_ROOTS)
@@ -63,7 +68,7 @@ def test_standalone_import_does_not_load_main_app_or_marker_runtime() -> None:
     assert probe.returncode == 0, probe.stderr
 
 
-def test_main_distribution_packages_contract_but_not_marker_dependency() -> None:
+def test_main_distribution_packages_contract_but_not_parser_runtime_dependency() -> None:
     config = tomllib.loads((_REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     packages = config["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"]
     dependencies = [
@@ -77,7 +82,15 @@ def test_main_distribution_packages_contract_but_not_marker_dependency() -> None
     lowered = "\n".join(dependencies).lower()
 
     assert "src/wiki_parser" in packages
-    for forbidden in ("marker-pdf", "surya-ocr", "torch", "transformers"):
+    for forbidden in (
+        "docling",
+        "marker-pdf",
+        "pymupdf",
+        "pymupdf4llm",
+        "surya-ocr",
+        "torch",
+        "transformers",
+    ):
         assert forbidden not in lowered
 
 

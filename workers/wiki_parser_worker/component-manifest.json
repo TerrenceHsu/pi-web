@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "component_id": "wiki-parser-worker",
+  "name": "pi Wiki Parser Worker",
+  "version": "0.0.28",
+  "license_expression": "AGPL-3.0-only",
+  "runtime_ready": false,
+  "source_archive_name": "wiki-parser-worker-0.0.28-source.tar.gz",
+  "files": [
+    {"path": "LICENSE", "role": "license"},
+    {"path": "NOTICE.md", "role": "notice"},
+    {"path": "README.md", "role": "documentation"},
+    {"path": "SOURCE_OFFER.md", "role": "source_offer"},
+    {"path": "component-manifest.json", "role": "manifest"},
+    {"path": "pyproject.toml", "role": "build"},
+    {"path": "scripts/verify_wheel.py", "role": "build"},
+    {"path": "sbom.spdx.json", "role": "sbom"},
+    {"path": "src/wiki_parser_worker/__init__.py", "role": "source"},
+    {"path": "src/wiki_parser_worker/compliance.py", "role": "source"},
+    {"path": "tests/test_compliance.py", "role": "source"}
+  ]
+}

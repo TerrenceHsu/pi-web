@@ -334,4 +334,10 @@ Playwright 测试位于 `tests/e2e/`，覆盖基础聊天、异步流、刷新�
 
 ## License
 
-本项目采用 MIT License，完整条款见 [`LICENSE`](LICENSE)。Python wheel 也携带同一许可证文件。
+主项目采用 MIT License，完整条款见 [`LICENSE`](LICENSE)，Python wheel 也携带同一许可证文件。
+
+LLM Wiki PDF Parser Worker 是独立组件，位于
+[`workers/wiki_parser_worker`](workers/wiki_parser_worker)，采用 `AGPL-3.0-only`，不属于主项目
+MIT 授权范围。当前包仅是 `runtime_ready=false` 的合规 scaffold，包含完整 AGPL 文本、notices、
+Corresponding Source manifest、Source Offer 与 SPDX SBOM，不含 PyMuPDF4LLM、Docling、OCR 或
+模型运行时。登录后的侧栏 **About & Source** 可查看许可证并下载同版本源码归档。

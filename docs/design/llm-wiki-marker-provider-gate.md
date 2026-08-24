@@ -1,8 +1,14 @@
-# LLM Wiki Marker Gate 与 Parser Provider Contract
+# LLM Wiki Marker Gate 与 Parser Provider Contract（历史）
 
-> 决策日期：**2026-08-23**  
-> 状态：**阶段 1 已冻结；真实 Marker Adapter 尚未接入**  
+> 决策日期：**2026-08-23**
+>
+> 状态：**2026-08-23 起停止实施，仅保留历史审计记录**
+>
 > 适用设计：[`llm-wiki.md`](llm-wiki.md)
+
+> LLM Wiki PDF 路线已改为 PyMuPDF4LLM 快速路径与 Docling 高质量/回退路径。本文件不再
+> 指导依赖、镜像、Provider Contract 或阶段 3 实施。现行设计见
+> [`llm-wiki-dual-pdf-parser.md`](llm-wiki-dual-pdf-parser.md)。
 
 ## 1. Gate 结论
 

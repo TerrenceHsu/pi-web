@@ -226,6 +226,10 @@ class WebAppState(BaseModel):
     knowledge_service: Any = None
     knowledge_store: Any = None
     knowledge_file_store: Any = None
+    # Page-centric LLM Wiki subsystem. Kept separate from legacy chunk Knowledge.
+    wiki_store: Any = None
+    wiki_ingestion_service: Any = None
+    wiki_ingestion_worker: Any = None
     # P2-R2-C2: Ingestion Worker Manager (None = disabled / [rag] extra missing).
     # Holds app-scoped singleton that drives PDF→Canonical Markdown pipeline.
     # Constructed in lifespan AFTER knowledge subsystem; started before yield;

@@ -98,6 +98,7 @@ from .state import WebAppState, WebMCPServerConfig, WebRunRequest
 if TYPE_CHECKING:
     from coding_sandbox import ArtifactSigner
     from coding_sandbox.admin import SandboxBackendFactory
+    from wiki_parser import ParserProvider, ParserProviderV2
 
     from .files import WorkspaceStore
 
@@ -359,6 +360,17 @@ def create_app(
     # True = 强制挂载（需 knowledge_root 非 None）
     # False = 不挂 router，但若 knowledge_root 非 None 仍 init service
     enable_knowledge_api: bool | None = None,
+    # New page-centric LLM Wiki. It is deliberately independent from the
+    # legacy chunk Knowledge API so both can coexist during the cutover.
+    wiki_root: str | Path | None = None,
+    enable_wiki_api: bool | None = None,
+    wiki_pdf_provider: ParserProvider | None = None,
+    wiki_pdf_provider_v2: ParserProviderV2 | None = None,
+    # Corresponding Source root for the separately AGPL-licensed PDF Worker.
+    # None auto-discovers a source checkout and otherwise reports unavailable.
+    # The main application reads compliance assets only; it never imports the
+    # Worker package or concrete parser runtime.
+    wiki_parser_worker_source_root: str | Path | None = None,
     # Built-in DuckDuckGo MCP server. Disabled by default so existing library
     # users/tests retain an empty MCP list; the authenticated dev app enables it.
     enable_builtin_ddgs: bool = False,
@@ -826,6 +838,46 @@ def create_app(
             state.ingestion_worker_manager = None
             state.indexing_worker_manager = None
 
+        @asynccontextmanager
+        async def _wiki_runtime_context() -> AsyncIterator[None]:
+            if wiki_root is None:
+                state.wiki_store = None
+                state.wiki_ingestion_service = None
+                state.wiki_ingestion_worker = None
+                yield
+                return
+            from .wiki import WikiIngestionService, WikiStore
+            from .wiki.worker import WikiIngestionWorkerManager
+
+            wiki_store = await WikiStore.open(wiki_root, legacy_policy="preserve")
+            wiki_service = WikiIngestionService(
+                wiki_store,
+                pdf_provider=wiki_pdf_provider,
+                pdf_provider_v2=wiki_pdf_provider_v2,
+            )
+            wiki_worker = WikiIngestionWorkerManager(
+                store=wiki_store,
+                service=wiki_service,
+            )
+            try:
+                await wiki_worker.start()
+            except BaseException:
+                await wiki_store.close()
+                raise
+            state.wiki_store = wiki_store
+            state.wiki_ingestion_service = wiki_service
+            state.wiki_ingestion_worker = wiki_worker
+            try:
+                yield
+            finally:
+                state.wiki_ingestion_worker = None
+                try:
+                    await wiki_worker.stop()
+                finally:
+                    state.wiki_ingestion_service = None
+                    state.wiki_store = None
+                    await wiki_store.close()
+
         # ====================================================================
         # P1-E1-4A: Credential Runtime Composition Root
         # 仅在文件型 DB 路径 + 显式 / 默认 enable 时启动；独立 connection
@@ -978,7 +1030,8 @@ def create_app(
                         provider_factory=create_provider,
                     )
                     try:
-                        yield
+                        async with _wiki_runtime_context():
+                            yield
                     finally:
                         _app.state.provider_config_runtime = None
                         _app.state.request_provider_runtime = None
@@ -989,7 +1042,8 @@ def create_app(
                 else:
                     _app.state.provider_config_runtime = None
                     _app.state.request_provider_runtime = None
-                    yield
+                    async with _wiki_runtime_context():
+                        yield
             finally:
                 registered_names = container["coding_sandbox_tool_names"]
                 for tool_name in tuple(registered_names):
@@ -1012,7 +1066,8 @@ def create_app(
             _app.state.coding_sandbox_runtime = None
             _app.state.provider_config_runtime = None
             _app.state.request_provider_runtime = None
-            yield
+            async with _wiki_runtime_context():
+                yield
 
         # ====================================================================
         # P1-B1: shutdown 收敛——先收敛 active request，再走原清理流程
@@ -1158,6 +1213,22 @@ def create_app(
     app.state.provider_config_runtime = None
     # M1-5: request_provider_runtime placeholder——仅 cred + pc runtime 都启用时填入
     app.state.request_provider_runtime = None
+    from .source_offer import (
+        SourceOfferError,
+        build_about_router,
+        build_source_offer_service,
+    )
+
+    try:
+        source_offer_service = build_source_offer_service(
+            wiki_parser_worker_source_root
+        )
+    except SourceOfferError as exc:
+        raise RuntimeError(
+            "wiki parser Worker Corresponding Source configuration is invalid"
+        ) from exc
+    app.state.wiki_parser_source_offer = source_offer_service
+    app.include_router(build_about_router(source_offer_service))
     # P1-E1-4A / B3: TrustedHost middleware（resolve 后的 flag 决定）
     # 默认 False 保留所有既有 create_app 调用点不变；启用 Credentials API
     # 时强制 True（已在 resolve_credential_api_configuration 中校验）
@@ -1283,6 +1354,24 @@ def create_app(
             app.include_router(
                 build_session_knowledge_router(_k_ws_cfg), prefix="/api/sessions"
             )
+
+    if enable_wiki_api is True and wiki_root is None:
+        raise RuntimeError("wiki API requires wiki_root")
+    if wiki_root is not None:
+        from .local_web_security import default_web_security_config as _wiki_ws
+        from .wiki.api import build_wiki_router
+
+        _wiki_ws_cfg = _wiki_ws(
+            extra_hosts=credential_extra_hosts,
+            extra_ui_origins=credential_extra_ui_origins,
+        )
+        _wiki_api_enabled = (
+            enable_wiki_api
+            if enable_wiki_api is not None
+            else _cred_resolved.trusted_host_enabled
+        )
+        if _wiki_api_enabled:
+            app.include_router(build_wiki_router(_wiki_ws_cfg), prefix="/api/wiki")
 
     # Flush in list order: each add_middleware does insert(0, ...).
     # After flushing [BodyLimit, TrustedHost] in order:
