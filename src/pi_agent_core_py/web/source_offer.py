@@ -30,7 +30,18 @@ _MAX_FILE_COUNT: Final = 512
 _MAX_FILE_BYTES: Final = 16 * 1024 * 1024
 _MAX_TOTAL_BYTES: Final = 64 * 1024 * 1024
 _ALLOWED_ROLES: Final = frozenset(
-    {"build", "documentation", "license", "manifest", "notice", "sbom", "source", "source_offer"}
+    {
+        "build",
+        "configuration",
+        "documentation",
+        "license",
+        "manifest",
+        "notice",
+        "runtime_manifest",
+        "sbom",
+        "source",
+        "source_offer",
+    }
 )
 _IGNORED_DIRECTORY_NAMES: Final = frozenset(
     {".mypy_cache", ".pytest_cache", ".ruff_cache", ".venv", "__pycache__", "build", "dist"}
@@ -158,7 +169,12 @@ def _canonical_json_bytes(value: object) -> bytes:
 
 
 def _is_generated_part(part: str) -> bool:
-    return part in _IGNORED_DIRECTORY_NAMES or part.endswith(".egg-info")
+    return (
+        part in _IGNORED_DIRECTORY_NAMES
+        or part == ".coverage"
+        or part.startswith(".coverage.")
+        or part.endswith(".egg-info")
+    )
 
 
 def _listed_regular_files(root: Path) -> set[str]:

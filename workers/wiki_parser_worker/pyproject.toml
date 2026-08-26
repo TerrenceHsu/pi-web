@@ -3,10 +3,30 @@ name = "pi-wiki-parser-worker"
 version = "0.0.28"
 description = "Isolated PDF parser worker for the pi-agent LLM Wiki"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
 license = { file = "LICENSE" }
 authors = [{ name = "Pi Python Port" }]
 dependencies = []
+
+[project.scripts]
+pi-wiki-parser-worker = "wiki_parser_worker.cli:main"
+
+[project.optional-dependencies]
+runtime = [
+    "docling-core==2.92.0",
+    "docling-ibm-models==3.13.2",
+    "docling-parse==7.15.0",
+    "docling-slim[convert-core,feat-ocr-rapidocr-onnx,format-pdf-docling,models-local]==2.119.0",
+    "onnxruntime==1.29.0",
+    "pymupdf==1.28.2",
+    "pymupdf-layout==1.28.2",
+    "pymupdf4llm==1.28.2",
+    "pypdfium2==5.13.0",
+    "rapidocr==3.9.2",
+    "torch==2.13.0+cpu",
+    "torchvision==0.28.0+cpu",
+    "transformers==5.15.1",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -20,7 +40,9 @@ packages = ["src/wiki_parser_worker"]
 "NOTICE.md" = "wiki_parser_worker/compliance_assets/NOTICE.md"
 "SOURCE_OFFER.md" = "wiki_parser_worker/compliance_assets/SOURCE_OFFER.md"
 "component-manifest.json" = "wiki_parser_worker/compliance_assets/component-manifest.json"
+"runtime-manifest.json" = "wiki_parser_worker/compliance_assets/runtime-manifest.json"
 "sbom.spdx.json" = "wiki_parser_worker/compliance_assets/sbom.spdx.json"
+"config/routing-quality-v1.json" = "wiki_parser_worker/config/routing-quality-v1.json"
 
 [tool.ruff]
 line-length = 100
@@ -30,5 +52,14 @@ target-version = "py311"
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }

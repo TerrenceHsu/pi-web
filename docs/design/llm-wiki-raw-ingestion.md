@@ -1,10 +1,10 @@
 # LLM Wiki Raw Ingestion
 
-> 状态：阶段 3 进行中；Backend、HTML、Contract v1 Fake PDF、Contract v2、Raw parse revisions、离线 Fake v2、Contract v2 主应用编排与 AGPL Worker 合规 scaffold 已实现并验证
+> 状态：阶段 3 进行中；Backend、HTML、Contract v1 Fake PDF、Contract v2、Raw parse revisions、离线 Fake v2、Contract v2 主应用编排、AGPL Worker 合规包与真实 Parser adapter/source Gate 已实现并验证
 >
-> 校准日期：2026-08-24
+> 校准日期：2026-08-26
 >
-> 未完成：真实 PyMuPDF4LLM + Docling Worker、阶段 3 最小前端
+> 未完成：阶段 3 最小前端
 
 ## 1. 边界
 
@@ -143,12 +143,12 @@ HTML 上传会自动排队。没有 PDF Provider 时，PDF 保持 `uploaded` 且
 5. 真实语料先校准 versioned routing/quality config，再完成 fast/accurate/auto/fallback、取消、
    超时、崩溃清理、SHA 篡改、断网、AGPL source offer 与资源上限 smoke。
 
-在 Contract v2、配置和运行时 Gate 完成前，HTML 与现有 Fake 路径可继续开发和 CI；生产 PDF
-解析保持不可用是预期行为。
+Contract v2、配置和运行时 Gate 均已完成；主应用仍须显式配置已验证的 OCI Worker exchange，
+未配置部署的生产 PDF 解析继续 fail closed。
 
 ## 9. 未完成
 
-- PyMuPDF4LLM + Docling 真实依赖/模型 Gate、持久 Worker adapter、OCI build manifest 和实机 smoke。
+- 离线 OCI Worker 已完成：完整 lock、wheel/source/model 物化、持久 Contract v2 transport、OCI build manifest、隔离检查及 digital/论文/复杂/扫描/auto-fallback/取消恢复真实 smoke 均通过，`runtime_ready=true`；后续发布镜像必须复跑相同 Gate。
 - Space/Source/状态/Raw artifact 最小前端；完整 Pages/Graph/Changes/Conversations 属于阶段 7。
 - Source 物理删除/保留策略；当前仅有 `deleting` 软状态，避免在 retention 合同冻结前删除 Raw。
 - 页面入口生成、Agent 总结、Change Set、FTS5 和图谱，分别属于阶段 4–6。

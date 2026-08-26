@@ -74,6 +74,7 @@ from .models import (
     ParserSourceSpec,
     validate_artifact_path,
 )
+from .oci import PersistentOciParserProvider
 from .provider import ParserProvider
 from .provider_v2 import ParserProviderV2
 
@@ -132,6 +133,7 @@ __all__ = [
     "ParserParsedAsset",
     "ParserParsedDocument",
     "ParserParsedPage",
+    "PersistentOciParserProvider",
     "ParserPreflightReport",
     "ParserPresetName",
     "ParserQualityFailureCode",

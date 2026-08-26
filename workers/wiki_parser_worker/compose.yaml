@@ -1,0 +1,42 @@
+name: pi-wiki-parser
+
+services:
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+    image: pi-wiki-parser-worker:0.0.28
+    restart: unless-stopped
+    network_mode: none
+    read_only: true
+    init: true
+    user: "65532:65532"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 8g
+    cpus: 2.0
+    stop_grace_period: 30s
+    environment:
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    volumes:
+      - type: bind
+        source: ${WIKI_PARSER_EXCHANGE_DIR:?set WIKI_PARSER_EXCHANGE_DIR to an absolute host directory}
+        target: /exchange
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=536870912,uid=65532,gid=65532,mode=0700
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 4096
+      nproc:
+        soft: 256
+        hard: 256

@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -62,15 +63,48 @@ def test_worker_package_has_exact_agpl_identity_and_complete_gate_assets() -> No
     )
     project = tomllib.loads((_WORKER_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     sbom = json.loads((_WORKER_ROOT / "sbom.spdx.json").read_text(encoding="utf-8"))
+    runtime = json.loads(
+        (_WORKER_ROOT / "runtime-manifest.json").read_text(encoding="utf-8")
+    )
     license_bytes = (_WORKER_ROOT / "LICENSE").read_bytes()
 
     assert manifest["component_id"] == "wiki-parser-worker"
     assert manifest["version"] == "0.0.28"
     assert manifest["license_expression"] == "AGPL-3.0-only"
-    assert manifest["runtime_ready"] is False
+    assert manifest["runtime_ready"] is True
     assert project["project"]["license"] == {"file": "LICENSE"}
     assert project["project"]["version"] == manifest["version"]
     assert project["project"]["dependencies"] == []
+    assert runtime["gate"]["adapter_source_ready"] is True
+    assert runtime["gate"]["full_transitive_lock_ready"] is True
+    assert runtime["gate"]["runtime_ready"] is True
+    assert runtime["gate"]["offline_oci_image_verified"] is True
+    assert len(runtime["packages"]) == 13
+    assert len(runtime["models"]) == 3
+    runtime_dependencies = set(project["project"]["optional-dependencies"]["runtime"])
+    assert "torch==2.13.0+cpu" in runtime_dependencies
+    assert "torchvision==0.28.0+cpu" in runtime_dependencies
+    assert project["tool"]["uv"]["sources"] == {
+        "torch": {"index": "pytorch-cpu"},
+        "torchvision": {"index": "pytorch-cpu"},
+    }
+    routing_config = json.loads(
+        (_WORKER_ROOT / runtime["routing_config"]["path"]).read_text(encoding="utf-8")
+    )
+    routing_config_bytes = json.dumps(
+        routing_config,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    assert hashlib.sha256(routing_config_bytes).hexdigest() == runtime["routing_config"][
+        "sha256"
+    ]
+    assert all(
+        len(file["sha256"]) == 64 and file["size_bytes"] > 0
+        for model in runtime["models"]
+        for file in model["files"]
+    )
     force_included = project["tool"]["hatch"]["build"]["targets"]["wheel"][
         "force-include"
     ]
@@ -79,7 +113,9 @@ def test_worker_package_has_exact_agpl_identity_and_complete_gate_assets() -> No
         "NOTICE.md",
         "SOURCE_OFFER.md",
         "component-manifest.json",
+        "runtime-manifest.json",
         "sbom.spdx.json",
+        "config/routing-quality-v1.json",
     }
     assert hashlib.sha256(license_bytes).hexdigest() == _OFFICIAL_AGPL_TEXT_SHA256
     decoded_license = license_bytes.decode("utf-8")
@@ -90,6 +126,63 @@ def test_worker_package_has_exact_agpl_identity_and_complete_gate_assets() -> No
     assert sbom["packages"][0]["licenseDeclared"] == "AGPL-3.0-only"
     assert sbom["packages"][0]["versionInfo"] == manifest["version"]
     assert sbom["packages"][0]["filesAnalyzed"] is False
+
+
+def test_oci_build_is_hash_locked_cpu_only_and_runtime_network_is_disabled() -> None:
+    runtime = json.loads(
+        (_WORKER_ROOT / "runtime-manifest.json").read_text(encoding="utf-8")
+    )
+    build = runtime["oci_build"]
+    dockerfile = (_WORKER_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    compose = (_WORKER_ROOT / "compose.yaml").read_text(encoding="utf-8")
+    uv_lock = (_WORKER_ROOT / build["uv_lock"]["path"]).read_bytes()
+    requirements = (
+        _WORKER_ROOT / build["requirements_lock"]["path"]
+    ).read_bytes()
+    requirements_text = requirements.decode("utf-8")
+
+    assert build["base_image"] in dockerfile
+    assert hashlib.sha256(uv_lock).hexdigest() == build["uv_lock"]["sha256"]
+    assert hashlib.sha256(requirements).hexdigest() == build["requirements_lock"][
+        "sha256"
+    ]
+    assert uv_lock.count(b"[[package]]") == build["uv_lock"]["package_count"]
+    assert (
+        len(re.findall(r"(?m)^[A-Za-z0-9][A-Za-z0-9_.-]*==", requirements_text))
+        == build["requirements_lock"]["resolved_package_count"]
+    )
+    assert "--require-hashes" in dockerfile
+    assert "--index-url https://pypi.org/simple" in requirements_text
+    assert "--extra-index-url https://download.pytorch.org/whl/cpu" in requirements_text
+    assert "network_mode: none" in compose
+    assert "read_only: true" in compose
+    assert 'user: "65532:65532"' in compose
+    assert "no-new-privileges:true" in compose
+    assert "cap_drop:" in compose and "- ALL" in compose
+    assert "ports:" not in compose
+    assert "opencv-python-headless" not in requirements_text
+    assert "opencv-python==5.0.0.93" in requirements_text
+    assert not re.search(r"(?mi)^(?:nvidia-|cuda)", requirements_text)
+    assert runtime["gate"]["offline_source_bundle_materialized"] is True
+    assert runtime["gate"]["offline_oci_image_verified"] is True
+    assert runtime["gate"]["representative_pdf_smoke_passed"] is True
+    assert runtime["gate"]["runtime_ready"] is True
+    assert runtime["verification"]["verified_at"] == "2026-08-26"
+    assert runtime["verification"]["docker_version"] == "29.7.2"
+    agpl_sources = {
+        package["name"]: package["source"]
+        for package in runtime["packages"]
+        if package.get("selected_license") == "AGPL-3.0-only"
+    }
+    assert set(agpl_sources) == {"pymupdf", "pymupdf-layout", "pymupdf4llm"}
+    assert all(
+        isinstance(source["archive_sha256"], str)
+        and len(source["archive_sha256"]) == 64
+        and source["url"].startswith("https://")
+        for source in agpl_sources.values()
+    )
+    assert "fetch_runtime_sources.py" in dockerfile
+    assert "/opt/upstream-sources" in dockerfile
 
 
 def test_worker_source_imports_neither_main_app_nor_concrete_parser_runtime() -> None:
@@ -117,7 +210,7 @@ def test_worker_source_imports_neither_main_app_nor_concrete_parser_runtime() ->
             (
                 "import sys; import wiki_parser_worker as worker; "
                 "identity=worker.compliance_identity(); "
-                "assert identity.runtime_ready is False; "
+                "assert identity.runtime_ready is True; "
                 f"forbidden={sorted(_FORBIDDEN_RUNTIME_ROOTS)!r}; "
                 "assert not any(name in sys.modules for name in forbidden)"
             ),
@@ -173,8 +266,8 @@ def test_source_offer_archive_is_exact_deterministic_and_self_verifying() -> Non
     assert first_snapshot == second_snapshot
     assert first_archive == second_archive
     assert first_hash == second_hash == hashlib.sha256(first_archive).hexdigest()
-    assert first_snapshot.runtime_ready is False
-    assert len(first_snapshot.files) == 11
+    assert first_snapshot.runtime_ready is True
+    assert len(first_snapshot.files) == 35
     public = first_snapshot.public_dict()
     assert str(_ROOT) not in json.dumps(public)
     assert public["source_tree_sha256"] == first_snapshot.source_tree_sha256
@@ -223,13 +316,13 @@ def test_about_api_exposes_manifest_assets_and_deterministic_source_archive() ->
         assert payload["application"]["license_expression"] == "MIT"
         worker = payload["components"][0]
         assert worker["license_expression"] == "AGPL-3.0-only"
-        assert worker["runtime_ready"] is False
+        assert worker["runtime_ready"] is True
         assert worker["source_offer_available"] is True
         assert str(_ROOT) not in about.text
 
         source_offer = client.get(worker["source_offer_url"])
         assert source_offer.status_code == 200
-        assert source_offer.json()["file_count"] == 11
+        assert source_offer.json()["file_count"] == 35
         assert source_offer.json()["source_tree_sha256"] == worker["source_tree_sha256"]
 
         license_response = client.get(worker["license_url"])

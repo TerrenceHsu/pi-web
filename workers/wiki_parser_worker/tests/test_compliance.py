@@ -22,20 +22,29 @@ from wiki_parser_worker import __version__, compliance_identity  # noqa: E402
 
 
 class ComplianceIdentityTests(unittest.TestCase):
-    def test_metadata_is_consistent_and_runtime_is_not_advertised(self) -> None:
+    def test_metadata_is_consistent_and_runtime_is_verified(self) -> None:
         manifest = json.loads(
             (_ROOT / "component-manifest.json").read_text(encoding="utf-8")
         )
         project = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         sbom = json.loads((_ROOT / "sbom.spdx.json").read_text(encoding="utf-8"))
+        runtime = json.loads(
+            (_ROOT / "runtime-manifest.json").read_text(encoding="utf-8")
+        )
         identity = compliance_identity()
 
         self.assertEqual(__version__, manifest["version"])
         self.assertEqual(project["project"]["version"], manifest["version"])
         self.assertEqual(sbom["packages"][0]["versionInfo"], manifest["version"])
         self.assertEqual(identity.license_expression, "AGPL-3.0-only")
-        self.assertFalse(identity.runtime_ready)
-        self.assertFalse(manifest["runtime_ready"])
+        self.assertTrue(identity.runtime_ready)
+        self.assertTrue(manifest["runtime_ready"])
+        self.assertTrue(runtime["gate"]["adapter_source_ready"])
+        self.assertTrue(runtime["gate"]["full_transitive_lock_ready"])
+        self.assertTrue(runtime["gate"]["offline_source_bundle_materialized"])
+        self.assertTrue(runtime["gate"]["offline_oci_image_verified"])
+        self.assertTrue(runtime["gate"]["representative_pdf_smoke_passed"])
+        self.assertTrue(runtime["gate"]["runtime_ready"])
 
 
 if __name__ == "__main__":

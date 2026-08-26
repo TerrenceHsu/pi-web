@@ -425,10 +425,9 @@ Knowledge
   Artifact v2 和同一原始 PDF SHA 证据，不加载任何具体 Parser runtime。
 - **已实现主应用编排**：Contract v2 不可信 artifact 逐项复核，三种模式贯穿上传、排队与
   崩溃恢复，attempt/route/quality/revision 原子持久化；拒绝制品不切换 selected revision。
-- **已实现 AGPL 合规 scaffold**：独立 Worker 包、完整许可证/notices、当前源码 manifest、
-  确定性 Source Offer、SPDX SBOM、wheel Gate 和 About API/UI；保持 `runtime_ready=false`。
-- **已冻结、待实现运行时**：AGPL-3.0 Worker 边界、真实版本化路由配置资产与
-  PyMuPDF4LLM/Docling adapter，见双 Parser 独立设计。
+- **已实现并验证 AGPL Worker**：独立 Worker 包、完整许可证/notices/源码 manifest、确定性
+  Source Offer、SPDX SBOM、wheel Gate、About API/UI、版本化路由配置及 PyMuPDF4LLM/Docling
+  adapter；真实 OCI 隔离与代表性 PDF smoke 通过，`runtime_ready=true`。
 - **可复用**：独立 `wiki_parser` Protocol/固定错误与完全离线 Fake 的生命周期和安全经验。
 
 ### 阶段 2：WikiStore 与新目录
@@ -448,7 +447,7 @@ Knowledge
 - **已完成**：Contract v2，以及 schema v2/Raw 多 attempt/revision、逐页 bundle、selected
   CAS/pointer repair 与旧 flat v1 明确重建门禁。
 - **已完成**：Contract v2 artifact 导入与现有 Wiki Worker/API 原子编排。
-- **待实现**：构建固定版本/hash、断外网的 PyMuPDF4LLM + Docling 持久 OCI Worker。
+- **已完成**：构建并验证固定版本/hash、断外网的 PyMuPDF4LLM + Docling 持久 OCI Worker。
 - **待实现**：前端先支持 Space、Source、状态和 Raw artifact 浏览。
 
 ### 阶段 4：Wiki 页面与 Change Set

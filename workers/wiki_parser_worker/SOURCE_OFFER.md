@@ -19,11 +19,20 @@ The manifest endpoint returns SHA-256 and size evidence for every offered file. 
 created with stable ordering and normalized metadata from the same validated byte snapshot. It
 requires no password, account-specific decryption key, or proprietary extraction tool.
 
-This repository copy is the complete Corresponding Source for the current compliance scaffold.
-It does not claim to be the source for a future parser image containing dependencies or models.
-Before such an image is distributed or offered as a network service, its exact build definition,
-lockfiles, adapters, configuration assets, modifications, dependency source references and
-installation information must enter the same source offer.
+This repository copy is the complete preferred source for the current Worker-owned service. It
+includes the adapters, file-queue protocol, persistent supervisor/child, tests, digest-pinned OCI
+build/Compose definitions, full transitive locks, versioned routing/quality configuration, audited
+dependency/model identities, and the fail-closed source materializer. Every image build places the
+three hash-verified Artifex AGPL archives under the image's `upstream-sources/` directory. The
+2026-08-26 OCI gate exported and independently verified those archives, notices and the runtime
+manifest from the built image before representative offline PDF smokes were accepted.
+
+Before a parser image is distributed or offered as a network service, its generated upstream source
+directory and container-level third-party notices must be mounted into or linked from the same
+no-charge source offer, and the exact built image must pass the documented offline smoke.
+`runtime-manifest.json` records the transitive-lock, materialization, image and representative-smoke
+gates as true. A later distributed image must repeat this verification and publish its generated
+upstream source directory; source-level readiness is not a substitute for release evidence.
 
 This engineering gate is not legal advice. Distribution and deployment operators remain
 responsible for reviewing their actual delivery and network-service obligations.

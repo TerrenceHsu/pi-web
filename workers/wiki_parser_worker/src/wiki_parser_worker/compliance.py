@@ -1,4 +1,4 @@
-"""Immutable public identity for the not-yet-runnable Worker package.
+"""Immutable public identity for the verified Worker package.
 
 Copyright (C) 2026 Pi Python Port
 SPDX-License-Identifier: AGPL-3.0-only
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class WorkerComplianceIdentity:
-    """Bounded identity that cannot falsely advertise parser readiness."""
+    """Bounded identity for the separately verified OCI Worker release."""
 
     component_id: str
     version: str
@@ -30,7 +30,7 @@ def compliance_identity() -> WorkerComplianceIdentity:
         component_id="wiki-parser-worker",
         version="0.0.28",
         license_expression="AGPL-3.0-only",
-        runtime_ready=False,
+        runtime_ready=True,
         source_offer_archive="wiki-parser-worker-0.0.28-source.tar.gz",
     )
 

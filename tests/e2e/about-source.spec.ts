@@ -17,7 +17,7 @@ test("About exposes the AGPL Worker Corresponding Source download", async ({
   const worker = modal.locator("[data-testid='worker-license']");
   await expect(worker).toContainText("AGPL-3.0-only");
   await expect(worker).toContainText("absolutely no warranty");
-  await expect(worker).toContainText("runtime not ready");
+  await expect(worker).toContainText("runtime ready");
 
   const manifestResponse = await page.request.get(
     "/api/about/wiki-parser-worker/source-offer",
@@ -25,7 +25,7 @@ test("About exposes the AGPL Worker Corresponding Source download", async ({
   expect(manifestResponse.ok(), await manifestResponse.text()).toBe(true);
   const manifest = await manifestResponse.json();
   expect(manifest.component_id).toBe("wiki-parser-worker");
-  expect(manifest.file_count).toBe(11);
+  expect(manifest.file_count).toBe(35);
   expect(manifest.source_tree_sha256).toMatch(/^[a-f0-9]{64}$/);
 
   const downloadPromise = page.waitForEvent("download");

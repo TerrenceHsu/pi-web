@@ -338,6 +338,7 @@ Playwright 测试位于 `tests/e2e/`，覆盖基础聊天、异步流、刷新�
 
 LLM Wiki PDF Parser Worker 是独立组件，位于
 [`workers/wiki_parser_worker`](workers/wiki_parser_worker)，采用 `AGPL-3.0-only`，不属于主项目
-MIT 授权范围。当前包仅是 `runtime_ready=false` 的合规 scaffold，包含完整 AGPL 文本、notices、
-Corresponding Source manifest、Source Offer 与 SPDX SBOM，不含 PyMuPDF4LLM、Docling、OCR 或
-模型运行时。登录后的侧栏 **About & Source** 可查看许可证并下载同版本源码归档。
+MIT 授权范围。Worker Source Offer 包含完整 AGPL 文本、notices、adapter/构建源码、锁、
+Corresponding Source manifest 与 SPDX SBOM；具体 PyMuPDF4LLM、Docling、OCR 和模型只由
+hash-locked OCI 构建物化，不装入主应用。2026-08-26 的断网镜像、隔离和代表性 PDF Gate 已通过，
+当前 manifest 为 `runtime_ready=true`。登录后的侧栏 **About & Source** 可查看许可证并下载同版本源码归档。

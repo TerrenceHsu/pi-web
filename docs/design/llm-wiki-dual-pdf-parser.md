@@ -113,12 +113,12 @@ PyMuPDF4LLM/PyMuPDF 所在 Worker 采用 AGPL-3.0 合规路径：
 这是工程合规 Gate，不代替法律意见；最终分发形态仍需在发布前复核许可证范围。
 
 当前已实现的 Gate 位于 `workers/wiki_parser_worker`：它是独立 `AGPL-3.0-only`、
-`runtime_ready=false` 的可构建包，包含未经改写的 GNU AGPLv3 正文、notices、精确文件 manifest、
+`runtime_ready=true` 的已验证可构建包，包含未经改写的 GNU AGPLv3 正文、notices、精确文件 manifest、
 SOURCE_OFFER、SPDX 2.3 SBOM、自包含 smoke 与 wheel verifier。主应用只读取该目录的合规资产，
 不 import Worker；`/api/about` 和侧栏 **About & Source** 从同一个稳定字节快照提供逐文件/tree/archive
-SHA 与确定性源码 tar。缺少源码挂载时下载入口 fail closed。当前 Source Offer 只对应合规 scaffold；
-后续加入真实依赖、adapter、配置、模型和镜像构建文件时，必须同步扩展 manifest/SBOM/notices 与
-Corresponding Source，不能沿用旧归档冒充新运行时源码。
+SHA 与确定性源码 tar。缺少源码挂载时下载入口 fail closed。真实依赖、adapter、配置、模型身份、
+镜像构建与完整锁已同步进入 manifest/SBOM/notices/Corresponding Source；后续发布仍须复跑实机 Gate，
+不能沿用旧归档冒充新运行时源码。
 
 ## 5. 预检与路由配置
 
@@ -315,12 +315,27 @@ Raw PDF page、parsed page、未批准草稿和历史 parse revision 均不进�
    PDF 字节，三种模式、直接 Docling、fast 成功、auto 单次 fallback、显式 fast 拒绝、
    Docling 终止、取消/销毁、逐页 tar 和同源 SHA 均有可重复测试。
 5. **已完成**：接入现有 API/Worker、取消/超时/崩溃恢复和不可信 Artifact v2 导入；三种模式精确贯穿上传、排队与恢复，每个 attempt/route/quality 和 revision 原子持久化，拒绝制品不发布 selected revision。
-6. **已完成**：建立独立 AGPL Worker 合规包、许可证/notices、当前 scaffold 的完整
-   Corresponding Source、确定性 Source Offer API/UI、SPDX 2.3 SBOM 与 wheel 内容 Gate；保持
-   `runtime_ready=false`，不提前加入或伪装具体 Parser runtime。
-7. 固定 PyMuPDF4LLM、PyMuPDF、Docling、OCR 和模型版本/hash，构建离线 OCI runtime。
-8. 实现 PyMuPDF 预检、PyMuPDF4LLM adapter、QualityEvaluator 和 Docling 两个 preset。
-9. 用真实语料校准配置并执行 fast/accurate/auto/fallback、安全、断网和资源 smoke。
+6. **已完成**：建立独立 AGPL Worker 合规包、许可证/notices、完整 Corresponding Source、
+   确定性 Source Offer API/UI、SPDX 2.3 SBOM 与 wheel 内容 Gate；最初的 scaffold 保持
+   `runtime_ready=false`，直到步骤 9 的真实 OCI Gate 完成后才提升为 true。
+7. **dependency/source Gate 已完成**：固定 PyMuPDF4LLM/PyMuPDF/Layout 1.28.2、Docling
+   Slim 2.119.0/Core 2.92.0/Parse 7.15.0/IBM Models 3.13.2、RapidOCR 3.9.2 与
+   CPU-only Torch/TorchVision；记录关键 wheel/source identity、Heron/TableFormer/PP-OCRv6
+   逐文件 hash 和许可证，并扩展 SBOM/Source Offer。完整传递 lock、PyPI/PyTorch CPU index、
+   基础镜像 manifest digest 和 hash-required Linux requirements 已固定；离线上游源码 bundle 与
+   OCI 实机 smoke 已在步骤 9 完成验证。
+8. **已完成**：实现 hash-pinned 配置、PyMuPDF 预检/路由、PyMuPDF4LLM
+   `page_chunks=True`/OCR-off adapter、原始 PDF 内嵌图片提取、QualityEvaluator 和启动期
+   Docling standard/ocr 双 Converter；生产默认路径在 Converter 创建前逐文件重算模型 SHA，
+   fast 路径拒绝无 PyMuPDF Layout 的静默 legacy fallback。
+9. **已完成并通过实机 Gate**：主应用通过稳定 file queue 连接持久 OCI Worker；
+   supervisor 单并发调度可复用 parser child，并在 cancel/timeout/crash 后硬终止和重建 child；
+   source/status/receipt/artifact 受大小、类型、SHA 和 Contract v2 约束。离线 fake-runtime 已覆盖
+   fast/accurate/auto/fallback、取消/超时/崩溃/重启恢复、source/artifact 篡改和配额。Compose
+   固定断网、只读 rootfs、非 root、drop-all capabilities、no-new-privileges 与资源上限，且提供
+   多代表性 PDF smoke CLI。2026-08-26 在 Docker 29.7.2/Linux-amd64 上验证镜像内 AGPL 源码与
+   notices、断网/只读/非 root/无 capability/资源上限，并通过 digital fast、论文/复杂 accurate、
+   扫描 OCR、auto 质量回退及运行中取消恢复；`runtime_ready=true`。
 10. 完成阶段 3 最小前端，然后继续 Wiki 页面/Change Set。
 
 ## 12. 验收不变量

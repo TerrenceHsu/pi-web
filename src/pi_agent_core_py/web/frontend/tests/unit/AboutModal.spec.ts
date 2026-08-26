@@ -27,7 +27,7 @@ const response = {
       name: "pi Wiki Parser Worker",
       version: "0.0.28",
       license_expression: "AGPL-3.0-only",
-      runtime_ready: false,
+      runtime_ready: true,
       source_offer_available: true,
       source_offer_url: "/api/about/wiki-parser-worker/source-offer",
       source_archive_url: "/api/about/wiki-parser-worker/source",
@@ -69,7 +69,7 @@ describe("AboutModal", () => {
     const worker = bodyGet('[data-testid="worker-license"]')
     expect(worker.text()).toContain("AGPL-3.0-only")
     expect(worker.text()).toContain("absolutely no warranty")
-    expect(worker.text()).toContain("runtime not ready")
+    expect(worker.text()).toContain("runtime ready")
     expect(worker.text()).toContain("a".repeat(64))
   })
 

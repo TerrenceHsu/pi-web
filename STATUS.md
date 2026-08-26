@@ -1,6 +1,6 @@
 # Project Status
 
-> 当前事实快照，校准日期：**2026-08-24**。本页只描述当前代码基线；阶段性测试数字和历史决策保留在 `docs/validation/`、`CHANGELOG.md` 与归档计划中。
+> 当前事实快照，校准日期：**2026-08-26**。本页只描述当前代码基线；阶段性测试数字和历史决策保留在 `docs/validation/`、`CHANGELOG.md` 与归档计划中。
 
 ## 基线身份
 
@@ -20,7 +20,7 @@
 
 ## 当前交付状态
 
-LLM Wiki 产品合同、Parser Provider 与 Store 基础阶段已完成；阶段 3 Contract v1 Backend、双 Parser Contract v2、Raw parse revisions、离线 Fake v2、Contract v2 主应用编排与 AGPL Worker 合规包已完成。PDF 路线已从 Marker 改为 PyMuPDF4LLM fast + Docling accurate/auto fallback，真实 Parser runtime 与前端按 `TODO.md` 推进：
+LLM Wiki 产品合同、Parser Provider 与 Store 基础阶段已完成；阶段 3 Contract v1 Backend、双 Parser Contract v2、Raw parse revisions、离线 Fake v2、Contract v2 主应用编排、AGPL Worker 合规包、真实 Parser adapter 及持久 OCI Worker 的构建与实机 Gate 已完成。PDF 路线为 PyMuPDF4LLM fast + Docling accurate/auto fallback；当前待办仅是阶段 3 前端：
 
 | 能力 | 状态 | 代表性基线 |
 |---|---|---|
@@ -50,10 +50,10 @@ LLM Wiki 产品合同、Parser Provider 与 Store 基础阶段已完成；阶段
 | Backend warning / pytest 状态目录 / ToolResult UTF-8 E2E | ✅ 完成 | Backend `-W error` 0 warning；cache/temp 固定到工作区；Playwright 48/48 |
 | Frontend warning 收敛 | ✅ 完成 | Modal/Teleport attrs、Vite mixed import 与 Playwright color env 三类提示归零；Vitest 404/404；Playwright 48/48 |
 | 历史消息 U+FFFD 完整性标记 | ✅ 完成 | 读取时递归检测并返回计数/RFC 6901 路径，不改写 SQLite、不伪造恢复；消息与工具卡可见，刷新保持；Playwright 49/49 |
-| LLM Wiki 产品合同与 Parser Provider Gate | ✅ Contract/Fake v2 与 AGPL 合规包完成，真实运行时待实现 | 新 Wiki 保持无 Chunk-RAG；Marker 路线停止；Contract v2 固定 PyMuPDF4LLM fast、Docling accurate/auto fallback、逐页制品、同源 attempt 证据、hash-pinned config、原始 PDF 唯一事实源与 AGPL-3.0 路径；离线 Fake v2 已执行完整路由/回退状态机，主应用依赖隔离门禁保持通过 |
-| LLM Wiki AGPL Worker 合规包 | ✅ `runtime_ready=false` scaffold | 独立 `workers/wiki_parser_worker`、完整 AGPL-3.0-only 文本/notices、精确源码 manifest、确定性 Source Offer、SPDX 2.3 SBOM、wheel verifier 与 About API/UI 已完成；主应用 wheel/import 和 Worker runtime 继续隔离，真实依赖/模型尚未进入 |
+| LLM Wiki 产品合同与 Parser Provider Gate | ✅ Contract/Fake/OCI Provider v2 完成并实机验证 | 新 Wiki 保持无 Chunk-RAG；Marker 路线停止；Contract v2 固定 PyMuPDF4LLM fast、Docling accurate/auto fallback、逐页制品、同源 attempt 证据、hash-pinned config、原始 PDF 唯一事实源与 AGPL-3.0 路径；主应用通过无 Parser 依赖的 file queue Provider 连接外部 Worker |
+| LLM Wiki AGPL Worker 合规包 | ✅ `runtime_ready=true` | 独立 `workers/wiki_parser_worker`、AGPL-3.0-only、35 文件精确/确定性 Source Offer、SPDX 2.3 SBOM、88 包 uv lock、hash-required Linux resolution、三项 Artifex 源码物化器、digest-pinned OCI/断网 Compose、持久 supervisor/child 与 wheel verifier；Docker 29.7.2/Linux-amd64 下镜像 bundle/notices、隔离、真实 fast/accurate/复杂/OCR/fallback 与取消恢复均通过 |
 | LLM WikiStore、目录与旧库退役 Gate | ✅ schema v2 | 页面中心型 schema v2、Space CRUD/CAS、不可变 ParseAttempt/ParseRevision、revision-scoped Artifact、selected version CAS/pointer repair、Raw/Page 原子路径和显式只读 legacy backup；旧 Wiki flat schema v1 固定要求显式重建，不自动迁移 |
-| LLM Wiki Raw Ingestion Backend | 🚧 阶段 3 进行中 | Contract v1 Source/Artifact/Job、不可变 PDF/HTML、零网络 HTML、Fake PDF、不可信 tar、lifespan/API/Worker、中断恢复、双 Parser Contract v2、Raw parse revisions、离线 Fake v2 与 Contract v2 不可信 artifact 导入/原子编排已完成；真实 Worker 和前端待完成 |
+| LLM Wiki Raw Ingestion Backend | 🚧 阶段 3 进行中 | Contract v1 Source/Artifact/Job、不可变 PDF/HTML、零网络 HTML、Fake PDF、不可信 tar、lifespan/API/Worker、中断恢复、双 Parser Contract v2、Raw parse revisions、离线 Fake v2、Contract v2 不可信 artifact 导入/原子编排、真实 adapter、OCI transport/supervisor 及实机 Gate 已完成；前端待完成 |
 
 ## 当前产品能力
 
@@ -103,7 +103,7 @@ LLM Wiki 产品合同、Parser Provider 与 Store 基础阶段已完成；阶段
 | API Key | OS Keyring、显式 session-only memory 或显式 env；不写入 SQLite 明文 |
 | Active request / pending approval / event subscribers | 当前后端进程内存；后端重启不恢复执行 |
 
-## 2026-08-23 当前验证基线
+## 2026-08-25 当前验证基线
 
 Backend 全量数字基于当前含 Coding Sandbox P0 第 0–10 项的工作区实际复跑；
 版本/许可证提交 `8a6ff2e` 另行通过 wheel 元数据验证；既有 `51ce3c7` 等价内容
@@ -111,17 +111,18 @@ Backend 全量数字基于当前含 Coding Sandbox P0 第 0–10 项的工作区
 
 | 验证 | 结果 | 备注 |
 |---|---|---|
-| Ruff 全量 | **PASS** | `ruff check src tests scripts`；0 errors；包含 `wiki_parser` 与新 `web.wiki` |
-| strict Mypy 全量 | **PASS** | 主项目 `mypy src --strict`：161 files / 0 issues；Worker `mypy --strict .../src .../tests`：3 files / 0 issues；覆盖独立 `coding_sandbox`、`wiki_parser` Contract/Fake v1/v2、新 Wiki Raw Ingestion、Source Offer 与 AGPL Worker scaffold |
-| Backend 全量离线 | **4024 passed, 9 skipped, 15 deselected** | `pytest tests --tb=short -q --no-cov`；521.01s；包含双 Parser Contract/Fake v2、Wiki schema v2、Contract v2 artifact 导入/编排、AGPL Worker/Source Offer、parse revision/CAS/pointer repair 与阶段 3 Backend/API/恢复回归 |
+| Ruff 全量 | **PASS** | `ruff check .`；0 errors；包含 OCI Provider、Worker service 与 smoke CLI |
+| strict Mypy 全量 | **PASS** | 主项目 `src` + OCI smoke CLI：163 files / 0 issues；Worker source/scripts/tests：21 files / 0 issues；覆盖 `wiki_parser` Contract/Fake/OCI v1/v2、新 Wiki Raw Ingestion、Source Offer、Parser adapters、构建脚本与 supervisor |
+| Backend 全量离线 | **4024 passed, 9 skipped, 15 deselected** | `pytest tests --tb=short -q --no-cov`；550.08s；包含双 Parser Contract/Fake v2、Wiki schema v2、Contract v2 artifact 导入/编排、AGPL Worker/Source Offer、parse revision/CAS/pointer repair 与阶段 3 Backend/API/恢复回归 |
 | Workspace 阶段 1 定向回归 | **125 passed** | `VirtualFileStore` 兼容别名、双根初始化、并发幂等、旧路径/purpose 迁移、固定根删除保护、Checkpointer/Auth/重启；`-W error` 下 0 warning |
 | Workspace 阶段 2 定向回归 | **116 passed** | 代码 `scripts/**` 映射、安全逻辑路径、revision 持久/冲突、Markdown CRUD、Agent 工具与 Web API；使用 `--no-cov` 定向运行 |
 | LLM Wiki Parser Contract/Fake v1 | **29 passed** | 历史 PDF-only Contract v1 的 DTO/Protocol、来源/制品 SHA、路径/配额、确定性 tar、取消/超时/销毁和包依赖隔离；可复用但不代表双 Parser v2 行为 |
 | LLM Wiki Parser Contract/Fake v2 与隔离 | **30 passed** | Contract v2 三模式、预检/路由/质量、逐页规范 Markdown、同源单次 fallback、attempt/artifact evidence、离线 Fake v2 生命周期/制品、AGPL capability 和主进程无具体 Parser runtime 依赖 |
 | LLM Wiki Fake Router v2 专项 | **10 passed** | accurate/扫描/复杂直接 Docling、auto fast 通过、auto 单次 fallback、显式 fast 拒绝、Docling 终止、源路径事后修改仍固定原始 SHA、取消/销毁与内容不泄露 |
-| LLM Wiki 全邻接 | **156 passed, 4 skipped** | `pytest tests -k wiki -q --no-cov`；28.29s；Wiki schema/store/files/legacy、Parser v1/v2/Fake v2、Source/HTML、Contract v1/v2 不可信 artifact、AGPL Worker/Source Offer、attempt/quality/route evidence、revision history/CAS/pointer repair、Worker 与 API；skip 为 Windows symlink capability |
-| LLM Wiki AGPL Worker 合规专项 | **7 passed + self-smoke 1 passed** | 官方 AGPL 文本 SHA、package/SBOM/version、主应用依赖隔离、确定性源码 tar、未声明/穿越攻击、About API、无效挂载 fail-fast；`uv build --wheel` 与 wheel 合规 verifier PASS，11 个源码/合规文件进入 Source Offer，5 个合规资产进入 wheel |
-| LLM Wiki Source Offer Browser E2E | **1 passed** | 登录后从侧栏打开 About，核验 MIT/AGPL 分离、无担保和 runtime-not-ready 提示，读取 hash manifest 并实际下载命名正确、具有 gzip 魔数的 Corresponding Source；0 retry |
+| LLM Wiki 全邻接 | **156 passed, 4 skipped** | `pytest tests -k wiki -q --no-cov`；20.62s；Wiki schema/store/files/legacy、Parser v1/v2/Fake v2、Source/HTML、Contract v1/v2 不可信 artifact、AGPL Worker/Source Offer、attempt/quality/route evidence、revision history/CAS/pointer repair、Worker 与 API；skip 为 Windows symlink capability |
+| LLM Wiki OCI/合规专项 | **31 passed + real OCI PASS** | fast/accurate/auto/fallback、cancel/timeout/crash/restart、source/artifact 篡改、配额、官方 AGPL 文本 SHA、锁/基础镜像/Compose/上游源码、确定性 Source Offer/About API；最终镜像 `sha256:d1e517ba…0368b`，镜像内 bundle/notices、断网/只读/非 root/无 capability/资源上限与真实 digital/论文/复杂/OCR/fallback/取消恢复均通过；smoke mutable path 防误用回归已覆盖 |
+| LLM Wiki v2 邻接回归 | **92 passed** | Contract v1/v2、Fake/OCI Provider、ingestion、HTML、不可信 artifact import、主应用依赖隔离与 AGPL Source Offer；`--no-cov` |
+| LLM Wiki Source Offer Browser E2E | **1 passed** | 登录后从侧栏打开 About，核验 MIT/AGPL 分离、无担保和 runtime-ready 提示，读取 hash manifest 并实际下载命名正确、具有 gzip 魔数的 Corresponding Source；运行态 exchange 固定在 Source Offer 树外；0 retry |
 | LLM Wiki Contract v2 主链路新增回归 | **13 passed（纳入全量）** | 覆盖 auto fallback 原子发布、fast 质量拒绝、恶意/非规范 artifact、accurate 重解析历史、v1/v2 隔离、API parse mode/evidence 浏览、恢复模式保持与连续重解析排队 |
 | LLM Wiki Raw revision 专项 | **5 passed** | 重解析历史保留、selected version 防 ABA、失败保留 selected 并记录 attempt、启动修复 pointer、跨 Source FK 隔离 |
 | LLM WikiStore/Files/Legacy | **52 passed, 4 skipped** | schema/version/capability/integrity、Space CRUD/双连接 CAS、路径/原子写入/镜像恢复、legacy 一致备份/故障顺序和旧 RAG import 隔离；skip 为 Windows symlink capability |
@@ -182,7 +183,7 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 - Session Folder 的 `view_file` 只对文本/Markdown/HTML/CSV/Parquet提供正文或结构化预览；Session PDF 只返回元信息
 - Knowledge 子系统可解析文本型 PDF；扫描件进入 `needs_ocr`，当前无 OCR、图片理解或视觉模型
 - Knowledge 检索使用 SQLite FTS5/BM25，不使用向量数据库或 embedding
-- 新 Wiki 已以 `preserve` 模式接入独立 Web lifespan/API，真实用户旧库仍原样保留；双 PDF Parser v2 尚未接入，PDF 未配置时保持 `uploaded`，最终切换仍须显式 `retire`
+- 新 Wiki 已以 `preserve` 模式接入独立 Web lifespan/API，真实用户旧库仍原样保留；双 PDF Parser v2 编排和 OCI file-queue Provider 已接入，但默认开发启动器尚未配置 Worker，未配置时 PDF 保持 `uploaded`，最终切换仍须显式 `retire`
 - 旧记录中已经写入的 Unicode replacement character `U+FFFD` 仍无法从现有数据反推出原字符；当前会在读取时把它标记为“疑似编码损坏”并显示受影响字段，但不会猜测或写回所谓修复
 
 ### 工程债务
@@ -193,12 +194,11 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 ## 当前阻塞项
 
-LLM Wiki Marker 接入已取消。用户已确认保持无 Chunk-RAG，并为 PyMuPDF4LLM 选择 AGPL-3.0 路径；Contract v2、Raw parse revisions、离线 Fake Router v2、主应用不可信 artifact 编排与当前 Worker 的 AGPL Corresponding Source/Source Offer/SBOM scaffold 已完成。下一门禁是固定 PyMuPDF4LLM/PyMuPDF、Docling 及实际 layout/table/OCR 模型的精确版本、artifact hash 和逐项许可证，然后才可实现 adapter 与真实 OCI runtime。Docker Desktop 已启动，但真实双 Parser 镜像尚未构建。Coding Sandbox Modal/Local Docker 仍按既有决定暂缓。正式 release 仍需决定 tag 名，并在需要 push 时配置 Git remote。
+LLM Wiki Marker 接入已取消。用户已确认保持无 Chunk-RAG，并为 PyMuPDF4LLM 选择 AGPL-3.0 路径；Contract v2、Raw parse revisions、Fake Router v2、主应用不可信 artifact 编排、AGPL Source Offer/SBOM、真实 Parser adapters、完整传递 lock、digest-pinned OCI 与持久 file-queue supervisor/child 均已完成。2026-08-26 已从实际镜像复核 bundle/notices、运行隔离并完成代表性 PDF 与取消恢复 smoke，Worker 现为 `runtime_ready=true`。当前 LLM Wiki 阻塞仅剩阶段 3 前端；Coding Sandbox Modal/Local Docker 仍按既有决定暂缓。正式 release 仍需决定 tag 名，并在需要 push 时配置 Git remote。
 
 ## 建议下一步
 
-1. 固定 PyMuPDF4LLM/PyMuPDF、Docling、layout/table/OCR 与模型的精确版本、wheel/model hash、源码位置和许可证/notices，并扩展当前 SBOM/Source Offer。
-2. 实现 PyMuPDF 预检、PyMuPDF4LLM fast、QualityEvaluator 和 Docling standard/ocr adapter，再构建断外网 OCI runtime 并完成真实 PDF smoke。
-3. 补阶段 3 最小前端：Space、Source、解析状态与 Raw artifact 浏览；完整 Wiki 页面仍留到阶段 7。
+1. 补阶段 3 最小前端：Space、Source、解析状态与 Raw artifact 浏览；不得引入 Chunk 检索 UI。
+2. 完成阶段 3 前端/Backend/E2E 验收后，再进入 Wiki 页面与 Change Set；完整 Pages/Graph/Changes/Conversations 仍按阶段 4–7 推进。
 
 未完成事项的唯一清单见 [`TODO.md`](TODO.md)。使用与架构说明见 [`README.md`](README.md)。
