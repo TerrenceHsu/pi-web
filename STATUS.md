@@ -8,7 +8,7 @@
 |---|---|
 | 代码基线 | LLM Wiki Parser/Raw 基线为 `b202a82`；阶段 0–10 功能与 `0.0.28` 发布候选回归已完成，本次提交收敛页面中心 Wiki、生命周期和测试策略 |
 | 分支 | `master` |
-| 最新 release tag | `v0.0.27-secure-credentials` @ `de05c66`；当前代码基线尚未打新 tag |
+| 最新 release tag | `0.0.28`；annotated tag 指向当前通过发布候选回归的代码与状态基线 |
 | Python / API 版本 | `0.0.28`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
 | 前端包版本 | `0.0.28`（`package.json` 与 lockfile 一致） |
 | 许可证 | MIT；根 `LICENSE` 为标准正文，`pyproject.toml` 与 wheel 均直接引用/携带该文件 |
@@ -16,7 +16,7 @@
 | Python | 声明支持 `>=3.11`；本机验证使用 Python 3.12.13（conda `pipy`） |
 | 产品边界 | localhost-only 本地 Agent 工作台；不是公网 SaaS |
 
-> `0.0.28` 是当前尚未打 tag 的 package baseline；最新既有 tag 仍是旧基线 `v0.0.27-secure-credentials`，不能据此声称已经发布 `0.0.28`。
+> `0.0.28` 是当前 Python、API、前端 package 与 release tag 的统一发布基线。
 
 ## 当前交付状态
 
@@ -204,11 +204,11 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 ## 当前阻塞项
 
-LLM Wiki 阶段 0–10 已完成，没有功能阻塞。真实 OCI Worker 为 `runtime_ready=true`，页面中心主链路、独立 Knowledge UI、来源保留与 Space 生命周期已实现，旧 Chunk Knowledge 已退出产品组合。发布候选静态检查、Backend/Frontend 全量精简套件、production build 与关键 Wiki Browser E2E 均已通过；Coding Sandbox Modal/Local Docker 与 Workspace 阶段 4–6 仍按既有决定冻结。正式 release 仍需决定 tag 名，并在需要 push 时配置 Git remote。
+LLM Wiki 阶段 0–10 已完成，没有功能阻塞。真实 OCI Worker 为 `runtime_ready=true`，页面中心主链路、独立 Knowledge UI、来源保留与 Space 生命周期已实现，旧 Chunk Knowledge 已退出产品组合。发布候选静态检查、Backend/Frontend 全量精简套件、production build 与关键 Wiki Browser E2E 均已通过，release tag 为 `0.0.28`；Coding Sandbox Modal/Local Docker 与 Workspace 阶段 4–6 仍按既有决定冻结。若需 push，仍需先配置 Git remote。
 
 ## 建议下一步
 
-1. 如需正式发布，决定 `0.0.28` tag 名；如需 push，再配置 Git remote。
+1. 如需把 `0.0.28` 发布到远端，先配置 Git remote，再显式 push 分支与 tag。
 2. 只有在用户解除冻结后，才继续 Workspace 阶段 4（统一 Sandbox 快照与发布目标）。
 
 未完成事项的唯一清单见 [`TODO.md`](TODO.md)。使用与架构说明见 [`README.md`](README.md)。
