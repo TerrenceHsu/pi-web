@@ -17,6 +17,8 @@ const props = withDefaults(
     providerReady?: boolean
     contextBlocked?: boolean
     slashCommands?: SlashCommandDefinition[]
+    attachmentsEnabled?: boolean
+    knowledgeMode?: boolean
   }>(),
   {
     uploading: false,
@@ -26,6 +28,8 @@ const props = withDefaults(
     providerReady: true,
     contextBlocked: false,
     slashCommands: () => [],
+    attachmentsEnabled: true,
+    knowledgeMode: false,
   },
 )
 
@@ -43,14 +47,10 @@ const selectedCommandIndex = ref(0)
 const matchingCommands = computed(() => {
   const query = text.value.trimStart().toLocaleLowerCase()
   if (!query.startsWith("/") || query.includes("\n")) return []
-  return props.slashCommands.filter((command) =>
-    command.name.toLocaleLowerCase().startsWith(query),
-  )
+  return props.slashCommands.filter((command) => command.name.toLocaleLowerCase().startsWith(query))
 })
 
-const showCommandMenu = computed(
-  () => !props.sending && matchingCommands.value.length > 0,
-)
+const showCommandMenu = computed(() => !props.sending && matchingCommands.value.length > 0)
 
 const canSend = computed(() => {
   // Provider 未就绪——阻止所有发送路径（按钮 / Enter / submit / 附件 send）
@@ -81,8 +81,7 @@ defineExpose({ setText })
 function onKey(e: KeyboardEvent) {
   if (showCommandMenu.value && e.key === "ArrowDown") {
     e.preventDefault()
-    selectedCommandIndex.value =
-      (selectedCommandIndex.value + 1) % matchingCommands.value.length
+    selectedCommandIndex.value = (selectedCommandIndex.value + 1) % matchingCommands.value.length
     return
   }
   if (showCommandMenu.value && e.key === "ArrowUp") {
@@ -123,6 +122,7 @@ function onFilesChosen(e: Event) {
 }
 
 function onDrop(e: DragEvent) {
+  if (!props.attachmentsEnabled) return
   if (!e.dataTransfer?.files?.length) return
   e.preventDefault()
   emit("upload-files", e.dataTransfer.files)
@@ -137,7 +137,7 @@ function onDragOver(e: DragEvent) {
 <template>
   <div class="chat-input" data-testid="chat-input" @drop="onDrop" @dragover="onDragOver">
     <AttachmentBar
-      v-if="pendingAttachments.length > 0"
+      v-if="attachmentsEnabled && pendingAttachments.length > 0"
       :files="pendingAttachments"
       :session-id="sessionId"
       data-testid="attachment-bar"
@@ -163,6 +163,7 @@ function onDragOver(e: DragEvent) {
 
     <div class="input-row">
       <input
+        v-if="attachmentsEnabled"
         ref="fileInput"
         type="file"
         multiple
@@ -172,6 +173,7 @@ function onDragOver(e: DragEvent) {
       />
 
       <button
+        v-if="attachmentsEnabled"
         class="attach-btn"
         data-testid="attach-button"
         :disabled="sending || uploading || !sessionId"
@@ -188,7 +190,13 @@ function onDragOver(e: DragEvent) {
         class="input-field"
         rows="1"
         data-testid="chat-input-field"
-        :placeholder="sending ? 'Running…' : 'Message or / command…  (Enter to send)'"
+        :placeholder="
+          sending
+            ? 'Running…'
+            : knowledgeMode
+              ? 'Ask this Wiki or propose an approved change…'
+              : 'Message or / command…  (Enter to send)'
+        "
         :disabled="sending"
         @keydown="onKey"
       ></textarea>
@@ -219,6 +227,10 @@ function onDragOver(e: DragEvent) {
       <span v-else-if="sending">● agent is running</span>
       <span v-else-if="contextBlocked" class="context-blocked"
         >Context limit reached · compact before sending</span
+      >
+      <span v-else-if="knowledgeMode" class="muted"
+        >Knowledge mode · approved Wiki pages and read-only Raw evidence · edits require
+        approval</span
       >
       <span v-else-if="!wsConnected" class="muted"
         >○ disconnected · supports md / html / csv / parquet / text</span
@@ -356,5 +368,7 @@ function onDragOver(e: DragEvent) {
 .input-hint .muted {
   color: var(--muted);
 }
-.context-blocked { color: #991b1b; }
+.context-blocked {
+  color: #991b1b;
+}
 </style>

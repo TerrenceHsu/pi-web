@@ -6,14 +6,106 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from pi_agent_core_py.providers.registry import ProviderDefinition, ProviderRegistry
+from pi_agent_core_py.web.credentials.service import CredentialService, CredentialView
+from pi_agent_core_py.web.credentials.store import CredentialNotFoundError
 from pi_agent_core_py.web.providers import config_service as svc_module
 from pi_agent_core_py.web.providers.config_service import (
     ProviderConfigService,
     ProviderProfileView,
 )
+
+
+def _make_provider_def(provider_id: str, display_name: str) -> ProviderDefinition:
+    return ProviderDefinition(
+        id=provider_id,
+        display_name=display_name,
+        api_style="anthropic",
+        default_base_url=f"https://{provider_id}.example.com",
+        credential_validation_strategy="unsupported",
+        credential_validation_endpoint=None,
+        supports_model_listing=False,
+        key_prefix_hints=(),
+    )
+
+
+class _FakeProviderRegistry(ProviderRegistry):
+    def __init__(self) -> None:
+        self._defs = {
+            "anthropic": _make_provider_def("anthropic", "Anthropic"),
+            "glm": _make_provider_def("glm", "GLM"),
+        }
+
+    def get(self, provider_id: str) -> ProviderDefinition | None:  # type: ignore[override]
+        return self._defs.get(provider_id)
+
+    def list(self) -> tuple[ProviderDefinition, ...]:  # type: ignore[override]
+        return tuple(self._defs.values())
+
+    def has(self, provider_id: str) -> bool:  # type: ignore[override]
+        return provider_id in self._defs
+
+
+class _FakeCredentialService(CredentialService):
+    def __init__(self) -> None:
+        self._views: dict[str, CredentialView] = {}
+
+    def seed(self, view: CredentialView) -> None:
+        self._views[view.id] = view
+
+    async def get(self, credential_id: str) -> CredentialView:  # type: ignore[override]
+        try:
+            return self._views[credential_id]
+        except KeyError as exc:
+            raise CredentialNotFoundError("credential not found") from exc
+
+    async def list(  # type: ignore[override]
+        self,
+        *,
+        limit: int = 100,
+        before_updated_at: int | None = None,
+    ) -> list[CredentialView]:
+        views = list(self._views.values())
+        if before_updated_at is not None:
+            views = [view for view in views if view.updated_at < before_updated_at]
+        return sorted(views, key=lambda view: view.updated_at, reverse=True)[:limit]
+
+    async def create(self, command: Any) -> Any:
+        raise NotImplementedError
+
+    async def update_label(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+    async def rotate(self, command: Any) -> Any:
+        raise NotImplementedError
+
+    async def delete(self, credential_id: str) -> Any:
+        raise NotImplementedError
+
+    async def validate(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+
+def _make_credential_view(credential_id: str) -> CredentialView:
+    return CredentialView(
+        id=credential_id,
+        label=f"Label-{credential_id}",
+        storage_mode="keyring",
+        masked_value="credential-****",
+        provider_hint=None,
+        provider_hint_confidence=None,
+        validation_status="never_validated",
+        last_validated_provider_id=None,
+        last_validated_at=None,
+        last_error_code=None,
+        created_at=1000,
+        updated_at=1000,
+        storage_status="ready",
+    )
 
 # ============================================================================
 # 1. Service does not depend on SecretStoreRouter
@@ -115,11 +207,6 @@ async def test_4_errors_do_not_leak_credential_dto(
     from pi_agent_core_py.web.providers.config_store import (
         SQLiteProviderConfigStore,
     )
-    from tests.test_provider_config_service_profiles import (
-        FakeCredentialService,
-        FakeProviderRegistry,
-    )
-
     counter = {"n": 1000}
 
     def fake_now() -> int:
@@ -132,8 +219,8 @@ async def test_4_errors_do_not_leak_credential_dto(
     try:
         svc = ProviderConfigService(
             store=store,
-            provider_registry=FakeProviderRegistry(),
-            credential_service=FakeCredentialService(),
+            provider_registry=_FakeProviderRegistry(),
+            credential_service=_FakeCredentialService(),
             session_exists=_always_true,
         )
         secret_marker = "PI_E2_TEST_MARKER_CRED_INPUT"
@@ -204,11 +291,6 @@ async def test_7_static_model_query_does_not_modify_sqlite(
     from pi_agent_core_py.web.providers.config_store import (
         SQLiteProviderConfigStore,
     )
-    from tests.test_provider_config_service_profiles import (
-        FakeCredentialService,
-        FakeProviderRegistry,
-        _make_credential_view,
-    )
     counter = {"n": 1000}
 
     def fake_now() -> int:
@@ -217,12 +299,12 @@ async def test_7_static_model_query_does_not_modify_sqlite(
 
     db = tmp_path / "no_modify.db"
     store = await SQLiteProviderConfigStore.open(db, now_ms=fake_now)
-    cred = FakeCredentialService()
-    cred.seed(_make_credential_view(cid="cred-A"))
+    cred = _FakeCredentialService()
+    cred.seed(_make_credential_view("cred-A"))
     try:
         svc = ProviderConfigService(
             store=store,
-            provider_registry=FakeProviderRegistry(),
+            provider_registry=_FakeProviderRegistry(),
             credential_service=cred,
             session_exists=_always_true,
         )

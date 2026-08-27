@@ -353,6 +353,14 @@ def create_authenticated_app(
         del session_path
         return await index()
 
+    @app.get("/knowledge", include_in_schema=False)
+    @app.get("/knowledge/", include_in_schema=False)
+    @app.get("/knowledge/{knowledge_path:path}", include_in_schema=False)
+    async def knowledge_route(knowledge_path: str | None = None) -> Response:
+        """Serve the independent LLM Wiki SPA shell on direct entry."""
+        del knowledge_path
+        return await index()
+
     @app.get("/assets/{path:path}", include_in_schema=False)
     async def assets(path: str) -> Response:
         asset_root = (_STATIC_DIR / "assets").resolve()

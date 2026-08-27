@@ -126,7 +126,6 @@ def main() -> None:
             _build_harness(),
             db_path=str(workspace_root / "workspace.sqlite"),
             uploads_dir=str(workspace_root / "uploads"),
-            knowledge_root=str(workspace_root / "knowledge"),
             wiki_root=str(workspace_root / "knowledge"),
             wiki_parser_worker_source_root=REPO_ROOT
             / "workers"

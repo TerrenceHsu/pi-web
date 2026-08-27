@@ -1,7 +1,6 @@
 """B7 regression tests: SQLite initialization failures release owned connections."""
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable
 
 import pytest
@@ -9,11 +8,9 @@ import pytest
 import pi_agent_core_py.session_sqlite as session_module
 import pi_agent_core_py.web.credentials.store as credential_module
 import pi_agent_core_py.web.extension_store as extension_module
-import pi_agent_core_py.web.knowledge.store as knowledge_module
 from pi_agent_core_py.session_sqlite import SQLiteSessionStore
 from pi_agent_core_py.web.credentials.store import SQLiteCredentialStore
 from pi_agent_core_py.web.extension_store import ExtensionSQLiteStore
-from pi_agent_core_py.web.knowledge.store import KnowledgeStore
 
 pytestmark = pytest.mark.asyncio
 
@@ -49,29 +46,6 @@ def _connect_returning(
         return connection
 
     return _connect
-
-
-@pytest.mark.parametrize("error_type", [RuntimeError, asyncio.CancelledError])
-async def test_knowledge_store_open_closes_on_schema_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    error_type: type[BaseException],
-) -> None:
-    connection = _TrackingConnection()
-    monkeypatch.setattr(
-        knowledge_module.aiosqlite,
-        "connect",
-        _connect_returning(connection),
-    )
-
-    async def _fail_schema(_self: KnowledgeStore) -> None:
-        raise error_type("injected initialization failure")
-
-    monkeypatch.setattr(KnowledgeStore, "_initialize_schema", _fail_schema)
-
-    with pytest.raises(error_type):
-        await KnowledgeStore.open(":memory:")
-
-    assert connection.close_calls == 1
 
 
 async def test_credential_store_open_closes_on_schema_failure(

@@ -126,6 +126,24 @@ describe("providerReady gating", () => {
   })
 })
 
+describe("Knowledge mode input", () => {
+  it("removes Workspace attachments and explains the approval boundary", () => {
+    const wrapper = mountInput({
+      knowledgeMode: true,
+      attachmentsEnabled: false,
+      pendingAttachments: [{ id: "f-1", name: "secret.txt", size: 10 } as any],
+    })
+
+    expect(wrapper.find('[data-testid="attach-button"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="file-input"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="attachment-bar"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="chat-input-field"]').attributes("placeholder")).toContain(
+      "Ask this Wiki",
+    )
+    expect(wrapper.text()).toContain("edits require approval")
+  })
+})
+
 describe("slash command menu", () => {
   const commands = [
     {

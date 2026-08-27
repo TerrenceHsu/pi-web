@@ -29,8 +29,17 @@ async function sendMessage(page: Page, text: string): Promise<void> {
   await expect(input).toBeEnabled()
   await input.fill(text)
   await expect(page.locator("[data-testid='send-button']")).toBeEnabled()
+  const accepted = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/api/prompt/async") &&
+      response.request().method() === "POST",
+  )
   await page.locator("[data-testid='send-button']").click()
+  expect((await accepted).status()).toBe(202)
   await waitUntilIdle(page)
+  await expect(
+    page.locator("[data-testid='user-message']").filter({ hasText: text }),
+  ).toBeVisible()
 }
 
 function blockedBudget(sessionId: string) {

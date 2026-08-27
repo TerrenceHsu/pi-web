@@ -1,8 +1,8 @@
 # LLM Wiki 设计
 
-> 状态：产品合同与阶段 1–2 已实现；阶段 3 Backend/HTML/Fake PDF、双 Parser Contract v2、Raw parse revisions、离线 Fake v2、Contract v2 主应用编排与 AGPL Worker 合规 scaffold 已实现；真实 Parser runtime 待实现
+> 状态：阶段 0–10 已实现；页面中心 LLM Wiki、双 Parser OCI Worker、独立 Knowledge 页面、来源保留、Space 生命周期与归档只读门禁均已完成
 >
-> 日期：2026-08-24
+> 日期：2026-08-28
 >
 > 范围：Wiki Space、PDF/HTML 原件、Parser Provider、Wiki 页面、Revision/Change Set、页面知识图谱、页面级 FTS5 与 Knowledge Agent 对话
 
@@ -120,13 +120,14 @@ data/
 SQLite `wiki.db` 是规范事实源。`pages/` 是已发布最新版本的可读镜像，可由数据库幂等重建，
 不承担并发控制或 revision 真相。
 
-Schema v1、Space CRUD、路径/原子镜像恢复和显式旧库 retirement 的实现冻结见
-[`llm-wiki-store-v1.md`](llm-wiki-store-v1.md)。阶段 2 不自动切换仍在运行的旧 Knowledge
-API/Worker；真正 retirement 必须等旧连接全部关闭后显式执行。
+Schema v1、Space CRUD、路径/原子镜像恢复和显式旧库 retirement 的初始实现冻结见
+[`llm-wiki-store-v1.md`](llm-wiki-store-v1.md)。当前产品启动不再打开旧 Knowledge API/Worker；
+历史文件保持原样，只有用户另行要求物理归档时才执行破坏性 retirement 流程。
 
-阶段 2/Contract v1 已实现的单一 `parsed_markdown_relpath` 属于当前工作基线；双 Parser 实施前
-必须升版并重新初始化未发布的新 Wiki 库，以支持下面的 selected parse revision。不能让代码在
-同一 schema version 下把 flat v1 误读为 v2。
+当前 schema v7 在 selected parse revision 的 v2 基础上依次加入 Summary Draft、Page Proposal、
+Change Set 发布、页面 FTS5、图谱与 Conversation 合同。旧 v1–v6 都固定返回
+`schema_rebuild_required`，由用户显式重新初始化未发布的新 Wiki 库；不做原地迁移，也不能在
+同一 schema version 下误读不同数据合同。
 
 ### 5.1 `wiki_spaces`
 
@@ -139,7 +140,7 @@ API/Worker；真正 retirement 必须等旧连接全部关闭后显式执行。
 
 - `id`、`space_id`
 - `display_name`、`mime_type`、`size_bytes`、`source_sha256`
-- `source_relpath`、`selected_parse_revision_id`
+- `source_relpath`、`selected_parse_revision_id`、`selection_version`、`selected_at_ms`
 - `status`: `uploaded | parsing | parsed | failed | deleting`
 - `safe_error_code`
 - `created_at`、`updated_at`
@@ -149,7 +150,7 @@ API/Worker；真正 retirement 必须等旧连接全部关闭后显式执行。
 ### 5.3 `wiki_artifacts`
 
 - `id`、`source_id`、`parse_revision_id`
-- `kind`: `parsed_markdown | parsed_page | embedded_image | table_image | manifest`
+- `kind`: `parsed_markdown | page_markdown | embedded_image | table_image | manifest`
 - `relpath`、`mime_type`、`size_bytes`、`sha256`
 - 图片可选 `width`、`height` 和 Parser 提供的来源定位信息
 
@@ -226,7 +227,7 @@ Knowledge 对话的可信绑定。
 ### 5.10 `wiki_jobs`
 
 - `id`、`space_id`、`source_id`
-- `kind`: `parse | synthesize_entry_page | rebuild_search | rebuild_graph_projection`
+- `kind`: `parse | summarize_source | synthesize_entry_page | rebuild_search | rebuild_graph_projection`
 - `status`: `queued | running | succeeded | failed | cancelled`
 - `requested_parse_mode`、`routing_config_revision`、`routing_config_sha256`
 - `selected_attempt_id`、`safe_error_code`
@@ -238,6 +239,16 @@ Knowledge 对话的可信绑定。
   duration、quality JSON、safe error 与 artifact receipt。
 - Revision：`source_id`、成功 attempt、不可变 root/manifest SHA、page count、创建时间。
 - Source 的 selected pointer 只在完整 artifact 验证和 DB/file 回读成功后通过 CAS 切换。
+
+### 5.12 `wiki_source_summaries`
+
+- `id`、`space_id`、`source_id`、`parse_revision_id`、`job_id`
+- `selection_version`、`source_sha256`、`parsed_markdown_sha256`、`manifest_sha256`、`page_count`
+- `prompt_revision`、实际 `provider`/`model`
+- 严格 `content_json`、`content_sha256`、`created_at_ms`
+
+记录只允许插入，不提供更新路径；同一个来源可以针对不同 selected parse revision 保留多份历史
+Summary Draft。后续页面提案必须显式指定一份 Draft，不能隐式读取“最新”后跨版本发布。
 - 失败 fast attempt 的质量证据可以保留，但正文不得进入 Agent 可读的 selected Raw。
 
 ## 6. Parser Provider
@@ -302,14 +313,32 @@ HTML MVP 只接受单个文件：
 
 ## 8. 页面生成与来源入口页
 
-每个成功解析的来源默认触发一次 `synthesize_entry_page`：
+页面生成拆成两个顺序阶段。第一阶段先生成不可变 Source Summary Draft，不创建页面：
 
-1. Agent 读取该来源的 `parsed.md`、manifest 和需要的内嵌图片信息。
-2. 生成一篇来源入口页，保留来源身份和可验证引用。
-3. Agent 可以在同一 Change Set 中提出零到多个主题子页面。
-4. Agent 可以提出固定类型的页面关系。
-5. 所有内容保持草稿，不写入已发布页面或正式图谱。
-6. 用户批准 Change Set 后统一发布。
+1. tool-free core Agent 分页读取当前 selected parse revision 的 Raw page Markdown。
+2. 模型只能返回严格结构化 JSON：建议标题、概览、带页码的关键点、主题候选和 caveat。
+3. 服务端验证 JSON、字段配额、页码范围和 UTF-8，并把草稿固定到 source SHA、parse revision、
+   selection version、parsed/manifest SHA、prompt revision、实际 provider/model 和正文 SHA。
+4. 长来源按配置分批总结，再由同一个 provider/model 合并；单页、批次数或合并上下文超限时安全失败。
+5. 完成写入前再次 CAS 当前 selected parse revision；来源在 Agent 运行期间被重解析时拒绝旧结果。
+6. Summary Draft 是后续页面提案的输入，不进入正式页面、FTS5 或图谱，也不修改 `raw/`。
+
+第二阶段由已固定 Summary Draft 触发 `synthesize_entry_page`：
+
+1. 生成一篇来源入口页，保留来源身份和可验证引用。
+2. Agent 可以在同一 Change Set 中提出零到多个主题子页面。
+3. Agent 可以提出固定类型的页面关系。
+4. 所有内容保持草稿，不写入已发布页面或正式图谱。
+5. 用户批准 Change Set 后统一发布。
+
+入口页在进入 Change Set 前保存为 immutable `wiki_page_proposals(kind=entry)`：正文由严格
+Summary Draft 确定性渲染，所有模型文本先做 Markdown/HTML 结构转义；slug 带来源稳定后缀，
+source locator 单独记录 source/parse revision/summary/page numbers。此记录不是 `wiki_pages`，
+重复生成返回同一 proposal，来源 selected revision 已变化时必须重新总结。
+
+主题子页面复用 `wiki_page_proposals(kind=topic)`，必须引用同一 Summary Draft 的 entry proposal
+作为 parent。服务端按 topic candidate ordinal 稳定生成 slug/正文，只加入与主题页码相交的关键点；
+同一 `synthesize_topic_pages` Job 在单个事务中插入全部主题 proposal，任一校验失败则一个都不留。
 
 Agent 不应把解析 Markdown 简单复制为 Wiki 页面；入口页应提供结构化摘要、主要主题、关键结论、
 术语和进一步阅读路径，同时区分来源事实与 Agent 组织性文字。
@@ -326,6 +355,13 @@ Agent 不应把解析 Markdown 简单复制为 Wiki 页面；入口页应提供�
 
 提交审批前，服务端生成规范、稳定排序的统一 diff 和结构化 edge diff。批准时：
 
+页面 proposals 按 entry、topic ordinal 的稳定顺序冻结为一个 `awaiting_approval` Change Set；
+每个 page-create item 保存 canonical JSON payload（含 proposal/source/summary/locator/正文 SHA）和
+`/dev/null → pages/{slug}.md` 的确定性 unified diff。Change Set 直接绑定 `source_summary_id`，重复
+冻结幂等；此阶段不会创建 Page/Revision 或刷新镜像。
+
+批准时：
+
 1. 获取 Space 写锁并开始短 SQLite 事务。
 2. 校验 `base_graph_revision`、所有目标页 version 和 before SHA。
 3. 任一前提变化则整个 Change Set 标记 `stale`，不发布任何部分。
@@ -336,6 +372,10 @@ Agent 不应把解析 Markdown 简单复制为 Wiki 页面；入口页应提供�
 
 SQLite 是规范事实源，因此文件镜像写入失败不会产生部分数据库发布；恢复 Worker 会根据已提交
 revision 重建镜像。拒绝和 stale Change Set 永不修改正式页面、FTS 或图谱。
+
+当前 page-create 审批实现已固定上述事务语义：批准同时创建 Page、version 1 Revision 和
+PageSource，Change Item 在发布时回填可信 page target；拒绝与 stale 均可审计且没有页面副作用。
+commit 后刷新 `pages/{slug}.md`/`space.json`，启动时依据 current revision 修复缺失页面镜像。
 
 ## 10. 页面级 FTS5
 
@@ -348,6 +388,10 @@ FTS5 只索引 active 页面当前已批准 revision：
 - 草稿、已删除页面和 Raw Markdown 不进入正式索引。
 
 FTS5 是 Wiki 导航和页面发现能力，不恢复旧 Chunk RAG 主链路。
+
+实现使用独立 `wiki_pages_fts`（unicode61）；page approval 在同一 SQLite 事务插入索引，启动可从
+active Page/current approved Revision 重建。API 只接受可信路径中的 Space，原始查询逐空白 term
+转成 quoted literal phrase 后再绑定给 `MATCH`，不会暴露 `OR/NEAR/*/column` 等 FTS 语法。
 
 ## 11. Knowledge Agent 模式
 
@@ -379,6 +423,22 @@ wiki_propose_edge_changes
 所有工具从可信 closure/context 获取 `space_id` 和 `conversation_id`；LLM 参数中不暴露可切换
 Space 的字段。提案工具只能写 Change Set staging，不能直接调用发布路径。
 
+当前实现把 Knowledge Skill 固定为内置、不可由用户替换的 Prompt/工具策略，而不是加载普通
+Session 的可选 Skill。Session 与 `wiki_conversations` 一对一可信绑定；一个 Space 可拥有多个彼此
+独立的 Session/Conversation。Prompt、regenerate 与 context-budget 都从服务端 Session binding 自动
+识别模式，客户端提交的 Conversation ID 只能用于一致性校验，不能切换 Space。Knowledge 请求拒绝
+Workspace file attachment 与普通 Skill selection，执行期间只临时安装上述 Wiki registry，并在
+`finally` 中恢复普通 Agent 工具。
+
+四个 `wiki_propose_*` 工具只创建 conversation-bound `awaiting_approval` Change Set：
+
+- `page_create`、`page_update`、`page_delete` 保存 canonical payload、基础 revision/正文 SHA（适用时）
+  和完整 unified diff。
+- `edge_add`、`edge_delete` 只接受五种用户关系；`related_to` 规范方向，`part_of` 在批准前检查无环。
+- 批准在同一 SQLite 写事务中重新校验 Conversation/Space、graph revision、Page revision、payload、
+  diff、端点与关系不变量；任一竞态使整个 Change Set stale，不会部分发布。
+- `derived_from` 没有 Agent proposal 或数据库写入路径，继续只从可信 PageSource 动态投影。
+
 ## 12. 前端信息架构
 
 Knowledge 从 Sidebar 弹窗升级为独立页面：
@@ -405,7 +465,7 @@ Knowledge
 2. 确认旧 SQLite/WAL/SHM 已关闭并 checkpoint。
 3. 把旧 `knowledge.db` 和旧 `libraries/` 记录到 legacy manifest，并移动为只读备份。
 4. 初始化全新 `wiki.db` 与 `spaces/`。
-5. 启用新 Wiki API；旧 API 返回稳定的 retired/gone 响应，不静默映射到新接口。
+5. 启用新 Wiki API；产品组合不再挂载旧 API（返回 404），且绝不静默映射到新接口。
 6. 经过独立用户授权后才能删除 legacy 备份。
 
 ## 14. 实施阶段
@@ -434,8 +494,8 @@ Knowledge
 
 - **已完成**：新建 `wiki.db` schema v1、三重身份/version gate、路径安全 Store 和 Raw/Page
   原子镜像/恢复原语。
-- **已完成**：实现显式旧库一致性只读备份与新库初始化，不迁移旧业务数据；当前运行时仍使用
-  preserve 模式，真实 retirement 留到旧 Worker/Store 关闭后的切换点。
+- **已完成**：实现显式旧库一致性只读备份与新库初始化，不迁移旧业务数据；产品组合只启动
+  Wiki runtime，旧 Chunk Knowledge 只保留显式兼容测试入口，且不会自动打开旧库或 Worker。
 - **已完成**：实现带 CAS 和软删除状态机的 Space CRUD。
 
 ### 阶段 3：PDF/HTML Raw Ingestion
@@ -448,28 +508,84 @@ Knowledge
   CAS/pointer repair 与旧 flat v1 明确重建门禁。
 - **已完成**：Contract v2 artifact 导入与现有 Wiki Worker/API 原子编排。
 - **已完成**：构建并验证固定版本/hash、断外网的 PyMuPDF4LLM + Docling 持久 OCI Worker。
-- **待实现**：前端先支持 Space、Source、状态和 Raw artifact 浏览。
+- **已完成**：前端支持 Space、Source、状态和 Raw artifact 安全浏览。
 
 ### 阶段 4：Wiki 页面与 Change Set
 
-- 实现入口页生成、主题子页面提案、immutable revision、统一 diff 和原子审批发布。
-- 实现 stale conflict、拒绝、恢复和页面文件镜像。
+- **已实现**：入口页生成、主题子页面提案、immutable revision、统一 diff 和原子审批发布。
+- **已实现**：stale conflict、拒绝、恢复和页面文件镜像。
 
 ### 阶段 5：页面 FTS5 与知识图谱
 
-- 实现仅针对已批准页面的 FTS5。
-- 实现固定关系、`derived_from`、无环校验、graph revision 和图谱 API。
+- **已实现**：仅针对 active/current/approved 页面 revision 的 FTS5；Raw、Summary、Proposal、
+  未批准 Change Set 与历史 revision 均无索引写入路径。
+- **已实现**：主题页到入口页的 `part_of` edge-add 与对应页面创建共用一个 Change Set 和批准
+  事务；事务在首个页面写入前完成 canonical payload/diff、固定关系类型、同 Space、去重、自环、
+  `related_to` 规范方向和 `part_of` 无环校验。
+- **已实现**：正式页面关系只保存于 `wiki_edges`；系统来源关系不接受 Change Set/Agent 输入，
+  而是从可信 `wiki_page_sources` 动态投影为 `derived_from`，并明确标记 `system_managed=true`。
+- **已实现**：`GET /api/wiki/spaces/{space_id}/graph` 返回带 graph revision 的稳定全图快照；
+  `GET /api/wiki/spaces/{space_id}/graph/pages/{page_id}/neighbors` 返回单页一跳邻接快照。两者只
+  暴露 active 页面、approved page edges 和可信来源投影。
 
 ### 阶段 6：Knowledge Agent 与多对话
 
-- 实现 Knowledge 模式、Prompt、Skill、工具白名单、Space 可信绑定和多对话。
-- 复用流事件、持久化、compaction 和引用机制，但不恢复 Chunk RAG。
+- **已完成**：实现 Knowledge 模式、内置固定 Prompt/Skill policy、10 个 Wiki 工具白名单、Session
+  → Conversation → Space 可信绑定和每 Space 多对话；对话创建/归档与 Session 生命周期一致。
+- **已完成**：复用 Agent loop、消息树、text/thinking/tool 流事件、lane、regenerate、持久化、
+  context budget 和 compaction；不加载普通 Skill、不挂载 Workspace/MCP/Sandbox/Web 工具，也不
+  恢复 Chunk RAG。
+- **已完成**：页面创建/修改/删除、关系增删只生成统一 Change Set；用户批准后才由事务 Publisher
+  原子更新 Page/Revision/FTS/Graph/镜像，拒绝/stale/未批准 proposal 对正式状态不可见。
 
 ### 阶段 7：独立 Knowledge 页面与最终验收
 
-- 实现 Pages/Sources/Graph/Changes/Conversations 五个视图。
-- 完成 Backend/Frontend/E2E、安全边界、崩溃恢复、真实双 Parser 和大文件配额验收。
-- 正式退役旧 Knowledge API、Worker 和前端弹窗。
+- **已完成**：实现 `/knowledge` 独立路由，以及 Pages/Sources/Graph/Changes/Conversations 五个视图。
+- **已完成**：前端覆盖上传/解析/Raw、Summary→Proposal→Change Set、diff 审批、页面 FTS5、正式
+  图谱与每 Space 多对话；Knowledge Chat 复用既有流事件但保持独立模式与工具白名单。
+- **已完成**：删除旧 Library/Document/Chunk UI；开发启动器和 E2E 产品组合不再启动旧 DB、
+  ingestion/indexing worker、`search_knowledge` Tool 或 REST。旧 Backend 代码仅能由
+  `enable_knowledge_api=True` 显式开启，用于历史兼容测试，不再属于产品运行时。
+- **已完成**：Frontend lint/typecheck/build、Vitest 352/352、Playwright 54/54、Ruff、strict Mypy
+  168 files / 0 issues 均通过；Backend 全量结果记录于项目状态页。
+
+### 阶段 8：Source retention 与安全 Raw 清理
+
+- **已完成**：`DELETE /api/wiki/sources/{source_id}` 只把 Source 推进到不可逆 `deleting`，
+  并立即关闭原件和解析 Artifact 的内容读取；审计 DTO、来源 SHA、Parse/Summary/Change Set
+  记录继续保留，不通过级联删除抹去证据。
+- 默认 retention 为 7 天，应用可在组合根配置；独立后台协程在启动和固定间隔检查到期项，
+  不与 Parser queue 的 `get()` 超时复用，避免边界竞态丢解析请求。
+- 到期清理只处理该 Source 的 `raw/<source-bundle>/`：先在同一 Raw 目录原子改名为内部
+  staging，再以不跟随 symlink/junction/reparse/special file 的遍历删除；崩溃留下的 staging
+  会在下一轮幂等重试。删除失败保持 fail-closed，不修改数据库审计状态。
+- active Page 的可信来源投影、queued/running Job，以及 draft/awaiting-approval Change Set 均阻断
+  删除。Page 必须先通过批准的 Change Set 进入 `deleted`，之后 Raw Source 才能进入 retention。
+- 前端 Sources 视图提供明确的二次确认和 `deleting` 状态说明；删除后不再请求 Raw 详情。
+
+### 阶段 9：Wiki Space 生命周期
+
+- `PATCH /api/wiki/spaces/{space_id}/status` 只接受 `active|archived`；archive 可恢复，前端不再
+  把 archived Space 当作默认活动空间，并提供显式 Restore。
+- `DELETE /api/wiki/spaces/{space_id}` 只推进到不可逆 `deleting`，不物理删除 Space 行、目录、
+  Page revision 或其他审计证据。
+- 删除事务在同一 `BEGIN IMMEDIATE` 内检查所有 Source 已进入 `deleting`、所有 Page 已进入
+  `deleted`、Conversation 已 archived，且不存在 queued/running Job 或 draft/awaiting-approval
+  Change Set；任何未收敛状态统一以 `space_in_use` 拒绝，不产生部分状态变化。
+- 前端为 active Space 提供 Archive/Delete，为 archived Space 提供 Restore/Delete；Delete 始终
+  二次确认，并在 409 时保留当前 Space 与所有内容不变。
+
+### 阶段 10：Archived Space 只读门禁
+
+- Archive 与运行态收敛使用同一 Store 写锁和 `BEGIN IMMEDIATE`：存在 queued/running Job、active
+  Conversation 或 draft/awaiting-approval Change Set 时拒绝归档，避免冻结半完成工作。
+- 上传、Parse claim、Summary/Proposal Job、新 Conversation、Source Change Set 和 Knowledge Agent
+  Change Set 在各自写事务内重新读取 Space 状态；只要不是 `active`，统一返回
+  `space_read_only`，不能依赖 UI 隐藏实现权限边界。
+- archived Space 仍允许读取已批准 Page、FTS5、Graph、Raw 审计元数据，以及执行 Restore、
+  Conversation archive、Change Set reject、Source deletion 和最终 Space deletion 等收敛操作。
+- 事务内状态复核确保另一个连接无法在“active 预检”和实际写入之间完成 Archive；Archive 也
+  无法越过已经持久化的 Job/Conversation/Change Set 门禁。
 
 ## 15. 验收不变量
 

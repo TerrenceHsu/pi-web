@@ -14,7 +14,7 @@ concurrency:
 jobs:
   lint-type-test:
     runs-on: ubuntu-latest
-    # The full 3.6k-test coverage suite can exceed 10 minutes on a cold runner.
+    # The offline product suite can still take several minutes on a cold runner.
     # Keep the gate intact and allow enough time for dependency install + tests.
     timeout-minutes: 30
 
@@ -40,10 +40,10 @@ jobs:
       - name: Mypy (strict)
         run: mypy src
 
-      - name: Pytest (non-slow) + coverage
+      - name: Backend offline tests + coverage
         env:
           PYTHONDONTWRITEBYTECODE: "1"
-        run: pytest tests/ -m "not slow" --tb=short -q
+        run: pytest tests/ --tb=short -q
 
       - name: Upload coverage XML
         if: always()
@@ -79,6 +79,9 @@ jobs:
 
       - name: vue-tsc typecheck
         run: npm run typecheck
+
+      - name: Vitest
+        run: npm test
 
       - name: Build
         run: npm run build

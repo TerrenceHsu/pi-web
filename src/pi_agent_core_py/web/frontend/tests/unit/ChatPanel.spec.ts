@@ -150,8 +150,8 @@ function setupStores(opts: {
   return { sessionStore, chatStore, providerStore }
 }
 
-function mountPanel() {
-  return mount(ChatPanel)
+function mountPanel(mode: "default" | "knowledge" = "default") {
+  return mount(ChatPanel, { props: { mode } })
 }
 
 // ============================================================================
@@ -250,5 +250,15 @@ describe("ChatPanel integration", () => {
     await flushAll()
     expect(fetchSpy).not.toHaveBeenCalled()
     fetchSpy.mockRestore()
+  })
+
+  it("uses the locked-down ChatInput contract in Knowledge mode", async () => {
+    setupStores({ binding: null })
+    const wrapper = mountPanel("knowledge")
+    await flushAll()
+    const chatInput = wrapper.findComponent({ name: "ChatInput" })
+    expect(chatInput.props("attachmentsEnabled")).toBe(false)
+    expect(chatInput.props("knowledgeMode")).toBe(true)
+    expect(chatInput.props("slashCommands")).toEqual([])
   })
 })

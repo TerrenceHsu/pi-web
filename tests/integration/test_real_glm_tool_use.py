@@ -1,9 +1,7 @@
 """P1-A3 — 真实 GLM 多轮 tool_use smoke（强制 tool 调用版）。
 
-与现有 ``tests/test_integration_glm_multi_tool_use.py`` 的差异：
-- 后者用 ``EchoTool``（原样回 args.text），模型可能"猜"答案不实际调 tool
-- 本测试用 ``E2EProbeTool`` 返回**固定 token** ``PROBE_OK_ALPHA_7F3A``——
-  模型必须真实调用工具才能拿到 token，杜绝"幻觉式 pass"
+使用 ``E2EProbeTool`` 返回**固定 token** ``PROBE_OK_ALPHA_7F3A``，模型必须
+真实调用工具才能拿到 token，避免“猜答案”造成假阳性。
 
 链路：
     UserMessage

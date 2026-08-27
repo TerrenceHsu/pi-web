@@ -1,8 +1,9 @@
-"""SQLite canonical store for page-centric LLM Wiki schema v2."""
+"""SQLite canonical store for page-centric LLM Wiki schema v7."""
 
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
 import json
 import secrets
@@ -15,31 +16,55 @@ import aiosqlite
 
 from .errors import WikiMirrorError, WikiSchemaError, WikiStoreError
 from .files import WikiFileStore
+from .fts import compile_wiki_fts_query
 from .legacy import retire_legacy_knowledge
 from .models import (
     WIKI_SCHEMA_VERSION,
     WikiArtifact,
     WikiArtifactKind,
+    WikiChangeSet,
+    WikiChangeSetItem,
+    WikiChangeSetOperationKind,
+    WikiConversation,
+    WikiConversationStatus,
+    WikiEdge,
+    WikiGraphEdge,
+    WikiGraphNode,
+    WikiGraphSnapshot,
     WikiJob,
     WikiJobKind,
     WikiJobStatus,
     WikiLegacyBackupReceipt,
     WikiMirrorRepairReport,
+    WikiPage,
+    WikiPageProposal,
+    WikiPageRevision,
+    WikiPageSearchResult,
     WikiParseAttempt,
     WikiParseAttemptState,
     WikiParseMode,
     WikiParseRevision,
+    WikiRelationType,
     WikiSelectedParsePointer,
     WikiSource,
     WikiSourceMimeType,
     WikiSourceStatus,
+    WikiSourceSummaryContent,
+    WikiSourceSummaryDraft,
     WikiSpace,
     WikiSpaceStatus,
     validate_artifact_id,
+    validate_change_set_id,
+    validate_conversation_id,
+    validate_edge_id,
     validate_job_id,
+    validate_page_id,
+    validate_page_proposal_id,
+    validate_page_revision_id,
     validate_parse_revision_id,
     validate_source_id,
     validate_space_id,
+    validate_summary_id,
 )
 
 WIKI_APPLICATION_ID = 1_464_421_193  # ASCII "WIKI"
@@ -154,6 +179,8 @@ _DDL_STATEMENTS: tuple[str, ...] = (
         id                  TEXT PRIMARY KEY,
         space_id            TEXT NOT NULL REFERENCES wiki_spaces(id) ON DELETE CASCADE,
         conversation_id     TEXT REFERENCES wiki_conversations(id) ON DELETE SET NULL,
+        source_summary_id   TEXT UNIQUE REFERENCES wiki_source_summaries(id)
+                                      ON DELETE RESTRICT,
         status              TEXT NOT NULL DEFAULT 'draft',
         base_graph_revision INTEGER NOT NULL,
         summary             TEXT NOT NULL DEFAULT '',
@@ -208,6 +235,16 @@ _DDL_STATEMENTS: tuple[str, ...] = (
         CHECK (author_kind IN ('agent', 'user', 'system')),
         UNIQUE (page_id, version)
     ) STRICT;
+    """,
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS wiki_pages_fts USING fts5(
+        page_id UNINDEXED,
+        space_id UNINDEXED,
+        title,
+        aliases,
+        content,
+        tokenize = 'unicode61 remove_diacritics 2'
+    );
     """,
     """
     CREATE TABLE IF NOT EXISTS wiki_page_sources (
@@ -270,7 +307,8 @@ _DDL_STATEMENTS: tuple[str, ...] = (
         created_at_ms   INTEGER NOT NULL,
         started_at_ms   INTEGER,
         finished_at_ms  INTEGER,
-        CHECK (kind IN ('parse', 'synthesize_entry_page', 'rebuild_search',
+        CHECK (kind IN ('parse', 'summarize_source', 'synthesize_entry_page',
+                        'synthesize_topic_pages', 'rebuild_search',
                         'rebuild_graph_projection')),
         CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
         CHECK (attempt >= 1),
@@ -382,6 +420,77 @@ _DDL_STATEMENTS: tuple[str, ...] = (
             REFERENCES wiki_parse_attempts(job_id, id) ON DELETE RESTRICT
     ) STRICT;
     """,
+    """
+    CREATE TABLE IF NOT EXISTS wiki_source_summaries (
+        id                       TEXT PRIMARY KEY,
+        space_id                 TEXT NOT NULL REFERENCES wiki_spaces(id) ON DELETE CASCADE,
+        source_id                TEXT NOT NULL REFERENCES wiki_sources(id) ON DELETE CASCADE,
+        parse_revision_id        TEXT NOT NULL REFERENCES wiki_parse_revisions(id)
+                                          ON DELETE RESTRICT,
+        job_id                   TEXT NOT NULL UNIQUE REFERENCES wiki_jobs(id) ON DELETE RESTRICT,
+        selection_version        INTEGER NOT NULL,
+        source_sha256            TEXT NOT NULL,
+        parsed_markdown_sha256   TEXT NOT NULL,
+        manifest_sha256          TEXT NOT NULL,
+        page_count               INTEGER NOT NULL,
+        prompt_revision          TEXT NOT NULL,
+        provider                 TEXT NOT NULL,
+        model                    TEXT NOT NULL,
+        content_json             TEXT NOT NULL,
+        content_sha256           TEXT NOT NULL,
+        created_at_ms            INTEGER NOT NULL,
+        CHECK (selection_version >= 1),
+        CHECK (length(source_sha256) = 64 AND source_sha256 = lower(source_sha256)),
+        CHECK (length(parsed_markdown_sha256) = 64 AND
+               parsed_markdown_sha256 = lower(parsed_markdown_sha256)),
+        CHECK (length(manifest_sha256) = 64 AND manifest_sha256 = lower(manifest_sha256)),
+        CHECK (page_count >= 1),
+        CHECK (prompt_revision <> '' AND provider <> '' AND model <> ''),
+        CHECK (json_valid(content_json) AND json_type(content_json) = 'object'),
+        CHECK (length(content_sha256) = 64 AND content_sha256 = lower(content_sha256)),
+        UNIQUE (source_id, id),
+        FOREIGN KEY (source_id, parse_revision_id)
+            REFERENCES wiki_parse_revisions(source_id, id) ON DELETE RESTRICT,
+        FOREIGN KEY (source_id, job_id)
+            REFERENCES wiki_jobs(source_id, id) ON DELETE RESTRICT
+    ) STRICT;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS wiki_page_proposals (
+        id                  TEXT PRIMARY KEY,
+        space_id            TEXT NOT NULL REFERENCES wiki_spaces(id) ON DELETE CASCADE,
+        source_id           TEXT NOT NULL REFERENCES wiki_sources(id) ON DELETE CASCADE,
+        summary_id          TEXT NOT NULL REFERENCES wiki_source_summaries(id)
+                                      ON DELETE RESTRICT,
+        job_id              TEXT NOT NULL REFERENCES wiki_jobs(id) ON DELETE RESTRICT,
+        kind                TEXT NOT NULL,
+        topic_ordinal       INTEGER,
+        parent_proposal_id  TEXT,
+        title               TEXT NOT NULL,
+        slug                TEXT NOT NULL,
+        aliases_json        TEXT NOT NULL DEFAULT '[]',
+        markdown            TEXT NOT NULL,
+        content_sha256      TEXT NOT NULL,
+        source_locator_json TEXT NOT NULL,
+        created_at_ms       INTEGER NOT NULL,
+        CHECK (kind IN ('entry', 'topic')),
+        CHECK ((kind = 'entry' AND topic_ordinal IS NULL AND parent_proposal_id IS NULL) OR
+               (kind = 'topic' AND topic_ordinal >= 0 AND parent_proposal_id IS NOT NULL)),
+        CHECK (title <> '' AND slug <> '' AND markdown <> ''),
+        CHECK (json_valid(aliases_json) AND json_type(aliases_json) = 'array'),
+        CHECK (length(content_sha256) = 64 AND content_sha256 = lower(content_sha256)),
+        CHECK (json_valid(source_locator_json) AND
+               json_type(source_locator_json) = 'object'),
+        UNIQUE (summary_id, kind, topic_ordinal),
+        UNIQUE (summary_id, id),
+        FOREIGN KEY (source_id, summary_id)
+            REFERENCES wiki_source_summaries(source_id, id) ON DELETE RESTRICT,
+        FOREIGN KEY (source_id, job_id)
+            REFERENCES wiki_jobs(source_id, id) ON DELETE RESTRICT,
+        FOREIGN KEY (summary_id, parent_proposal_id)
+            REFERENCES wiki_page_proposals(summary_id, id) ON DELETE RESTRICT
+    ) STRICT;
+    """,
     "CREATE INDEX IF NOT EXISTS idx_wiki_sources_space ON wiki_sources(space_id);",
     "CREATE INDEX IF NOT EXISTS idx_wiki_sources_status ON wiki_sources(status);",
     "CREATE INDEX IF NOT EXISTS idx_wiki_artifacts_source ON wiki_artifacts(source_id);",
@@ -396,6 +505,18 @@ _DDL_STATEMENTS: tuple[str, ...] = (
     (
         "CREATE INDEX IF NOT EXISTS idx_wiki_parse_revisions_source "
         "ON wiki_parse_revisions(source_id, created_at_ms, id);"
+    ),
+    (
+        "CREATE INDEX IF NOT EXISTS idx_wiki_source_summaries_source "
+        "ON wiki_source_summaries(source_id, created_at_ms, id);"
+    ),
+    (
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_wiki_page_proposals_entry "
+        "ON wiki_page_proposals(summary_id) WHERE kind = 'entry';"
+    ),
+    (
+        "CREATE INDEX IF NOT EXISTS idx_wiki_page_proposals_source "
+        "ON wiki_page_proposals(source_id, created_at_ms, id);"
     ),
     "CREATE INDEX IF NOT EXISTS idx_wiki_pages_space_status ON wiki_pages(space_id, status);",
     "CREATE INDEX IF NOT EXISTS idx_wiki_revisions_page ON wiki_page_revisions(page_id, version);",
@@ -482,6 +603,7 @@ _REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
             "created_at_ms",
         }
     ),
+    "wiki_pages_fts": frozenset({"page_id", "space_id", "title", "aliases", "content"}),
     "wiki_page_sources": frozenset(
         {"page_id", "source_id", "source_locator_json", "created_at_ms"}
     ),
@@ -501,6 +623,7 @@ _REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
             "id",
             "space_id",
             "conversation_id",
+            "source_summary_id",
             "status",
             "base_graph_revision",
             "summary",
@@ -597,6 +720,45 @@ _REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
             "manifest_relpath",
             "manifest_sha256",
             "page_count",
+            "created_at_ms",
+        }
+    ),
+    "wiki_source_summaries": frozenset(
+        {
+            "id",
+            "space_id",
+            "source_id",
+            "parse_revision_id",
+            "job_id",
+            "selection_version",
+            "source_sha256",
+            "parsed_markdown_sha256",
+            "manifest_sha256",
+            "page_count",
+            "prompt_revision",
+            "provider",
+            "model",
+            "content_json",
+            "content_sha256",
+            "created_at_ms",
+        }
+    ),
+    "wiki_page_proposals": frozenset(
+        {
+            "id",
+            "space_id",
+            "source_id",
+            "summary_id",
+            "job_id",
+            "kind",
+            "topic_ordinal",
+            "parent_proposal_id",
+            "title",
+            "slug",
+            "aliases_json",
+            "markdown",
+            "content_sha256",
+            "source_locator_json",
             "created_at_ms",
         }
     ),
@@ -742,6 +904,161 @@ def _row_to_parse_revision(row: aiosqlite.Row) -> WikiParseRevision:
     )
 
 
+def _row_to_source_summary(row: aiosqlite.Row) -> WikiSourceSummaryDraft:
+    return WikiSourceSummaryDraft(
+        id=row["id"],
+        space_id=row["space_id"],
+        source_id=row["source_id"],
+        parse_revision_id=row["parse_revision_id"],
+        job_id=row["job_id"],
+        selection_version=row["selection_version"],
+        source_sha256=row["source_sha256"],
+        parsed_markdown_sha256=row["parsed_markdown_sha256"],
+        manifest_sha256=row["manifest_sha256"],
+        page_count=row["page_count"],
+        prompt_revision=row["prompt_revision"],
+        provider=row["provider"],
+        model=row["model"],
+        content=WikiSourceSummaryContent.model_validate_json(row["content_json"]),
+        content_sha256=row["content_sha256"],
+        created_at_ms=row["created_at_ms"],
+    )
+
+
+def _row_to_page_proposal(row: aiosqlite.Row) -> WikiPageProposal:
+    return WikiPageProposal(
+        id=row["id"],
+        space_id=row["space_id"],
+        source_id=row["source_id"],
+        summary_id=row["summary_id"],
+        job_id=row["job_id"],
+        kind=row["kind"],
+        topic_ordinal=row["topic_ordinal"],
+        parent_proposal_id=row["parent_proposal_id"],
+        title=row["title"],
+        slug=row["slug"],
+        aliases=tuple(json.loads(row["aliases_json"])),
+        markdown=row["markdown"],
+        content_sha256=row["content_sha256"],
+        source_locator_json=row["source_locator_json"],
+        created_at_ms=row["created_at_ms"],
+    )
+
+
+def _row_to_page(row: aiosqlite.Row) -> WikiPage:
+    return WikiPage(
+        id=row["id"],
+        space_id=row["space_id"],
+        slug=row["slug"],
+        title=row["title"],
+        aliases=tuple(json.loads(row["aliases_json"])),
+        status=row["status"],
+        current_revision_id=row["current_revision_id"],
+        version=row["version"],
+        created_at_ms=row["created_at_ms"],
+        updated_at_ms=row["updated_at_ms"],
+    )
+
+
+def _row_to_page_revision(row: aiosqlite.Row) -> WikiPageRevision:
+    return WikiPageRevision(
+        id=row["id"],
+        page_id=row["page_id"],
+        version=row["version"],
+        title=row["title"],
+        markdown=row["markdown"],
+        content_sha256=row["content_sha256"],
+        change_set_id=row["change_set_id"],
+        author_kind=row["author_kind"],
+        created_at_ms=row["created_at_ms"],
+    )
+
+
+def _row_to_edge(row: aiosqlite.Row) -> WikiEdge:
+    return WikiEdge(
+        id=row["id"],
+        space_id=row["space_id"],
+        from_page_id=row["from_page_id"],
+        to_page_id=row["to_page_id"],
+        relation_type=row["relation_type"],
+        change_set_id=row["change_set_id"],
+        created_at_ms=row["created_at_ms"],
+    )
+
+
+def _row_to_conversation(row: aiosqlite.Row) -> WikiConversation:
+    return WikiConversation(
+        id=row["id"],
+        space_id=row["space_id"],
+        session_id=row["session_id"],
+        title=row["title"],
+        status=row["status"],
+        created_at_ms=row["created_at_ms"],
+        updated_at_ms=row["updated_at_ms"],
+    )
+
+
+def _row_to_change_set(row: aiosqlite.Row) -> WikiChangeSet:
+    return WikiChangeSet(
+        id=row["id"],
+        space_id=row["space_id"],
+        conversation_id=row["conversation_id"],
+        source_summary_id=row["source_summary_id"],
+        status=row["status"],
+        base_graph_revision=row["base_graph_revision"],
+        summary=row["summary"],
+        safe_error_code=row["safe_error_code"],
+        created_at_ms=row["created_at_ms"],
+        decided_at_ms=row["decided_at_ms"],
+        published_at_ms=row["published_at_ms"],
+    )
+
+
+def _row_to_change_set_item(row: aiosqlite.Row) -> WikiChangeSetItem:
+    return WikiChangeSetItem(
+        id=row["id"],
+        change_set_id=row["change_set_id"],
+        ordinal=row["ordinal"],
+        operation_kind=row["operation_kind"],
+        target_id=row["target_id"],
+        base_version=row["base_version"],
+        before_sha256=row["before_sha256"],
+        payload_json=row["payload_json"],
+        unified_diff=row["unified_diff"],
+        created_at_ms=row["created_at_ms"],
+    )
+
+
+def _render_page_create_diff(slug: str, markdown: str) -> str:
+    lines = markdown.splitlines()
+    header = (
+        "--- /dev/null",
+        f"+++ pages/{slug}.md",
+        f"@@ -0,0 +1,{len(lines)} @@",
+    )
+    return "\n".join((*header, *(f"+{line}" for line in lines))) + "\n"
+
+
+def _render_edge_add_diff(
+    from_slug: str,
+    to_slug: str,
+    relation_type: str,
+) -> str:
+    return f"+ edge pages/{from_slug}.md --{relation_type}--> pages/{to_slug}.md\n"
+
+
+def _render_page_update_diff(slug: str, before: str, after: str) -> str:
+    lines = difflib.unified_diff(
+        before.splitlines(),
+        after.splitlines(),
+        fromfile=f"pages/{slug}.md",
+        tofile=f"pages/{slug}.md",
+        lineterm="",
+    )
+    rendered = "\n".join(lines)
+    return f"{rendered}\n" if rendered else ""
+
+
 class WikiStore:
     """Own ``wiki.db`` and the rebuildable account-scoped Wiki mirror."""
 
@@ -758,6 +1075,14 @@ class WikiStore:
         job_id_factory: Callable[[], str] | None = None,
         parse_attempt_id_factory: Callable[[], str] | None = None,
         parse_revision_id_factory: Callable[[], str] | None = None,
+        summary_id_factory: Callable[[], str] | None = None,
+        page_proposal_id_factory: Callable[[], str] | None = None,
+        change_set_id_factory: Callable[[], str] | None = None,
+        change_set_item_id_factory: Callable[[], str] | None = None,
+        page_id_factory: Callable[[], str] | None = None,
+        page_revision_id_factory: Callable[[], str] | None = None,
+        edge_id_factory: Callable[[], str] | None = None,
+        conversation_id_factory: Callable[[], str] | None = None,
         legacy_backup_receipt: WikiLegacyBackupReceipt | None = None,
     ) -> None:
         self._db: aiosqlite.Connection | None = connection
@@ -775,6 +1100,26 @@ class WikiStore:
         )
         self._parse_revision_id_factory = parse_revision_id_factory or (
             lambda: f"parse_revision_{secrets.token_hex(12)}"
+        )
+        self._summary_id_factory = summary_id_factory or (
+            lambda: f"summary_{secrets.token_hex(12)}"
+        )
+        self._page_proposal_id_factory = page_proposal_id_factory or (
+            lambda: f"page_proposal_{secrets.token_hex(12)}"
+        )
+        self._change_set_id_factory = change_set_id_factory or (
+            lambda: f"change_set_{secrets.token_hex(12)}"
+        )
+        self._change_set_item_id_factory = change_set_item_id_factory or (
+            lambda: f"change_item_{secrets.token_hex(12)}"
+        )
+        self._page_id_factory = page_id_factory or (lambda: f"page_{secrets.token_hex(12)}")
+        self._page_revision_id_factory = page_revision_id_factory or (
+            lambda: f"page_revision_{secrets.token_hex(12)}"
+        )
+        self._edge_id_factory = edge_id_factory or (lambda: f"edge_{secrets.token_hex(12)}")
+        self._conversation_id_factory = conversation_id_factory or (
+            lambda: f"conversation_{secrets.token_hex(12)}"
         )
         self._legacy_backup_receipt = legacy_backup_receipt
         self._closed = False
@@ -794,6 +1139,14 @@ class WikiStore:
         job_id_factory: Callable[[], str] | None = None,
         parse_attempt_id_factory: Callable[[], str] | None = None,
         parse_revision_id_factory: Callable[[], str] | None = None,
+        summary_id_factory: Callable[[], str] | None = None,
+        page_proposal_id_factory: Callable[[], str] | None = None,
+        change_set_id_factory: Callable[[], str] | None = None,
+        change_set_item_id_factory: Callable[[], str] | None = None,
+        page_id_factory: Callable[[], str] | None = None,
+        page_revision_id_factory: Callable[[], str] | None = None,
+        edge_id_factory: Callable[[], str] | None = None,
+        conversation_id_factory: Callable[[], str] | None = None,
         backup_id_factory: Callable[[], str] | None = None,
     ) -> WikiStore:
         if legacy_policy not in {"preserve", "retire"}:
@@ -835,12 +1188,22 @@ class WikiStore:
                 job_id_factory=job_id_factory,
                 parse_attempt_id_factory=parse_attempt_id_factory,
                 parse_revision_id_factory=parse_revision_id_factory,
+                summary_id_factory=summary_id_factory,
+                page_proposal_id_factory=page_proposal_id_factory,
+                change_set_id_factory=change_set_id_factory,
+                change_set_item_id_factory=change_set_item_id_factory,
+                page_id_factory=page_id_factory,
+                page_revision_id_factory=page_revision_id_factory,
+                edge_id_factory=edge_id_factory,
+                conversation_id_factory=conversation_id_factory,
                 legacy_backup_receipt=backup_receipt,
             )
             await store._initialize_schema()
             await connection.execute("PRAGMA journal_mode=WAL")
             store._startup_repair_report = await store.repair_space_mirrors()
             await store.repair_selected_parse_pointers()
+            await store.repair_page_mirrors()
+            await store.repair_page_search_index()
         except BaseException:
             await connection.close()
             raise
@@ -860,6 +1223,14 @@ class WikiStore:
         job_id_factory: Callable[[], str] | None = None,
         parse_attempt_id_factory: Callable[[], str] | None = None,
         parse_revision_id_factory: Callable[[], str] | None = None,
+        summary_id_factory: Callable[[], str] | None = None,
+        page_proposal_id_factory: Callable[[], str] | None = None,
+        change_set_id_factory: Callable[[], str] | None = None,
+        change_set_item_id_factory: Callable[[], str] | None = None,
+        page_id_factory: Callable[[], str] | None = None,
+        page_revision_id_factory: Callable[[], str] | None = None,
+        edge_id_factory: Callable[[], str] | None = None,
+        conversation_id_factory: Callable[[], str] | None = None,
     ) -> WikiStore:
         if getattr(connection, "isolation_level", "") is not None:
             raise WikiStoreError("invalid_configuration")
@@ -878,10 +1249,20 @@ class WikiStore:
             job_id_factory=job_id_factory,
             parse_attempt_id_factory=parse_attempt_id_factory,
             parse_revision_id_factory=parse_revision_id_factory,
+            summary_id_factory=summary_id_factory,
+            page_proposal_id_factory=page_proposal_id_factory,
+            change_set_id_factory=change_set_id_factory,
+            change_set_item_id_factory=change_set_item_id_factory,
+            page_id_factory=page_id_factory,
+            page_revision_id_factory=page_revision_id_factory,
+            edge_id_factory=edge_id_factory,
+            conversation_id_factory=conversation_id_factory,
         )
         await store._initialize_schema()
         store._startup_repair_report = await store.repair_space_mirrors()
         await store.repair_selected_parse_pointers()
+        await store.repair_page_mirrors()
+        await store.repair_page_search_index()
         return store
 
     @property
@@ -1038,6 +1419,8 @@ class WikiStore:
                 if row is None:
                     raise WikiStoreError("space_not_found")
                 locked = _row_to_space(row)
+                if locked.status != "active":
+                    raise WikiStoreError("space_read_only")
                 if (
                     expected_updated_at_ms is not None
                     and locked.updated_at_ms != expected_updated_at_ms
@@ -1091,6 +1474,19 @@ class WikiStore:
                     return current
                 if status not in _STATUS_TRANSITIONS[current.status]:
                     raise WikiStoreError("invalid_status_transition")
+                if status == "archived":
+                    checks = (
+                        "SELECT 1 FROM wiki_jobs WHERE space_id = ? "
+                        "AND status IN ('queued', 'running') LIMIT 1",
+                        "SELECT 1 FROM wiki_conversations WHERE space_id = ? "
+                        "AND status = 'active' LIMIT 1",
+                        "SELECT 1 FROM wiki_change_sets WHERE space_id = ? "
+                        "AND status IN ('draft', 'awaiting_approval') LIMIT 1",
+                    )
+                    for query in checks:
+                        async with db.execute(query, (space_id,)) as cursor:
+                            if await cursor.fetchone() is not None:
+                                raise WikiStoreError("space_in_use")
                 updated_at = max(self._clock_ms(), current.updated_at_ms + 1)
                 await db.execute(
                     "UPDATE wiki_spaces SET status = ?, updated_at_ms = ? WHERE id = ?",
@@ -1110,12 +1506,67 @@ class WikiStore:
         *,
         expected_updated_at_ms: int | None = None,
     ) -> WikiSpace:
-        """Soft-delete by entering ``deleting``; physical deletion is a later workflow."""
-        return await self.set_space_status(
-            space_id,
-            "deleting",
-            expected_updated_at_ms=expected_updated_at_ms,
-        )
+        """Enter ``deleting`` only after all user-visible work is retired."""
+        async with self._write_lock:
+            db = self._require_db()
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                async with db.execute(
+                    "SELECT * FROM wiki_spaces WHERE id = ?",
+                    (space_id,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                if row is None:
+                    raise WikiStoreError("space_not_found")
+                current = _row_to_space(row)
+                if (
+                    expected_updated_at_ms is not None
+                    and current.updated_at_ms != expected_updated_at_ms
+                ):
+                    raise WikiStoreError("space_conflict")
+                if current.status == "deleting":
+                    await db.execute("COMMIT")
+                    return current
+                checks = (
+                    (
+                        "SELECT 1 FROM wiki_sources "
+                        "WHERE space_id = ? AND status <> 'deleting' LIMIT 1"
+                    ),
+                    (
+                        "SELECT 1 FROM wiki_pages "
+                        "WHERE space_id = ? AND status = 'active' LIMIT 1"
+                    ),
+                    (
+                        "SELECT 1 FROM wiki_conversations "
+                        "WHERE space_id = ? AND status = 'active' LIMIT 1"
+                    ),
+                    (
+                        "SELECT 1 FROM wiki_jobs WHERE space_id = ? "
+                        "AND status IN ('queued', 'running') LIMIT 1"
+                    ),
+                    (
+                        "SELECT 1 FROM wiki_change_sets WHERE space_id = ? "
+                        "AND status IN ('draft', 'awaiting_approval') LIMIT 1"
+                    ),
+                )
+                for query in checks:
+                    async with db.execute(query, (space_id,)) as cursor:
+                        if await cursor.fetchone() is not None:
+                            raise WikiStoreError("space_in_use")
+                if "deleting" not in _STATUS_TRANSITIONS[current.status]:
+                    raise WikiStoreError("invalid_status_transition")
+                updated_at = max(self._clock_ms(), current.updated_at_ms + 1)
+                await db.execute(
+                    "UPDATE wiki_spaces SET status = 'deleting', updated_at_ms = ? WHERE id = ?",
+                    (updated_at, space_id),
+                )
+                await db.execute("COMMIT")
+            except BaseException:
+                await self._rollback_quietly(db)
+                raise
+        updated = await self.get_space(space_id)
+        await self._sync_mirror_or_raise(updated)
+        return updated
 
     async def upload_source(
         self,
@@ -1131,7 +1582,7 @@ class WikiStore:
             raise WikiStoreError("file_too_large")
         space = await self.get_space(space_id)
         if space.status != "active":
-            raise WikiStoreError("invalid_source")
+            raise WikiStoreError("space_read_only")
         now = self._clock_ms()
         source_id = self._source_id_factory()
         digest = hashlib.sha256(content).hexdigest()
@@ -1173,6 +1624,15 @@ class WikiStore:
                     max_bytes=max_bytes,
                 )
                 wrote_file = True
+                async with db.execute(
+                    "SELECT status FROM wiki_spaces WHERE id = ?",
+                    (space_id,),
+                ) as cursor:
+                    space_row = await cursor.fetchone()
+                if space_row is None:
+                    raise WikiStoreError("space_not_found")
+                if space_row["status"] != "active":
+                    raise WikiStoreError("space_read_only")
                 await db.execute(
                     """
                     INSERT INTO wiki_sources (
@@ -1352,6 +1812,137 @@ class WikiStore:
                 raise
         return await self.get_source(source_id)
 
+    async def request_source_deletion(
+        self,
+        source_id: str,
+        *,
+        expected_updated_at_ms: int | None = None,
+    ) -> WikiSource:
+        """Make Raw bytes inaccessible and schedule retention cleanup.
+
+        Source metadata remains as immutable audit evidence. A Source that is
+        still projected by an active page, has active work, or feeds a pending
+        Change Set cannot enter deletion.
+        """
+        try:
+            validate_source_id(source_id)
+        except ValueError as exc:
+            raise WikiStoreError("invalid_identifier") from exc
+        async with self._write_lock:
+            db = self._require_db()
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                async with db.execute(
+                    "SELECT * FROM wiki_sources WHERE id = ?",
+                    (source_id,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                if row is None:
+                    raise WikiStoreError("source_not_found")
+                current = _row_to_source(row)
+                if (
+                    expected_updated_at_ms is not None
+                    and current.updated_at_ms != expected_updated_at_ms
+                ):
+                    raise WikiStoreError("source_conflict")
+                if current.status == "deleting":
+                    await db.execute("COMMIT")
+                    return current
+                async with db.execute(
+                    """
+                    SELECT 1
+                    FROM wiki_page_sources AS ps
+                    JOIN wiki_pages AS p ON p.id = ps.page_id
+                    WHERE ps.source_id = ? AND p.status = 'active'
+                    LIMIT 1
+                    """,
+                    (source_id,),
+                ) as cursor:
+                    if await cursor.fetchone() is not None:
+                        raise WikiStoreError("source_in_use")
+                async with db.execute(
+                    """
+                    SELECT 1 FROM wiki_jobs
+                    WHERE source_id = ? AND status IN ('queued', 'running')
+                    LIMIT 1
+                    """,
+                    (source_id,),
+                ) as cursor:
+                    if await cursor.fetchone() is not None:
+                        raise WikiStoreError("source_conflict")
+                async with db.execute(
+                    """
+                    SELECT 1
+                    FROM wiki_change_sets AS c
+                    JOIN wiki_source_summaries AS s ON s.id = c.source_summary_id
+                    WHERE s.source_id = ? AND c.status IN ('draft', 'awaiting_approval')
+                    LIMIT 1
+                    """,
+                    (source_id,),
+                ) as cursor:
+                    if await cursor.fetchone() is not None:
+                        raise WikiStoreError("source_conflict")
+                updated_at = max(self._clock_ms(), current.updated_at_ms + 1)
+                await db.execute(
+                    """
+                    UPDATE wiki_sources
+                    SET status = 'deleting', safe_error_code = '', updated_at_ms = ?
+                    WHERE id = ?
+                    """,
+                    (updated_at, source_id),
+                )
+                await db.execute("COMMIT")
+            except BaseException:
+                await self._rollback_quietly(db)
+                raise
+        return await self.get_source(source_id)
+
+    async def purge_due_source_files(
+        self,
+        *,
+        retention_ms: int,
+        limit: int = 100,
+        now_ms: int | None = None,
+    ) -> tuple[str, ...]:
+        """Physically remove due Raw trees while retaining canonical rows."""
+        if retention_ms < 0 or not 1 <= limit <= 1000:
+            raise WikiStoreError("invalid_configuration")
+        cutoff = (self._clock_ms() if now_ms is None else now_ms) - retention_ms
+        async with self._write_lock:
+            db = self._require_db()
+            async with db.execute(
+                """
+                SELECT * FROM wiki_sources
+                WHERE status = 'deleting' AND updated_at_ms <= ?
+                ORDER BY updated_at_ms, id
+                LIMIT ?
+                """,
+                (cutoff, limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
+            removed: list[str] = []
+            for row in rows:
+                source = _row_to_source(row)
+                async with db.execute(
+                    """
+                    SELECT 1
+                    FROM wiki_page_sources AS ps
+                    JOIN wiki_pages AS p ON p.id = ps.page_id
+                    WHERE ps.source_id = ? AND p.status = 'active'
+                    LIMIT 1
+                    """,
+                    (source.id,),
+                ) as cursor:
+                    if await cursor.fetchone() is not None:
+                        continue
+                did_remove = await asyncio.to_thread(
+                    self._file_store.purge_source_bundle,
+                    source,
+                )
+                if did_remove:
+                    removed.append(source.id)
+        return tuple(removed)
+
     async def create_job(
         self,
         space_id: str,
@@ -1386,6 +1977,8 @@ class WikiStore:
         async with self._write_lock:
             db = self._require_db()
             try:
+                await db.execute("BEGIN IMMEDIATE")
+                await self._assert_space_active(db, space_id)
                 await db.execute(
                     """
                     INSERT INTO wiki_jobs (
@@ -1408,8 +2001,13 @@ class WikiStore:
                         job.created_at_ms,
                     ),
                 )
+                await db.execute("COMMIT")
             except aiosqlite.IntegrityError as exc:
+                await self._rollback_quietly(db)
                 raise WikiStoreError("job_conflict") from exc
+            except BaseException:
+                await self._rollback_quietly(db)
+                raise
         return job
 
     async def begin_parse_job(
@@ -1435,6 +2033,7 @@ class WikiStore:
                 if row is None:
                     raise WikiStoreError("source_not_found")
                 source = _row_to_source(row)
+                await self._assert_space_active(db, source.space_id)
                 if source.status not in {"uploaded", "failed", "parsed"}:
                     raise WikiStoreError("source_conflict")
                 now = max(self._clock_ms(), source.updated_at_ms + 1)
@@ -1838,6 +2437,3021 @@ class WikiStore:
             rows = await cursor.fetchall()
         return tuple(_row_to_artifact(row) for row in rows)
 
+    def new_source_summary(
+        self,
+        source: WikiSource,
+        revision: WikiParseRevision,
+        job: WikiJob,
+        *,
+        prompt_revision: str,
+        provider: str,
+        model: str,
+        content: WikiSourceSummaryContent,
+    ) -> WikiSourceSummaryDraft:
+        """Build an immutable draft pinned to the job's selected Raw revision."""
+        if (
+            source.status != "parsed"
+            or source.selected_parse_revision_id != revision.id
+            or source.selection_version < 1
+            or revision.source_id != source.id
+            or revision.source_sha256 != source.source_sha256
+            or job.kind != "summarize_source"
+            or job.status != "running"
+            or job.source_id != source.id
+            or job.base_selection_version != source.selection_version
+            or job.base_selected_parse_revision_id != revision.id
+        ):
+            raise WikiStoreError("source_conflict")
+        content_json = json.dumps(
+            content.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        try:
+            return WikiSourceSummaryDraft(
+                id=self._summary_id_factory(),
+                space_id=source.space_id,
+                source_id=source.id,
+                parse_revision_id=revision.id,
+                job_id=job.id,
+                selection_version=source.selection_version,
+                source_sha256=source.source_sha256,
+                parsed_markdown_sha256=revision.parsed_markdown_sha256,
+                manifest_sha256=revision.manifest_sha256,
+                page_count=revision.page_count,
+                prompt_revision=prompt_revision,
+                provider=provider,
+                model=model,
+                content=content,
+                content_sha256=hashlib.sha256(content_json.encode("utf-8")).hexdigest(),
+                created_at_ms=max(self._clock_ms(), job.started_at_ms or 0),
+            )
+        except ValueError as exc:
+            raise WikiStoreError("invalid_summary") from exc
+
+    async def complete_source_summary(
+        self,
+        summary: WikiSourceSummaryDraft,
+    ) -> WikiSourceSummaryDraft:
+        """Publish only the draft row; never mutate Raw artifacts or Wiki pages."""
+        try:
+            validate_summary_id(summary.id)
+        except ValueError as exc:
+            raise WikiStoreError("invalid_identifier") from exc
+        content_json = json.dumps(
+            summary.content.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if hashlib.sha256(content_json.encode("utf-8")).hexdigest() != summary.content_sha256:
+            raise WikiStoreError("invalid_summary")
+        async with self._write_lock:
+            db = self._require_db()
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                async with db.execute(
+                    "SELECT * FROM wiki_sources WHERE id = ?",
+                    (summary.source_id,),
+                ) as cursor:
+                    source_row = await cursor.fetchone()
+                async with db.execute(
+                    "SELECT * FROM wiki_jobs WHERE id = ?",
+                    (summary.job_id,),
+                ) as cursor:
+                    job_row = await cursor.fetchone()
+                if source_row is None or job_row is None:
+                    raise WikiStoreError("source_conflict")
+                source = _row_to_source(source_row)
+                job = _row_to_job(job_row)
+                if (
+                    source.space_id != summary.space_id
+                    or source.status != "parsed"
+                    or source.source_sha256 != summary.source_sha256
+                    or source.selection_version != summary.selection_version
+                    or source.selected_parse_revision_id != summary.parse_revision_id
+                    or job.kind != "summarize_source"
+                    or job.status != "running"
+                    or job.source_id != source.id
+                    or job.base_selection_version != summary.selection_version
+                    or job.base_selected_parse_revision_id != summary.parse_revision_id
+                ):
+                    raise WikiStoreError("source_conflict")
+                await db.execute(
+                    """
+                    INSERT INTO wiki_source_summaries (
+                        id, space_id, source_id, parse_revision_id, job_id,
+                        selection_version, source_sha256, parsed_markdown_sha256,
+                        manifest_sha256, page_count, prompt_revision, provider,
+                        model, content_json, content_sha256, created_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        summary.id,
+                        summary.space_id,
+                        summary.source_id,
+                        summary.parse_revision_id,
+                        summary.job_id,
+                        summary.selection_version,
+                        summary.source_sha256,
+                        summary.parsed_markdown_sha256,
+                        summary.manifest_sha256,
+                        summary.page_count,
+                        summary.prompt_revision,
+                        summary.provider,
+                        summary.model,
+                        content_json,
+                        summary.content_sha256,
+                        summary.created_at_ms,
+                    ),
+                )
+                finished_at = max(self._clock_ms(), job.started_at_ms or 0)
+                await db.execute(
+                    """
+                    UPDATE wiki_jobs
+                    SET status = 'succeeded', safe_error_code = '', finished_at_ms = ?
+                    WHERE id = ?
+                    """,
+                    (finished_at, job.id),
+                )
+                await db.execute("COMMIT")
+            except aiosqlite.IntegrityError as exc:
+                await self._rollback_quietly(db)
+                raise WikiStoreError("source_conflict") from exc
+            except BaseException:
+                await self._rollback_quietly(db)
+                raise
+        return await self.get_source_summary(summary.id)
+
+    async def get_source_summary(self, summary_id: str) -> WikiSourceSummaryDraft:
+        try:
+            validate_summary_id(summary_id)
+        except ValueError as exc:
+            raise WikiStoreError("invalid_identifier") from exc
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM wiki_source_summaries WHERE id = ?",
+            (summary_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise WikiStoreError("summary_not_found")
+        return _row_to_source_summary(row)
+
+    async def list_source_summaries(
+        self,
+        source_id: str,
+    ) -> tuple[WikiSourceSummaryDraft, ...]:
+        await self.get_source(source_id)
+        db = self._require_db()
+        async with db.execute(
+            """
+            SELECT * FROM wiki_source_summaries
+            WHERE source_id = ? ORDER BY created_at_ms, id
+            """,
+            (source_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return tuple(_row_to_source_summary(row) for row in rows)
+
+    def new_entry_page_proposal(
+        self,
+        summary: WikiSourceSummaryDraft,
+        job: WikiJob,
+        *,
+        title: str,
+        slug: str,
+        aliases: tuple[str, ...],
+        markdown: str,
+        source_locator_json: str,
+    ) -> WikiPageProposal:
+        if (
+            job.kind != "synthesize_entry_page"
+            or job.status != "running"
+            or job.source_id != summary.source_id
+            or job.space_id != summary.space_id
+            or job.base_selection_version != summary.selection_version
+            or job.base_selected_parse_revision_id != summary.parse_revision_id
+        ):
+            raise WikiStoreError("source_conflict")
+        try:
+            return WikiPageProposal(
+                id=self._page_proposal_id_factory(),
+                space_id=summary.space_id,
+                source_id=summary.source_id,
+                summary_id=summary.id,
+                job_id=job.id,
+                kind="entry",
+                title=title,
+                slug=slug,
+                aliases=aliases,
+                markdown=markdown,
+                content_sha256=hashlib.sha256(markdown.encode("utf-8")).hexdigest(),
+                source_locator_json=source_locator_json,
+                created_at_ms=max(self._clock_ms(), job.started_at_ms or 0),
+            )
+        except ValueError as exc:
+            raise WikiStoreError("invalid_page_proposal") from exc
+
+    async def complete_entry_page_proposal(
+        self,
+        summary: WikiSourceSummaryDraft,
+        proposal: WikiPageProposal,
+    ) -> WikiPageProposal:
+        if (
+            proposal.kind != "entry"
+            or proposal.summary_id != summary.id
+            or proposal.source_id != summary.source_id
+            or proposal.space_id != summary.space_id
+            or hashlib.sha256(proposal.markdown.encode("utf-8")).hexdigest()
+            != proposal.content_sha256
+        ):
+            raise WikiStoreError("invalid_page_proposal")
+        aliases_json = json.dumps(
+            list(proposal.aliases),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        async with self._write_lock:
+            db = self._require_db()
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                async with db.execute(
+                    "SELECT * FROM wiki_sources WHERE id = ?",
+                    (summary.source_id,),
+                ) as cursor:
+                    source_row = await cursor.fetchone()
+                async with db.execute(
+                    "SELECT * FROM wiki_source_summaries WHERE id = ?",
+                    (summary.id,),
+                ) as cursor:
+                    summary_row = await cursor.fetchone()
+                async with db.execute(
+                    "SELECT * FROM wiki_jobs WHERE id = ?",
+                    (proposal.job_id,),
+                ) as cursor:
+                    job_row = await cursor.fetchone()
+                if source_row is None or summary_row is None or job_row is None:
+                    raise WikiStoreError("source_conflict")
+                source = _row_to_source(source_row)
+                persisted_summary = _row_to_source_summary(summary_row)
+                job = _row_to_job(job_row)
+                if (
+                    persisted_summary != summary
+                    or source.status != "parsed"
+                    or source.space_id != summary.space_id
+                    or source.source_sha256 != summary.source_sha256
+                    or source.selection_version != summary.selection_version
+                    or source.selected_parse_revision_id != summary.parse_revision_id
+                    or job.kind != "synthesize_entry_page"
+                    or job.status != "running"
+                    or job.source_id != summary.source_id
+                    or job.base_selection_version != summary.selection_version
+                    or job.base_selected_parse_revision_id != summary.parse_revision_id
+                ):
+                    raise WikiStoreError("source_conflict")
+                await db.execute(
+                    """
+                    INSERT INTO wiki_page_proposals (
+                        id, space_id, source_id, summary_id, job_id, kind,
+                        topic_ordinal, parent_proposal_id, title, slug, aliases_json,
+                        markdown, content_sha256, source_locator_json, created_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, 'entry', NULL, NULL, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        proposal.id,
+                        proposal.space_id,
+                        proposal.source_id,
+                        proposal.summary_id,
+                        proposal.job_id,
+                        proposal.title,
+                        proposal.slug,
+                        aliases_json,
+                        proposal.markdown,
+                        proposal.content_sha256,
+                        proposal.source_locator_json,
+                        proposal.created_at_ms,
+                    ),
+                )
+                finished_at = max(self._clock_ms(), job.started_at_ms or 0)
+                await db.execute(
+                    """
+                    UPDATE wiki_jobs
+                    SET status = 'succeeded', safe_error_code = '', finished_at_ms = ?
+                    WHERE id = ?
+                    """,
+                    (finished_at, job.id),
+                )
+                await db.execute("COMMIT")
+            except aiosqlite.IntegrityError as exc:
+                await self._rollback_quietly(db)
+                raise WikiStoreError("page_proposal_conflict") from exc
+            except BaseException:
+                await self._rollback_quietly(db)
+                raise
+        return await self.get_page_proposal(proposal.id)
+
+    def new_topic_page_proposal(
+        self,
+        summary: WikiSourceSummaryDraft,
+        entry: WikiPageProposal,
+        job: WikiJob,
+        *,
+        topic_ordinal: int,
+        title: str,
+        slug: str,
+        markdown: str,
+        source_locator_json: str,
+    ) -> WikiPageProposal:
+        if (
+            entry.kind != "entry"
+            or entry.summary_id != summary.id
+            or job.kind != "synthesize_topic_pages"
+            or job.status != "running"
+            or job.source_id != summary.source_id
+            or job.space_id != summary.space_id
+            or job.base_selection_version != summary.selection_version
+            or job.base_selected_parse_revision_id != summary.parse_revision_id
+        ):
+            raise WikiStoreError("source_conflict")
+        try:
+            return WikiPageProposal(
+                id=self._page_proposal_id_factory(),
+                space_id=summary.space_id,
+                source_id=summary.source_id,
+                summary_id=summary.id,
+                job_id=job.id,
+                kind="topic",
+                topic_ordinal=topic_ordinal,
+                parent_proposal_id=entry.id,
+                title=title,
+                slug=slug,
+                markdown=markdown,
+                content_sha256=hashlib.sha256(markdown.encode("utf-8")).hexdigest(),
+                source_locator_json=source_locator_json,
+                created_at_ms=max(self._clock_ms(), job.started_at_ms or 0),
+            )
+        except ValueError as exc:
+            raise WikiStoreError("invalid_page_proposal") from exc
+
+    async def complete_topic_page_proposals(
+        self,
+        summary: WikiSourceSummaryDraft,
+        entry: WikiPageProposal,
+        proposals: Sequence[WikiPageProposal],
+    ) -> tuple[WikiPageProposal, ...]:
+        if not proposals or len(proposals) != len(summary.content.topics):
+            raise WikiStoreError("invalid_page_proposal")
+        if [item.topic_ordinal for item in proposals] != list(range(len(proposals))):
+            raise WikiStoreError("invalid_page_proposal")
+        job_id = proposals[0].job_id
+        if any(
+            item.kind != "topic"
+            or item.summary_id != summary.id
+            or item.source_id != summary.source_id
+            or item.space_id != summary.space_id
+            or item.parent_proposal_id != entry.id
+            or item.job_id != job_id
+            or hashlib.sha256(item.markdown.encode("utf-8")).hexdigest() != item.content_sha256
+            for item in proposals
+        ):
+            raise WikiStoreError("invalid_page_proposal")
+        async with self._write_lock:
+            db = self._require_db()
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                async with db.execute(
+                    "SELECT * FROM wiki_sources WHERE id = ?",
+                    (summary.source_id,),
+                ) as cursor:
+                    source_row = await cursor.fetchone()
+                async with db.execute(
+                    "SELECT * FROM wiki_source_summaries WHERE id = ?",
+                    (summary.id,),
+                ) as cursor:
+                    summary_row = await cursor.fetchone()
+                async with db.execute(
+                    "SELECT * FROM wiki_page_proposals WHERE id = ?",
+                    (entry.id,),
+                ) as cursor:
+                    entry_row = await cursor.fetchone()
+                async with db.execute(
+                    "SELECT * FROM wiki_jobs WHERE id = ?",
+                    (job_id,),
+                ) as cursor:
+                    job_row = await cursor.fetchone()
+                if (
+                    source_row is None
+                    or summary_row is None
+                    or entry_row is None
+                    or job_row is None
+                ):
+                    raise WikiStoreError("source_conflict")
+                source = _row_to_source(source_row)
+                persisted_summary = _row_to_source_summary(summary_row)
+                persisted_entry = _row_to_page_proposal(entry_row)
+                job = _row_to_job(job_row)
+                if (
+                    persisted_summary != summary
+                    or persisted_entry != entry
+                    or source.status != "parsed"
+                    or source.space_id != summary.space_id
+                    or source.source_sha256 != summary.source_sha256
+                    or source.selection_version != summary.selection_version
+                    or source.selected_parse_revision_id != summary.parse_revision_id
+                    or job.kind != "synthesize_topic_pages"
+                    or job.status != "running"
+                    or job.source_id != summary.source_id
+                    or job.base_selection_version != summary.selection_version
+                    or job.base_selected_parse_revision_id != summary.parse_revision_id
+                ):
+                    raise WikiStoreError("source_conflict")
+                for proposal in proposals:
+                    await db.execute(
+                        """
+                        INSERT INTO wiki_page_proposals (
+                            id, space_id, source_id, summary_id, job_id, kind,
+                            topic_ordinal, parent_proposal_id, title, slug,
+                            aliases_json, markdown, content_sha256,
+                            source_locator_json, created_at_ms
+                        ) VALUES (?, ?, ?, ?, ?, 'topic', ?, ?, ?, ?, '[]', ?, ?, ?, ?)
+                        """,
+                        (
+                            proposal.id,
+                            proposal.space_id,
+                            proposal.source_id,
+                            proposal.summary_id,
+                            proposal.job_id,
+                            proposal.topic_ordinal,
+                            proposal.parent_proposal_id,
+                            proposal.title,
+                            proposal.slug,
+                            proposal.markdown,
+                            proposal.content_sha256,
+                            proposal.source_locator_json,
+                            proposal.created_at_ms,
+                        ),
+                    )
+                finished_at = max(self._clock_ms(), job.started_at_ms or 0)
+                await db.execute(
+                    """
+                    UPDATE wiki_jobs
+                    SET status = 'succeeded', safe_error_code = '', finished_at_ms = ?
+                    WHERE id = ?
+                    """,
+                    (finished_at, job.id),
+                )
+                await db.execute("COMMIT")
+            except aiosqlite.IntegrityError as exc:
+                await self._rollback_quietly(db)
+                raise WikiStoreError("page_proposal_conflict") from exc
+            except BaseException:
+                await self._rollback_quietly(db)
+                raise
+        return await self.list_topic_page_proposals(summary.id)
+
+    async def get_page_proposal(self, proposal_id: str) -> WikiPageProposal:
+        try:
+            validate_page_proposal_id(proposal_id)
+        except ValueError as exc:
+            raise WikiStoreError("invalid_identifier") from exc
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM wiki_page_proposals WHERE id = ?",
+            (proposal_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise WikiStoreError("page_proposal_not_found")
+        return _row_to_page_proposal(row)
+
+    async def find_entry_page_proposal(
+        self,
+        summary_id: str,
+    ) -> WikiPageProposal | None:
+        try:
+            validate_summary_id(summary_id)
+        except ValueError as exc:
+            raise WikiStoreError("invalid_identifier") from exc
+        db = self._require_db()
+        async with db.execute(
+            """
+            SELECT * FROM wiki_page_proposals
+            WHERE summary_id = ? AND kind = 'entry'
+            """,
+            (summary_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return None if row is None else _row_to_page_proposal(row)
+
+    async def list_topic_page_proposals(
+        self,
+        summary_id: str,
+    ) -> tuple[WikiPageProposal, ...]:
+        try:
+            validate_summary_id(summary_id)
+        except ValueError as exc:
+            raise WikiStoreError("invalid_identifier") from exc
+        db = self._require_db()
+        async with db.execute(
+            """
+            SELECT * FROM wiki_page_proposals
+            WHERE summary_id = ? AND kind = 'topic'
+            ORDER BY topic_ordinal, id
+            """,
+            (summary_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return tuple(_row_to_page_proposal(row) for row in rows)
+
+    async def list_page_proposals(
+        self,
+        source_id: str,
+    ) -> tuple[WikiPageProposal, ...]:
+        await self.get_source(source_id)
+        db = self._require_db()
+        async with db.execute(
+            """
+            SELECT * FROM wiki_page_proposals
+            WHERE source_id = ?
+            ORDER BY CASE kind WHEN 'entry' THEN 0 ELSE 1 END,
+                     topic_ordinal, created_at_ms, id
+            """,
+            (source_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return tuple(_row_to_page_proposal(row) for row in rows)
+
+    async def create_conversation(
+        self,
+        space_id: str,
+        *,
+        session_id: str,
+        title: str,
+    ) -> WikiConversation:
+        """Bind a server-created durable Session to exactly one Wiki Space."""
+        space = await self.get_space(space_id)
+        now = self._clock_ms()
+        try:
+            conversation = WikiConversation(
+                id=self._conversation_id_factory(),
+                space_id=space.id,
+                session_id=session_id,
+                title=title.strip(),
+                status="active",
+                created_at_ms=now,
+                updated_at_ms=now,
+            )
+        except ValueError as exc:
+            raise WikiStoreError("invalid_conversation") from exc
+        async with self._write_lock:
+            db = self._require_db()
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                async with db.execute(
+                    "SELECT status FROM wiki_spaces WHERE id = ?",
+                    (space.id,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                if row is None:
+                    raise WikiStoreError("space_not_found")
+                if row["status"] != "active":
+                    raise WikiStoreError("space_read_only")
+                await db.execute(
+                    """
+                    INSERT INTO wiki_conversations (
+                        id, space_id, session_id, title, status,
+                        created_at_ms, updated_at_ms
+                    ) VALUES (?, ?, ?, ?, 'active', ?, ?)
+                    """,
+                    (
+                        conversation.id,
+                        conversation.space_id,
+                        conversation.session_id,
+                        conversation.title,
+                        conversation.created_at_ms,
+                        conversation.updated_at_ms,
+                    ),
+                )
+                await db.execute("COMMIT")
+            except aiosqlite.IntegrityError as exc:
+                await self._rollback_quietly(db)
+                raise WikiStoreError("conversation_conflict") from exc
+            except BaseException:
+                await self._rollback_quietly(db)
+                raise
+        return conversation
+
+    async def get_conversation(self, conversation_id: str) -> WikiConversation:
+        try:
+            validate_conversation_id(conversation_id)
+        except ValueError as exc:
+            raise WikiStoreError("invalid_identifier") from exc
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM wiki_conversations WHERE id = ?",
+            (conversation_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise WikiStoreError("conversation_not_found")
+        return _row_to_conversation(row)
+
+    async def find_conversation_by_session(
+        self,
+        session_id: str,
+    ) -> WikiConversation | None:
+        if (
+            not isinstance(session_id, str)
+            or not session_id
+            or len(session_id) > 128
+            or session_id != session_id.strip()
+            or any(character in session_id for character in ("\x00", "\r", "\n"))
+        ):
+            raise WikiStoreError("invalid_identifier")
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM wiki_conversations WHERE session_id = ?",
+            (session_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return None if row is None else _row_to_conversation(row)
+
+    async def list_conversations(
+        self,
+        space_id: str,
+        *,
+        statuses: Sequence[WikiConversationStatus] = ("active", "archived"),
+    ) -> tuple[WikiConversation, ...]:
+        await self.get_space(space_id)
+        if not statuses or any(status not in {"active", "archived"} for status in statuses):
+            raise WikiStoreError("invalid_conversation")
+        unique_statuses = tuple(dict.fromkeys(statuses))
+        placeholders = ",".join("?" for _ in unique_statuses)
+        db = self._require_db()
+        async with db.execute(
+            f"""
+            SELECT * FROM wiki_conversations
+            WHERE space_id = ? AND status IN ({placeholders})
+            ORDER BY updated_at_ms DESC, id
+            """,  # noqa: S608 - placeholders are generated, never user supplied
+            (space_id, *unique_statuses),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return tuple(_row_to_conversation(row) for row in rows)
+
+    async def set_conversation_status(
+        self,
+        conversation_id: str,
+        status: WikiConversationStatus,
+    ) -> WikiConversation:
+        conversation = await self.get_conversation(conversation_id)
+        if status not in {"active", "archived"}:
+            raise WikiStoreError("invalid_conversation")
+        if conversation.status == status:
+            return conversation
+        now = max(self._clock_ms(), conversation.updated_at_ms + 1)
+        async with self._write_lock:
+            db = self._require_db()
+            cursor = await db.execute(
+                """
+                UPDATE wiki_conversations SET status = ?, updated_at_ms = ?
+                WHERE id = ? AND status = ? AND updated_at_ms = ?
+                """,
+                (
+                    status,
+                    now,
+                    conversation.id,
+                    conversation.status,
+                    conversation.updated_at_ms,
+                ),
+            )
+            await db.commit()
+        if cursor.rowcount != 1:
+            raise WikiStoreError("conversation_conflict")
+        return await self.get_conversation(conversation.id)
+
+    async def on_session_deleted(self, session_id: str) -> None:
+        conversation = await self.find_conversation_by_session(session_id)
+        if conversation is not None and conversation.status == "active":
+            await self.set_conversation_status(conversation.id, "archived")
+
+    async def create_page_proposal_change_set(
+        self,
+        summary: WikiSourceSummaryDraft,
+        proposals: Sequence[WikiPageProposal],
+        item_specs: Sequence[tuple[WikiChangeSetOperationKind, str, str]],
+    ) -> tuple[WikiChangeSet, tuple[WikiChangeSetItem, ...]]:
+        """Atomically freeze ordered page-create payloads and user-visible diffs."""
+        existing = await self.find_change_set_for_summary(summary.id)
+        if existing is not None:
+            return existing, await self.list_change_set_items(existing.id)
+        if (
+            not proposals
+            or len(item_specs) != len(proposals) * 2 - 1
+            or proposals[0].kind != "entry"
+            or proposals[0].topic_ordinal is not None
+            or any(
+                proposal.summary_id != summary.id
+                or proposal.source_id != summary.source_id
+                or proposal.space_id != summary.space_id
+                for proposal in proposals
+            )
+            or [item.topic_ordinal for item in proposals[1:]] != list(range(len(proposals) - 1))
+        ):
+            raise WikiStoreError("invalid_change_set")
+        page_specs = item_specs[: len(proposals)]
+        edge_specs = item_specs[len(proposals) :]
+        for proposal, (operation_kind, payload_json, unified_diff) in zip(
+            proposals,
+            page_specs,
+            strict=True,
+        ):
+            try:
+                payload = json.loads(payload_json)
+            except (TypeError, ValueError) as exc:
+                raise WikiStoreError("invalid_change_set") from exc
+            if (
+                not isinstance(payload, dict)
+                or operation_kind != "page_create"
+                or payload.get("schema") != "llm-wiki-page-create/v1"
+                or payload.get("proposal_id") != proposal.id
+                or payload.get("source_id") != proposal.source_id
+                or payload.get("summary_id") != proposal.summary_id
+                or payload.get("slug") != proposal.slug
+                or payload.get("title") != proposal.title
+                or payload.get("markdown") != proposal.markdown
+                or payload.get("content_sha256") != proposal.content_sha256
+                or not unified_diff
+            ):
+                raise WikiStoreError("invalid_change_set")
+        for topic, (operation_kind, payload_json, unified_diff) in zip(
+            proposals[1:],
+            edge_specs,
+            strict=True,
+        ):
+            try:
+                payload = json.loads(payload_json)
+            except (TypeError, ValueError) as exc:
+                raise WikiStoreError("invalid_change_set") from exc
+            if (
+                operation_kind != "edge_add"
+                or not isinstance(payload, dict)
+                or payload.get("schema") != "llm-wiki-edge-add/v1"
+                or payload.get("from_proposal_id") != topic.id
+                or payload.get("to_proposal_id") != proposals[0].id
+                or payload.get("relation_type") != "part_of"
+                or not unified_diff
+            ):
+                raise WikiStoreError("invalid_change_set")
+        space = await self.get_space(summary.space_id)
+        now = self._clock_ms()
+        try:
+            change_set = WikiChangeSet(
+                id=self._change_set_id_factory(),
+                space_id=summary.space_id,
+                source_summary_id=summary.id,
+                status="awaiting_approval",
+                base_graph_revision=space.graph_revision,
+                summary=(
+                    f"Create one source entry page and {len(proposals) - 1} "
+                    f"topic page(s), plus {len(edge_specs)} relation(s), "
+                    f"from {summary.id}."
+                ),
+                created_at_ms=now,
+            )
+            items = tuple(
+                WikiChangeSetItem(
+                    id=self._change_set_item_id_factory(),
+                    change_set_id=change_set.id,
+                    ordinal=ordinal,
+                    operation_kind=operation_kind,
+                    payload_json=payload_json,
+                    unified_diff=unified_diff,
+                    created_at_ms=now,
+                )
+                for ordinal, (operation_kind, payload_json, unified_diff) in enumerate(item_specs)
+            )
+        except ValueError as exc:
+            raise WikiStoreError("invalid_change_set") from exc
+        async with self._write_lock:
+            db = self._require_db()
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                async with db.execute(
+                    "SELECT * FROM wiki_change_sets WHERE source_summary_id = ?",
+                    (summary.id,),
+                ) as cursor:
+                    existing_row = await cursor.fetchone()
+                if existing_row is not None:
+                    await db.execute("COMMIT")
+                    persisted = _row_to_change_set(existing_row)
+                    return persisted, await self.list_change_set_items(persisted.id)
+                async with db.execute(
+                    "SELECT * FROM wiki_sources WHERE id = ?",
+                    (summary.source_id,),
+                ) as cursor:
+                    source_row = await cursor.fetchone()
+                async with db.execute(
+                    "SELECT * FROM wiki_source_summaries WHERE id = ?",
+                    (summary.id,),
+                ) as cursor:
+                    summary_row = await cursor.fetchone()
+                async with db.execute(
+                    "SELECT * FROM wiki_spaces WHERE id = ?",
+                    (summary.space_id,),
+                ) as cursor:
+                    space_row = await cursor.fetchone()
+                if source_row is None or summary_row is None or space_row is None:
+                    raise WikiStoreError("source_conflict")
+                source = _row_to_source(source_row)
+                persisted_summary = _row_to_source_summary(summary_row)
+                persisted_space = _row_to_space(space_row)
+                if (
+                    persisted_summary != summary
+                    or persisted_space != space
+                    or persisted_space.status != "active"
+                    or source.status != "parsed"
+                    or source.source_sha256 != summary.source_sha256
+                    or source.selection_version != summary.selection_version
+                    or source.selected_parse_revision_id != summary.parse_revision_id
+                ):
+                    raise WikiStoreError("source_conflict")
+                persisted_proposals: list[WikiPageProposal] = []
+                for proposal in proposals:
+                    async with db.execute(
+                        "SELECT * FROM wiki_page_proposals WHERE id = ?",
+                        (proposal.id,),
+                    ) as cursor:
+                        proposal_row = await cursor.fetchone()
+                    if proposal_row is None:
+                        raise WikiStoreError("page_proposal_conflict")
+                    persisted_proposals.append(_row_to_page_proposal(proposal_row))
+                    async with db.execute(
+                        "SELECT 1 FROM wiki_pages WHERE space_id = ? AND slug = ?",
+                        (summary.space_id, proposal.slug),
+                    ) as cursor:
+                        if await cursor.fetchone() is not None:
+                            raise WikiStoreError("page_proposal_conflict")
+                if tuple(persisted_proposals) != tuple(proposals):
+                    raise WikiStoreError("page_proposal_conflict")
+                await db.execute(
+                    """
+                    INSERT INTO wiki_change_sets (
+                        id, space_id, conversation_id, source_summary_id, status,
+                        base_graph_revision, summary, safe_error_code, created_at_ms,
+                        decided_at_ms, published_at_ms
+                    ) VALUES (?, ?, NULL, ?, 'awaiting_approval', ?, ?, '', ?, NULL, NULL)
+                    """,
+                    (
+                        change_set.id,
+                        change_set.space_id,
+                        change_set.source_summary_id,
+                        change_set.base_graph_revision,
+                        change_set.summary,
+                        change_set.created_at_ms,
+                    ),
+                )
+                for item in items:
+                    await db.execute(
+                        """
+                        INSERT INTO wiki_change_set_items (
+                            id, change_set_id, ordinal, operation_kind, target_id,
+                            base_version, before_sha256, payload_json, unified_diff,
+                            created_at_ms
+                        ) VALUES (?, ?, ?, ?, '', NULL, '', ?, ?, ?)
+                        """,
+                        (
+                            item.id,
+                            item.change_set_id,
+                            item.ordinal,
+                            item.operation_kind,
+                            item.payload_json,
+                            item.unified_diff,
+                            item.created_at_ms,
+                        ),
+                    )
+                await db.execute("COMMIT")
+            except aiosqlite.IntegrityError as exc:
+                await self._rollback_quietly(db)
+                raise WikiStoreError("change_set_conflict") from exc
+            except BaseException:
+                await self._rollback_quietly(db)
+                raise
+        return change_set, items
+
+    async def create_conversation_page_update_change_set(
+        self,
+        conversation: WikiConversation,
+        page: WikiPage,
+        revision: WikiPageRevision,
+        *,
+        title: str,
+        aliases: tuple[str, ...],
+        markdown: str,
+        payload_json: str,
+        unified_diff: str,
+    ) -> tuple[WikiChangeSet, tuple[WikiChangeSetItem, ...]]:
+        """Freeze one Knowledge Agent page patch without publishing it."""
+        if (
+            conversation.status != "active"
+            or page.status != "active"
+            or page.space_id != conversation.space_id
+            or page.current_revision_id != revision.id
+            or revision.page_id != page.id
+            or not unified_diff
+        ):
+            raise WikiStoreError("invalid_change_set")
+        try:
+            payload = json.loads(payload_json)
+            canonical_payload = json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            content_sha256 = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+            proposed_page = WikiPage(
+                id=page.id,
+                space_id=page.space_id,
+                slug=page.slug,
+                title=title,
+                aliases=aliases,
+                status=page.status,
+                current_revision_id=page.current_revision_id,
+                version=page.version,
+                created_at_ms=page.created_at_ms,
+                updated_at_ms=page.updated_at_ms,
+            )
+            proposed_revision = WikiPageRevision(
+                id=f"page_revision_{'0' * 24}",
+                page_id=page.id,
+                version=page.version + 1,
+                title=title,
+                markdown=markdown,
+                content_sha256=content_sha256,
+                change_set_id=f"change_set_{'0' * 24}",
+                author_kind="agent",
+                created_at_ms=max(self._clock_ms(), page.updated_at_ms),
+            )
+        except (TypeError, ValueError) as exc:
+            raise WikiStoreError("invalid_change_set") from exc
+        if (
+            canonical_payload != payload_json
+            or proposed_page.title != title
+            or proposed_page.aliases != aliases
+            or payload.get("schema") != "llm-wiki-page-update/v1"
+            or payload.get("page_id") != page.id
+            or payload.get("base_revision_id") != revision.id
+            or payload.get("title") != title
+            or tuple(payload.get("aliases", ())) != aliases
+            or payload.get("markdown") != markdown
+            or payload.get("content_sha256") != proposed_revision.content_sha256
+            or unified_diff != _render_page_update_diff(page.slug, revision.markdown, markdown)
+        ):
+            raise WikiStoreError("invalid_change_set")
+        space = await self.get_space(conversation.space_id)
+        now = max(self._clock_ms(), page.updated_at_ms)
+        try:
+            change_set = WikiChangeSet(
+                id=self._change_set_id_factory(),
+                space_id=space.id,
+                conversation_id=conversation.id,
+                status="awaiting_approval",
+                base_graph_revision=space.graph_revision,
+                summary=f"Update Wiki page {page.title}.",
+                created_at_ms=now,
+            )
+            item = WikiChangeSetItem(
+                id=self._change_set_item_id_factory(),
+                change_set_id=change_set.id,
+                ordinal=0,
+                operation_kind="page_update",
+                target_id=page.id,
+                base_version=page.version,
+                before_sha256=revision.content_sha256,
+                payload_json=payload_json,
+                unified_diff=unified_diff,
+                created_at_ms=now,
+            )
+        except ValueError as exc:
+            raise WikiStoreError("invalid_change_set") from exc
+        async with self._write_lock:
+            db = self._require_db()
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                async with db.execute(
+                    """
+                    SELECT c.* FROM wiki_change_sets AS c
+                    JOIN wiki_change_set_items AS i ON i.change_set_id = c.id
+                    WHERE c.conversation_id = ? AND c.status = 'awaiting_approval'
+                      AND i.ordinal = 0 AND i.operation_kind = 'page_update'
+                      AND i.target_id = ? AND i.base_version = ?
+                      AND i.before_sha256 = ? AND i.payload_json = ?
+                    ORDER BY c.created_at_ms, c.id LIMIT 1
+                    """,
+                    (
+                        conversation.id,
+                        page.id,
+                        page.version,
+                        revision.content_sha256,
+                        payload_json,
+                    ),
+                ) as cursor:
+                    existing_row = await cursor.fetchone()
+                if existing_row is not None:
+                    await db.execute("COMMIT")
+                    existing = _row_to_change_set(existing_row)
+                    return existing, await self.list_change_set_items(existing.id)
+                async with db.execute(
+                    "SELECT * FROM wiki_conversations WHERE id = ?",
+                    (conversation.id,),
+                ) as cursor:
+                    conversation_row = await cursor.fetchone()
+                async with db.execute(
+                    "SELECT * FROM wiki_spaces WHERE id = ?",
+                    (space.id,),
+                ) as cursor:
+                    space_row = await cursor.fetchone()
+                async with db.execute(
+                    "SELECT * FROM wiki_pages WHERE id = ?",
+                    (page.id,),
+                ) as cursor:
+                    page_row = await cursor.fetchone()
+                async with db.execute(
+                    "SELECT * FROM wiki_page_revisions WHERE id = ?",
+                    (revision.id,),
+                ) as cursor:
+                    revision_row = await cursor.fetchone()
+                if (
+                    conversation_row is None
+                    or space_row is None
+                    or page_row is None
+                    or revision_row is None
+                    or _row_to_conversation(conversation_row) != conversation
+                    or _row_to_space(space_row) != space
+                    or _row_to_page(page_row) != page
+                    or _row_to_page_revision(revision_row) != revision
+                    or space.status != "active"
+                ):
+                    raise WikiStoreError("change_set_conflict")
+                await db.execute(
+                    """
+                    INSERT INTO wiki_change_sets (
+                        id, space_id, conversation_id, source_summary_id, status,
+                        base_graph_revision, summary, safe_error_code, created_at_ms,
+                        decided_at_ms, published_at_ms
+                    ) VALUES (?, ?, ?, NULL, 'awaiting_approval', ?, ?, '', ?, NULL, NULL)
+                    """,
+                    (
+                        change_set.id,
+                        change_set.space_id,
+                        change_set.conversation_id,
+                        change_set.base_graph_revision,
+                        change_set.summary,
+                        change_set.created_at_ms,
+                    ),
+                )
+                await db.execute(
+                    """
+                    INSERT INTO wiki_change_set_items (
+                        id, change_set_id, ordinal, operation_kind, target_id,
+                        base_version, before_sha256, payload_json, unified_diff,
+                        created_at_ms
+                    ) VALUES (?, ?, 0, 'page_update', ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        item.id,
+                        item.change_set_id,
+                        item.target_id,
+                        item.base_version,
+                        item.before_sha256,
+                        item.payload_json,
+                        item.unified_diff,
+                        item.created_at_ms,
+                    ),
+                )
+                await db.execute("COMMIT")
+            except aiosqlite.IntegrityError as exc:
+                await self._rollback_quietly(db)
+                raise WikiStoreError("change_set_conflict") from exc
+            except BaseException:
+                await self._rollback_quietly(db)
+                raise
+        return change_set, (item,)
+
+    async def create_conversation_change_set(
+        self,
+        conversation: WikiConversation,
+        *,
+        summary: str,
+        item_specs: Sequence[
+            tuple[
+                WikiChangeSetOperationKind,
+                str,
+                int | None,
+                str,
+                str,
+                str,
+            ]
+        ],
+    ) -> tuple[WikiChangeSet, tuple[WikiChangeSetItem, ...]]:
+        """Freeze validated Knowledge Agent create/delete/edge operations."""
+        if conversation.status != "active" or not item_specs or len(item_specs) > 100:
+            raise WikiStoreError("invalid_change_set")
+        fingerprint_payload = json.dumps(
+            [list(spec) for spec in item_specs],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        fingerprint = hashlib.sha256(fingerprint_payload.encode("utf-8")).hexdigest()
+        rendered_summary = f"{summary.strip()} [proposal {fingerprint[:12]}]"
+        space = await self.get_space(conversation.space_id)
+        now = max(self._clock_ms(), conversation.updated_at_ms)
+        try:
+            change_set = WikiChangeSet(
+                id=self._change_set_id_factory(),
+                space_id=space.id,
+                conversation_id=conversation.id,
+                status="awaiting_approval",
+                base_graph_revision=space.graph_revision,
+                summary=rendered_summary,
+                created_at_ms=now,
+            )
+            items = tuple(
+                WikiChangeSetItem(
+                    id=self._change_set_item_id_factory(),
+                    change_set_id=change_set.id,
+                    ordinal=ordinal,
+                    operation_kind=operation_kind,
+                    target_id=target_id,
+                    base_version=base_version,
+                    before_sha256=before_sha256,
+                    payload_json=payload_json,
+                    unified_diff=unified_diff,
+                    created_at_ms=now,
+                )
+                for ordinal, (
+                    operation_kind,
+                    target_id,
+                    base_version,
+                    before_sha256,
+                    payload_json,
+                    unified_diff,
+                ) in enumerate(item_specs)
+            )
+        except ValueError as exc:
+            raise WikiStoreError("invalid_change_set") from exc
+        async with self._write_lock:
+            db = self._require_db()
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                async with db.execute(
+                    """
+                    SELECT * FROM wiki_change_sets
+                    WHERE conversation_id = ? AND status = 'awaiting_approval'
+                      AND base_graph_revision = ? AND summary = ?
+                    ORDER BY created_at_ms, id
+                    """,
+                    (conversation.id, space.graph_revision, rendered_summary),
+                ) as cursor:
+                    candidate_rows = await cursor.fetchall()
+                for candidate_row in candidate_rows:
+                    candidate = _row_to_change_set(candidate_row)
+                    async with db.execute(
+                        """
+                        SELECT * FROM wiki_change_set_items
+                        WHERE change_set_id = ? ORDER BY ordinal, id
+                        """,
+                        (candidate.id,),
+                    ) as cursor:
+                        candidate_item_rows = await cursor.fetchall()
+                    candidate_items = tuple(
+                        _row_to_change_set_item(row) for row in candidate_item_rows
+                    )
+                    candidate_specs = tuple(
+                        (
+                            item.operation_kind,
+                            item.target_id,
+                            item.base_version,
+                            item.before_sha256,
+                            item.payload_json,
+                            item.unified_diff,
+                        )
+                        for item in candidate_items
+                    )
+                    if candidate_specs == tuple(item_specs):
+                        await db.execute("COMMIT")
+                        return candidate, candidate_items
+                async with db.execute(
+                    "SELECT * FROM wiki_conversations WHERE id = ?",
+                    (conversation.id,),
+                ) as cursor:
+                    conversation_row = await cursor.fetchone()
+                async with db.execute(
+                    "SELECT * FROM wiki_spaces WHERE id = ?",
+                    (space.id,),
+                ) as cursor:
+                    space_row = await cursor.fetchone()
+                if (
+                    conversation_row is None
+                    or space_row is None
+                    or _row_to_conversation(conversation_row) != conversation
+                    or _row_to_space(space_row) != space
+                    or conversation.status != "active"
+                    or space.status != "active"
+                ):
+                    raise WikiStoreError("change_set_conflict")
+                await db.execute(
+                    """
+                    INSERT INTO wiki_change_sets (
+                        id, space_id, conversation_id, source_summary_id, status,
+                        base_graph_revision, summary, safe_error_code, created_at_ms,
+                        decided_at_ms, published_at_ms
+                    ) VALUES (?, ?, ?, NULL, 'awaiting_approval', ?, ?, '', ?, NULL, NULL)
+                    """,
+                    (
+                        change_set.id,
+                        change_set.space_id,
+                        change_set.conversation_id,
+                        change_set.base_graph_revision,
+                        change_set.summary,
+                        change_set.created_at_ms,
+                    ),
+                )
+                for item in items:
+                    await db.execute(
+                        """
+                        INSERT INTO wiki_change_set_items (
+                            id, change_set_id, ordinal, operation_kind, target_id,
+                            base_version, before_sha256, payload_json, unified_diff,
+                            created_at_ms
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            item.id,
+                            item.change_set_id,
+                            item.ordinal,
+                            item.operation_kind,
+                            item.target_id,
+                            item.base_version,
+                            item.before_sha256,
+                            item.payload_json,
+                            item.unified_diff,
+                            item.created_at_ms,
+                        ),
+                    )
+                await db.execute("COMMIT")
+            except aiosqlite.IntegrityError as exc:
+                await self._rollback_quietly(db)
+                raise WikiStoreError("change_set_conflict") from exc
+            except BaseException:
+                await self._rollback_quietly(db)
+                raise
+        return change_set, items
+
+    async def get_change_set(self, change_set_id: str) -> WikiChangeSet:
+        try:
+            validate_change_set_id(change_set_id)
+        except ValueError as exc:
+            raise WikiStoreError("invalid_identifier") from exc
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM wiki_change_sets WHERE id = ?",
+            (change_set_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise WikiStoreError("change_set_not_found")
+        return _row_to_change_set(row)
+
+    async def decide_change_set(
+        self,
+        change_set_id: str,
+        *,
+        approve: bool,
+    ) -> tuple[WikiChangeSet, tuple[WikiPage, ...]]:
+        """Reject or atomically publish every page-create item in one transaction."""
+        try:
+            validate_change_set_id(change_set_id)
+        except ValueError as exc:
+            raise WikiStoreError("invalid_identifier") from exc
+        published_pages: tuple[WikiPage, ...] = ()
+        async with self._write_lock:
+            db = self._require_db()
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                async with db.execute(
+                    "SELECT * FROM wiki_change_sets WHERE id = ?",
+                    (change_set_id,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                if row is None:
+                    raise WikiStoreError("change_set_not_found")
+                change_set = _row_to_change_set(row)
+                if change_set.status == "approved":
+                    if not approve:
+                        raise WikiStoreError("change_set_conflict")
+                    await db.execute("COMMIT")
+                    published_pages = await self._pages_for_change_set(change_set.id)
+                elif change_set.status == "rejected":
+                    if approve:
+                        raise WikiStoreError("change_set_conflict")
+                    await db.execute("COMMIT")
+                elif change_set.status != "awaiting_approval":
+                    raise WikiStoreError("change_set_conflict")
+                elif not approve:
+                    decided_at = max(self._clock_ms(), change_set.created_at_ms)
+                    await db.execute(
+                        """
+                        UPDATE wiki_change_sets
+                        SET status = 'rejected', decided_at_ms = ?
+                        WHERE id = ?
+                        """,
+                        (decided_at, change_set.id),
+                    )
+                    await db.execute("COMMIT")
+                else:
+                    outcome = await self._approve_change_set_transaction(
+                        db,
+                        change_set,
+                    )
+                    if outcome is None:
+                        await db.execute("COMMIT")
+                    else:
+                        published_pages = outcome
+                        await db.execute("COMMIT")
+            except aiosqlite.IntegrityError as exc:
+                await self._rollback_quietly(db)
+                raise WikiStoreError("change_set_conflict") from exc
+            except BaseException:
+                await self._rollback_quietly(db)
+                raise
+        decided = await self.get_change_set(change_set_id)
+        if decided.status == "approved":
+            if not published_pages:
+                published_pages = await self._pages_for_change_set(decided.id)
+            await self._sync_page_mirrors(published_pages)
+            await self._sync_deleted_page_mirrors(decided.id)
+            await self._sync_mirror_or_raise(await self.get_space(decided.space_id))
+        return decided, published_pages
+
+    async def _approve_change_set_transaction(
+        self,
+        db: aiosqlite.Connection,
+        change_set: WikiChangeSet,
+    ) -> tuple[WikiPage, ...] | None:
+        if change_set.source_summary_id is not None and change_set.conversation_id is None:
+            return await self._approve_source_change_set_transaction(db, change_set)
+        if change_set.conversation_id is not None and change_set.source_summary_id is None:
+            return await self._approve_conversation_change_set_transaction(
+                db,
+                change_set,
+            )
+        raise WikiStoreError("invalid_change_set")
+
+    async def _approve_source_change_set_transaction(
+        self,
+        db: aiosqlite.Connection,
+        change_set: WikiChangeSet,
+    ) -> tuple[WikiPage, ...] | None:
+        if change_set.source_summary_id is None:
+            raise WikiStoreError("invalid_change_set")
+        async with db.execute(
+            "SELECT * FROM wiki_spaces WHERE id = ?",
+            (change_set.space_id,),
+        ) as cursor:
+            space_row = await cursor.fetchone()
+        async with db.execute(
+            "SELECT * FROM wiki_source_summaries WHERE id = ?",
+            (change_set.source_summary_id,),
+        ) as cursor:
+            summary_row = await cursor.fetchone()
+        if space_row is None or summary_row is None:
+            await self._mark_change_set_stale(db, change_set)
+            return None
+        space = _row_to_space(space_row)
+        summary = _row_to_source_summary(summary_row)
+        async with db.execute(
+            "SELECT * FROM wiki_sources WHERE id = ?",
+            (summary.source_id,),
+        ) as cursor:
+            source_row = await cursor.fetchone()
+        if source_row is None:
+            await self._mark_change_set_stale(db, change_set)
+            return None
+        source = _row_to_source(source_row)
+        if (
+            space.status != "active"
+            or space.graph_revision != change_set.base_graph_revision
+            or source.status != "parsed"
+            or source.space_id != change_set.space_id
+            or source.source_sha256 != summary.source_sha256
+            or source.selection_version != summary.selection_version
+            or source.selected_parse_revision_id != summary.parse_revision_id
+        ):
+            await self._mark_change_set_stale(db, change_set)
+            return None
+        async with db.execute(
+            """
+            SELECT * FROM wiki_change_set_items
+            WHERE change_set_id = ? ORDER BY ordinal, id
+            """,
+            (change_set.id,),
+        ) as cursor:
+            item_rows = await cursor.fetchall()
+        items = tuple(_row_to_change_set_item(row) for row in item_rows)
+        if not items or [item.ordinal for item in items] != list(range(len(items))):
+            raise WikiStoreError("invalid_change_set")
+        page_items = tuple(item for item in items if item.operation_kind == "page_create")
+        edge_items = tuple(item for item in items if item.operation_kind == "edge_add")
+        if len(page_items) + len(edge_items) != len(items) or not page_items:
+            raise WikiStoreError("invalid_change_set")
+        now = max(self._clock_ms(), change_set.created_at_ms)
+        pages: list[WikiPage] = []
+        revisions: list[WikiPageRevision] = []
+        locators: list[str] = []
+        proposal_to_page: dict[str, WikiPage] = {}
+        proposal_by_id: dict[str, WikiPageProposal] = {}
+        for item in page_items:
+            try:
+                payload = json.loads(item.payload_json)
+                canonical_payload = json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                proposal_id = payload["proposal_id"]
+                aliases = tuple(payload["aliases"])
+                locator_json = json.dumps(
+                    payload["source_locator"],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise WikiStoreError("invalid_change_set") from exc
+            if canonical_payload != item.payload_json:
+                raise WikiStoreError("invalid_change_set")
+            async with db.execute(
+                "SELECT * FROM wiki_page_proposals WHERE id = ?",
+                (proposal_id,),
+            ) as cursor:
+                proposal_row = await cursor.fetchone()
+            if proposal_row is None:
+                await self._mark_change_set_stale(db, change_set)
+                return None
+            proposal = _row_to_page_proposal(proposal_row)
+            if (
+                proposal.summary_id != summary.id
+                or proposal.source_id != summary.source_id
+                or payload.get("schema") != "llm-wiki-page-create/v1"
+                or payload.get("source_id") != proposal.source_id
+                or payload.get("summary_id") != proposal.summary_id
+                or payload.get("slug") != proposal.slug
+                or payload.get("title") != proposal.title
+                or aliases != proposal.aliases
+                or payload.get("markdown") != proposal.markdown
+                or payload.get("content_sha256") != proposal.content_sha256
+                or payload.get("source_locator") != json.loads(proposal.source_locator_json)
+                or item.unified_diff != _render_page_create_diff(proposal.slug, proposal.markdown)
+            ):
+                raise WikiStoreError("invalid_change_set")
+            async with db.execute(
+                "SELECT 1 FROM wiki_pages WHERE space_id = ? AND slug = ?",
+                (space.id, proposal.slug),
+            ) as cursor:
+                if await cursor.fetchone() is not None:
+                    await self._mark_change_set_stale(db, change_set)
+                    return None
+            try:
+                page = WikiPage(
+                    id=self._page_id_factory(),
+                    space_id=space.id,
+                    slug=proposal.slug,
+                    title=proposal.title,
+                    aliases=proposal.aliases,
+                    status="active",
+                    current_revision_id=self._page_revision_id_factory(),
+                    version=1,
+                    created_at_ms=now,
+                    updated_at_ms=now,
+                )
+                revision = WikiPageRevision(
+                    id=page.current_revision_id,
+                    page_id=page.id,
+                    version=1,
+                    title=page.title,
+                    markdown=proposal.markdown,
+                    content_sha256=proposal.content_sha256,
+                    change_set_id=change_set.id,
+                    author_kind="agent",
+                    created_at_ms=now,
+                )
+            except ValueError as exc:
+                raise WikiStoreError("invalid_change_set") from exc
+            pages.append(page)
+            revisions.append(revision)
+            locators.append(locator_json)
+            proposal_to_page[proposal.id] = page
+            proposal_by_id[proposal.id] = proposal
+        edges: list[WikiEdge] = []
+        edge_item_pairs: list[tuple[WikiChangeSetItem, WikiEdge]] = []
+        async with db.execute(
+            """
+            SELECT from_page_id, to_page_id FROM wiki_edges
+            WHERE space_id = ? AND relation_type = 'part_of'
+            """,
+            (space.id,),
+        ) as cursor:
+            part_of_rows = await cursor.fetchall()
+        part_of_adjacency: dict[str, set[str]] = {}
+        pending_edge_keys: set[tuple[str, str, WikiRelationType]] = set()
+        for row in part_of_rows:
+            part_of_adjacency.setdefault(row["from_page_id"], set()).add(row["to_page_id"])
+        for item in edge_items:
+            try:
+                payload = json.loads(item.payload_json)
+                canonical_payload = json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                from_proposal_id = payload["from_proposal_id"]
+                to_proposal_id = payload["to_proposal_id"]
+                relation_type = cast("WikiRelationType", payload["relation_type"])
+                from_page = proposal_to_page[from_proposal_id]
+                to_page = proposal_to_page[to_proposal_id]
+                from_proposal = proposal_by_id[from_proposal_id]
+                to_proposal = proposal_by_id[to_proposal_id]
+            except (KeyError, TypeError, ValueError) as exc:
+                raise WikiStoreError("invalid_change_set") from exc
+            if (
+                canonical_payload != item.payload_json
+                or payload.get("schema") != "llm-wiki-edge-add/v1"
+                or relation_type
+                not in {
+                    "related_to",
+                    "references",
+                    "extends",
+                    "contradicts",
+                    "part_of",
+                }
+                or item.unified_diff
+                != _render_edge_add_diff(
+                    from_proposal.slug,
+                    to_proposal.slug,
+                    relation_type,
+                )
+            ):
+                raise WikiStoreError("invalid_change_set")
+            from_page_id = from_page.id
+            to_page_id = to_page.id
+            if relation_type == "related_to" and from_page_id > to_page_id:
+                from_page_id, to_page_id = to_page_id, from_page_id
+            if from_page_id == to_page_id:
+                raise WikiStoreError("invalid_change_set")
+            edge_key = (from_page_id, to_page_id, relation_type)
+            if edge_key in pending_edge_keys:
+                raise WikiStoreError("invalid_change_set")
+            pending_edge_keys.add(edge_key)
+            async with db.execute(
+                """
+                SELECT 1 FROM wiki_edges
+                WHERE space_id = ? AND from_page_id = ? AND to_page_id = ?
+                  AND relation_type = ?
+                """,
+                (space.id, from_page_id, to_page_id, relation_type),
+            ) as cursor:
+                if await cursor.fetchone() is not None:
+                    await self._mark_change_set_stale(db, change_set)
+                    return None
+            if relation_type == "part_of":
+                pending = [to_page_id]
+                visited: set[str] = set()
+                while pending:
+                    node = pending.pop()
+                    if node == from_page_id:
+                        raise WikiStoreError("invalid_change_set")
+                    if node in visited:
+                        continue
+                    visited.add(node)
+                    pending.extend(part_of_adjacency.get(node, ()))
+                part_of_adjacency.setdefault(from_page_id, set()).add(to_page_id)
+            try:
+                edge = WikiEdge(
+                    id=self._edge_id_factory(),
+                    space_id=space.id,
+                    from_page_id=from_page_id,
+                    to_page_id=to_page_id,
+                    relation_type=relation_type,
+                    change_set_id=change_set.id,
+                    created_at_ms=now,
+                )
+            except ValueError as exc:
+                raise WikiStoreError("invalid_change_set") from exc
+            edges.append(edge)
+            edge_item_pairs.append((item, edge))
+        for item, page, revision, locator_json in zip(
+            page_items,
+            pages,
+            revisions,
+            locators,
+            strict=True,
+        ):
+            aliases_json = json.dumps(
+                list(page.aliases),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            await db.execute(
+                """
+                INSERT INTO wiki_pages (
+                    id, space_id, slug, title, aliases_json, status,
+                    current_revision_id, version, created_at_ms, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, 'active', ?, 1, ?, ?)
+                """,
+                (
+                    page.id,
+                    page.space_id,
+                    page.slug,
+                    page.title,
+                    aliases_json,
+                    page.current_revision_id,
+                    page.created_at_ms,
+                    page.updated_at_ms,
+                ),
+            )
+            await db.execute(
+                """
+                INSERT INTO wiki_page_revisions (
+                    id, page_id, version, title, markdown, content_sha256,
+                    change_set_id, author_kind, created_at_ms
+                ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    revision.id,
+                    revision.page_id,
+                    revision.title,
+                    revision.markdown,
+                    revision.content_sha256,
+                    revision.change_set_id,
+                    revision.author_kind,
+                    revision.created_at_ms,
+                ),
+            )
+            await db.execute(
+                """
+                INSERT INTO wiki_page_sources (
+                    page_id, source_id, source_locator_json, created_at_ms
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (page.id, summary.source_id, locator_json, now),
+            )
+            await db.execute(
+                "UPDATE wiki_change_set_items SET target_id = ? WHERE id = ?",
+                (page.id, item.id),
+            )
+            await db.execute(
+                """
+                INSERT INTO wiki_pages_fts (
+                    page_id, space_id, title, aliases, content
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    page.id,
+                    page.space_id,
+                    page.title,
+                    aliases_json,
+                    revision.markdown,
+                ),
+            )
+        for item, edge in edge_item_pairs:
+            await db.execute(
+                """
+                INSERT INTO wiki_edges (
+                    id, space_id, from_page_id, to_page_id, relation_type,
+                    change_set_id, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    edge.id,
+                    edge.space_id,
+                    edge.from_page_id,
+                    edge.to_page_id,
+                    edge.relation_type,
+                    edge.change_set_id,
+                    edge.created_at_ms,
+                ),
+            )
+            await db.execute(
+                "UPDATE wiki_change_set_items SET target_id = ? WHERE id = ?",
+                (edge.id, item.id),
+            )
+        updated_at = max(now, space.updated_at_ms + 1)
+        await db.execute(
+            """
+            UPDATE wiki_spaces
+            SET graph_revision = ?, updated_at_ms = ?
+            WHERE id = ?
+            """,
+            (space.graph_revision + 1, updated_at, space.id),
+        )
+        await db.execute(
+            """
+            UPDATE wiki_change_sets
+            SET status = 'approved', decided_at_ms = ?, published_at_ms = ?
+            WHERE id = ?
+            """,
+            (now, now, change_set.id),
+        )
+        return tuple(pages)
+
+    async def _approve_conversation_change_set_transaction(
+        self,
+        db: aiosqlite.Connection,
+        change_set: WikiChangeSet,
+    ) -> tuple[WikiPage, ...] | None:
+        async with db.execute(
+            """
+            SELECT operation_kind FROM wiki_change_set_items
+            WHERE change_set_id = ? ORDER BY ordinal, id
+            """,
+            (change_set.id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        operation_kinds = tuple(row["operation_kind"] for row in rows)
+        if operation_kinds and all(kind == "page_update" for kind in operation_kinds):
+            return await self._approve_conversation_page_update_transaction(
+                db,
+                change_set,
+            )
+        if operation_kinds and all(kind == "page_create" for kind in operation_kinds):
+            return await self._approve_conversation_page_create_transaction(
+                db,
+                change_set,
+            )
+        if operation_kinds and all(kind == "page_delete" for kind in operation_kinds):
+            return await self._approve_conversation_page_delete_transaction(
+                db,
+                change_set,
+            )
+        if operation_kinds and all(kind in {"edge_add", "edge_delete"} for kind in operation_kinds):
+            return await self._approve_conversation_edge_transaction(
+                db,
+                change_set,
+            )
+        raise WikiStoreError("invalid_change_set")
+
+    async def _approve_conversation_page_update_transaction(
+        self,
+        db: aiosqlite.Connection,
+        change_set: WikiChangeSet,
+    ) -> tuple[WikiPage, ...] | None:
+        if change_set.conversation_id is None:
+            raise WikiStoreError("invalid_change_set")
+        async with db.execute(
+            "SELECT * FROM wiki_spaces WHERE id = ?",
+            (change_set.space_id,),
+        ) as cursor:
+            space_row = await cursor.fetchone()
+        async with db.execute(
+            "SELECT * FROM wiki_conversations WHERE id = ?",
+            (change_set.conversation_id,),
+        ) as cursor:
+            conversation_row = await cursor.fetchone()
+        if space_row is None or conversation_row is None:
+            await self._mark_change_set_stale(db, change_set)
+            return None
+        space = _row_to_space(space_row)
+        conversation = _row_to_conversation(conversation_row)
+        if (
+            space.status != "active"
+            or space.graph_revision != change_set.base_graph_revision
+            or conversation.space_id != space.id
+            or conversation.status != "active"
+        ):
+            await self._mark_change_set_stale(db, change_set)
+            return None
+        async with db.execute(
+            """
+            SELECT * FROM wiki_change_set_items
+            WHERE change_set_id = ? ORDER BY ordinal, id
+            """,
+            (change_set.id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        items = tuple(_row_to_change_set_item(row) for row in rows)
+        if (
+            not items
+            or [item.ordinal for item in items] != list(range(len(items)))
+            or any(item.operation_kind != "page_update" for item in items)
+            or len({item.target_id for item in items}) != len(items)
+        ):
+            raise WikiStoreError("invalid_change_set")
+        now = max(self._clock_ms(), change_set.created_at_ms)
+        updates: list[tuple[WikiPage, WikiPageRevision, WikiPage]] = []
+        for item in items:
+            try:
+                payload = json.loads(item.payload_json)
+                expected_keys = {
+                    "schema",
+                    "page_id",
+                    "base_revision_id",
+                    "title",
+                    "aliases",
+                    "markdown",
+                    "content_sha256",
+                }
+                if (
+                    not isinstance(payload, dict)
+                    or set(payload) != expected_keys
+                    or not isinstance(payload.get("aliases"), list)
+                    or any(not isinstance(alias, str) for alias in payload.get("aliases", ()))
+                ):
+                    raise ValueError("invalid page update payload")
+                canonical_payload = json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                aliases = tuple(payload["aliases"])
+                markdown = payload["markdown"]
+                title = payload["title"]
+            except (KeyError, TypeError, ValueError) as exc:
+                raise WikiStoreError("invalid_change_set") from exc
+            if (
+                canonical_payload != item.payload_json
+                or payload.get("schema") != "llm-wiki-page-update/v1"
+                or payload.get("page_id") != item.target_id
+                or not isinstance(markdown, str)
+                or not isinstance(title, str)
+                or payload.get("content_sha256")
+                != hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+            ):
+                raise WikiStoreError("invalid_change_set")
+            async with db.execute(
+                "SELECT * FROM wiki_pages WHERE id = ?",
+                (item.target_id,),
+            ) as cursor:
+                page_row = await cursor.fetchone()
+            if page_row is None:
+                await self._mark_change_set_stale(db, change_set)
+                return None
+            page = _row_to_page(page_row)
+            if page.current_revision_id is None:
+                await self._mark_change_set_stale(db, change_set)
+                return None
+            async with db.execute(
+                "SELECT * FROM wiki_page_revisions WHERE id = ?",
+                (page.current_revision_id,),
+            ) as cursor:
+                revision_row = await cursor.fetchone()
+            if revision_row is None:
+                await self._mark_change_set_stale(db, change_set)
+                return None
+            before_revision = _row_to_page_revision(revision_row)
+            if (
+                page.space_id != space.id
+                or page.status != "active"
+                or page.version != item.base_version
+                or before_revision.content_sha256 != item.before_sha256
+                or payload.get("base_revision_id") != before_revision.id
+            ):
+                await self._mark_change_set_stale(db, change_set)
+                return None
+            if item.unified_diff != _render_page_update_diff(
+                page.slug,
+                before_revision.markdown,
+                markdown,
+            ):
+                raise WikiStoreError("invalid_change_set")
+            updated_at = max(now, page.updated_at_ms + 1)
+            try:
+                revision = WikiPageRevision(
+                    id=self._page_revision_id_factory(),
+                    page_id=page.id,
+                    version=page.version + 1,
+                    title=title,
+                    markdown=markdown,
+                    content_sha256=payload["content_sha256"],
+                    change_set_id=change_set.id,
+                    author_kind="agent",
+                    created_at_ms=updated_at,
+                )
+                updated_page = WikiPage(
+                    id=page.id,
+                    space_id=page.space_id,
+                    slug=page.slug,
+                    title=title,
+                    aliases=aliases,
+                    status="active",
+                    current_revision_id=revision.id,
+                    version=revision.version,
+                    created_at_ms=page.created_at_ms,
+                    updated_at_ms=updated_at,
+                )
+            except ValueError as exc:
+                raise WikiStoreError("invalid_change_set") from exc
+            updates.append((page, revision, updated_page))
+        for _item, (before_page, revision, updated_page) in zip(
+            items,
+            updates,
+            strict=True,
+        ):
+            aliases_json = json.dumps(
+                list(updated_page.aliases),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            await db.execute(
+                """
+                INSERT INTO wiki_page_revisions (
+                    id, page_id, version, title, markdown, content_sha256,
+                    change_set_id, author_kind, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'agent', ?)
+                """,
+                (
+                    revision.id,
+                    revision.page_id,
+                    revision.version,
+                    revision.title,
+                    revision.markdown,
+                    revision.content_sha256,
+                    revision.change_set_id,
+                    revision.created_at_ms,
+                ),
+            )
+            cursor = await db.execute(
+                """
+                UPDATE wiki_pages
+                SET title = ?, aliases_json = ?, current_revision_id = ?,
+                    version = ?, updated_at_ms = ?
+                WHERE id = ? AND space_id = ? AND status = 'active'
+                  AND version = ? AND current_revision_id = ?
+                """,
+                (
+                    updated_page.title,
+                    aliases_json,
+                    updated_page.current_revision_id,
+                    updated_page.version,
+                    updated_page.updated_at_ms,
+                    updated_page.id,
+                    updated_page.space_id,
+                    before_page.version,
+                    before_page.current_revision_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise WikiStoreError("change_set_conflict")
+            await db.execute(
+                "DELETE FROM wiki_pages_fts WHERE page_id = ?",
+                (updated_page.id,),
+            )
+            await db.execute(
+                """
+                INSERT INTO wiki_pages_fts (
+                    page_id, space_id, title, aliases, content
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    updated_page.id,
+                    updated_page.space_id,
+                    updated_page.title,
+                    aliases_json,
+                    revision.markdown,
+                ),
+            )
+        updated_at = max(
+            (updated_page.updated_at_ms for _, _, updated_page in updates),
+            default=now,
+        )
+        await db.execute(
+            """
+            UPDATE wiki_spaces SET graph_revision = ?, updated_at_ms = ?
+            WHERE id = ?
+            """,
+            (space.graph_revision + 1, updated_at, space.id),
+        )
+        await db.execute(
+            """
+            UPDATE wiki_change_sets
+            SET status = 'approved', decided_at_ms = ?, published_at_ms = ?
+            WHERE id = ?
+            """,
+            (now, now, change_set.id),
+        )
+        return tuple(updated_page for _, _, updated_page in updates)
+
+    async def _active_conversation_change_context(
+        self,
+        db: aiosqlite.Connection,
+        change_set: WikiChangeSet,
+    ) -> tuple[WikiSpace, WikiConversation] | None:
+        if change_set.conversation_id is None:
+            raise WikiStoreError("invalid_change_set")
+        async with db.execute(
+            "SELECT * FROM wiki_spaces WHERE id = ?",
+            (change_set.space_id,),
+        ) as cursor:
+            space_row = await cursor.fetchone()
+        async with db.execute(
+            "SELECT * FROM wiki_conversations WHERE id = ?",
+            (change_set.conversation_id,),
+        ) as cursor:
+            conversation_row = await cursor.fetchone()
+        if space_row is None or conversation_row is None:
+            await self._mark_change_set_stale(db, change_set)
+            return None
+        space = _row_to_space(space_row)
+        conversation = _row_to_conversation(conversation_row)
+        if (
+            space.status != "active"
+            or space.graph_revision != change_set.base_graph_revision
+            or conversation.space_id != space.id
+            or conversation.status != "active"
+        ):
+            await self._mark_change_set_stale(db, change_set)
+            return None
+        return space, conversation
+
+    async def _ordered_change_set_items(
+        self,
+        db: aiosqlite.Connection,
+        change_set_id: str,
+    ) -> tuple[WikiChangeSetItem, ...]:
+        async with db.execute(
+            """
+            SELECT * FROM wiki_change_set_items
+            WHERE change_set_id = ? ORDER BY ordinal, id
+            """,
+            (change_set_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        items = tuple(_row_to_change_set_item(row) for row in rows)
+        if not items or [item.ordinal for item in items] != list(range(len(items))):
+            raise WikiStoreError("invalid_change_set")
+        return items
+
+    async def _publish_conversation_change_set(
+        self,
+        db: aiosqlite.Connection,
+        change_set: WikiChangeSet,
+        space: WikiSpace,
+        *,
+        now: int,
+        updated_at_ms: int,
+    ) -> None:
+        await db.execute(
+            """
+            UPDATE wiki_spaces SET graph_revision = ?, updated_at_ms = ?
+            WHERE id = ?
+            """,
+            (
+                space.graph_revision + 1,
+                max(updated_at_ms, space.updated_at_ms + 1),
+                space.id,
+            ),
+        )
+        await db.execute(
+            """
+            UPDATE wiki_change_sets
+            SET status = 'approved', decided_at_ms = ?, published_at_ms = ?
+            WHERE id = ?
+            """,
+            (now, now, change_set.id),
+        )
+
+    async def _approve_conversation_page_create_transaction(
+        self,
+        db: aiosqlite.Connection,
+        change_set: WikiChangeSet,
+    ) -> tuple[WikiPage, ...] | None:
+        context = await self._active_conversation_change_context(db, change_set)
+        if context is None:
+            return None
+        space, _conversation = context
+        items = await self._ordered_change_set_items(db, change_set.id)
+        if any(item.operation_kind != "page_create" for item in items):
+            raise WikiStoreError("invalid_change_set")
+        now = max(self._clock_ms(), change_set.created_at_ms)
+        pages: list[WikiPage] = []
+        revisions: list[WikiPageRevision] = []
+        slugs: set[str] = set()
+        expected_keys = {
+            "schema",
+            "slug",
+            "title",
+            "aliases",
+            "markdown",
+            "content_sha256",
+        }
+        for item in items:
+            try:
+                payload = json.loads(item.payload_json)
+                if (
+                    not isinstance(payload, dict)
+                    or set(payload) != expected_keys
+                    or not isinstance(payload["aliases"], list)
+                    or any(not isinstance(alias, str) for alias in payload["aliases"])
+                ):
+                    raise ValueError("invalid page create payload")
+                canonical_payload = json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                markdown = payload["markdown"]
+                title = payload["title"]
+                slug = payload["slug"]
+                aliases = tuple(payload["aliases"])
+                if not all(isinstance(value, str) for value in (markdown, title, slug)):
+                    raise ValueError("invalid page create text")
+                page = WikiPage(
+                    id=self._page_id_factory(),
+                    space_id=space.id,
+                    slug=slug,
+                    title=title,
+                    aliases=aliases,
+                    status="active",
+                    current_revision_id=self._page_revision_id_factory(),
+                    version=1,
+                    created_at_ms=now,
+                    updated_at_ms=now,
+                )
+                revision = WikiPageRevision(
+                    id=page.current_revision_id or "",
+                    page_id=page.id,
+                    version=1,
+                    title=page.title,
+                    markdown=markdown,
+                    content_sha256=payload["content_sha256"],
+                    change_set_id=change_set.id,
+                    author_kind="agent",
+                    created_at_ms=now,
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise WikiStoreError("invalid_change_set") from exc
+            if (
+                canonical_payload != item.payload_json
+                or payload.get("schema") != "llm-wiki-page-create-agent/v1"
+                or revision.content_sha256
+                != hashlib.sha256(revision.markdown.encode("utf-8")).hexdigest()
+                or item.unified_diff != _render_page_create_diff(page.slug, revision.markdown)
+                or page.slug in slugs
+            ):
+                raise WikiStoreError("invalid_change_set")
+            slugs.add(page.slug)
+            async with db.execute(
+                "SELECT 1 FROM wiki_pages WHERE space_id = ? AND slug = ?",
+                (space.id, page.slug),
+            ) as cursor:
+                if await cursor.fetchone() is not None:
+                    await self._mark_change_set_stale(db, change_set)
+                    return None
+            pages.append(page)
+            revisions.append(revision)
+        for item, page, revision in zip(items, pages, revisions, strict=True):
+            aliases_json = json.dumps(
+                list(page.aliases),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            await db.execute(
+                """
+                INSERT INTO wiki_pages (
+                    id, space_id, slug, title, aliases_json, status,
+                    current_revision_id, version, created_at_ms, updated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, 'active', ?, 1, ?, ?)
+                """,
+                (
+                    page.id,
+                    page.space_id,
+                    page.slug,
+                    page.title,
+                    aliases_json,
+                    page.current_revision_id,
+                    page.created_at_ms,
+                    page.updated_at_ms,
+                ),
+            )
+            await db.execute(
+                """
+                INSERT INTO wiki_page_revisions (
+                    id, page_id, version, title, markdown, content_sha256,
+                    change_set_id, author_kind, created_at_ms
+                ) VALUES (?, ?, 1, ?, ?, ?, ?, 'agent', ?)
+                """,
+                (
+                    revision.id,
+                    revision.page_id,
+                    revision.title,
+                    revision.markdown,
+                    revision.content_sha256,
+                    revision.change_set_id,
+                    revision.created_at_ms,
+                ),
+            )
+            await db.execute(
+                """
+                INSERT INTO wiki_pages_fts (page_id, space_id, title, aliases, content)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    page.id,
+                    page.space_id,
+                    page.title,
+                    aliases_json,
+                    revision.markdown,
+                ),
+            )
+            await db.execute(
+                "UPDATE wiki_change_set_items SET target_id = ? WHERE id = ?",
+                (page.id, item.id),
+            )
+        await self._publish_conversation_change_set(
+            db,
+            change_set,
+            space,
+            now=now,
+            updated_at_ms=now,
+        )
+        return tuple(pages)
+
+    async def _approve_conversation_page_delete_transaction(
+        self,
+        db: aiosqlite.Connection,
+        change_set: WikiChangeSet,
+    ) -> tuple[WikiPage, ...] | None:
+        context = await self._active_conversation_change_context(db, change_set)
+        if context is None:
+            return None
+        space, _conversation = context
+        items = await self._ordered_change_set_items(db, change_set.id)
+        if any(item.operation_kind != "page_delete" for item in items) or len(
+            {item.target_id for item in items}
+        ) != len(items):
+            raise WikiStoreError("invalid_change_set")
+        now = max(self._clock_ms(), change_set.created_at_ms)
+        pages: list[WikiPage] = []
+        expected_keys = {"schema", "page_id", "base_revision_id", "slug"}
+        for item in items:
+            try:
+                payload = json.loads(item.payload_json)
+                canonical_payload = json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            except (TypeError, ValueError) as exc:
+                raise WikiStoreError("invalid_change_set") from exc
+            if not isinstance(payload, dict) or set(payload) != expected_keys:
+                raise WikiStoreError("invalid_change_set")
+            async with db.execute(
+                "SELECT * FROM wiki_pages WHERE id = ?",
+                (item.target_id,),
+            ) as cursor:
+                page_row = await cursor.fetchone()
+            if page_row is None:
+                await self._mark_change_set_stale(db, change_set)
+                return None
+            page = _row_to_page(page_row)
+            if page.current_revision_id is None:
+                await self._mark_change_set_stale(db, change_set)
+                return None
+            async with db.execute(
+                "SELECT * FROM wiki_page_revisions WHERE id = ?",
+                (page.current_revision_id,),
+            ) as cursor:
+                revision_row = await cursor.fetchone()
+            if revision_row is None:
+                await self._mark_change_set_stale(db, change_set)
+                return None
+            revision = _row_to_page_revision(revision_row)
+            if (
+                canonical_payload != item.payload_json
+                or payload.get("schema") != "llm-wiki-page-delete/v1"
+                or payload.get("page_id") != page.id
+                or payload.get("base_revision_id") != revision.id
+                or payload.get("slug") != page.slug
+                or page.space_id != space.id
+                or page.status != "active"
+                or page.version != item.base_version
+                or revision.content_sha256 != item.before_sha256
+                or item.unified_diff != self._render_page_delete_diff(page.slug, revision.markdown)
+            ):
+                if (
+                    page.space_id != space.id
+                    or page.status != "active"
+                    or page.version != item.base_version
+                    or revision.content_sha256 != item.before_sha256
+                ):
+                    await self._mark_change_set_stale(db, change_set)
+                    return None
+                raise WikiStoreError("invalid_change_set")
+            pages.append(page)
+        latest_update = now
+        for page in pages:
+            updated_at = max(now, page.updated_at_ms + 1)
+            latest_update = max(latest_update, updated_at)
+            cursor = await db.execute(
+                """
+                UPDATE wiki_pages SET status = 'deleted', updated_at_ms = ?
+                WHERE id = ? AND space_id = ? AND status = 'active'
+                  AND version = ? AND current_revision_id = ?
+                """,
+                (
+                    updated_at,
+                    page.id,
+                    page.space_id,
+                    page.version,
+                    page.current_revision_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise WikiStoreError("change_set_conflict")
+            await db.execute(
+                "DELETE FROM wiki_pages_fts WHERE page_id = ?",
+                (page.id,),
+            )
+        await self._publish_conversation_change_set(
+            db,
+            change_set,
+            space,
+            now=now,
+            updated_at_ms=latest_update,
+        )
+        return ()
+
+    @staticmethod
+    def _render_page_delete_diff(slug: str, markdown: str) -> str:
+        lines = markdown.splitlines()
+        return "\n".join(
+            (
+                f"--- pages/{slug}.md",
+                "+++ /dev/null",
+                f"@@ -1,{len(lines)} +0,0 @@",
+                *(f"-{line}" for line in lines),
+                "",
+            )
+        )
+
+    async def _approve_conversation_edge_transaction(
+        self,
+        db: aiosqlite.Connection,
+        change_set: WikiChangeSet,
+    ) -> tuple[WikiPage, ...] | None:
+        context = await self._active_conversation_change_context(db, change_set)
+        if context is None:
+            return None
+        space, _conversation = context
+        items = await self._ordered_change_set_items(db, change_set.id)
+        if any(item.operation_kind not in {"edge_add", "edge_delete"} for item in items):
+            raise WikiStoreError("invalid_change_set")
+        async with db.execute(
+            "SELECT * FROM wiki_pages WHERE space_id = ? AND status = 'active'",
+            (space.id,),
+        ) as cursor:
+            page_rows = await cursor.fetchall()
+        pages = {row["id"]: _row_to_page(row) for row in page_rows}
+        async with db.execute(
+            "SELECT * FROM wiki_edges WHERE space_id = ?",
+            (space.id,),
+        ) as cursor:
+            edge_rows = await cursor.fetchall()
+        parsed_edges = tuple(_row_to_edge(row) for row in edge_rows)
+        existing_edges = {edge.id: edge for edge in parsed_edges}
+        delete_pairs: list[tuple[WikiChangeSetItem, WikiEdge]] = []
+        deleted_ids: set[str] = set()
+        for item in items:
+            if item.operation_kind != "edge_delete":
+                continue
+            edge = existing_edges.get(item.target_id)
+            try:
+                payload = json.loads(item.payload_json)
+                canonical_payload = json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            except (TypeError, ValueError) as exc:
+                raise WikiStoreError("invalid_change_set") from exc
+            if edge is None:
+                await self._mark_change_set_stale(db, change_set)
+                return None
+            from_page = pages.get(edge.from_page_id)
+            to_page = pages.get(edge.to_page_id)
+            if from_page is None or to_page is None:
+                await self._mark_change_set_stale(db, change_set)
+                return None
+            if (
+                not isinstance(payload, dict)
+                or set(payload)
+                != {
+                    "schema",
+                    "edge_id",
+                    "from_page_id",
+                    "to_page_id",
+                    "relation_type",
+                }
+                or canonical_payload != item.payload_json
+                or payload.get("schema") != "llm-wiki-edge-delete/v1"
+                or payload.get("edge_id") != edge.id
+                or payload.get("from_page_id") != edge.from_page_id
+                or payload.get("to_page_id") != edge.to_page_id
+                or payload.get("relation_type") != edge.relation_type
+                or item.unified_diff
+                != (
+                    f"- edge pages/{from_page.slug}.md --{edge.relation_type}--> "
+                    f"pages/{to_page.slug}.md\n"
+                )
+                or edge.id in deleted_ids
+            ):
+                raise WikiStoreError("invalid_change_set")
+            deleted_ids.add(edge.id)
+            delete_pairs.append((item, edge))
+        effective_edges = {
+            (
+                edge.from_page_id,
+                edge.to_page_id,
+                edge.relation_type,
+            )
+            for edge in existing_edges.values()
+            if edge.id not in deleted_ids
+        }
+        part_of_adjacency: dict[str, set[str]] = {}
+        for from_id, to_id, relation_type in effective_edges:
+            if relation_type == "part_of":
+                part_of_adjacency.setdefault(from_id, set()).add(to_id)
+        add_pairs: list[tuple[WikiChangeSetItem, WikiEdge]] = []
+        now = max(self._clock_ms(), change_set.created_at_ms)
+        allowed_relations = {
+            "related_to",
+            "references",
+            "extends",
+            "contradicts",
+            "part_of",
+        }
+        for item in items:
+            if item.operation_kind != "edge_add":
+                continue
+            try:
+                payload = json.loads(item.payload_json)
+                canonical_payload = json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                relation_type = cast("WikiRelationType", payload["relation_type"])
+                from_page = pages[payload["from_page_id"]]
+                to_page = pages[payload["to_page_id"]]
+            except (KeyError, TypeError, ValueError) as exc:
+                raise WikiStoreError("invalid_change_set") from exc
+            if (
+                not isinstance(payload, dict)
+                or set(payload) != {"schema", "from_page_id", "to_page_id", "relation_type"}
+                or canonical_payload != item.payload_json
+                or payload.get("schema") != "llm-wiki-edge-add-agent/v1"
+                or relation_type not in allowed_relations
+                or from_page.id == to_page.id
+                or (relation_type == "related_to" and from_page.id > to_page.id)
+                or item.unified_diff
+                != _render_edge_add_diff(
+                    from_page.slug,
+                    to_page.slug,
+                    relation_type,
+                )
+            ):
+                raise WikiStoreError("invalid_change_set")
+            key = (from_page.id, to_page.id, relation_type)
+            if key in effective_edges:
+                raise WikiStoreError("invalid_change_set")
+            if relation_type == "part_of":
+                pending = [to_page.id]
+                visited: set[str] = set()
+                while pending:
+                    node = pending.pop()
+                    if node == from_page.id:
+                        raise WikiStoreError("invalid_change_set")
+                    if node in visited:
+                        continue
+                    visited.add(node)
+                    pending.extend(part_of_adjacency.get(node, ()))
+                part_of_adjacency.setdefault(from_page.id, set()).add(to_page.id)
+            effective_edges.add(key)
+            try:
+                edge = WikiEdge(
+                    id=self._edge_id_factory(),
+                    space_id=space.id,
+                    from_page_id=from_page.id,
+                    to_page_id=to_page.id,
+                    relation_type=relation_type,
+                    change_set_id=change_set.id,
+                    created_at_ms=now,
+                )
+            except ValueError as exc:
+                raise WikiStoreError("invalid_change_set") from exc
+            add_pairs.append((item, edge))
+        for _item, edge in delete_pairs:
+            cursor = await db.execute(
+                "DELETE FROM wiki_edges WHERE id = ? AND space_id = ?",
+                (edge.id, space.id),
+            )
+            if cursor.rowcount != 1:
+                raise WikiStoreError("change_set_conflict")
+        for item, edge in add_pairs:
+            await db.execute(
+                """
+                INSERT INTO wiki_edges (
+                    id, space_id, from_page_id, to_page_id, relation_type,
+                    change_set_id, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    edge.id,
+                    edge.space_id,
+                    edge.from_page_id,
+                    edge.to_page_id,
+                    edge.relation_type,
+                    edge.change_set_id,
+                    edge.created_at_ms,
+                ),
+            )
+            await db.execute(
+                "UPDATE wiki_change_set_items SET target_id = ? WHERE id = ?",
+                (edge.id, item.id),
+            )
+        await self._publish_conversation_change_set(
+            db,
+            change_set,
+            space,
+            now=now,
+            updated_at_ms=now,
+        )
+        return ()
+
+    async def _mark_change_set_stale(
+        self,
+        db: aiosqlite.Connection,
+        change_set: WikiChangeSet,
+    ) -> None:
+        decided_at = max(self._clock_ms(), change_set.created_at_ms)
+        await db.execute(
+            """
+            UPDATE wiki_change_sets
+            SET status = 'stale', decided_at_ms = ?
+            WHERE id = ?
+            """,
+            (decided_at, change_set.id),
+        )
+        return None
+
+    async def find_change_set_for_summary(
+        self,
+        summary_id: str,
+    ) -> WikiChangeSet | None:
+        try:
+            validate_summary_id(summary_id)
+        except ValueError as exc:
+            raise WikiStoreError("invalid_identifier") from exc
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM wiki_change_sets WHERE source_summary_id = ?",
+            (summary_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return None if row is None else _row_to_change_set(row)
+
+    async def list_change_set_items(
+        self,
+        change_set_id: str,
+    ) -> tuple[WikiChangeSetItem, ...]:
+        await self.get_change_set(change_set_id)
+        db = self._require_db()
+        async with db.execute(
+            """
+            SELECT * FROM wiki_change_set_items
+            WHERE change_set_id = ? ORDER BY ordinal, id
+            """,
+            (change_set_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return tuple(_row_to_change_set_item(row) for row in rows)
+
+    async def list_change_sets(self, space_id: str) -> tuple[WikiChangeSet, ...]:
+        await self.get_space(space_id)
+        db = self._require_db()
+        async with db.execute(
+            """
+            SELECT * FROM wiki_change_sets
+            WHERE space_id = ? ORDER BY created_at_ms, id
+            """,
+            (space_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return tuple(_row_to_change_set(row) for row in rows)
+
+    async def get_page(self, page_id: str) -> WikiPage:
+        try:
+            validate_page_id(page_id)
+        except ValueError as exc:
+            raise WikiStoreError("invalid_identifier") from exc
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM wiki_pages WHERE id = ?",
+            (page_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise WikiStoreError("page_not_found")
+        return _row_to_page(row)
+
+    async def list_pages(
+        self,
+        space_id: str,
+        *,
+        include_deleted: bool = False,
+    ) -> tuple[WikiPage, ...]:
+        await self.get_space(space_id)
+        db = self._require_db()
+        query = "SELECT * FROM wiki_pages WHERE space_id = ?"
+        if not include_deleted:
+            query += " AND status = 'active'"
+        query += " ORDER BY slug, id"
+        async with db.execute(query, (space_id,)) as cursor:
+            rows = await cursor.fetchall()
+        return tuple(_row_to_page(row) for row in rows)
+
+    async def list_edges(self, space_id: str) -> tuple[WikiEdge, ...]:
+        """Return approved page relations; system-derived source edges are excluded."""
+        await self.get_space(space_id)
+        db = self._require_db()
+        async with db.execute(
+            """
+            SELECT e.*
+            FROM wiki_edges AS e
+            JOIN wiki_pages AS source_page ON source_page.id = e.from_page_id
+            JOIN wiki_pages AS target_page ON target_page.id = e.to_page_id
+            JOIN wiki_change_sets AS c ON c.id = e.change_set_id
+            WHERE e.space_id = ?
+              AND source_page.space_id = e.space_id
+              AND target_page.space_id = e.space_id
+              AND source_page.status = 'active'
+              AND target_page.status = 'active'
+              AND c.status = 'approved'
+            ORDER BY e.relation_type, e.from_page_id, e.to_page_id, e.id
+            """,
+            (space_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return tuple(_row_to_edge(row) for row in rows)
+
+    async def get_edge(self, edge_id: str) -> WikiEdge:
+        try:
+            validate_edge_id(edge_id)
+        except ValueError as exc:
+            raise WikiStoreError("invalid_identifier") from exc
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM wiki_edges WHERE id = ?",
+            (edge_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise WikiStoreError("change_set_conflict")
+        return _row_to_edge(row)
+
+    async def get_graph_snapshot(self, space_id: str) -> WikiGraphSnapshot:
+        """Project active pages, approved page edges and system source provenance."""
+        space = await self.get_space(space_id)
+        db = self._require_db()
+        async with db.execute(
+            """
+            SELECT id, title
+            FROM wiki_pages
+            WHERE space_id = ? AND status = 'active'
+            ORDER BY slug, id
+            """,
+            (space_id,),
+        ) as cursor:
+            page_rows = await cursor.fetchall()
+        async with db.execute(
+            """
+            SELECT DISTINCT s.id, s.display_name
+            FROM wiki_page_sources AS ps
+            JOIN wiki_pages AS p ON p.id = ps.page_id
+            JOIN wiki_sources AS s ON s.id = ps.source_id
+            WHERE p.space_id = ? AND p.status = 'active' AND s.space_id = p.space_id
+            ORDER BY s.display_name, s.id
+            """,
+            (space_id,),
+        ) as cursor:
+            source_rows = await cursor.fetchall()
+        async with db.execute(
+            """
+            SELECT ps.page_id, ps.source_id
+            FROM wiki_page_sources AS ps
+            JOIN wiki_pages AS p ON p.id = ps.page_id
+            JOIN wiki_sources AS s ON s.id = ps.source_id
+            WHERE p.space_id = ? AND p.status = 'active' AND s.space_id = p.space_id
+            ORDER BY ps.page_id, ps.source_id
+            """,
+            (space_id,),
+        ) as cursor:
+            source_edge_rows = await cursor.fetchall()
+        page_edges = await self.list_edges(space_id)
+        nodes = tuple(
+            [WikiGraphNode(id=row["id"], kind="page", label=row["title"]) for row in page_rows]
+            + [
+                WikiGraphNode(
+                    id=row["id"],
+                    kind="source",
+                    label=row["display_name"],
+                )
+                for row in source_rows
+            ]
+        )
+        edges = tuple(
+            [
+                WikiGraphEdge(
+                    id=edge.id,
+                    from_node_id=edge.from_page_id,
+                    to_node_id=edge.to_page_id,
+                    relation_type=edge.relation_type,
+                )
+                for edge in page_edges
+            ]
+            + [
+                WikiGraphEdge(
+                    id=(f"derived_from:{row['page_id']}:{row['source_id']}"),
+                    from_node_id=row["page_id"],
+                    to_node_id=row["source_id"],
+                    relation_type="derived_from",
+                    system_managed=True,
+                )
+                for row in source_edge_rows
+            ]
+        )
+        return WikiGraphSnapshot(
+            space_id=space.id,
+            graph_revision=space.graph_revision,
+            nodes=nodes,
+            edges=edges,
+        )
+
+    async def get_page_graph_neighborhood(
+        self,
+        space_id: str,
+        page_id: str,
+    ) -> WikiGraphSnapshot:
+        """Return one page and its directly connected page/source nodes."""
+        try:
+            validate_page_id(page_id)
+        except ValueError as exc:
+            raise WikiStoreError("invalid_identifier") from exc
+        snapshot = await self.get_graph_snapshot(space_id)
+        node_by_id = {node.id: node for node in snapshot.nodes}
+        page_node = node_by_id.get(page_id)
+        if page_node is None or page_node.kind != "page":
+            raise WikiStoreError("page_not_found")
+        edges = tuple(
+            edge
+            for edge in snapshot.edges
+            if edge.from_node_id == page_id or edge.to_node_id == page_id
+        )
+        node_ids = {page_id}
+        for edge in edges:
+            node_ids.add(edge.from_node_id)
+            node_ids.add(edge.to_node_id)
+        nodes = tuple(node for node in snapshot.nodes if node.id in node_ids)
+        return WikiGraphSnapshot(
+            space_id=snapshot.space_id,
+            graph_revision=snapshot.graph_revision,
+            nodes=nodes,
+            edges=edges,
+        )
+
+    async def get_page_revision(self, revision_id: str) -> WikiPageRevision:
+        try:
+            validate_page_revision_id(revision_id)
+        except ValueError as exc:
+            raise WikiStoreError("invalid_identifier") from exc
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM wiki_page_revisions WHERE id = ?",
+            (revision_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise WikiStoreError("page_revision_not_found")
+        return _row_to_page_revision(row)
+
+    async def list_page_revisions(
+        self,
+        page_id: str,
+    ) -> tuple[WikiPageRevision, ...]:
+        await self.get_page(page_id)
+        db = self._require_db()
+        async with db.execute(
+            """
+            SELECT * FROM wiki_page_revisions
+            WHERE page_id = ? ORDER BY version, id
+            """,
+            (page_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return tuple(_row_to_page_revision(row) for row in rows)
+
+    async def list_page_source_links(
+        self,
+        page_id: str,
+    ) -> tuple[tuple[str, str], ...]:
+        """Return trusted Source IDs and canonical locator JSON for one page."""
+        await self.get_page(page_id)
+        db = self._require_db()
+        async with db.execute(
+            """
+            SELECT source_id, source_locator_json
+            FROM wiki_page_sources
+            WHERE page_id = ? ORDER BY source_id
+            """,
+            (page_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return tuple((row["source_id"], row["source_locator_json"]) for row in rows)
+
+    async def _pages_for_change_set(
+        self,
+        change_set_id: str,
+    ) -> tuple[WikiPage, ...]:
+        db = self._require_db()
+        async with db.execute(
+            """
+            SELECT p.*
+            FROM wiki_change_set_items AS i
+            JOIN wiki_pages AS p ON p.id = i.target_id
+            WHERE i.change_set_id = ?
+              AND p.status = 'active'
+            ORDER BY i.ordinal, i.id
+            """,
+            (change_set_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return tuple(_row_to_page(row) for row in rows)
+
+    async def repair_page_mirrors(self) -> None:
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM wiki_pages WHERE status = 'active' ORDER BY space_id, slug, id"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        await self._sync_page_mirrors(tuple(_row_to_page(row) for row in rows))
+        async with db.execute(
+            "SELECT * FROM wiki_pages WHERE status = 'deleted' ORDER BY space_id, slug, id"
+        ) as cursor:
+            deleted_rows = await cursor.fetchall()
+        for row in deleted_rows:
+            page = _row_to_page(row)
+            await asyncio.to_thread(
+                self._file_store.remove_owned_file_if_present,
+                page.space_id,
+                f"pages/{page.slug}.md",
+            )
+
+    async def _sync_deleted_page_mirrors(self, change_set_id: str) -> None:
+        db = self._require_db()
+        async with db.execute(
+            """
+            SELECT p.* FROM wiki_change_set_items AS i
+            JOIN wiki_pages AS p ON p.id = i.target_id
+            WHERE i.change_set_id = ? AND i.operation_kind = 'page_delete'
+              AND p.status = 'deleted'
+            ORDER BY i.ordinal, i.id
+            """,
+            (change_set_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        for row in rows:
+            page = _row_to_page(row)
+            try:
+                await asyncio.to_thread(
+                    self._file_store.remove_owned_file_if_present,
+                    page.space_id,
+                    f"pages/{page.slug}.md",
+                )
+            except Exception as exc:
+                raise WikiMirrorError("mirror_failed") from exc
+
+    async def _sync_page_mirrors(self, pages: Sequence[WikiPage]) -> None:
+        for page in pages:
+            if page.current_revision_id is None:
+                raise WikiMirrorError("mirror_failed")
+            revision = await self.get_page_revision(page.current_revision_id)
+            if (
+                revision.page_id != page.id
+                or revision.version != page.version
+                or revision.title != page.title
+                or hashlib.sha256(revision.markdown.encode("utf-8")).hexdigest()
+                != revision.content_sha256
+            ):
+                raise WikiMirrorError("mirror_failed")
+            try:
+                await asyncio.to_thread(
+                    self._file_store.write_owned_file_atomic,
+                    page.space_id,
+                    f"pages/{page.slug}.md",
+                    revision.markdown.encode("utf-8"),
+                    overwrite=True,
+                    max_bytes=500_000,
+                )
+            except Exception as exc:
+                raise WikiMirrorError("mirror_failed") from exc
+
+    async def repair_page_search_index(self) -> None:
+        """Rebuild the derived FTS projection from active current page revisions."""
+        async with self._write_lock:
+            db = self._require_db()
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                await db.execute("DELETE FROM wiki_pages_fts")
+                await db.execute(
+                    """
+                    INSERT INTO wiki_pages_fts (
+                        page_id, space_id, title, aliases, content
+                    )
+                    SELECT p.id, p.space_id, p.title, p.aliases_json, r.markdown
+                    FROM wiki_pages AS p
+                    JOIN wiki_page_revisions AS r ON r.id = p.current_revision_id
+                    JOIN wiki_change_sets AS c ON c.id = r.change_set_id
+                    WHERE p.status = 'active' AND c.status = 'approved'
+                    ORDER BY p.space_id, p.slug, p.id
+                    """
+                )
+                await db.execute("COMMIT")
+            except BaseException:
+                await self._rollback_quietly(db)
+                raise
+
+    async def search_pages(
+        self,
+        space_id: str,
+        query: str,
+        *,
+        limit: int = 20,
+    ) -> tuple[WikiPageSearchResult, ...]:
+        await self.get_space(space_id)
+        if limit < 1 or limit > 50:
+            raise WikiStoreError("invalid_search_query")
+        compiled = compile_wiki_fts_query(query)
+        db = self._require_db()
+        try:
+            async with db.execute(
+                """
+                SELECT p.id AS page_id, p.space_id, p.current_revision_id,
+                       p.version, p.slug, p.title,
+                       snippet(wiki_pages_fts, 4, '【', '】', '…', 24) AS snippet,
+                       bm25(wiki_pages_fts, 0.0, 0.0, 5.0, 3.0, 1.0) AS rank
+                FROM wiki_pages_fts
+                JOIN wiki_pages AS p ON p.id = wiki_pages_fts.page_id
+                JOIN wiki_page_revisions AS r ON r.id = p.current_revision_id
+                JOIN wiki_change_sets AS c ON c.id = r.change_set_id
+                WHERE wiki_pages_fts MATCH ?
+                  AND wiki_pages_fts.space_id = ?
+                  AND p.space_id = ?
+                  AND p.status = 'active'
+                  AND c.status = 'approved'
+                ORDER BY rank, p.id
+                LIMIT ?
+                """,
+                (compiled, space_id, space_id, limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        except aiosqlite.Error as exc:
+            raise WikiStoreError("invalid_search_query") from exc
+        return tuple(
+            WikiPageSearchResult(
+                page_id=row["page_id"],
+                space_id=row["space_id"],
+                revision_id=row["current_revision_id"],
+                version=row["version"],
+                slug=row["slug"],
+                title=row["title"],
+                snippet=row["snippet"] or "",
+                rank=float(row["rank"]),
+            )
+            for row in rows
+        )
+
     def _validate_parse_commit(
         self,
         source: WikiSource,
@@ -1972,8 +5586,7 @@ class WikiStore:
             or source_row["status"] != "parsing"
             or source_row["updated_at_ms"] != source.updated_at_ms
             or source_row["selection_version"] != job.base_selection_version
-            or source_row["selected_parse_revision_id"]
-            != job.base_selected_parse_revision_id
+            or source_row["selected_parse_revision_id"] != job.base_selected_parse_revision_id
             or job_row is None
             or job_row["status"] != "running"
             or job_row["started_at_ms"] != job.started_at_ms
@@ -2232,9 +5845,7 @@ class WikiStore:
             manifest_relpath=revision.manifest_relpath,
             manifest_sha256=revision.manifest_sha256,
             selected_at_ms=(
-                source.selected_at_ms
-                if source.selected_at_ms is not None
-                else source.updated_at_ms
+                source.selected_at_ms if source.selected_at_ms is not None else source.updated_at_ms
             ),
         )
 
@@ -2342,6 +5953,8 @@ class WikiStore:
         return tuple(repaired)
 
     async def _sync_selected_pointer(self, source: WikiSource) -> bool:
+        if source.status == "deleting":
+            return False
         if source.selected_parse_revision_id is None:
             return await asyncio.to_thread(
                 self._file_store.remove_owned_file_if_present,
@@ -2385,6 +5998,8 @@ class WikiStore:
         persisted = await self.get_source(source.id, space_id=source.space_id)
         if persisted != source:
             raise WikiStoreError("source_conflict")
+        if source.status == "deleting":
+            raise WikiStoreError("source_not_available")
         content = await asyncio.to_thread(
             self._file_store.read_owned_file,
             source.space_id,
@@ -2406,6 +6021,9 @@ class WikiStore:
         persisted = await self.get_artifact(artifact.id)
         if persisted != artifact or artifact.source_id != source.id:
             raise WikiStoreError("source_conflict")
+        current_source = await self.get_source(source.id, space_id=source.space_id)
+        if current_source.status == "deleting":
+            raise WikiStoreError("source_not_available")
         content = await asyncio.to_thread(
             self._file_store.read_owned_file,
             source.space_id,
@@ -2438,6 +6056,21 @@ class WikiStore:
         except Exception:
             pass
 
+    @staticmethod
+    async def _assert_space_active(
+        db: aiosqlite.Connection,
+        space_id: str,
+    ) -> None:
+        async with db.execute(
+            "SELECT status FROM wiki_spaces WHERE id = ?",
+            (space_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            raise WikiStoreError("space_not_found")
+        if row["status"] != "active":
+            raise WikiStoreError("space_read_only")
+
     async def repair_space_mirrors(self) -> WikiMirrorRepairReport:
         spaces = await self.list_spaces()
         try:
@@ -2469,7 +6102,7 @@ class WikiStore:
             if existing - {"wiki_schema_meta"}:
                 raise WikiSchemaError("schema_incompatible")
             await self._initialize_fresh_schema()
-        elif version == 1 and WIKI_SCHEMA_VERSION == 2:
+        elif version in {1, 2, 3, 4, 5, 6} and version < WIKI_SCHEMA_VERSION:
             raise WikiSchemaError("schema_rebuild_required")
         elif version != WIKI_SCHEMA_VERSION:
             raise WikiSchemaError("schema_incompatible")
@@ -2538,6 +6171,8 @@ class WikiStore:
                 "SELECT sqlite_version(), json_valid('[]'), json_type('[]')"
             ) as cursor:
                 row = await cursor.fetchone()
+            await db.execute("CREATE VIRTUAL TABLE temp.wiki_fts_probe USING fts5(value)")
+            await db.execute("DROP TABLE temp.wiki_fts_probe")
         except aiosqlite.Error as exc:
             raise WikiSchemaError("schema_incompatible") from exc
         if row is None:

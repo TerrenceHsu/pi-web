@@ -11,6 +11,7 @@ dist/
 .pytest-cache-workspace/
 .pytest-tmp/
 /.test-tmp/
+/.t/
 .mypy_cache/
 .ruff_cache/
 

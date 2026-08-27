@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import math
 
 from .errors import WikiStoreError
 from .ingestion import WikiIngestionService
 from .models import WikiParseMode
 from .store import WikiStore
+
+_logger = logging.getLogger(__name__)
 
 
 class WikiIngestionWorkerManager:
@@ -17,17 +21,29 @@ class WikiIngestionWorkerManager:
         store: WikiStore,
         service: WikiIngestionService,
         shutdown_timeout_seconds: float = 5.0,
+        source_retention_seconds: float = 7 * 24 * 60 * 60,
+        purge_interval_seconds: float = 5 * 60,
     ) -> None:
-        if shutdown_timeout_seconds <= 0:
-            raise ValueError("shutdown timeout must be positive")
+        if (
+            shutdown_timeout_seconds <= 0
+            or source_retention_seconds < 0
+            or purge_interval_seconds <= 0
+            or not math.isfinite(source_retention_seconds)
+            or not math.isfinite(purge_interval_seconds)
+        ):
+            raise ValueError("Wiki worker durations are invalid")
         self._store = store
         self._service = service
         self._shutdown_timeout_seconds = shutdown_timeout_seconds
+        self._source_retention_ms = int(source_retention_seconds * 1000)
+        self._purge_interval_seconds = purge_interval_seconds
         self._queue: asyncio.Queue[tuple[str, WikiParseMode] | None] = asyncio.Queue()
         self._queued: set[str] = set()
         self._follow_up_modes: dict[str, WikiParseMode] = {}
         self._active_source_id: str | None = None
         self._task: asyncio.Task[None] | None = None
+        self._purge_task: asyncio.Task[None] | None = None
+        self._stop_purge = asyncio.Event()
         self._lock = asyncio.Lock()
 
     @property
@@ -38,6 +54,8 @@ class WikiIngestionWorkerManager:
         async with self._lock:
             if self.running:
                 return
+            await self._purge_due_sources()
+            self._stop_purge = asyncio.Event()
             recovered = await self._store.recover_interrupted_parses()
             uploaded = await self._store.list_sources_by_status(("uploaded",))
             candidates = {
@@ -63,6 +81,10 @@ class WikiIngestionWorkerManager:
                         continue
                     candidates[source.id] = (source, resolved_mode)
             self._task = asyncio.create_task(self._run(), name="wiki-ingestion-worker")
+            self._purge_task = asyncio.create_task(
+                self._run_purge_loop(),
+                name="wiki-source-retention-worker",
+            )
             for source, requested_mode in candidates.values():
                 self._queued.add(source.id)
                 self._queue.put_nowait((source.id, requested_mode))
@@ -98,18 +120,30 @@ class WikiIngestionWorkerManager:
     async def stop(self) -> None:
         async with self._lock:
             task = self._task
+            purge_task = self._purge_task
             self._task = None
-            if task is None:
+            self._purge_task = None
+            self._stop_purge.set()
+            if task is None and purge_task is None:
                 return
-            self._queue.put_nowait(None)
+            if task is not None:
+                self._queue.put_nowait(None)
         try:
-            await asyncio.wait_for(
-                asyncio.shield(task),
-                timeout=self._shutdown_timeout_seconds,
-            )
+            if task is not None:
+                await asyncio.wait_for(
+                    asyncio.shield(task),
+                    timeout=self._shutdown_timeout_seconds,
+                )
+            if purge_task is not None:
+                await asyncio.wait_for(
+                    asyncio.shield(purge_task),
+                    timeout=self._shutdown_timeout_seconds,
+                )
         except TimeoutError:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            pending = tuple(item for item in (task, purge_task) if item is not None)
+            for item in pending:
+                item.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
         finally:
             self._queued.clear()
             self._follow_up_modes.clear()
@@ -139,6 +173,28 @@ class WikiIngestionWorkerManager:
                     else:
                         self._queue.put_nowait((source_id, follow_up_mode))
                 self._queue.task_done()
+
+    async def _run_purge_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.wait_for(
+                    self._stop_purge.wait(),
+                    timeout=self._purge_interval_seconds,
+                )
+                return
+            except TimeoutError:
+                await self._purge_due_sources()
+
+    async def _purge_due_sources(self) -> None:
+        try:
+            await self._store.purge_due_source_files(
+                retention_ms=self._source_retention_ms,
+            )
+        except Exception as exc:
+            _logger.warning(
+                "Wiki Source retention cleanup failed safely (error_type=%s)",
+                type(exc).__name__,
+            )
 
 
 __all__ = ["WikiIngestionWorkerManager"]

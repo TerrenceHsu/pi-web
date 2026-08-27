@@ -5,6 +5,7 @@ import AppShell from "./components/layout/AppShell.vue"
 import SessionSidebar from "./components/layout/SessionSidebar.vue"
 import ChatPanel from "./components/chat/ChatPanel.vue"
 import WorkspacePanel from "./components/workspace/WorkspacePanel.vue"
+import WikiWorkspace from "./components/wiki/WikiWorkspace.vue"
 import LoginPage from "./components/auth/LoginPage.vue"
 import { useAuthStore } from "./stores/authStore"
 import { useChatStore } from "./stores/chatStore"
@@ -15,11 +16,9 @@ import { useMcpStore } from "./stores/mcpStore"
 import { useProviderStore } from "./stores/providerStore"
 import { useSessionStore } from "./stores/sessionStore"
 import { useSkillStore } from "./stores/skillStore"
-import {
-  pushSessionRoute,
-  readSessionRoute,
-  replaceSessionRoute,
-} from "./utils/sessionRoute"
+import { useWikiStore } from "./stores/wikiStore"
+import { pushKnowledgeRoute, readAppView, type AppView } from "./utils/appRoute"
+import { pushSessionRoute, readSessionRoute, replaceSessionRoute } from "./utils/sessionRoute"
 
 const authStore = useAuthStore()
 const sessionStore = useSessionStore()
@@ -30,6 +29,8 @@ const fileStore = useFileStore()
 const skillStore = useSkillStore()
 const mcpStore = useMcpStore()
 const providerStore = useProviderStore()
+const wikiStore = useWikiStore()
+const activeView = ref<AppView>(readAppView())
 const workspaceStarted = ref(false)
 const workspaceLoading = ref(false)
 const sessionCoordinatorReady = ref(false)
@@ -67,7 +68,8 @@ async function bootstrapWorkspace(): Promise<void> {
 
   sessionCoordinatorReady.value = false
   try {
-    const route = readSessionRoute()
+    const route =
+      activeView.value === "chat" ? readSessionRoute() : { requested: false, sessionId: null }
     await sessionStore.loadSessions(route.sessionId)
     if (!sessionStore.activeSessionId) {
       try {
@@ -78,7 +80,7 @@ async function bootstrapWorkspace(): Promise<void> {
     }
 
     const sid = sessionStore.activeSessionId
-    replaceSessionRoute(sid)
+    if (activeView.value === "chat") replaceSessionRoute(sid)
 
     // 认证 Cookie 会随 WebSocket 握手发送。先连接，再恢复 active request；
     // recoverActiveRequestEvents 会把查询期间的 live event 合并去重。
@@ -91,7 +93,6 @@ async function bootstrapWorkspace(): Promise<void> {
     mcpStore.loadServers().catch((e) => console.error("loadServers failed", e))
     mcpStore.loadTools().catch((e) => console.error("loadTools failed", e))
     providerStore.initialize().catch((e) => console.error("providerStore.initialize failed", e))
-
   } finally {
     workspaceLoading.value = false
   }
@@ -121,10 +122,7 @@ async function restoreWorkspaceSession(sessionId: string | null): Promise<void> 
   if (version !== activationVersion || sessionStore.activeSessionId !== sessionId) return
   if (!activeRequestId) {
     // 关闭“初次 load 与 active 查询之间刚好完成”的竞态。
-    await Promise.all([
-      chatStore.loadMessages(sessionId),
-      fileStore.loadFiles(sessionId),
-    ])
+    await Promise.all([chatStore.loadMessages(sessionId), fileStore.loadFiles(sessionId)])
     return
   }
 
@@ -151,6 +149,7 @@ function resetWorkspaceState(): void {
   mcpStore.resetWorkspace()
   providerStore.resetWorkspace()
   codingSandboxStore.resetWorkspace()
+  wikiStore.reset()
   sessionStore.resetWorkspace()
   workspaceStarted.value = false
   workspaceLoading.value = false
@@ -176,11 +175,13 @@ watch(
   () => sessionStore.activeSessionId,
   (sessionId) => {
     if (!sessionCoordinatorReady.value || !authStore.authenticated) return
-    if (sessionId) {
-      const route = readSessionRoute()
-      if (route.sessionId !== sessionId) pushSessionRoute(sessionId)
-    } else {
-      replaceSessionRoute(null)
+    if (activeView.value === "chat") {
+      if (sessionId) {
+        const route = readSessionRoute()
+        if (route.sessionId !== sessionId) pushSessionRoute(sessionId)
+      } else {
+        replaceSessionRoute(null)
+      }
     }
     void restoreWorkspaceSession(sessionId)
   },
@@ -188,16 +189,28 @@ watch(
 
 function handlePopState(): void {
   if (!sessionCoordinatorReady.value || !authStore.authenticated) return
+  const nextView = readAppView()
+  activeView.value = nextView
+  if (nextView === "knowledge") return
   const route = readSessionRoute()
-  if (
-    route.sessionId &&
-    sessionStore.sessions.some((session) => session.id === route.sessionId)
-  ) {
+  if (route.sessionId && sessionStore.sessions.some((session) => session.id === route.sessionId)) {
     sessionStore.setActiveSession(route.sessionId)
     return
   }
   // 非法、已删除、或不属于当前账号的 Session 绝不发 API 请求。
   replaceSessionRoute(sessionStore.activeSessionId)
+}
+
+function openKnowledge(): void {
+  pushKnowledgeRoute()
+  activeView.value = "knowledge"
+}
+
+function closeKnowledge(): void {
+  activeView.value = "chat"
+  const sessionId = sessionStore.activeSessionId
+  if (sessionId) pushSessionRoute(sessionId)
+  else replaceSessionRoute(null)
 }
 
 onMounted(async () => {
@@ -220,13 +233,14 @@ onBeforeUnmount(() => {
   <div v-else-if="workspaceLoading" class="auth-loading" data-testid="workspace-loading">
     Loading {{ authStore.user?.name }} workspace…
   </div>
+  <WikiWorkspace v-else-if="activeView === 'knowledge'" @close="closeKnowledge" />
   <AppShell
     v-else
     :workspace-attention="workspaceAttention"
     @workspace-opened="acknowledgeWorkspace"
   >
     <template #sidebar>
-      <SessionSidebar />
+      <SessionSidebar @open-knowledge="openKnowledge" />
     </template>
     <template #main>
       <ChatPanel />

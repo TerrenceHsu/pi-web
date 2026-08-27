@@ -16,12 +16,17 @@ import EmptyState from "../common/EmptyState.vue"
 import ErrorBanner from "../common/ErrorBanner.vue"
 import ContextBudgetBadge from "./ContextBudgetBadge.vue"
 
+const props = withDefaults(defineProps<{ mode?: "default" | "knowledge" }>(), {
+  mode: "default",
+})
+
 const sessionStore = useSessionStore()
 const chatStore = useChatStore()
 const contextBudgetStore = useContextBudgetStore()
 const fileStore = useFileStore()
 const skillStore = useSkillStore()
 const providerStore = useProviderStore()
+const knowledgeMode = computed(() => props.mode === "knowledge")
 
 const activeSessionId = computed(() => sessionStore.activeSessionId)
 const hasSession = computed(() => !!activeSessionId.value)
@@ -45,6 +50,10 @@ const lastFailedText = ref<string>("")
 const chatInputRef = ref<InstanceType<typeof ChatInput> | null>(null)
 
 onMounted(async () => {
+  if (knowledgeMode.value) {
+    slashCommands.value = []
+    return
+  }
   try {
     const catalog = await listSlashCommands()
     if (Array.isArray(catalog?.commands)) {
@@ -70,6 +79,7 @@ watch(
 )
 
 async function onUploadFiles(files: FileList | File[]) {
+  if (knowledgeMode.value) return
   if (!activeSessionId.value) {
     fileStore.error = "No active session"
     return
@@ -93,7 +103,7 @@ async function onSubmit(text: string) {
   lastFailedText.value = text
 
   const normalized = text.trim()
-  if (normalized.startsWith("/")) {
+  if (!knowledgeMode.value && normalized.startsWith("/")) {
     if (normalized.toLocaleLowerCase() !== "/checkpointer") {
       chatStore.error = `Unknown slash command: ${normalized.split(/\s+/, 1)[0]}`
       chatInputRef.value?.setText(text)
@@ -110,17 +120,19 @@ async function onSubmit(text: string) {
     return
   }
 
-  const fileIds = pendingAttachments.value.map((f) => f.id)
-  const files = pendingAttachments.value.slice()
+  const fileIds = knowledgeMode.value ? [] : pendingAttachments.value.map((f) => f.id)
+  const files = knowledgeMode.value ? [] : pendingAttachments.value.slice()
+  const skillNames = knowledgeMode.value ? [] : [...skillStore.selectedSkillNames]
 
   try {
     const preview = await contextBudgetStore.preview(activeSessionId.value!, {
       text,
       file_ids: fileIds,
-      skill_names: [...skillStore.selectedSkillNames],
+      skill_names: skillNames,
     })
     if (preview?.estimate.level === "blocked") {
-      contextBudgetStore.error = "Context budget exceeded. Compact this conversation before sending."
+      contextBudgetStore.error =
+        "Context budget exceeded. Compact this conversation before sending."
       chatInputRef.value?.setText(lastFailedText.value)
       return
     }
@@ -129,7 +141,7 @@ async function onSubmit(text: string) {
       text,
       fileIds,
       files,
-      skillNames: [...skillStore.selectedSkillNames],
+      skillNames,
     })
     // 成功：清空 pending；reload session files（让侧栏其它视图也同步）
     fileStore.clearPendingAttachments()
@@ -225,6 +237,8 @@ function dismissError() {
       :provider-ready="providerStore.canSendPrompt"
       :context-blocked="contextBlocked"
       :slash-commands="slashCommands"
+      :attachments-enabled="!knowledgeMode"
+      :knowledge-mode="knowledgeMode"
       @submit="onSubmit"
       @abort="onAbort"
       @upload-files="onUploadFiles"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -45,6 +46,7 @@ from .models import (
 from .store import WikiStore
 
 HTML_ARTIFACT_SCHEMA = "llm-wiki-html-artifact/v1"
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,15 +175,30 @@ class WikiIngestionService:
         except ParserError as exc:
             return await self._mark_failed(source, job, exc.code)
         except WikiStoreError as exc:
-            code = {
+            mapped_codes = {
                 "file_too_large": "resource_limit",
                 "invalid_source": "invalid_source",
                 "invalid_artifact": "artifact_invalid",
                 "file_exists": "artifact_invalid",
                 "path_unsafe": "artifact_invalid",
-            }.get(exc.code, "unknown_error")
+            }
+            code = mapped_codes.get(exc.code, "unknown_error")
+            if code == "unknown_error":
+                _logger.exception(
+                    "Wiki parse hit an unclassified store error "
+                    "(source_id=%s, job_id=%s, error_code=%s)",
+                    source.id,
+                    job.id,
+                    exc.code,
+                )
             return await self._mark_failed(source, job, code)
-        except Exception:
+        except Exception as exc:
+            _logger.exception(
+                "Wiki parse failed unexpectedly (source_id=%s, job_id=%s, error_type=%s)",
+                source.id,
+                job.id,
+                type(exc).__name__,
+            )
             return await self._mark_failed(source, job, "unknown_error")
         job = await self._store.set_job_status(job.id, "succeeded")
         return WikiParseOutcome(source=completed, job=job)

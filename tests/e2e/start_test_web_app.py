@@ -284,14 +284,14 @@ def main() -> None:
             else workspace_root / "workspace.sqlite"
         )
         uploads_dir = workspace_root / "uploads"
-        knowledge_root = workspace_root / "knowledge"
+        wiki_root = workspace_root / "knowledge"
         uploads_dir.mkdir(parents=True, exist_ok=True)
-        knowledge_root.mkdir(parents=True, exist_ok=True)
+        wiki_root.mkdir(parents=True, exist_ok=True)
         return create_app(
             _build_test_harness(),
             db_path=str(workspace_db),
             uploads_dir=str(uploads_dir),
-            knowledge_root=str(knowledge_root),
+            wiki_root=str(wiki_root),
             allow_prompt_preview=True,
             event_buffer_max_size=buffer_max_size,
             enable_trusted_host=True,

@@ -279,16 +279,12 @@ class WikiFileStore:
     ) -> str:
         validate_parse_revision_id(parse_revision_id)
         return (
-            PurePosixPath(cls.source_bundle_relative_path(source))
-            / "parses"
-            / parse_revision_id
+            PurePosixPath(cls.source_bundle_relative_path(source)) / "parses" / parse_revision_id
         ).as_posix()
 
     @classmethod
     def selected_parse_relative_path(cls, source: WikiSource) -> str:
-        return (
-            PurePosixPath(cls.source_bundle_relative_path(source)) / "selected.json"
-        ).as_posix()
+        return (PurePosixPath(cls.source_bundle_relative_path(source)) / "selected.json").as_posix()
 
     def write_selected_parse_pointer(
         self,
@@ -307,8 +303,7 @@ class WikiFileStore:
             or pointer.selection_version != source.selection_version
             or pointer.manifest_relpath != revision.manifest_relpath
             or pointer.manifest_sha256 != revision.manifest_sha256
-            or PurePosixPath(revision.manifest_relpath).parent.as_posix()
-            != expected_revision_dir
+            or PurePosixPath(revision.manifest_relpath).parent.as_posix() != expected_revision_dir
         ):
             raise WikiStoreError("invalid_artifact")
         payload = (
@@ -352,6 +347,42 @@ class WikiFileStore:
         path.unlink()
         self._fsync_directory(path.parent)
         return True
+
+    def purge_source_bundle(self, source: WikiSource) -> bool:
+        """Remove one Source-owned Raw tree without following links.
+
+        The tree is first renamed to an internal sibling name. A crash after
+        the rename is recoverable because the next purge also scans matching
+        staging names. Database audit rows are intentionally unaffected.
+        """
+        bundle_relative = self.source_bundle_relative_path(source)
+        bundle_parts = PurePosixPath(bundle_relative).parts
+        if len(bundle_parts) != 2 or bundle_parts[0] != RAW_SUBDIR:
+            raise WikiPathError("path_unsafe")
+        raw_root = self.space_dir(source.space_id) / RAW_SUBDIR
+        self._assert_directory(raw_root)
+        bundle = raw_root / bundle_parts[1]
+        self._assert_contained(bundle)
+        prefix = f".purging-{source.id}-"
+        removed = False
+        if bundle.exists():
+            if _is_link_or_reparse(bundle):
+                raise WikiPathError("path_unsafe")
+            self._assert_directory(bundle)
+            staging = raw_root / f"{prefix}{uuid4().hex}"
+            self._assert_contained(staging)
+            os.replace(bundle, staging)
+            self._fsync_directory(raw_root)
+            removed = True
+        for candidate in tuple(raw_root.iterdir()):
+            if not candidate.name.startswith(prefix):
+                continue
+            self._assert_contained(candidate)
+            self._remove_tree_no_links(candidate)
+            removed = True
+        if removed:
+            self._fsync_directory(raw_root)
+        return removed
 
     def read_owned_file(
         self,
@@ -580,6 +611,38 @@ class WikiFileStore:
         if identity_before != identity_after or len(content) != before.st_size:
             raise WikiPathError("path_unsafe")
         return content
+
+    def _remove_tree_no_links(self, directory: Path) -> None:
+        self._assert_contained(directory)
+        if _is_link_or_reparse(directory):
+            raise WikiPathError("path_unsafe")
+        self._assert_directory(directory)
+        try:
+            entries = tuple(os.scandir(directory))
+        except OSError as exc:
+            raise WikiStoreError("file_io_failed") from exc
+        for entry in entries:
+            path = Path(entry.path)
+            self._assert_contained(path)
+            if entry.is_symlink() or _is_link_or_reparse(path):
+                raise WikiPathError("path_unsafe")
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise WikiStoreError("file_io_failed") from exc
+            if stat.S_ISDIR(info.st_mode):
+                self._remove_tree_no_links(path)
+            elif stat.S_ISREG(info.st_mode):
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    raise WikiStoreError("file_io_failed") from exc
+            else:
+                raise WikiPathError("path_unsafe")
+        try:
+            directory.rmdir()
+        except OSError as exc:
+            raise WikiStoreError("file_io_failed") from exc
 
     def _quarantine_staging(self, staging: Path) -> None:
         quarantine = self._legacy_root / "recovery"

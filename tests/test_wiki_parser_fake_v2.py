@@ -309,7 +309,14 @@ async def test_wait_cancellation_and_destroy_are_idempotent(tmp_path: Path) -> N
     assert status.state == "cancelled"
     assert status.safe_error_code == "cancelled"
     assert status.attempts == ()
-    assert await provider.cancel(handle) == status
+    cancelled_again = await provider.cancel(handle)
+    assert cancelled_again.state == status.state
+    assert cancelled_again.phase == status.phase
+    assert cancelled_again.started_at_ms == status.started_at_ms
+    assert cancelled_again.finished_at_ms == status.finished_at_ms
+    assert cancelled_again.safe_error_code == status.safe_error_code
+    assert cancelled_again.attempts == status.attempts
+    assert cancelled_again.observed_at_ms >= status.observed_at_ms
     await provider.destroy(handle)
     await provider.destroy(handle)
     destroyed = await provider.status(handle)

@@ -1,6 +1,6 @@
 # pi-agent-core-py
 
-`@earendil-works/pi-agent-core` 的 Python 移植与本地 Web Agent 工作台。项目包含事件驱动 Agent Runtime、工具与 MCP、Skills、Provider 切换、Session 工作区、Knowledge/RAG、审批、上下文预算和可恢复的浏览器聊天界面。
+`@earendil-works/pi-agent-core` 的 Python 移植与本地 Web Agent 工作台。项目包含事件驱动 Agent Runtime、工具与 MCP、Skills、Provider 切换、Session 工作区、页面中心 LLM Wiki、审批、上下文预算和可恢复的浏览器聊天界面。
 
 > 当前代码事实以 [`STATUS.md`](STATUS.md) 为准；未完成事项只维护在 [`TODO.md`](TODO.md)。本项目是 **localhost-only** 本地开发工具，不是公网 SaaS。
 
@@ -22,7 +22,7 @@
 
 ### Web 工作台
 
-- 本地账号登录；每账号独立 Session、文件、Skills、MCP、Knowledge 和 Provider 配置
+- 本地账号登录；每账号独立 Session、文件、Skills、MCP、Wiki Space/Conversation 和 Provider 配置
 - `/chat/{session_id}` 路由；整页刷新恢复 Session、历史、文件树及当前进程中的 active request
 - Prompt、Stop、Regenerate 最新 Assistant、Markdown Export、SSE/WebSocket 实时事件
 - Human Approval：高风险 ToolCall 在当前 Turn 内暂停，支持 Approve once / Deny
@@ -57,28 +57,27 @@
 - MCP 子进程强制 `PYTHONIOENCODING=utf-8` / `PYTHONUTF8=1`；非法 UTF-8 作为协议错误拒绝
 - HTTP MCP transport 仍是 placeholder；当前生产可用 transport 为 stdio
 
-### Knowledge / RAG
+### LLM Wiki / Knowledge Agent
 
-- Knowledge Library/Document 管理、Session binding 和账号隔离
-- PDF 流式上传、文本提取、Canonical Markdown、heading-aware chunk、SQLite FTS5/BM25
-- 后台 ingestion/indexing worker、重启恢复、状态/重试/delete guard
-- `search_knowledge` Agent Tool 按当前 Session Library ACL 检索
-- Assistant 中的 `[cite:E1]` 转为稳定编号和 Sources footer
-- Knowledge Manager UI 支持上传、状态轮询、Markdown 查看和搜索
+- 每个账号可创建多个 Wiki Space；每个 Space 支持 PDF、单文件 HTML Source 与多个独立对话
+- 原件不可变且对 Agent 只读；HTML 零网络解析，PDF 由外部 OCI Worker 执行 PyMuPDF4LLM fast、Docling accurate/auto fallback
+- Agent Summary 先生成入口页和主题页 Proposal；所有页面/关系修改进入一个 Change Set，用户批准后才原子发布
+- 只对 active/current/approved 页面使用 SQLite FTS5/BM25；知识图谱包含五种页面关系和系统维护的 `derived_from`
+- `/knowledge` 提供 Pages、Sources、Graph、Changes、Conversations 五个视图；Knowledge Agent 使用独立 Prompt/Skill 与工具白名单
 
-Knowledge 是纯 FTS5 路线，不使用 embedding、向量数据库或外部模型下载。扫描 PDF 进入 `needs_ocr`，当前不做 OCR。
+Wiki 不创建 Chunk、embedding 或向量检索主链路。旧 Library/Document/`search_knowledge` 产品已退役；Backend 仅保留显式兼容测试入口。
 
 ## 关键数据边界
 
-Session 文件和 Knowledge 文档用途不同：
+Session 文件和 Wiki Source/Page 用途不同：
 
-| 能力 | Session Folder | Knowledge Library |
+| 能力 | Session Folder | LLM Wiki |
 |---|---|---|
-| 作用域 | 单个 Session | 账号内 Library，可绑定多个 Session |
-| 输入 | 任意受配额文件 | PDF |
-| Agent 读取 | 文本/Markdown/HTML/CSV/Parquet；PDF 仅元信息 | `search_knowledge` 返回索引片段 |
-| 持久化 | `uploads/{session_id}/` + workspace metadata | `knowledge.db` + `knowledge/libraries/` |
-| 图片/OCR | 不支持 | 扫描 PDF → `needs_ocr` |
+| 作用域 | 单个 Session | 账号内 Space；每 Space 多 Knowledge 对话 |
+| 输入 | 任意受配额文件 | PDF、单文件 HTML |
+| Agent 读取 | 文本/Markdown/HTML/CSV/Parquet；PDF 仅元信息 | 受限工具读取 Raw artifact 与已批准页面/FTS/图谱 |
+| 持久化 | `uploads/{session_id}/` + workspace metadata | `knowledge/wiki.db` + `knowledge/spaces/` |
+| 图片/OCR | 不支持 | PDF 内嵌图片；扫描件走 Docling OCR preset |
 
 `AGENT.md` 是当前 Session 的行为指令；`Memory.md` 是当前 Session 的对话摘要。两者都不是跨 Session 用户画像，也不能覆盖平台安全规则。
 
@@ -91,7 +90,7 @@ Session 文件和 Knowledge 文档用途不同：
 | Web 后端 | FastAPI、uvicorn、WebSocket/SSE |
 | Web 前端 | Vue 3、Pinia、Vite、TypeScript |
 | 持久化 | aiosqlite、OS Keyring、受管文件目录 |
-| Knowledge | pypdf、SQLite FTS5/BM25 |
+| LLM Wiki | SQLite FTS5/BM25；外部 PyMuPDF4LLM + Docling OCI Worker |
 | MCP 搜索 | ddgs 9.x，stdio JSON-RPC |
 | 测试 | pytest/pytest-asyncio、Vitest、Playwright |
 
@@ -180,7 +179,7 @@ D:\miniconda\envs\pipy\python.exe scripts/dev_web_app.py
 3. 拖放或选择文件上传；Agent 在下一轮可用文件工具读取。
 4. 输入 `/checkpointer` 生成或累计更新 `Memory.md`。
 5. `Skills` 上传并启用 `SKILL.md`，按 Turn 选择使用。
-6. `Knowledge` 创建 Library、上传 PDF、等待 ready、绑定当前 Session。
+6. `Knowledge` 创建 Wiki Space，上传 PDF/HTML，审核 Summary/页面 Change Set，并在 Space 对话中检索或提出修改。
 7. `MCP` 配置自定义 stdio server；内置 DDGS 参数可直接编辑。
 8. `Providers` 管理凭证/Profile/模型窗口，并切换当前 Session binding。
 9. 对最新 Assistant 使用 Regenerate；从 Session 菜单导出 Markdown。
@@ -202,8 +201,9 @@ D:\miniconda\envs\pipy\python.exe scripts/dev_web_app.py
         │       ├── Memory.md        # Session 初始化时创建，checkpointer 累计更新
         │       └── ...
         └── knowledge/
-            ├── knowledge.db
-            └── libraries/
+            ├── wiki.db
+            ├── spaces/
+            └── legacy/               # 仅在显式归档流程中创建
 ```
 
 可通过 `PI_AGENT_DATA_DIR` 修改根目录。后端重启会撤销旧登录 Session，但不会删除账号或工作区数据。
@@ -219,7 +219,7 @@ D:\miniconda\envs\pipy\python.exe scripts/dev_web_app.py
 - `/api/requests*`：active request、abort、approval
 - `/api/provider-*`、`/api/credentials`：Provider/Profile/Binding/Credential
 - `/api/mcp/*`、`/api/skills/*`：MCP 与 Skills
-- `/api/knowledge/*`：Library、Document、PDF ingestion、search、Session binding
+- `/api/wiki/*`：Space、Source/parse artifact、Summary/Proposal、Page/FTS/Graph、Change Set 与 Conversation
 - `/api/stream` 与 `/ws/events`：SSE/WebSocket 实时事件
 
 所有工作区 API 均受登录网关保护；未认证 HTTP 返回 401，WebSocket 关闭码为 4401。
@@ -230,7 +230,10 @@ Compaction 默认只在完整 turn 边界切分，使用与 preflight 相同的 
 
 ## 测试
 
-当前代码基线的准确数字见 [`STATUS.md`](STATUS.md#2026-08-20-当前验证基线)。2026-08-20 校准结果：Backend **3665 passed / 6 skipped / 12 deselected**、coverage **83.78%**，Ruff/Mypy 全绿；Frontend lint/typecheck/build 全绿，Vitest **394/394**；完整 Playwright **45/45** 与真实 DDGS + GLM **3/3** 沿用最近发布前门禁结果。
+当前代码基线的准确数字见 [`STATUS.md`](STATUS.md#2026-08-27-当前验证基线)。
+默认门禁只覆盖当前产品代码：快速单元/组件测试、静态检查和少量关键浏览器旅程。
+退役 Chunk-RAG 的历史行为测试、重复阶段验收和重复 GLM live 用例已经移出当前套件；
+历史证据仍可在 `docs/validation/` 查阅。
 
 ### Backend offline
 
@@ -273,9 +276,10 @@ npm --prefix src/pi_agent_core_py/web/frontend run build
 
 ### Browser E2E
 
-Playwright 测试位于 `tests/e2e/`，覆盖基础聊天、异步流、刷新路由、Regenerate、MCP、Approval、Context Compaction 与扩展持久化。运行说明见 [`docs/guides/web-testing.md`](docs/guides/web-testing.md)。
-
-当前发布前基线为 Chromium 单 worker **45/45 passed**；全套件使用独立端口与 FakeClient，不访问真实 Provider。
+Playwright 测试位于 `tests/e2e/`，只覆盖聊天、Session 刷新恢复、MCP、Approval、
+Context Compaction、Workspace、Coding Sandbox 与 LLM Wiki 关键旅程。运行说明见
+[`docs/guides/web-testing.md`](docs/guides/web-testing.md)。套件使用独立端口与
+FakeClient，不访问真实 Provider。
 
 ## 安全边界
 
@@ -285,7 +289,7 @@ Playwright 测试位于 `tests/e2e/`，覆盖基础聊天、异步流、刷新�
 - API Key 不在 API response、日志、SQLite main/WAL/SHM 中回显或明文持久化
 - MCP env values 不回显；配置后前端立即清空输入
 - Prompt preview 默认关闭；开发启动器只对受信任本地 origin 开启
-- MCP command、Session 文件和 Knowledge 文档均视为不可信输入
+- MCP command、Session 文件、Wiki Source 与 Parser artifacts 均视为不可信输入
 - Pending approval 与 active request 是进程内状态，不是永久授权或审计数据库
 
 ## 当前限制
@@ -293,8 +297,8 @@ Playwright 测试位于 `tests/e2e/`，覆盖基础聊天、异步流、刷新�
 - 单账号单 harness、单 active request；没有并行 Session 生成
 - Context estimator 不是 Provider 官方 tokenizer；compaction 默认手动、规则式
 - Regenerate 只支持最新 Assistant；没有 revision history UI
-- Session Folder 不解析 PDF 正文；PDF RAG 必须通过 Knowledge Library 上传
-- 无 OCR、图片理解、向量检索、Multi-Agent、RBAC/OAuth 或公网部署
+- Session Folder 不解析 PDF 正文；PDF 知识处理必须上传到 Wiki Space
+- Wiki 支持 Docling OCR preset，但不做通用图片理解、向量检索、Multi-Agent、RBAC/OAuth 或公网部署
 - MCP HTTP transport 未实现；只支持 stdio
 - 历史数据中已经存在的 `U+FFFD` 无法自动恢复原字符
 - 当前 package baseline 为 `0.0.28`，Python、FastAPI/Auth 与前端版本已统一；Git remote 仍待配置
@@ -314,7 +318,8 @@ Playwright 测试位于 `tests/e2e/`，覆盖基础聊天、异步流、刷新�
 │       ├── auth/               # 本地账号与登录网关
 │       ├── credentials/        # Credential metadata/runtime
 │       ├── providers/          # Profile/Binding/runtime
-│       ├── knowledge/          # PDF ingestion、FTS5、citation
+│       ├── wiki/               # Raw、页面、审批、FTS5、图谱、Knowledge Agent
+│       ├── knowledge/          # 已退役 Chunk Knowledge 的显式兼容 Backend
 │       └── frontend/           # Vue 3/Vite/Pinia
 ├── scripts/dev_web_app.py
 ├── tests/

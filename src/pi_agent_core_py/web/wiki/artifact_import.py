@@ -343,10 +343,7 @@ def _validate_manifest_v2(
         raise WikiStoreError("invalid_artifact")
     for entry in (manifest.markdown, *manifest.pages, *manifest.assets):
         payload = files[entry.path]
-        if (
-            len(payload) != entry.size_bytes
-            or hashlib.sha256(payload).hexdigest() != entry.sha256
-        ):
+        if len(payload) != entry.size_bytes or hashlib.sha256(payload).hexdigest() != entry.sha256:
             raise WikiStoreError("invalid_artifact")
         if entry.kind in {"document_markdown", "page_markdown"}:
             try:

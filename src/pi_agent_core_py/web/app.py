@@ -23,12 +23,14 @@ Browser (Vue)                  FastAPI                       AgentHarness
 **安全**：此工厂仍是单工作区应用。需要登录与账号隔离时，用
 ``create_authenticated_app`` 作为外层网关；两者都不面向公网部署。
 """
+
 from __future__ import annotations
 
 import asyncio
 import inspect
 import json
 import logging
+import math
 import time
 from collections import deque
 from collections.abc import AsyncIterator
@@ -101,6 +103,7 @@ if TYPE_CHECKING:
     from wiki_parser import ParserProvider, ParserProviderV2
 
     from .files import WorkspaceStore
+    from .wiki.summary import WikiSummaryAgent
 
 # ============================================================================
 # 常量
@@ -185,6 +188,7 @@ class _PromptValidated:
     original_messages: list[Any] | None
     attached_blocks: list[Any]
     attached_summary: list[dict[str, Any]]
+    knowledge_conversation: Any = None
 
 
 @dataclass(frozen=True)
@@ -201,6 +205,7 @@ class ValidatedRegenerationRequest:
     preceding_user_message_id: str
     history: tuple[Any, ...]
     original_harness_messages: tuple[Any, ...]
+    knowledge_conversation: Any = None
 
 
 class RegenerationValidationError(Exception):
@@ -347,25 +352,28 @@ def create_app(
     enable_coding_sandbox_api: bool | None = None,
     coding_sandbox_backend_factory: SandboxBackendFactory | None = None,
     coding_sandbox_artifact_signer: ArtifactSigner | None = None,
-    # P2-R1: Knowledge Library subsystem root directory.
-    # None = 不启用（默认；保持向后兼容）；传入 Path 时启用：
+    # Deprecated Chunk Knowledge compatibility root.
+    # The legacy DB, workers, Tool and REST API only start when
+    # enable_knowledge_api=True is also explicit. Product composition uses
+    # wiki_root and leaves this disabled.
     #   - 在 <knowledge_root>/knowledge.db 打开独立 aiosqlite connection
     #   - <knowledge_root>/libraries/{library_id}/documents/... 物理文件
     #   - 挂载 Knowledge Library CRUD + Session Binding REST API（仅当
     #     trusted_host + UI header deps 启用时；否则不挂 router，service
     #     仍可用于内部 / 测试）
     knowledge_root: str | Path | None = None,
-    # 显式控制 Knowledge API 是否挂载。
-    # None = auto（仅当 knowledge_root 非 None + trusted_host 启用时挂载）
-    # True = 强制挂载（需 knowledge_root 非 None）
-    # False = 不挂 router，但若 knowledge_root 非 None 仍 init service
+    # True is an explicit compatibility opt-in. None/False retires the entire
+    # legacy runtime rather than merely hiding its router.
     enable_knowledge_api: bool | None = None,
-    # New page-centric LLM Wiki. It is deliberately independent from the
-    # legacy chunk Knowledge API so both can coexist during the cutover.
+    # Page-centric LLM Wiki product runtime. The deprecated Chunk Knowledge
+    # compatibility path stays off unless independently and explicitly enabled.
     wiki_root: str | Path | None = None,
     enable_wiki_api: bool | None = None,
     wiki_pdf_provider: ParserProvider | None = None,
     wiki_pdf_provider_v2: ParserProviderV2 | None = None,
+    wiki_summary_agent: WikiSummaryAgent | None = None,
+    wiki_source_retention_seconds: float = 7 * 24 * 60 * 60,
+    wiki_source_purge_interval_seconds: float = 5 * 60,
     # Corresponding Source root for the separately AGPL-licensed PDF Worker.
     # None auto-discovers a source checkout and otherwise reports unavailable.
     # The main application reads compliance assets only; it never imports the
@@ -400,6 +408,13 @@ def create_app(
         max_file_size: 单文件大小上限，默认 25 MB
         max_session_upload_size: 单 session 总上传上限，默认 100 MB
     """
+    if (
+        wiki_source_retention_seconds < 0
+        or wiki_source_purge_interval_seconds <= 0
+        or not math.isfinite(wiki_source_retention_seconds)
+        or not math.isfinite(wiki_source_purge_interval_seconds)
+    ):
+        raise ValueError("Wiki Source retention durations are invalid")
     # 用 closure 持有 hook / clients——lifespan 退出时清理
     container: dict[str, Any] = {
         "hook": None,
@@ -432,9 +447,7 @@ def create_app(
         )
     except CredentialWebSecurityConfigurationError as e:
         # 不静默降级——必须显式修正
-        raise RuntimeError(
-            f"credential web security configuration error: {e}"
-        ) from e
+        raise RuntimeError(f"credential web security configuration error: {e}") from e
 
     from .coding_sandbox.runtime import (
         SandboxRuntimeConfigurationError,
@@ -450,9 +463,11 @@ def create_app(
             db_path=db_path,
         )
     except SandboxRuntimeConfigurationError as e:
-        raise RuntimeError(
-            f"coding sandbox web security configuration error: {e}"
-        ) from e
+        raise RuntimeError(f"coding sandbox web security configuration error: {e}") from e
+
+    if enable_knowledge_api is True and knowledge_root is None:
+        raise RuntimeError("legacy knowledge API requires knowledge_root")
+    _legacy_knowledge_enabled = enable_knowledge_api is True
 
     # ========================================================================
     # P1-E2-3B1: Resolve Provider Profiles API configuration at app creation
@@ -472,9 +487,7 @@ def create_app(
             db_path=db_path,
         )
     except ProviderConfigWebSecurityConfigurationError as e:
-        raise RuntimeError(
-            f"provider config web security configuration error: {e}"
-        ) from e
+        raise RuntimeError(f"provider config web security configuration error: {e}") from e
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -525,8 +538,7 @@ def create_app(
                 # 文件存储不可用不阻塞 app 启动；endpoint 走 503。
                 # 但必须留下完整 traceback，避免深层文件系统错误只表现为下游 503。
                 _logger.exception(
-                    "WorkspaceStore init failed; file endpoints will return 503 "
-                    "(uploads_dir=%s)",
+                    "WorkspaceStore init failed; file endpoints will return 503 (uploads_dir=%s)",
                     uploads_dir,
                 )
                 state.file_store = None
@@ -539,9 +551,7 @@ def create_app(
         # requests can observe the workspace. Recovery is evidence-only and
         # never calls the provider; a changed source leaf preserves messages.
         if state.file_store is not None:
-            recovery = await recover_checkpointer_operations(
-                session_store, state.file_store
-            )
+            recovery = await recover_checkpointer_operations(session_store, state.file_store)
             state.durable_recovery_summary = {
                 "scanned": recovery.scanned,
                 "completed": recovery.completed,
@@ -595,9 +605,7 @@ def create_app(
         # + skill_mutation_lock + 启动恢复 uploaded Skills
         from .extension_store import ExtensionSQLiteStore
 
-        extension_store = ExtensionSQLiteStore(
-            store_path, connection=session_store.connection
-        )
+        extension_store = ExtensionSQLiteStore(store_path, connection=session_store.connection)
         await extension_store.init()
         state.extension_store = extension_store
         state.skill_mutation_lock = asyncio.Lock()
@@ -631,9 +639,7 @@ def create_app(
             # here or a failed sweep leaks the aiosqlite connection into GC.
             await _close_startup_sqlite_stores()
             # 安全摘要——不含 content / SQL / 绝对路径 / traceback / secret
-            raise RuntimeError(
-                f"startup sweep failed: {type(e).__name__}"
-            ) from e
+            raise RuntimeError(f"startup sweep failed: {type(e).__name__}") from e
 
         # 启动恢复 uploaded Skills（逐行隔离 + sha256 校验 + model_validate）
         await _restore_uploaded_skills(extension_store)
@@ -650,12 +656,12 @@ def create_app(
             _mark_builtin_ddgs_runtime(ddgs_settings)
 
         # ====================================================================
-        # P2-R1: Knowledge Library subsystem composition
-        # 仅在 knowledge_root 非 None 时启用——独立 knowledge.db aiosqlite
-        # connection + 独立文件根目录（P2-R0 §2 + §3 决策 R2 / R5）
+        # Deprecated Chunk Knowledge compatibility composition. This is never
+        # auto-started; explicit enable_knowledge_api=True is required.
         # ====================================================================
         knowledge_service = None
-        if knowledge_root is not None:
+        if _legacy_knowledge_enabled:
+            assert knowledge_root is not None
             from .knowledge.files import KnowledgeFileStore
             from .knowledge.service import KnowledgeService
             from .knowledge.store import KnowledgeStore
@@ -743,8 +749,7 @@ def create_app(
                     state.ingestion_worker_manager = ingestion_manager
                 except Exception as e:
                     raise RuntimeError(
-                        f"ingestion worker manager start failed: "
-                        f"{type(e).__name__}"
+                        f"ingestion worker manager start failed: {type(e).__name__}"
                     ) from e
 
             # ============================================================
@@ -788,8 +793,7 @@ def create_app(
                     state.indexing_worker_manager = indexing_manager
                 except Exception as e:
                     raise RuntimeError(
-                        f"indexing worker manager start failed: "
-                        f"{type(e).__name__}"
+                        f"indexing worker manager start failed: {type(e).__name__}"
                     ) from e
 
             # ============================================================
@@ -828,8 +832,7 @@ def create_app(
                         harness.agent.tools.register(_search_tool)
                 except Exception as e:
                     raise RuntimeError(
-                        f"search_knowledge tool init failed: "
-                        f"{type(e).__name__}"
+                        f"search_knowledge tool init failed: {type(e).__name__}"
                     ) from e
         else:
             state.knowledge_service = None
@@ -844,9 +847,19 @@ def create_app(
                 state.wiki_store = None
                 state.wiki_ingestion_service = None
                 state.wiki_ingestion_worker = None
+                state.wiki_summary_service = None
+                state.wiki_entry_page_service = None
+                state.wiki_change_set_service = None
+                state.wiki_conversation_service = None
+                state.wiki_knowledge_tools = None
                 yield
                 return
             from .wiki import WikiIngestionService, WikiStore
+            from .wiki.changes import WikiChangeSetService
+            from .wiki.conversations import WikiConversationService
+            from .wiki.knowledge_agent import build_knowledge_tool_registry
+            from .wiki.pages import WikiEntryPageService
+            from .wiki.summary import CoreAgentWikiSummaryAgent, WikiSummaryService
             from .wiki.worker import WikiIngestionWorkerManager
 
             wiki_store = await WikiStore.open(wiki_root, legacy_policy="preserve")
@@ -858,6 +871,28 @@ def create_app(
             wiki_worker = WikiIngestionWorkerManager(
                 store=wiki_store,
                 service=wiki_service,
+                source_retention_seconds=wiki_source_retention_seconds,
+                purge_interval_seconds=wiki_source_purge_interval_seconds,
+            )
+            summary_agent = wiki_summary_agent or CoreAgentWikiSummaryAgent(
+                lambda: harness.agent.client
+            )
+            wiki_summary_service = WikiSummaryService(wiki_store, summary_agent)
+            wiki_entry_page_service = WikiEntryPageService(wiki_store)
+            wiki_change_set_service = WikiChangeSetService(wiki_store)
+            wiki_conversation_service = WikiConversationService(
+                wiki_store,
+                session_store=session_store,
+                file_store=state.file_store,
+                provider_config_runtime=getattr(
+                    _app.state,
+                    "provider_config_runtime",
+                    None,
+                ),
+            )
+            wiki_knowledge_tools = build_knowledge_tool_registry(
+                wiki_store,
+                wiki_change_set_service,
             )
             try:
                 await wiki_worker.start()
@@ -867,10 +902,21 @@ def create_app(
             state.wiki_store = wiki_store
             state.wiki_ingestion_service = wiki_service
             state.wiki_ingestion_worker = wiki_worker
+            state.wiki_source_retention_ms = int(wiki_source_retention_seconds * 1000)
+            state.wiki_summary_service = wiki_summary_service
+            state.wiki_entry_page_service = wiki_entry_page_service
+            state.wiki_change_set_service = wiki_change_set_service
+            state.wiki_conversation_service = wiki_conversation_service
+            state.wiki_knowledge_tools = wiki_knowledge_tools
             try:
                 yield
             finally:
                 state.wiki_ingestion_worker = None
+                state.wiki_summary_service = None
+                state.wiki_entry_page_service = None
+                state.wiki_change_set_service = None
+                state.wiki_conversation_service = None
+                state.wiki_knowledge_tools = None
                 try:
                     await wiki_worker.stop()
                 finally:
@@ -904,13 +950,12 @@ def create_app(
             except Exception as e:
                 # 配置错误——拒绝启动（不静默降级）
                 await _close_startup_sqlite_stores()
-                raise RuntimeError(
-                    f"credential runtime config error: {type(e).__name__}"
-                ) from e
+                raise RuntimeError(f"credential runtime config error: {type(e).__name__}") from e
 
         if cred_runtime_cm is not None:
             _app.state.credential_runtime = await cred_runtime_cm.__aenter__()
             try:
+
                 async def _session_exists_cb(session_id: str) -> bool:
                     if state.session_store is None:
                         return False
@@ -955,20 +1000,12 @@ def create_app(
                         backend_factory=coding_sandbox_backend_factory,
                         artifact_signer=artifact_signer,
                         session_exists=_session_exists_cb,
-                        projects_root=(
-                            database_path.parent / "coding-sandbox-projects"
-                        ),
-                        publisher_state_root=(
-                            database_path.parent / "coding-sandbox-publisher"
-                        ),
-                        staging_root=(
-                            database_path.parent / "coding-sandbox-staging"
-                        ),
+                        projects_root=(database_path.parent / "coding-sandbox-projects"),
+                        publisher_state_root=(database_path.parent / "coding-sandbox-publisher"),
+                        staging_root=(database_path.parent / "coding-sandbox-staging"),
                         event_sink=_sandbox_event_sink,
                     )
-                    _app.state.coding_sandbox_runtime = (
-                        await sandbox_runtime_cm.__aenter__()
-                    )
+                    _app.state.coding_sandbox_runtime = await sandbox_runtime_cm.__aenter__()
                     lifecycle = _app.state.coding_sandbox_runtime.lifecycle
                     if lifecycle is not None:
                         from ..tools import (
@@ -978,8 +1015,7 @@ def create_app(
 
                         def _coding_workspace() -> Any:
                             session_id = (
-                                tool_session_context.get()
-                                or state.current_request_session_id
+                                tool_session_context.get() or state.current_request_session_id
                             )
                             return lifecycle.workspace_for_session(session_id)
 
@@ -987,13 +1023,9 @@ def create_app(
                             workspace_getter=_coding_workspace
                         )
                         coding_tools.append(
-                            create_coding_validation_tool(
-                                workspace_getter=_coding_workspace
-                            )
+                            create_coding_validation_tool(workspace_getter=_coding_workspace)
                         )
-                        registered_names: set[str] = container[
-                            "coding_sandbox_tool_names"
-                        ]
+                        registered_names: set[str] = container["coding_sandbox_tool_names"]
                         for coding_tool in coding_tools:
                             if not harness.agent.tools.has(coding_tool.name):
                                 harness.agent.tools.register(coding_tool)
@@ -1012,9 +1044,7 @@ def create_app(
                         credential_service=_app.state.credential_runtime.service,
                         session_exists=_session_exists_cb,
                     )
-                    _app.state.provider_config_runtime = (
-                        await pc_runtime_cm.__aenter__()
-                    )
+                    _app.state.provider_config_runtime = await pc_runtime_cm.__aenter__()
                     # M1-5: 构造 RequestProviderRuntime——仅在 Credential + Provider
                     # Config 两个 runtime 都启动时. 无独立 lifespan——纯 Python 对象
                     # 无长期网络资源. Prompt 路径通过 app.state.request_provider_runtime
@@ -1147,9 +1177,7 @@ def create_app(
         # + parser.close(). 必须在 KnowledgeStore.close() 之前完成，否则
         # Manager 的 worker_loop 会访问已关闭的 connection.
         ingestion_mgr = (
-            state.ingestion_worker_manager
-            if hasattr(state, "ingestion_worker_manager")
-            else None
+            state.ingestion_worker_manager if hasattr(state, "ingestion_worker_manager") else None
         )
         if ingestion_mgr is not None:
             try:
@@ -1161,9 +1189,7 @@ def create_app(
         # KnowledgeStore.close 之前）。Per directive §28: producer stops
         # first to prevent new normalizing during Index Worker drain.
         indexing_mgr = (
-            state.indexing_worker_manager
-            if hasattr(state, "indexing_worker_manager")
-            else None
+            state.indexing_worker_manager if hasattr(state, "indexing_worker_manager") else None
         )
         if indexing_mgr is not None:
             try:
@@ -1185,8 +1211,7 @@ def create_app(
     app = FastAPI(
         title="pi-agent-core-py · Trace Viewer",
         description=(
-            "Local-only development UI for inspecting Agent runtime state. "
-            "DO NOT expose publicly."
+            "Local-only development UI for inspecting Agent runtime state. DO NOT expose publicly."
         ),
         version=__version__,
         lifespan=_lifespan,
@@ -1220,9 +1245,7 @@ def create_app(
     )
 
     try:
-        source_offer_service = build_source_offer_service(
-            wiki_parser_worker_source_root
-        )
+        source_offer_service = build_source_offer_service(wiki_parser_worker_source_root)
     except SourceOfferError as exc:
         raise RuntimeError(
             "wiki parser Worker Corresponding Source configuration is invalid"
@@ -1328,10 +1351,9 @@ def create_app(
             ),
         )
 
-    # P2-R1: Knowledge Library REST API（Library CRUD + Document metadata
-    # + Session Binding）. 默认 None = 不启用。显式 knowledge_root + trusted_host
-    # + enable_knowledge_api（或 auto）= 挂载 router，复用 E1 UI/origin deps.
-    if knowledge_root is not None:
+    # Deprecated Chunk Knowledge REST API. Explicit compatibility opt-in only.
+    if _legacy_knowledge_enabled:
+        assert knowledge_root is not None
         from .knowledge.api import (
             build_knowledge_router,
             build_session_knowledge_router,
@@ -1342,18 +1364,8 @@ def create_app(
             extra_hosts=credential_extra_hosts,
             extra_ui_origins=credential_extra_ui_origins,
         )
-        _knowledge_api_enabled = (
-            enable_knowledge_api
-            if enable_knowledge_api is not None
-            else _cred_resolved.trusted_host_enabled
-        )
-        if _knowledge_api_enabled:
-            app.include_router(
-                build_knowledge_router(_k_ws_cfg), prefix="/api/knowledge"
-            )
-            app.include_router(
-                build_session_knowledge_router(_k_ws_cfg), prefix="/api/sessions"
-            )
+        app.include_router(build_knowledge_router(_k_ws_cfg), prefix="/api/knowledge")
+        app.include_router(build_session_knowledge_router(_k_ws_cfg), prefix="/api/sessions")
 
     if enable_wiki_api is True and wiki_root is None:
         raise RuntimeError("wiki API requires wiki_root")
@@ -1366,9 +1378,7 @@ def create_app(
             extra_ui_origins=credential_extra_ui_origins,
         )
         _wiki_api_enabled = (
-            enable_wiki_api
-            if enable_wiki_api is not None
-            else _cred_resolved.trusted_host_enabled
+            enable_wiki_api if enable_wiki_api is not None else _cred_resolved.trusted_host_enabled
         )
         if _wiki_api_enabled:
             app.include_router(build_wiki_router(_wiki_ws_cfg), prefix="/api/wiki")
@@ -1481,8 +1491,7 @@ def create_app(
             if inspect.isawaitable(previous_result):
                 previous_result = await previous_result
             if previous_result is False or (
-                isinstance(previous_result, ModelCallDecision)
-                and not previous_result.allow
+                isinstance(previous_result, ModelCallDecision) and not previous_result.allow
             ):
                 return previous_result
 
@@ -1498,9 +1507,7 @@ def create_app(
             messages=context.messages,
             tools=context.tools,
             context_window=(capabilities.context_window if capabilities else None),
-            reserved_output_tokens=(
-                capabilities.max_output_tokens if capabilities else None
-            ),
+            reserved_output_tokens=(capabilities.max_output_tokens if capabilities else None),
         )
         await _emit_web_payload(
             {
@@ -1517,9 +1524,7 @@ def create_app(
         if not estimate.can_send:
             return ModelCallDecision(
                 allow=False,
-                error_message=(
-                    "context budget exceeded; compact the session before continuing"
-                ),
+                error_message=("context budget exceeded; compact the session before continuing"),
             )
         return ModelCallDecision()
 
@@ -1607,22 +1612,16 @@ def create_app(
             name = row["name"] if "name" in row.keys() else "<unknown>"
 
             if result.error is not None or result.skill is None:
-                await ext_store.set_skill_restore_error(
-                    name, result.error or "decode failed"
-                )
+                await ext_store.set_skill_restore_error(name, result.error or "decode failed")
                 continue
 
             persisted = result.skill
 
             # sha256 校验 raw_markdown
             if persisted.content_sha256:
-                actual_sha = hashlib.sha256(
-                    persisted.raw_markdown.encode("utf-8")
-                ).hexdigest()
+                actual_sha = hashlib.sha256(persisted.raw_markdown.encode("utf-8")).hexdigest()
                 if actual_sha != persisted.content_sha256:
-                    await ext_store.set_skill_restore_error(
-                        name, "content hash mismatch"
-                    )
+                    await ext_store.set_skill_restore_error(name, "content hash mismatch")
                     continue
 
             # decode skill_json + model_validate
@@ -1630,9 +1629,7 @@ def create_app(
                 skill_data = _json.loads(persisted.skill_json)
                 skill = Skill.model_validate(skill_data)
             except Exception as e:
-                await ext_store.set_skill_restore_error(
-                    name, f"decode failed: {type(e).__name__}"
-                )
+                await ext_store.set_skill_restore_error(name, f"decode failed: {type(e).__name__}")
                 continue
 
             # 服务端强制覆盖 source metadata（不信任 Markdown 自声明）
@@ -1642,9 +1639,7 @@ def create_app(
 
             # 同名冲突——filesystem/built-in 优先
             if registry.has(name):
-                await ext_store.set_skill_restore_error(
-                    name, "name conflict with existing skill"
-                )
+                await ext_store.set_skill_restore_error(name, "name conflict with existing skill")
                 continue
 
             # register + apply enabled
@@ -1800,9 +1795,7 @@ def create_app(
             name = row["name"] if "name" in row.keys() else "<unknown>"
 
             if result.error is not None or result.server is None:
-                await ext_store.set_mcp_restore_error(
-                    name, result.error or "decode failed"
-                )
+                await ext_store.set_mcp_restore_error(name, result.error or "decode failed")
                 continue
 
             persisted = result.server
@@ -1871,9 +1864,7 @@ def create_app(
                     cfg.attached = False
                     cfg.restore_status = "error"
                     cfg.last_error = (
-                        server_state.last_error
-                        if server_state
-                        else "not in registry after attach"
+                        server_state.last_error if server_state else "not in registry after attach"
                     )
                     await ext_store.set_mcp_restore_error(name, cfg.last_error)
                     continue
@@ -1902,9 +1893,7 @@ def create_app(
                 await ext_store.set_mcp_restore_error(name, "restore timeout")
             except Exception as e:
                 cfg.attached = False
-                cfg.last_error = _safe_extension_error(
-                    e, list(resolved_env.values())
-                )
+                cfg.last_error = _safe_extension_error(e, list(resolved_env.values()))
                 await ext_store.set_mcp_restore_error(name, cfg.last_error)
 
     # ========================================================================
@@ -1952,13 +1941,9 @@ def create_app(
         if not file_ids_raw:
             return [], []
         if state.file_store is None:
-            raise PromptValidationError(
-                503, "file store not initialized; cannot accept file_ids"
-            )
+            raise PromptValidationError(503, "file store not initialized; cannot accept file_ids")
         if session_id is None:
-            raise PromptValidationError(
-                400, "session_id required when file_ids present"
-            )
+            raise PromptValidationError(400, "session_id required when file_ids present")
 
         from ..messages import FileBlock
         from ..tools.view_file import _classify_format
@@ -2013,8 +1998,7 @@ def create_app(
         supported_count = sum(
             1
             for s in attached_summary
-            if s["format"]
-            not in ("image_unsupported", "binary", "unsupported", "pdf")
+            if s["format"] not in ("image_unsupported", "binary", "unsupported", "pdf")
         )
         unsupported_count = len(attached_summary) - supported_count
         return {
@@ -2043,6 +2027,7 @@ def create_app(
         # Atomically reserve the single-active-request slot BEFORE any
         # await. No suspension point between check and reserve.
         state.running = True
+        original_messages: list[Any] | None = None
 
         try:
             text = (payload or {}).get("text") or ""
@@ -2053,14 +2038,8 @@ def create_app(
             skill_names_raw = (payload or {}).get("skill_names")
             if skill_names_raw is not None:
                 if not isinstance(skill_names_raw, list):
-                    raise PromptValidationError(
-                        400, "skill_names must be a list of strings"
-                    )
-                bad = [
-                    n
-                    for n in skill_names_raw
-                    if not isinstance(n, str) or not n
-                ]
+                    raise PromptValidationError(400, "skill_names must be a list of strings")
+                bad = [n for n in skill_names_raw if not isinstance(n, str) or not n]
                 if bad:
                     raise PromptValidationError(
                         400,
@@ -2073,9 +2052,7 @@ def create_app(
             skill_selection = _build_skill_selection(skill_sel_raw, merged_names)
 
             if merged_names and harness.skill_registry is not None:
-                missing = [
-                    n for n in merged_names if not harness.skill_registry.has(n)
-                ]
+                missing = [n for n in merged_names if not harness.skill_registry.has(n)]
                 if missing:
                     raise PromptValidationError(
                         400,
@@ -2086,23 +2063,60 @@ def create_app(
             session_id = (payload or {}).get("session_id") or state.current_session_id
             store = state.session_store
 
-            original_messages: list[Any] | None = None
             if store is not None and session_id is not None:
                 from ..session_sqlite import SessionNotFoundError
 
                 try:
                     history = await store.list_messages(session_id)
                 except SessionNotFoundError:
-                    raise PromptValidationError(
-                        404, f"session {session_id!r} not found"
-                    ) from None
+                    raise PromptValidationError(404, f"session {session_id!r} not found") from None
                 original_messages = list(harness.agent.state.messages)
                 harness.agent.state.messages = list(history)
 
+            knowledge_conversation = None
+            wiki_store = state.wiki_store
+            if wiki_store is not None and session_id is not None:
+                try:
+                    knowledge_conversation = await wiki_store.find_conversation_by_session(
+                        session_id
+                    )
+                    if knowledge_conversation is not None:
+                        space = await wiki_store.get_space(knowledge_conversation.space_id)
+                        if knowledge_conversation.status != "active" or space.status != "active":
+                            raise PromptValidationError(
+                                409,
+                                "Knowledge conversation is not active",
+                            )
+                except PromptValidationError:
+                    raise
+                except Exception as exc:
+                    raise PromptValidationError(
+                        409,
+                        "Knowledge conversation binding is unavailable",
+                    ) from exc
+            claimed_conversation_id = (payload or {}).get("knowledge_conversation_id")
+            if claimed_conversation_id is not None and (
+                knowledge_conversation is None
+                or not isinstance(claimed_conversation_id, str)
+                or claimed_conversation_id != knowledge_conversation.id
+            ):
+                raise PromptValidationError(
+                    403,
+                    "Knowledge conversation binding does not match the Session",
+                )
+            if knowledge_conversation is not None and skill_selection is not None:
+                raise PromptValidationError(
+                    400,
+                    "Knowledge conversations use a fixed built-in Skill",
+                )
+
             file_ids_raw = (payload or {}).get("file_ids") or []
             if not isinstance(file_ids_raw, list):
+                raise PromptValidationError(400, "file_ids must be a list of strings")
+            if knowledge_conversation is not None and file_ids_raw:
                 raise PromptValidationError(
-                    400, "file_ids must be a list of strings"
+                    400,
+                    "Knowledge conversations cannot attach Session Workspace files",
                 )
             attached_blocks, attached_summary = await _resolve_file_blocks(
                 session_id, list(file_ids_raw)
@@ -2114,11 +2128,14 @@ def create_app(
                 session_id=session_id,
                 store=store,
                 original_messages=original_messages,
-            attached_blocks=attached_blocks,
-            attached_summary=attached_summary,
+                attached_blocks=attached_blocks,
+                attached_summary=attached_summary,
+                knowledge_conversation=knowledge_conversation,
             )
         except Exception:
             # Rollback the reservation if any validation step fails.
+            if original_messages is not None:
+                harness.agent.state.messages = original_messages
             state.running = False
             raise
 
@@ -2174,9 +2191,7 @@ def create_app(
                 continue
             # 必须含至少一个 TextContent（纯 ToolCall 的中间 turn 不算 terminal）
             has_text = any(isinstance(c, TextContent) for c in msg.content)
-            has_only_tool_calls = all(
-                isinstance(c, ToolCall) for c in msg.content
-            ) and msg.content
+            has_only_tool_calls = all(isinstance(c, ToolCall) for c in msg.content) and msg.content
             if has_text or not has_only_tool_calls:
                 return msg
         return None
@@ -2257,8 +2272,7 @@ def create_app(
 
         try:
             target_idx = max(
-                i for i, m in enumerate(canonical_before)
-                if isinstance(m, AssistantMessage)
+                i for i, m in enumerate(canonical_before) if isinstance(m, AssistantMessage)
             )
         except ValueError:
             # canonical 找不到 assistant——mark error
@@ -2447,6 +2461,27 @@ def create_app(
                 raise HTTPException(status_code=404, detail="session not found") from None
             raise
 
+        knowledge_conversation = None
+        if state.wiki_store is not None:
+            knowledge_conversation = await state.wiki_store.find_conversation_by_session(session_id)
+            if knowledge_conversation is not None:
+                space = await state.wiki_store.get_space(knowledge_conversation.space_id)
+                if knowledge_conversation.status != "active" or space.status != "active":
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Knowledge conversation is not active",
+                    )
+                if file_ids:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=("Knowledge conversations cannot attach Session Workspace files"),
+                    )
+                if skill_selection is not None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Knowledge conversations use a fixed built-in Skill",
+                    )
+
         attached_blocks: list[Any] = []
         if file_ids:
             try:
@@ -2459,21 +2494,32 @@ def create_app(
         if draft_text.strip() or attached_blocks:
             from ..messages import TextContent, UserMessage
 
-            messages.append(UserMessage(content=[
-                TextContent(text=draft_text),
-                *attached_blocks,
-            ]))
+            messages.append(
+                UserMessage(
+                    content=[
+                        TextContent(text=draft_text),
+                        *attached_blocks,
+                    ]
+                )
+            )
 
         # Rendering helpers annotate Harness metadata for snapshots. A preview is
         # observational, so restore the prior values after rendering.
         metadata_before = dict(harness.context.metadata)
         try:
-            agent_instructions = await _load_session_agent_instructions(session_id)
-            durable_memory = await _load_session_memory(session_id)
-            suffix = "\n\n".join(
-                block for block in (agent_instructions, durable_memory) if block
-            ) or None
-            rendered_prompt, _ = harness._prepare_skill_prompt(skill_selection)
+            if knowledge_conversation is None:
+                agent_instructions = await _load_session_agent_instructions(session_id)
+                durable_memory = await _load_session_memory(session_id)
+                suffix = (
+                    "\n\n".join(block for block in (agent_instructions, durable_memory) if block)
+                    or None
+                )
+                rendered_prompt, _ = harness._prepare_skill_prompt(skill_selection)
+            else:
+                from .wiki.knowledge_agent import render_knowledge_agent_prompt
+
+                suffix = render_knowledge_agent_prompt(knowledge_conversation)
+                rendered_prompt, _ = harness._prepare_skill_prompt(None)
             if suffix:
                 rendered_prompt = f"{rendered_prompt}\n\n{suffix.strip()}"
         finally:
@@ -2510,14 +2556,19 @@ def create_app(
             if capability_store is not None
             else None
         )
+        tool_registry = (
+            state.wiki_knowledge_tools
+            if knowledge_conversation is not None
+            else harness.agent.tools
+        )
+        if tool_registry is None:
+            raise HTTPException(status_code=503, detail="Knowledge tools unavailable")
         estimate = estimate_context(
             system_prompt=rendered_prompt,
             messages=llm_messages,
-            tools=harness.agent.tools.definitions(),
+            tools=tool_registry.definitions(),
             context_window=(capabilities.context_window if capabilities else None),
-            reserved_output_tokens=(
-                capabilities.max_output_tokens if capabilities else None
-            ),
+            reserved_output_tokens=(capabilities.max_output_tokens if capabilities else None),
         )
         payload = {
             "session_id": session_id,
@@ -2592,19 +2643,44 @@ def create_app(
         # selection 为 None（Session 无 Binding）→ 同样走 legacy client.
         runtime = app.state.request_provider_runtime
         selection: RequestProviderSelection | None = None
-        if checkpoint_source is None:
-            agent_instructions = await _load_session_agent_instructions(
-                validated.session_id
-            )
+        if checkpoint_source is None and validated.knowledge_conversation is None:
+            agent_instructions = await _load_session_agent_instructions(validated.session_id)
             durable_memory = await _load_session_memory(validated.session_id)
-            prompt_suffix = "\n\n".join(
-                block for block in (agent_instructions, durable_memory) if block
-            ) or None
-        else:
+            prompt_suffix = (
+                "\n\n".join(block for block in (agent_instructions, durable_memory) if block)
+                or None
+            )
+        elif checkpoint_source is not None:
             # A checkpointer summary treats AGENT.md, Memory.md and the transcript
             # as data only. It calls the selected client directly below and never
             # enters Harness/Agent execution, so Tools, Skills and MCP stay disabled.
             prompt_suffix = None
+        else:
+            from .wiki.knowledge_agent import render_knowledge_agent_prompt
+
+            wiki_store = state.wiki_store
+            try:
+                if wiki_store is None:
+                    raise RuntimeError("Wiki store unavailable")
+                current_conversation = await wiki_store.get_conversation(
+                    validated.knowledge_conversation.id
+                )
+                current_space = await wiki_store.get_space(current_conversation.space_id)
+                if (
+                    current_conversation != validated.knowledge_conversation
+                    or current_conversation.status != "active"
+                    or current_space.status != "active"
+                ):
+                    raise RuntimeError("Knowledge binding changed")
+                prompt_suffix = render_knowledge_agent_prompt(current_conversation)
+            except Exception:
+                if manage_running_state:
+                    state.running = False
+                raise PromptRuntimeError(
+                    409,
+                    "Knowledge conversation binding changed before execution.",
+                    "knowledge_conversation_conflict",
+                ) from None
 
         try:
             if runtime is not None:
@@ -2613,11 +2689,33 @@ def create_app(
             # M1-5: bind_to_harness 在 active-request ownership 内部；
             # AsyncExitStack 让 selection=None 时跳过绑定（legacy path）.
             async with AsyncExitStack() as stack:
+                if validated.knowledge_conversation is not None:
+                    from .wiki.knowledge_agent import (
+                        KnowledgeAgentBinding,
+                        knowledge_agent_binding,
+                    )
+
+                    knowledge_tools = state.wiki_knowledge_tools
+                    if knowledge_tools is None:
+                        raise RuntimeError("Knowledge Agent tools unavailable")
+                    original_tools = harness.agent.tools
+                    binding_token = knowledge_agent_binding.set(
+                        KnowledgeAgentBinding(
+                            conversation_id=validated.knowledge_conversation.id,
+                            space_id=validated.knowledge_conversation.space_id,
+                            session_id=validated.knowledge_conversation.session_id,
+                        )
+                    )
+                    harness.agent.tools = knowledge_tools
+
+                    def _restore_knowledge_mode() -> None:
+                        harness.agent.tools = original_tools
+                        knowledge_agent_binding.reset(binding_token)
+
+                    stack.callback(_restore_knowledge_mode)
                 if runtime is not None and selection is not None:
                     await stack.enter_async_context(
-                        runtime.bind_to_harness(
-                            harness=harness, selection=selection
-                        )
+                        runtime.bind_to_harness(harness=harness, selection=selection)
                     )
 
                 if checkpoint_source is not None:
@@ -2659,9 +2757,7 @@ def create_app(
             ) from None
         except ProviderSelectionDisabledError:
             state.last_error = "Selected provider profile is disabled."
-            raise PromptRuntimeError(
-                500, state.last_error, "provider_profile_disabled"
-            ) from None
+            raise PromptRuntimeError(500, state.last_error, "provider_profile_disabled") from None
         except ProviderSelectionUnavailableError:
             state.last_error = "Selected provider credential is unavailable."
             raise PromptRuntimeError(
@@ -2678,9 +2774,7 @@ def create_app(
             msg = str(e)
             state.last_error = f"{type(e).__name__}: {msg}"
             status = 409 if "already running" in msg.lower() else 500
-            raise PromptRuntimeError(
-                status, state.last_error, type(e).__name__
-            ) from None
+            raise PromptRuntimeError(status, state.last_error, type(e).__name__) from None
         except Exception as e:
             state.last_error = f"{type(e).__name__}: {e}"
             raise PromptRuntimeError(500, state.last_error, type(e).__name__) from None
@@ -2690,9 +2784,7 @@ def create_app(
 
         messages_after = list(harness.agent.state.messages)
         # candidate 提取：从 suffix 中找最后一个合格 AssistantMessage
-        assistant_candidate = _extract_terminal_assistant(
-            messages_after[len(messages_before):]
-        )
+        assistant_candidate = _extract_terminal_assistant(messages_after[len(messages_before) :])
 
         # 终态 AssistantMessage 是 stop_reason / usage 的事实来源。RequestSnapshot
         # metadata 从未承诺包含这两个字段；usage 已随消息和 TurnSnapshot 持久化。
@@ -2713,12 +2805,11 @@ def create_app(
             except Exception:
                 snapshot_payload = None
 
-        applied_skill_names: list[str] = list(
-            validated.skill_selection.names
-        ) if (
-            validated.skill_selection is not None
-            and validated.skill_selection.names
-        ) else []
+        applied_skill_names: list[str] = (
+            list(validated.skill_selection.names)
+            if (validated.skill_selection is not None and validated.skill_selection.names)
+            else []
+        )
 
         attachment_meta = _build_attachment_meta(validated.attached_summary)
 
@@ -2765,19 +2856,16 @@ def create_app(
                 if validated.original_messages is not None:
                     harness.agent.state.messages = validated.original_messages
 
-        applied_skill_names: list[str] = list(
-            validated.skill_selection.names
-        ) if (
-            validated.skill_selection is not None
-            and validated.skill_selection.names
-        ) else []
+        applied_skill_names: list[str] = (
+            list(validated.skill_selection.names)
+            if (validated.skill_selection is not None and validated.skill_selection.names)
+            else []
+        )
         attachment_meta = _build_attachment_meta(validated.attached_summary)
 
         return PromptRunOutcome(
             messages=execution.messages,
-            serialized_messages=[
-                serialize_message(m) for m in execution.messages
-            ],
+            serialized_messages=[serialize_message(m) for m in execution.messages],
             session_id=validated.session_id,
             attachment_meta=attachment_meta,
             applied_skill_names=applied_skill_names,
@@ -2809,9 +2897,7 @@ def create_app(
             raise ValueError("regeneration produced no qualified assistant candidate")
 
         # candidate canonical 序列化——{type, data} 包装格式（与 messages 表对齐）
-        candidate_json = _serialize_assistant_for_messages(
-            execution.assistant_message
-        )
+        candidate_json = _serialize_assistant_for_messages(execution.assistant_message)
 
         # 核心：finalize_revision（单 BEGIN IMMEDIATE transaction）
         try:
@@ -2832,27 +2918,22 @@ def create_app(
             and harness.last_snapshot is not None
         ):
             try:
-                await validated.store.append_snapshot(
-                    validated.session_id, harness.last_snapshot
-                )
+                await validated.store.append_snapshot(validated.session_id, harness.last_snapshot)
             except Exception as e:
                 # finalize 已 commit——snapshot 失败不能回滚 active answer
                 snapshot_error = f"snapshot: {type(e).__name__}: {e}"
                 state.last_error = snapshot_error
 
-        applied_skill_names: list[str] = list(
-            validated.skill_selection.names
-        ) if (
-            validated.skill_selection is not None
-            and validated.skill_selection.names
-        ) else []
+        applied_skill_names: list[str] = (
+            list(validated.skill_selection.names)
+            if (validated.skill_selection is not None and validated.skill_selection.names)
+            else []
+        )
         attachment_meta = _build_attachment_meta(validated.attached_summary)
 
         return PromptRunOutcome(
             messages=execution.messages,
-            serialized_messages=[
-                serialize_message(m) for m in execution.messages
-            ],
+            serialized_messages=[serialize_message(m) for m in execution.messages],
             session_id=validated.session_id,
             attachment_meta=attachment_meta,
             applied_skill_names=applied_skill_names,
@@ -2877,9 +2958,7 @@ def create_app(
             canonical = await store.list_messages(session_id)
             harness.agent.state.messages = list(canonical)
         except Exception as e:
-            state.last_error = (
-                f"reset_harness: {type(e).__name__}: {e}"[:500]
-            )
+            state.last_error = f"reset_harness: {type(e).__name__}: {e}"[:500]
             harness.agent.state.messages = list(fallback_messages)
 
     def _serialize_prompt_validation_error(
@@ -2950,10 +3029,7 @@ def create_app(
     def _remove_from_active(req: WebRunRequest) -> None:
         """从 active_requests / active_request_by_session 移除；保留 history append 给调用方做。"""
         state.active_requests.pop(req.id, None)
-        if (
-            req.session_id
-            and state.active_request_by_session.get(req.session_id) == req.id
-        ):
+        if req.session_id and state.active_request_by_session.get(req.session_id) == req.id:
             state.active_request_by_session.pop(req.session_id, None)
 
     async def _run_prompt_background(
@@ -3058,10 +3134,7 @@ def create_app(
                     errors="replace",
                 )
 
-            already_committed = (
-                extract_checkpoint_source_hash(prior_text)
-                == source.source_sha256
-            )
+            already_committed = extract_checkpoint_source_hash(prior_text) == source.source_sha256
             updated_ref = memory_ref
             operation = await store.get_operation(operation_id)
             if operation is None:
@@ -3180,9 +3253,7 @@ def create_app(
         state.current_request_session_id = web_request.session_id
         web_request.event_start_sequence = state.next_event_sequence
         try:
-            result = await _run_checkpointer_core(
-                web_request.session_id, source, operation_id
-            )
+            result = await _run_checkpointer_core(web_request.session_id, source, operation_id)
         except asyncio.CancelledError:
             # If Memory.md crossed its commit point, cancellation must converge
             # forward; otherwise close the no-effect intent as aborted.
@@ -3197,9 +3268,7 @@ def create_app(
                             session_id=web_request.session_id,
                         )
                     )
-                    operation = await asyncio.shield(
-                        store.get_operation(operation_id)
-                    )
+                    operation = await asyncio.shield(store.get_operation(operation_id))
                 except Exception:
                     operation = None
                 if operation is not None and operation.outcome == "completed":
@@ -3217,17 +3286,13 @@ def create_app(
                 else:
                     web_request.status = "aborted"
                     web_request.error = "cancelled"
-                    web_request.abort_reason = (
-                        web_request.abort_reason or "task_cancelled"
-                    )
+                    web_request.abort_reason = web_request.abort_reason or "task_cancelled"
                     web_request.ended_at = _now_utc()
                     raise
             else:
                 web_request.status = "aborted"
                 web_request.error = "cancelled"
-                web_request.abort_reason = (
-                    web_request.abort_reason or "task_cancelled"
-                )
+                web_request.abort_reason = web_request.abort_reason or "task_cancelled"
                 web_request.ended_at = _now_utc()
                 raise
         except CheckpointerError as e:
@@ -3349,7 +3414,8 @@ def create_app(
         ext_store = state.extension_store
         if store is None or ext_store is None:
             raise RegenerationValidationError(
-                503, "extension_store_unavailable",
+                503,
+                "extension_store_unavailable",
                 "Extension store not initialized.",
             )
 
@@ -3360,7 +3426,8 @@ def create_app(
             session = None
         if session is None:
             raise RegenerationValidationError(
-                404, "session_not_found",
+                404,
+                "session_not_found",
                 f"Session {session_id!r} not found.",
             )
 
@@ -3374,12 +3441,14 @@ def create_app(
         await cur.close()
         if msg_row is None or msg_row["session_id"] != session_id:
             raise RegenerationValidationError(
-                404, "message_not_found",
+                404,
+                "message_not_found",
                 f"Assistant message {assistant_message_id!r} not found in this session.",
             )
         if msg_row["role"] != "assistant":
             raise RegenerationValidationError(
-                400, "regenerate_target_not_assistant",
+                400,
+                "regenerate_target_not_assistant",
                 "Only assistant messages can be regenerated.",
             )
 
@@ -3394,7 +3463,8 @@ def create_app(
         await cur.close()
         if latest is None or latest["id"] != assistant_message_id:
             raise RegenerationValidationError(
-                409, "regenerate_target_not_latest",
+                409,
+                "regenerate_target_not_latest",
                 "Only the latest assistant response can be regenerated.",
             )
 
@@ -3409,14 +3479,16 @@ def create_app(
         await cur.close()
         if preceding is None:
             raise RegenerationValidationError(
-                409, "regenerate_missing_user_message",
+                409,
+                "regenerate_missing_user_message",
                 "No preceding user message found to regenerate from.",
             )
 
         # active request 检查
         if session_id in state.active_request_by_session:
             raise RegenerationValidationError(
-                409, "request_already_active",
+                409,
+                "request_already_active",
                 "An active request is already running for this session.",
             )
 
@@ -3430,9 +3502,32 @@ def create_app(
         await cur.close()
         if existing_running is not None:
             raise RegenerationValidationError(
-                409, "revision_already_running",
+                409,
+                "revision_already_running",
                 "A regeneration is already running for this assistant message.",
             )
+
+        knowledge_conversation = None
+        wiki_store = state.wiki_store
+        if wiki_store is not None:
+            try:
+                knowledge_conversation = await wiki_store.find_conversation_by_session(session_id)
+                if knowledge_conversation is not None:
+                    space = await wiki_store.get_space(knowledge_conversation.space_id)
+                    if knowledge_conversation.status != "active" or space.status != "active":
+                        raise RegenerationValidationError(
+                            409,
+                            "knowledge_conversation_inactive",
+                            "Knowledge conversation is not active.",
+                        )
+            except RegenerationValidationError:
+                raise
+            except Exception:
+                raise RegenerationValidationError(
+                    409,
+                    "knowledge_conversation_conflict",
+                    "Knowledge conversation binding is unavailable.",
+                ) from None
 
         # 构造 history——canonical active messages[:target_idx]（不含旧 assistant）
         canonical = await store.list_messages(session_id)
@@ -3444,6 +3539,7 @@ def create_app(
             preceding_user_message_id=preceding["id"],
             history=history,
             original_harness_messages=tuple(harness.agent.state.messages),
+            knowledge_conversation=knowledge_conversation,
         )
 
     async def _run_regeneration_background(
@@ -3487,6 +3583,7 @@ def create_app(
             original_messages=list(validated.original_harness_messages),
             attached_blocks=[],
             attached_summary=[],
+            knowledge_conversation=validated.knowledge_conversation,
         )
 
         try:
@@ -3500,7 +3597,8 @@ def create_app(
             # 显式 mark_revision_aborted（不让通用 except 捕获）
             try:
                 await ext_store.mark_revision_aborted(
-                    revision_id=revision_id, request_id=request_id,
+                    revision_id=revision_id,
+                    request_id=request_id,
                 )
             except Exception:
                 pass  # best-effort——revision 可能已被 mark
@@ -3582,6 +3680,14 @@ def create_app(
         del session_path
         return await index()
 
+    @app.get("/knowledge", include_in_schema=False)
+    @app.get("/knowledge/", include_in_schema=False)
+    @app.get("/knowledge/{knowledge_path:path}", include_in_schema=False)
+    async def knowledge_route(knowledge_path: str | None = None) -> Any:
+        """Serve the independent LLM Wiki SPA shell on refresh and direct entry."""
+        del knowledge_path
+        return await index()
+
     @app.get("/assets/{path:path}", include_in_schema=False)
     async def assets(path: str) -> Any:
         # 只允许相对文件名，禁止 .. 逃逸
@@ -3648,9 +3754,7 @@ def create_app(
             return {
                 "count": len(msgs),
                 "messages": serialized_messages,
-                "content_integrity": summarize_content_integrity(
-                    serialized_messages
-                ),
+                "content_integrity": summarize_content_integrity(serialized_messages),
             }
 
         store = state.session_store
@@ -3661,6 +3765,7 @@ def create_app(
             )
         from ..session_sqlite import SessionNotFoundError
         from .serializers import serialize_persisted_message
+
         try:
             # D2-6：用 list_persisted_messages——含 message_id（regenerate 必需）
             stored_msgs = await store.list_persisted_messages(session_id)
@@ -3669,9 +3774,7 @@ def create_app(
                 status_code=404,
                 content={"detail": f"session {session_id!r} not found"},
             )
-        serialized_messages = [
-            serialize_persisted_message(message) for message in stored_msgs
-        ]
+        serialized_messages = [serialize_persisted_message(message) for message in stored_msgs]
         return {
             "count": len(stored_msgs),
             "session_id": session_id,
@@ -3764,8 +3867,7 @@ def create_app(
         return {
             "count": len(snaps),
             "snapshots": [
-                {**serialize_snapshot_summary(s), "index": i}
-                for i, s in enumerate(snaps)
+                {**serialize_snapshot_summary(s), "index": i} for i, s in enumerate(snaps)
             ],
         }
 
@@ -3925,7 +4027,8 @@ def create_app(
 
     @app.post("/api/sessions/{sid}/fork")
     async def post_session_fork(
-        sid: str, payload: dict[str, Any],
+        sid: str,
+        payload: dict[str, Any],
     ) -> dict[str, Any]:
         store = state.session_store
         if store is None:
@@ -3962,7 +4065,8 @@ def create_app(
 
     @app.post("/api/sessions/{sid}/branch")
     async def post_session_branch(
-        sid: str, payload: dict[str, Any],
+        sid: str,
+        payload: dict[str, Any],
     ) -> dict[str, Any]:
         store = state.session_store
         if store is None:
@@ -3984,7 +4088,8 @@ def create_app(
 
     @app.patch("/api/sessions/{sid}/active-lane")
     async def patch_session_active_lane(
-        sid: str, payload: dict[str, Any],
+        sid: str,
+        payload: dict[str, Any],
     ) -> dict[str, Any]:
         store = state.session_store
         if store is None:
@@ -4002,7 +4107,9 @@ def create_app(
 
     @app.put("/api/sessions/{sid}/entries/{entry_id}/label")
     async def put_session_entry_label(
-        sid: str, entry_id: str, payload: dict[str, Any],
+        sid: str,
+        entry_id: str,
+        payload: dict[str, Any],
     ) -> dict[str, Any]:
         store = state.session_store
         if store is None:
@@ -4152,7 +4259,8 @@ def create_app(
 
     @app.post("/api/sessions", response_model=None)
     async def post_sessions(
-        request: Request, payload: dict[str, Any],
+        request: Request,
+        payload: dict[str, Any],
     ) -> dict[str, Any] | JSONResponse:
         """创建新 session（spec endpoint，P0-1）。
 
@@ -4188,9 +4296,7 @@ def create_app(
             except Exception:
                 # Binding failed (FK race / Store error / etc.)—compensate.
                 try:
-                    await asyncio.shield(
-                        _compensate_delete_session(state, s.id)
-                    )
+                    await asyncio.shield(_compensate_delete_session(state, s.id))
                 except Exception:
                     _logger.critical(
                         "session_creation_rollback_failed",
@@ -4262,7 +4368,8 @@ def create_app(
 
     @app.patch("/api/sessions/{sid}", response_model=None)
     async def patch_session(
-        sid: str, payload: dict[str, Any],
+        sid: str,
+        payload: dict[str, Any],
     ) -> dict[str, Any] | JSONResponse:
         """重命名 session（spec endpoint，P0-1）。"""
         from ..session_sqlite import SessionNotFoundError
@@ -4276,13 +4383,15 @@ def create_app(
         title = (payload or {}).get("title")
         if not title:
             return JSONResponse(
-                status_code=400, content={"detail": "title is required"},
+                status_code=400,
+                content={"detail": "title is required"},
             )
         try:
             s = await store.rename_session(sid, title)
         except SessionNotFoundError:
             return JSONResponse(
-                status_code=404, content={"detail": f"session {sid!r} not found"},
+                status_code=404,
+                content={"detail": f"session {sid!r} not found"},
             )
         return {
             "id": s.id,
@@ -4315,7 +4424,8 @@ def create_app(
         existing = await store.get_session(sid)
         if existing is None:
             return JSONResponse(
-                status_code=404, content={"detail": f"session {sid!r} not found"},
+                status_code=404,
+                content={"detail": f"session {sid!r} not found"},
             )
 
         # P0-2：先删 uploads/{sid}/
@@ -4325,16 +4435,15 @@ def create_app(
                 deleted_files = await state.file_store.delete_session_files(sid)
             except Exception as e:
                 # 文件删除失败不阻塞 sqlite 删除；记 warning
-                state.last_error = (
-                    f"delete_session_files({sid}) failed: {type(e).__name__}: {e}"
-                )
+                state.last_error = f"delete_session_files({sid}) failed: {type(e).__name__}: {e}"
 
         try:
             await store.delete_session(sid)
         except SessionNotFoundError:
             # 二次防御——理论上前面 get_session 已校验
             return JSONResponse(
-                status_code=404, content={"detail": f"session {sid!r} not found"},
+                status_code=404,
+                content={"detail": f"session {sid!r} not found"},
             )
         # P2-R1: 删除 session 后清理 knowledge library bindings（P2-R0 §7.2 不变量 7）
         # 只清 binding，不删 library 本身。失败不阻塞 session 删除（记 warning）。
@@ -4343,10 +4452,13 @@ def create_app(
             try:
                 await k_service.on_session_deleted(sid)
             except Exception as e:
-                state.last_error = (
-                    f"knowledge.on_session_deleted({sid}) failed: "
-                    f"{type(e).__name__}"
-                )
+                state.last_error = f"knowledge.on_session_deleted({sid}) failed: {type(e).__name__}"
+        wiki_store = state.wiki_store
+        if wiki_store is not None:
+            try:
+                await wiki_store.on_session_deleted(sid)
+            except Exception as e:
+                state.last_error = f"wiki.on_session_deleted({sid}) failed: {type(e).__name__}"
         # 删的是 current session → 自动切到 default（或新建一个）
         if state.current_session_id == sid:
             state.current_session_id = None
@@ -4518,9 +4630,7 @@ def create_app(
         if session is None:
             return JSONResponse(
                 status_code=404,
-                content={
-                    "detail": {"code": "session_not_found", "message": "Session not found."}
-                },
+                content={"detail": {"code": "session_not_found", "message": "Session not found."}},
             )
         db = store.connection
         cur = await db.execute(
@@ -4746,15 +4856,10 @@ def create_app(
                 status_code=404,
                 content={"detail": f"session {sid!r} not found"},
             )
-        if (
-            expected_workspace_revision is not None
-            and expected_workspace_revision < 0
-        ):
+        if expected_workspace_revision is not None and expected_workspace_revision < 0:
             return JSONResponse(
                 status_code=422,
-                content={
-                    "detail": "expected_workspace_revision must be non-negative"
-                },
+                content={"detail": "expected_workspace_revision must be non-negative"},
             )
 
         file_store = _require_file_store()
@@ -4781,48 +4886,61 @@ def create_app(
                 workspace = await file_store.get_workspace_state(sid)
                 next_expected_revision = workspace.revision
             except FileTooLargeError as e:
-                errors.append({
-                    "filename": upload.filename or "<unknown>",
-                    "error_type": "FileTooLargeError",
-                    "error": str(e),
-                })
+                errors.append(
+                    {
+                        "filename": upload.filename or "<unknown>",
+                        "error_type": "FileTooLargeError",
+                        "error": str(e),
+                    }
+                )
             except SessionStorageLimitError as e:
-                errors.append({
-                    "filename": upload.filename or "<unknown>",
-                    "error_type": "SessionStorageLimitError",
-                    "error": str(e),
-                })
+                errors.append(
+                    {
+                        "filename": upload.filename or "<unknown>",
+                        "error_type": "SessionStorageLimitError",
+                        "error": str(e),
+                    }
+                )
             except UnsafeFilenameError as e:
-                errors.append({
-                    "filename": upload.filename or "<unknown>",
-                    "error_type": "UnsafeFilenameError",
-                    "error": str(e),
-                })
+                errors.append(
+                    {
+                        "filename": upload.filename or "<unknown>",
+                        "error_type": "UnsafeFilenameError",
+                        "error": str(e),
+                    }
+                )
             except WorkspaceVersionConflictError as e:
-                errors.append({
-                    "filename": upload.filename or "<unknown>",
-                    "error_type": "WorkspaceVersionConflictError",
-                    "error": str(e),
-                    "expected_revision": e.expected,
-                    "current_revision": e.current,
-                })
+                errors.append(
+                    {
+                        "filename": upload.filename or "<unknown>",
+                        "error_type": "WorkspaceVersionConflictError",
+                        "error": str(e),
+                        "expected_revision": e.expected,
+                        "current_revision": e.current,
+                    }
+                )
                 break
             except FileStoreError as e:
-                errors.append({
-                    "filename": upload.filename or "<unknown>",
-                    "error_type": type(e).__name__,
-                    "error": str(e),
-                })
+                errors.append(
+                    {
+                        "filename": upload.filename or "<unknown>",
+                        "error_type": type(e).__name__,
+                        "error": str(e),
+                    }
+                )
         status_code = 200
         if not saved and errors:
             # 全部失败——客户端可以据此显示
-            status_code = 413 if any(
-                e["error_type"] in ("FileTooLargeError", "SessionStorageLimitError")
-                for e in errors
-            ) else 409 if any(
-                e["error_type"] == "WorkspaceVersionConflictError"
-                for e in errors
-            ) else 400
+            status_code = (
+                413
+                if any(
+                    e["error_type"] in ("FileTooLargeError", "SessionStorageLimitError")
+                    for e in errors
+                )
+                else 409
+                if any(e["error_type"] == "WorkspaceVersionConflictError" for e in errors)
+                else 400
+            )
         workspace = await file_store.get_workspace_state(sid)
         return JSONResponse(
             status_code=status_code,
@@ -4923,19 +5041,14 @@ def create_app(
                 status_code=422,
                 content={"detail": "content must be a string"},
             )
-        if (
-            expected_revision is not None
-            and (
-                isinstance(expected_revision, bool)
-                or not isinstance(expected_revision, int)
-                or expected_revision < 0
-            )
+        if expected_revision is not None and (
+            isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 0
         ):
             return JSONResponse(
                 status_code=422,
-                content={
-                    "detail": "expected_workspace_revision must be a non-negative integer"
-                },
+                content={"detail": "expected_workspace_revision must be a non-negative integer"},
             )
 
         file_store = _require_file_store()
@@ -4973,7 +5086,8 @@ def create_app(
 
     @app.get("/api/sessions/{sid}/files/{fid}", response_model=None)
     async def get_session_file_content(
-        sid: str, fid: str,
+        sid: str,
+        fid: str,
     ) -> Any:
         """下载 session 内单文件。
 
@@ -5004,19 +5118,24 @@ def create_app(
             ref = await file_store.get_for_session(sid, fid)
         except VirtualFileNotFoundError as e:
             return JSONResponse(
-                status_code=404, content={"detail": str(e)},
+                status_code=404,
+                content={"detail": str(e)},
             )
         except FileAccessDeniedError as e:
             return JSONResponse(
-                status_code=403, content={"detail": str(e)},
+                status_code=403,
+                content={"detail": str(e)},
             )
         except UnsafeFilenameError as e:
             return JSONResponse(
-                status_code=400, content={"detail": str(e)},
+                status_code=400,
+                content={"detail": str(e)},
             )
         # FileResponse 把 Content-Type / filename 设对
         return FileResponse(
-            ref.path, media_type=ref.mime, filename=ref.name,
+            ref.path,
+            media_type=ref.mime,
+            filename=ref.name,
         )
 
     @app.put("/api/sessions/{sid}/files/{fid}/content", response_model=None)
@@ -5061,33 +5180,25 @@ def create_app(
                 status_code=422,
                 content={"detail": "expected_sha256 must be a string"},
             )
-        if (
-            expected_revision is not None
-            and (
-                isinstance(expected_revision, bool)
-                or not isinstance(expected_revision, int)
-                or expected_revision < 0
-            )
+        if expected_revision is not None and (
+            isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 0
         ):
             return JSONResponse(
                 status_code=422,
-                content={
-                    "detail": "expected_workspace_revision must be a non-negative integer"
-                },
+                content={"detail": "expected_workspace_revision must be a non-negative integer"},
             )
 
         file_store = _require_file_store()
         try:
             current = await file_store.get_for_session(sid, fid)
-            if (
-                current.purpose not in {"agent_instructions", "memory"}
-                and not is_markdown_filename(current.name)
+            if current.purpose not in {"agent_instructions", "memory"} and not is_markdown_filename(
+                current.name
             ):
                 return JSONResponse(
                     status_code=403,
-                    content={
-                        "detail": "only Workspace Markdown files are editable here"
-                    },
+                    content={"detail": "only Workspace Markdown files are editable here"},
                 )
             updated = await file_store.update_text(
                 sid,
@@ -5153,19 +5264,14 @@ def create_app(
                 status_code=422,
                 content={"detail": "expected_sha256 must be a string"},
             )
-        if (
-            expected_revision is not None
-            and (
-                isinstance(expected_revision, bool)
-                or not isinstance(expected_revision, int)
-                or expected_revision < 0
-            )
+        if expected_revision is not None and (
+            isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 0
         ):
             return JSONResponse(
                 status_code=422,
-                content={
-                    "detail": "expected_workspace_revision must be a non-negative integer"
-                },
+                content={"detail": "expected_workspace_revision must be a non-negative integer"},
             )
         file_store = _require_file_store()
         try:
@@ -5198,7 +5304,8 @@ def create_app(
 
     @app.get("/api/files/{fid}", response_model=None)
     async def get_file_compat(
-        fid: str, session_id: str | None = None,
+        fid: str,
+        session_id: str | None = None,
     ) -> Any:
         """兼容下载入口：必须 query 参数 session_id。"""
         if not session_id:
@@ -5257,15 +5364,10 @@ def create_app(
                 status_code=404,
                 content={"detail": f"session {sid!r} not found"},
             )
-        if (
-            expected_workspace_revision is not None
-            and expected_workspace_revision < 0
-        ):
+        if expected_workspace_revision is not None and expected_workspace_revision < 0:
             return JSONResponse(
                 status_code=422,
-                content={
-                    "detail": "expected_workspace_revision must be non-negative"
-                },
+                content={"detail": "expected_workspace_revision must be non-negative"},
             )
         file_store = _require_file_store()
         try:
@@ -5275,8 +5377,7 @@ def create_app(
                     status_code=409,
                     content={
                         "detail": (
-                            "AGENT.md and Memory.md are required; edit their "
-                            "content instead"
+                            "AGENT.md and Memory.md are required; edit their content instead"
                         )
                     },
                 )
@@ -5288,23 +5389,28 @@ def create_app(
             )
         except VirtualFileNotFoundError as e:
             return JSONResponse(
-                status_code=404, content={"detail": str(e)},
+                status_code=404,
+                content={"detail": str(e)},
             )
         except FileAccessDeniedError as e:
             return JSONResponse(
-                status_code=403, content={"detail": str(e)},
+                status_code=403,
+                content={"detail": str(e)},
             )
         except UnsafeFilenameError as e:
             return JSONResponse(
-                status_code=400, content={"detail": str(e)},
+                status_code=400,
+                content={"detail": str(e)},
             )
         except (FileVersionConflictError, WorkspaceVersionConflictError) as e:
             return JSONResponse(
-                status_code=409, content={"detail": str(e)},
+                status_code=409,
+                content={"detail": str(e)},
             )
         except FileStoreError as e:
             return JSONResponse(
-                status_code=500, content={"detail": str(e)},
+                status_code=500,
+                content={"detail": str(e)},
             )
         workspace = await file_store.get_workspace_state(sid)
         return {
@@ -5325,12 +5431,14 @@ def create_app(
         servers = [serialize_mcp_server_state(s) for s in registry.list_servers()]
         tools: list[dict[str, Any]] = []
         for tool in registry.list_agent_tools():
-            tools.append({
-                "name": getattr(tool, "name", None),
-                "server": getattr(tool, "server_name", None),
-                "mcp_tool": getattr(tool, "mcp_tool_name", None),
-                "description": getattr(tool, "description", ""),
-            })
+            tools.append(
+                {
+                    "name": getattr(tool, "name", None),
+                    "server": getattr(tool, "server_name", None),
+                    "mcp_tool": getattr(tool, "mcp_tool_name", None),
+                    "description": getattr(tool, "description", ""),
+                }
+            )
         prompts = [
             {"server": server, "name": info.name, "description": info.description}
             for server, info in registry.list_prompts()
@@ -5358,24 +5466,25 @@ def create_app(
         registry = harness.mcp_registry
         if registry is None:
             return {"attached": False, "tools": [], "count": 0}
-        active_tool_names = set(harness.agent.tools.names()) if (
-            getattr(harness.agent, "tools", None) is not None
-        ) else set()
+        active_tool_names = (
+            set(harness.agent.tools.names())
+            if (getattr(harness.agent, "tools", None) is not None)
+            else set()
+        )
         tools: list[dict[str, Any]] = []
         for tool in registry.list_agent_tools():
             tname = getattr(tool, "name", None)
             # 真正 active = 在 agent.tools 中且未在 disabled_mcp_tools set 中
-            enabled = (
-                tname in active_tool_names
-                and tname not in state.disabled_mcp_tools
+            enabled = tname in active_tool_names and tname not in state.disabled_mcp_tools
+            tools.append(
+                {
+                    "name": tname,
+                    "server": getattr(tool, "server_name", None),
+                    "mcp_tool": getattr(tool, "mcp_tool_name", None),
+                    "description": getattr(tool, "description", ""),
+                    "enabled": enabled,
+                }
             )
-            tools.append({
-                "name": tname,
-                "server": getattr(tool, "server_name", None),
-                "mcp_tool": getattr(tool, "mcp_tool_name", None),
-                "description": getattr(tool, "description", ""),
-                "enabled": enabled,
-            })
         return {
             "attached": True,
             "tools": tools,
@@ -5429,13 +5538,11 @@ def create_app(
         if not full_name.startswith(_MCP_TOOL_NAME_PREFIX):
             return None
         # 按 server_name 长度降序——优先匹配最长前缀
-        sorted_names = sorted(
-            state.mcp_server_configs.keys(), key=len, reverse=True
-        )
+        sorted_names = sorted(state.mcp_server_configs.keys(), key=len, reverse=True)
         for server_name in sorted_names:
             prefix = f"{_MCP_TOOL_NAME_PREFIX}{server_name}__"
             if full_name.startswith(prefix):
-                raw_tool = full_name[len(prefix):]
+                raw_tool = full_name[len(prefix) :]
                 return server_name, raw_tool
         return None
 
@@ -5460,8 +5567,7 @@ def create_app(
         if not re.match(_MCP_NAME_RE_PATTERN, name):
             return (
                 None,
-                "name must match [A-Za-z0-9_-]+ (got "
-                f"{name!r})",
+                f"name must match [A-Za-z0-9_-]+ (got {name!r})",
             )
 
         command = (payload or {}).get("command")
@@ -5524,9 +5630,7 @@ def create_app(
 
         约束：本函数只在 web 层操作；不动 harness 内部状态。
         """
-        enabled_cfgs = [
-            cfg for cfg in state.mcp_server_configs.values() if cfg.enabled
-        ]
+        enabled_cfgs = [cfg for cfg in state.mcp_server_configs.values() if cfg.enabled]
         if not enabled_cfgs:
             # 没有 enabled server：detach 所有
             try:
@@ -5547,9 +5651,7 @@ def create_app(
             return
 
         # 成功——同步每个 server 的 tool_count / last_error
-        server_states = {
-            s.name: s for s in harness.list_mcp_servers()
-        }
+        server_states = {s.name: s for s in harness.list_mcp_servers()}
         for cfg in enabled_cfgs:
             st = server_states.get(cfg.name)
             if st is None:
@@ -5930,8 +6032,7 @@ def create_app(
                     await _refresh_enabled_mcp_servers()
                 except Exception as e:
                     state.last_error = (
-                        f"delete_mcp_server({name}) detach failed: "
-                        f"{type(e).__name__}: {e}"
+                        f"delete_mcp_server({name}) detach failed: {type(e).__name__}: {e}"
                     )
             # 保存原 config 用于回滚
             original_cfg = cfg.model_copy()
@@ -6019,9 +6120,7 @@ def create_app(
             # P1-C3: DB delete disabled row（结构化 key）
             if state.extension_store is not None:
                 try:
-                    await state.extension_store.enable_mcp_tool(
-                        server_name, raw_tool_name
-                    )
+                    await state.extension_store.enable_mcp_tool(server_name, raw_tool_name)
                 except ExtensionStoreError:
                     # DB 失败 → unregister 回滚
                     try:
@@ -6076,9 +6175,7 @@ def create_app(
             # P1-C3: DB insert disabled row（结构化 key）
             if state.extension_store is not None:
                 try:
-                    await state.extension_store.disable_mcp_tool(
-                        server_name, raw_tool_name
-                    )
+                    await state.extension_store.disable_mcp_tool(server_name, raw_tool_name)
                 except ExtensionStoreError:
                     # DB 失败 → re-register 回滚
                     if original_target is not None:
@@ -6145,16 +6242,11 @@ def create_app(
                     status_code=403,
                     detail="include_prompt=true is only allowed from localhost",
                 )
-        skills = [
-            serialize_skill(s, include_prompt=include_prompt)
-            for s in registry.list()
-        ]
+        skills = [serialize_skill(s, include_prompt=include_prompt) for s in registry.list()]
         return {
             "attached": True,
             "skills": skills,
-            "skill_loader": to_json_safe(
-                harness.context.metadata.get("skill_loader") or {}
-            ),
+            "skill_loader": to_json_safe(harness.context.metadata.get("skill_loader") or {}),
         }
 
     # ------------------------------------------------------------------
@@ -6234,30 +6326,36 @@ def create_app(
                 try:
                     raw = await upload.read()
                 except Exception as e:
-                    errors.append({
-                        "filename": filename or "<unknown>",
-                        "error_type": type(e).__name__,
-                        "error": f"failed to read upload: {e}",
-                    })
+                    errors.append(
+                        {
+                            "filename": filename or "<unknown>",
+                            "error_type": type(e).__name__,
+                            "error": f"failed to read upload: {e}",
+                        }
+                    )
                     continue
                 if len(raw) > _SKILL_UPLOAD_MAX_BYTES:
-                    errors.append({
-                        "filename": filename or "<unknown>",
-                        "error_type": "SkillFileSecurityError",
-                        "error": (
-                            f"uploaded skill file size {len(raw)} exceeds "
-                            f"max_file_size_bytes={_SKILL_UPLOAD_MAX_BYTES}"
-                        ),
-                    })
+                    errors.append(
+                        {
+                            "filename": filename or "<unknown>",
+                            "error_type": "SkillFileSecurityError",
+                            "error": (
+                                f"uploaded skill file size {len(raw)} exceeds "
+                                f"max_file_size_bytes={_SKILL_UPLOAD_MAX_BYTES}"
+                            ),
+                        }
+                    )
                     continue
                 try:
                     text = raw.decode("utf-8")
                 except UnicodeDecodeError as e:
-                    errors.append({
-                        "filename": filename or "<unknown>",
-                        "error_type": "SkillFileFormatError",
-                        "error": f"file is not valid utf-8: {e}",
-                    })
+                    errors.append(
+                        {
+                            "filename": filename or "<unknown>",
+                            "error_type": "SkillFileFormatError",
+                            "error": f"file is not valid utf-8: {e}",
+                        }
+                    )
                     continue
 
                 fallback_name = _secure_skill_filename(filename)
@@ -6268,11 +6366,13 @@ def create_app(
                         source_path=f"upload:{filename or fallback_name}",
                     )
                 except SkillFileFormatError as e:
-                    errors.append({
-                        "filename": filename or fallback_name,
-                        "error_type": "SkillFileFormatError",
-                        "error": str(e),
-                    })
+                    errors.append(
+                        {
+                            "filename": filename or fallback_name,
+                            "error_type": "SkillFileFormatError",
+                            "error": str(e),
+                        }
+                    )
                     continue
 
                 # P1-C2: 服务端强制覆盖 source metadata（不信任 Markdown 自声明）
@@ -6285,21 +6385,21 @@ def create_app(
                     registry.register(skill)
                 except SkillRegistrationError as e:
                     msg = str(e)
-                    errors.append({
-                        "filename": filename or fallback_name,
-                        "skill_name": skill.name,
-                        "error_type": "SkillRegistrationError",
-                        "error": msg,
-                        "status": 409,
-                    })
+                    errors.append(
+                        {
+                            "filename": filename or fallback_name,
+                            "skill_name": skill.name,
+                            "error_type": "SkillRegistrationError",
+                            "error": msg,
+                            "status": 409,
+                        }
+                    )
                     continue
 
                 # DB 持久化（如果 extension_store 可用）
                 if state.extension_store is not None:
                     try:
-                        content_sha = hashlib.sha256(
-                            text.encode("utf-8")
-                        ).hexdigest()
+                        content_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
                         await state.extension_store.upsert_uploaded_skill(
                             name=skill.name,
                             skill_json=skill.model_dump_json(),
@@ -6311,21 +6411,21 @@ def create_app(
                     except ExtensionStoreError as e:
                         # DB 失败 → 回滚 registry
                         registry.unregister(skill.name)
-                        errors.append({
-                            "filename": filename or fallback_name,
-                            "skill_name": skill.name,
-                            "error_type": "ExtensionStoreError",
-                            "error": str(e),
-                            "status": 500,
-                        })
+                        errors.append(
+                            {
+                                "filename": filename or fallback_name,
+                                "skill_name": skill.name,
+                                "error_type": "ExtensionStoreError",
+                                "error": str(e),
+                                "status": 500,
+                            }
+                        )
                         continue
 
                 saved_skills.append(skill)
 
         # 至少一个成功 → 200；全部失败 → 用首个 error status 作整体 status
-        out_skills = [
-            serialize_skill(s, include_prompt=False) for s in saved_skills
-        ]
+        out_skills = [serialize_skill(s, include_prompt=False) for s in saved_skills]
         if saved_skills and not errors:
             return {"count": len(saved_skills), "skills": out_skills, "errors": []}
         if saved_skills and errors:
@@ -6551,9 +6651,7 @@ def create_app(
         # 取最近 limit 条（按写入顺序的尾部）
         sliced = records[-limit:] if limit else records
         policy_name = (
-            harness.permission_policy.name
-            if harness.permission_policy is not None
-            else None
+            harness.permission_policy.name if harness.permission_policy is not None else None
         )
         return {
             "policy_name": policy_name,
@@ -6577,9 +6675,7 @@ def create_app(
     ) -> JSONResponse:
         """Validate and start a managed slash command request."""
         try:
-            command, _arguments = parse_slash_command(
-                (payload or {}).get("command")
-            )
+            command, _arguments = parse_slash_command((payload or {}).get("command"))
         except CheckpointerError as e:
             return JSONResponse(
                 status_code=400,
@@ -6688,9 +6784,7 @@ def create_app(
                 content={
                     "detail": {
                         "code": "durable_operation_conflict",
-                        "message": (
-                            "This session has an unfinished durable operation."
-                        ),
+                        "message": ("This session has an unfinished durable operation."),
                     }
                 },
             )
@@ -6728,9 +6822,7 @@ def create_app(
         # registration; reacquire it synchronously before scheduling the task.
         state.running = True
         task = asyncio.create_task(
-            _run_checkpointer_background(
-                web_request, source, durable_operation.id
-            ),
+            _run_checkpointer_background(web_request, source, durable_operation.id),
             name=f"checkpointer_{request_id}",
         )
         web_request.task = task
@@ -6815,9 +6907,7 @@ def create_app(
         if state.shutting_down:
             return JSONResponse(
                 status_code=503,
-                content={
-                    "detail": "server shutting down; cannot accept new prompts"
-                },
+                content={"detail": "server shutting down; cannot accept new prompts"},
             )
 
         # 1. 完整乐观校验——_ensure_idle / text / skill_names / unknown skill /
@@ -6828,9 +6918,7 @@ def create_app(
             return _serialize_prompt_validation_error(e)
         except HTTPException as e:
             # _ensure_idle 抛 HTTPException(409)——转与同步路径一致的 schema
-            return JSONResponse(
-                status_code=e.status_code, content={"detail": e.detail}
-            )
+            return JSONResponse(status_code=e.status_code, content={"detail": e.detail})
 
         # 2. session 级并发检查
         session_id = validated.session_id
@@ -6838,9 +6926,7 @@ def create_app(
             return JSONResponse(
                 status_code=409,
                 content={
-                    "detail": (
-                        f"session {session_id!r} already has an active request"
-                    ),
+                    "detail": (f"session {session_id!r} already has an active request"),
                 },
             )
 
@@ -6866,9 +6952,7 @@ def create_app(
         web_request.task = task
 
         # 5. 立即返回 202——不 await task
-        events_url = "/api/events" + (
-            f"?session_id={session_id}" if session_id else ""
-        )
+        events_url = "/api/events" + (f"?session_id={session_id}" if session_id else "")
         return JSONResponse(
             status_code=202,
             content={
@@ -6918,11 +7002,7 @@ def create_app(
         if status == "active":
             all_reqs = [r for r in all_reqs if r.status in ("queued", "running")]
         elif status == "terminal":
-            all_reqs = [
-                r
-                for r in all_reqs
-                if r.status in ("completed", "error", "aborted")
-            ]
+            all_reqs = [r for r in all_reqs if r.status in ("completed", "error", "aborted")]
         elif status is not None:
             # 精确匹配 status
             all_reqs = [r for r in all_reqs if r.status == status]
@@ -7064,7 +7144,6 @@ def create_app(
             )
         return {"ok": True}
 
-
     @app.post("/api/reset", response_model=None)
     async def post_reset(payload: dict[str, Any]) -> dict[str, Any] | JSONResponse:
         _ensure_idle()
@@ -7117,7 +7196,8 @@ def create_app(
         """
         if limit is not None and limit < 0:
             raise HTTPException(
-                status_code=400, detail="limit must be >= 0 (or omitted)",
+                status_code=400,
+                detail="limit must be >= 0 (or omitted)",
             )
 
         client_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -7139,7 +7219,8 @@ def create_app(
                         break
                     try:
                         payload = await asyncio.wait_for(
-                            client_queue.get(), timeout=_SSE_HEARTBEAT_SECONDS,
+                            client_queue.get(),
+                            timeout=_SSE_HEARTBEAT_SECONDS,
                         )
                         # shutdown sentinel：服务端关闭，立即结束
                         if payload.get("type") == "shutdown" and limit is None:
@@ -7193,14 +7274,16 @@ def create_app(
             # first_available_sequence / last_available_sequence 帮助客户端建立 baseline：
             # - 首次连接 + 无 active request：lastGlobalSequence = last_available_sequence
             # - 避免"第一个真实事件 sequence=500 被误判缺失 1-499"
-            await websocket.send_json({
-                "type": "hello",
-                "agent_status": _agent_status(),
-                "first_available_sequence": state.event_buffer.first_sequence,
-                "last_available_sequence": state.event_buffer.last_sequence,
-                "server_time": _now_utc().isoformat(),
-                "_received_at_ms": int(time.time() * 1000),
-            })
+            await websocket.send_json(
+                {
+                    "type": "hello",
+                    "agent_status": _agent_status(),
+                    "first_available_sequence": state.event_buffer.first_sequence,
+                    "last_available_sequence": state.event_buffer.last_sequence,
+                    "server_time": _now_utc().isoformat(),
+                    "_received_at_ms": int(time.time() * 1000),
+                }
+            )
             while True:
                 # 不真的从客户端读——这里只为检测断连。约定客户端可发任意 keepalive。
                 try:

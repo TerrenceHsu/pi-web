@@ -74,8 +74,19 @@ def _build_gateway(tmp_path: Path) -> FastAPI:
     )
 
 
-@pytest.mark.parametrize("path", ["/chat", "/chat/", "/chat/sess-safe", "/chat/bad/path"])
-def test_gateway_chat_routes_return_spa_shell(tmp_path: Path, path: str) -> None:
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/chat",
+        "/chat/",
+        "/chat/sess-safe",
+        "/chat/bad/path",
+        "/knowledge",
+        "/knowledge/",
+        "/knowledge/pages",
+    ],
+)
+def test_gateway_spa_routes_return_spa_shell(tmp_path: Path, path: str) -> None:
     with TestClient(_build_gateway(tmp_path)) as client:
         response = client.get(path)
         assert response.status_code == 200

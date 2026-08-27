@@ -1,4 +1,4 @@
-"""Schema, lifecycle, Space CRUD and mirror recovery for WikiStore v2."""
+"""Schema, lifecycle, Space CRUD and mirror recovery for WikiStore v7."""
 
 from __future__ import annotations
 
@@ -44,9 +44,7 @@ async def wiki_store(tmp_path: Path) -> AsyncIterator[WikiStore]:
 
 async def _table_names(store: WikiStore) -> set[str]:
     db = store._require_db()
-    async with db.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table'"
-    ) as cursor:
+    async with db.execute("SELECT name FROM sqlite_master WHERE type = 'table'") as cursor:
         rows = await cursor.fetchall()
     return {str(row["name"]) for row in rows}
 
@@ -65,8 +63,11 @@ async def test_fresh_schema_has_all_page_centric_tables_and_no_chunk_tables(
         "wiki_artifacts",
         "wiki_parse_attempts",
         "wiki_parse_revisions",
+        "wiki_source_summaries",
+        "wiki_page_proposals",
         "wiki_pages",
         "wiki_page_revisions",
+        "wiki_pages_fts",
         "wiki_page_sources",
         "wiki_edges",
         "wiki_change_sets",
@@ -130,12 +131,34 @@ async def test_retired_flat_v1_schema_requires_explicit_rebuild(tmp_path: Path) 
         connection.execute(
             "CREATE TABLE wiki_schema_meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)"
         )
-        connection.execute(
-            "INSERT INTO wiki_schema_meta (key, value) VALUES ('schema_version', 1)"
-        )
+        connection.execute("INSERT INTO wiki_schema_meta (key, value) VALUES ('schema_version', 1)")
         connection.execute(
             "CREATE TABLE wiki_sources (id TEXT PRIMARY KEY, parsed_markdown_relpath TEXT)"
         )
+        connection.commit()
+    before = path.read_bytes()
+
+    with pytest.raises(WikiSchemaError) as exc_info:
+        await WikiStore.open(tmp_path)
+
+    assert exc_info.value.code == "schema_rebuild_required"
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("retired_version", [2, 3, 4, 5, 6])
+async def test_retired_schema_requires_explicit_rebuild(
+    tmp_path: Path,
+    retired_version: int,
+) -> None:
+    store = await WikiStore.open(tmp_path)
+    await store.close()
+    path = tmp_path / "wiki.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE wiki_schema_meta SET value = ? WHERE key = 'schema_version'",
+            (retired_version,),
+        )
+        connection.execute(f"PRAGMA user_version = {retired_version}")
         connection.commit()
     before = path.read_bytes()
 
@@ -241,6 +264,43 @@ async def test_create_space_builds_fixed_layout_and_canonical_manifest(
     assert payload["schema"] == WIKI_SPACE_MANIFEST_SCHEMA
     assert payload["space"] == space.model_dump(mode="json")
     assert not list(directory.glob(".*.tmp"))
+
+
+async def test_wiki_conversations_are_space_scoped_and_session_unique(
+    wiki_store: WikiStore,
+) -> None:
+    first_space = await wiki_store.create_space(name="First Wiki")
+    second_space = await wiki_store.create_space(name="Second Wiki")
+    conversation = await wiki_store.create_conversation(
+        first_space.id,
+        session_id="sess-100-aaaaaaaa",
+        title="Research",
+    )
+
+    assert await wiki_store.get_conversation(conversation.id) == conversation
+    assert await wiki_store.find_conversation_by_session(conversation.session_id) == (conversation)
+    assert await wiki_store.list_conversations(first_space.id) == (conversation,)
+    assert await wiki_store.list_conversations(second_space.id) == ()
+    with pytest.raises(WikiStoreError) as exc_info:
+        await wiki_store.create_conversation(
+            second_space.id,
+            session_id=conversation.session_id,
+            title="Duplicate",
+        )
+    assert exc_info.value.code == "conversation_conflict"
+
+    archived = await wiki_store.set_conversation_status(
+        conversation.id,
+        "archived",
+    )
+    assert archived.status == "archived"
+    assert (
+        await wiki_store.set_conversation_status(
+            conversation.id,
+            "archived",
+        )
+        == archived
+    )
 
 
 async def test_space_list_update_filter_and_compare_and_swap(

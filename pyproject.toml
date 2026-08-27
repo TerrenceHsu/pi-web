@@ -106,6 +106,9 @@ branch = true
 omit = [
     # demo / tutorial scripts——不在发布包范围内
     "*/steps/*",
+    # Retired Chunk-RAG compatibility code is not part of the current product.
+    # One product-boundary test ensures it cannot be started accidentally.
+    "*/web/knowledge/*",
 ]
 
 [tool.coverage.report]

@@ -25,6 +25,7 @@ asyncio.Queue.put(json_safe_dict)         ← /api/stream SSE 读
 
 只保存 JSON-safe dict——serialize 由 `serializers.to_json_safe` 保证。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -52,9 +53,7 @@ class TraceEventBuffer:
 
     def __init__(self, max_size: int = 1000) -> None:
         if max_size <= 0:
-            raise ValueError(
-                f"TraceEventBuffer.max_size must be > 0, got {max_size}"
-            )
+            raise ValueError(f"TraceEventBuffer.max_size must be > 0, got {max_size}")
         self.max_size = max_size
         self._events: deque[dict[str, Any]] = deque(maxlen=max_size)
         # P1-B2: sequence 跟踪——None 表示 buffer 空
@@ -230,6 +229,12 @@ class WebAppState(BaseModel):
     wiki_store: Any = None
     wiki_ingestion_service: Any = None
     wiki_ingestion_worker: Any = None
+    wiki_source_retention_ms: int = 7 * 24 * 60 * 60 * 1000
+    wiki_summary_service: Any = None
+    wiki_entry_page_service: Any = None
+    wiki_change_set_service: Any = None
+    wiki_conversation_service: Any = None
+    wiki_knowledge_tools: Any = None
     # P2-R2-C2: Ingestion Worker Manager (None = disabled / [rag] extra missing).
     # Holds app-scoped singleton that drives PDF→Canonical Markdown pipeline.
     # Constructed in lifespan AFTER knowledge subsystem; started before yield;

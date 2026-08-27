@@ -9,7 +9,6 @@ import { useSessionStore } from "../../stores/sessionStore"
 import { clearSessionRoute } from "../../utils/sessionRoute"
 import LoadingSpinner from "../common/LoadingSpinner.vue"
 import AboutModal from "../about/AboutModal.vue"
-import KnowledgeManagerModal from "../knowledge/KnowledgeManagerModal.vue"
 import MCPManagerModal from "../mcp/MCPManagerModal.vue"
 import ProviderSettingsModal from "../providers/ProviderSettingsModal.vue"
 import SkillManagerModal from "../skills/SkillManagerModal.vue"
@@ -18,6 +17,7 @@ import CodingSandboxModal from "../coding-sandbox/CodingSandboxModal.vue"
 const authStore = useAuthStore()
 const sessionStore = useSessionStore()
 const chatStore = useChatStore()
+const emit = defineEmits<{ (event: "open-knowledge"): void }>()
 
 const sessions = computed(() => sessionStore.sessions)
 const activeId = computed(() => sessionStore.activeSessionId)
@@ -25,7 +25,6 @@ const activeId = computed(() => sessionStore.activeSessionId)
 const skillsOpen = ref(false)
 const mcpOpen = ref(false)
 const providerOpen = ref(false)
-const knowledgeOpen = ref(false)
 const sandboxOpen = ref(false)
 const aboutOpen = ref(false)
 
@@ -146,8 +145,8 @@ async function signOut(): Promise<void> {
       <button
         class="sidebar-tool-btn"
         data-testid="knowledge-button"
-        title="Knowledge libraries manager"
-        @click="knowledgeOpen = true"
+        title="Open LLM Wiki"
+        @click="emit('open-knowledge')"
       >
         Knowledge
       </button>
@@ -246,7 +245,6 @@ async function signOut(): Promise<void> {
     </div>
 
     <SkillManagerModal :open="skillsOpen" @close="skillsOpen = false" />
-    <KnowledgeManagerModal :open="knowledgeOpen" @close="knowledgeOpen = false" />
     <MCPManagerModal :open="mcpOpen" @close="mcpOpen = false" />
     <CodingSandboxModal :open="sandboxOpen" @close="sandboxOpen = false" />
     <ProviderSettingsModal

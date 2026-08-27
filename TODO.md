@@ -1,6 +1,6 @@
 # Current TODO
 
-> 校准日期：**2026-08-24**。本文件只保留尚未完成或明确延期的事项；已完成阶段不再复制数百行历史记录，统一由 [`STATUS.md`](STATUS.md)、[`CHANGELOG.md`](CHANGELOG.md) 和 `docs/validation/` 追溯。
+> 校准日期：**2026-08-28**。本文件只保留尚未完成或明确延期的事项；已完成阶段不再复制数百行历史记录，统一由 [`STATUS.md`](STATUS.md)、[`CHANGELOG.md`](CHANGELOG.md) 和 `docs/validation/` 追溯。
 
 ## 当前收敛执行顺序
 
@@ -9,6 +9,7 @@
 - [x] **3. 统一 Python、FastAPI/Auth、前端与 release 版本号，并补齐仓库根 `LICENSE`**（完成：统一为未打 tag 的 `0.0.28`；两个 FastAPI 工厂直接复用 Python `__version__`；新增跨 Python/前端/lockfile/API 一致性测试；根 MIT `LICENSE` 已进入 wheel；提交 `8a6ff2e`）
 - [x] **4. 复跑当前提交的完整 Playwright E2E 与最终 GLM 真实 smoke**（完成：修复 full-suite 的 Regenerate 完成等待、logout 共享 token 撤销与 Session 删除路由竞态，提交 `51ce3c7`；完整 Playwright 45/45 passed；固定 DDGS 1 项 + GLM 2 项真实 smoke 3/3 passed）
 - [x] **5. 继续 pi-agent 对齐：补齐 model、thinking level、streaming message、pending tool calls 等公开 Agent 状态**（完成：新增 secret-free `AgentModelState`、完整 `ThinkingLevel`、`is_streaming` / `streaming_message` / `pending_tool_calls` / `error_message`；按消息与工具事件生命周期更新，request 结束、异常与 reset 统一清理；`/api/state` 与前端类型同步；提交 `848ae1d`）
+- [x] **6. 按当前开发阶段精简测试套件**：采用“最小可观察行为”预算，删除退役 Chunk-RAG、历史 Step/Smoke、Provider 内部实现与重复边界矩阵，只保留核心语义、安全/数据风险、公开 API 和关键用户旅程；Backend 从 4093 降到 2105 collected，Frontend Vitest 从 352 降到 180，Playwright 从 54 收敛为 8 个规格/18 项。第二轮仅改测试与策略文档，按开发阶段规则不复跑耗时全量门禁；当前收集、Ruff 和保留的最小定向测试通过。历史冻结证据继续归档在 `docs/validation/`
 
 ## P0 — Session Workspace 一体化
 
@@ -18,7 +19,7 @@
 - [x] **阶段 1：统一 `WorkspaceStore` 与初始化 `Memory.md`**（完成）：以 `WorkspaceStore` 作为 Session 文件唯一规范事实源，`VirtualFileStore` 仅为同一实现的兼容别名；新旧 Session 均幂等拥有唯一根 `AGENT.md` 与 `Memory.md`，迁移保留已有正文/file id 并规范大小写等价旧路径与 purpose，两个固定根文件均禁止删除；Ruff PASS、strict Mypy 141 files / 0 issues、Workspace/文件/Auth/Checkpointer 定向 125 passed（`-W error`）、Backend CI 3857 passed / 8 skipped / 12 deselected、83.69% coverage
 - [x] **阶段 2：代码与 Markdown 规则**（完成）：`WorkspaceStore` 按扩展名把 Agent 写入和用户上传的代码统一映射到惰性逻辑根 `scripts/`，安全相对目录自动约束在其下；新增普通 Markdown 精确创建、正文更新、移动/重命名和删除 API，固定根文件继续受保护；每个 Session 以隐藏 `.workspace.json` 持久化单调 revision，mutation 同时支持逐文件 SHA 与 Workspace revision 乐观锁，失败保持文件树/revision 不变，删除 tombstone 和状态 temp 可在重启时收敛；Agent `write_file`/`list_files` 与前端 API/types/store 返回 revision。全量 Ruff PASS、strict Mypy 141 files / 0 issues、阶段定向 Backend 116 passed、Frontend typecheck/lint 与 Vitest 405/405 passed
 - [x] **阶段 3：右侧 Workspace 成果面板**（完成）：`AppShell` 改为 Sessions / Chat / Workspace 三栏，窄于 1050px 时右栏降级为带新成果提示的 drawer；右栏监听成功 `write_file` ToolResult 的 `file_id`/Workspace revision，立即刷新、选中并预览 Agent 生成的 `.md`、`.py` 等成果，整页刷新后从持久 ToolResult 恢复；Files 支持目录树、最新成果提示、用户上传（不自动附加到聊天）、Markdown 创建/安全预览/编辑、代码查看与下载，Sandbox / Changes 复用现有 operation、日志、验证、diff 和完整审批发布 Modal。Frontend typecheck/lint/build PASS、Vitest 409/409、Playwright 全量 52/52（含成果自动展示/刷新恢复、Markdown 编辑、代码上传、窄屏 drawer），0 retry / 0 failure
-- [ ] **阶段 4：统一 Sandbox 快照与发布目标**（冻结）：从 `WorkspaceStore` 物化 E2B 快照，固定验证和用户确认后事务发布回同一 Workspace，保护根文件与系统路径并原子提升 revision；在 LLM Wiki 当前阶段完成前不进入实施
+- [ ] **阶段 4：统一 Sandbox 快照与发布目标**（冻结，需用户显式解除）：从 `WorkspaceStore` 物化 E2B 快照，固定验证和用户确认后事务发布回同一 Workspace，保护根文件与系统路径并原子提升 revision
 - [ ] **阶段 5：固定文档转换工作流**（冻结）：建立不可变原件、转换任务和 manifest，依次支持 PDF→Markdown、DOCX→Markdown、XLSX→摘要/CSV/schema；OCR 明确延期；不得与独立 Knowledge/LLM Wiki 的 Raw Source 流水线混用
 - [ ] **阶段 6：完整验收**（冻结）：Backend/Frontend 静态检查和测试、Workspace Browser E2E、刷新/重启/并发冲突回归，以及真实 E2B Python 写入、验证和发布 smoke
 
@@ -32,7 +33,7 @@
 - [x] **阶段 1A：Provider Contract v1 与 Marker 历史 Gate**（完成但停止后续实施）：已验证独立 `wiki_parser` 生命周期、immutable/extra-forbid DTO、固定安全错误、来源/制品 SHA、配额/超时/取消/幂等销毁和完全离线 Fake；Marker 专属实现路线于 2026-08-23 被双 Parser 取代，历史审计仅见 [`docs/design/llm-wiki-marker-provider-gate.md`](docs/design/llm-wiki-marker-provider-gate.md)
 - [x] **阶段 1B：冻结双 PDF Parser 架构**：PyMuPDF4LLM 负责 fast，Docling 负责 accurate 与 auto 质量回退；两者只读取原始 PDF；API 固定 `auto|fast|accurate`；Docling standard/ocr Converter 启动期复用；路由/质量阈值版本化且不从 API 注入；保存 Parser/version/preset/config/质量/attempt；保持无 Chunk-RAG；PyMuPDF4LLM 选择 AGPL-3.0 合规路径。设计见 [`docs/design/llm-wiki-dual-pdf-parser.md`](docs/design/llm-wiki-dual-pdf-parser.md)
 - [x] **阶段 2：实现 WikiStore、`wiki.db` 与新目录结构**（完成）：新增独立 `pi_agent_core_py.web.wiki`，以三重 DB 身份/version gate、SQLite capability/integrity gate、STRICT/FK/CHECK/UNIQUE 建立 Space/Source/Artifact/Page/Revision/PageSource/Edge/ChangeSet/Item/Conversation/Job schema v1，明确不创建 Chunk/Chunk FTS；实现带跨连接 CAS/软删除状态机的 Space CRUD，固定 `spaces/{space_id}/{raw,pages}`、canonical `space.json`、全层 casefold/symlink/reparse/特殊文件防护、Raw no-clobber 与 Page atomic replace、启动镜像重建/orphan 报告/staging 隔离；显式 `retire` 在独占锁内先生成 SQLite 一致快照与逐文件 SHA 的只读 legacy backup，再清理旧固定路径，默认 `preserve` 且未触碰真实用户旧库。设计见 [`docs/design/llm-wiki-store-v1.md`](docs/design/llm-wiki-store-v1.md)；Ruff PASS、strict Mypy 152 files / 0 issues、新 Wiki 52 passed / 4 capability skipped、新旧邻接 149 passed / 5 skipped、Backend 3949 passed / 12 skipped / 12 deselected / 83.35%
-- [ ] **阶段 3：实现 PDF/HTML Raw Ingestion**（进行中；Contract v1 Backend/HTML/Fake PDF、双 Parser Contract v2、Raw parse revisions、Fake v2、Contract v2 主应用编排、AGPL Worker 合规包、真实 Parser adapter/source Gate、离线 OCI 与真实 smoke 已完成，仅阶段 3 前端待完成；设计见 [`docs/design/llm-wiki-raw-ingestion.md`](docs/design/llm-wiki-raw-ingestion.md)）
+- [x] **阶段 3：实现 PDF/HTML Raw Ingestion**（完成；Contract v1 Backend/HTML/Fake PDF、双 Parser Contract v2、Raw parse revisions、Fake v2、Contract v2 主应用编排、AGPL Worker 合规包、真实 Parser adapter/source Gate、离线 OCI/真实 smoke，以及 Space/Source/解析状态/Raw artifact 前端均已完成；设计见 [`docs/design/llm-wiki-raw-ingestion.md`](docs/design/llm-wiki-raw-ingestion.md)）
   - [x] Source/Artifact/Job DTO、不可变 `source.pdf|source.html`、同内容冲突、固定 Raw bundle 路径、状态机与跨连接原子 parse claim
   - [x] 零网络单文件 HTML Parser：严格 UTF-8、移除 script/style/iframe/object/embed/form 等主动内容、不获取 CSS/图片/iframe，转义来源 Markdown 注入，仅提取受 MIME/魔数/单图/总量/数量配额约束的 `data:` PNG/JPEG/WebP
   - [x] 不可信 Parser tar 导入：重算 archive/manifest/逐文件 SHA，核验 job/source/provider/version，拒绝路径穿越、大小写重复、symlink/目录/特殊成员、未声明文件、错误 MIME/魔数、超额文件和非 UTF-8 Markdown；全部验证后才以 no-clobber/idempotent 语义写入 Raw
@@ -52,11 +53,20 @@
     - [x] 固定 digest 基础镜像、88 包 `uv.lock`、87 条跨平台 marker 后 Linux resolution、`pip --require-hashes`、PyPI + PyTorch CPU 索引、构建期模型逐文件 hash/size 校验，以及无网/只读/非 root/no-cap/no-new-privileges Compose
     - [x] 将 OCI build、锁、队列/监督器和 hash-pinned AGPL 上游源码物化脚本加入 35 文件确定性 Source Offer；每次镜像构建把三项 Artifex 源码归档及 canonical evidence manifest 放入镜像，并提供不输出正文的多语料实机 smoke CLI；本机真实物化 3/3 成功（PyMuPDF 87,903,557 bytes、PyMuPDF Layout 44,947,301 bytes、PyMuPDF4LLM 2,091,728 bytes），逐项 SHA-256 与 `runtime-manifest.json` 一致
     - [x] 实际镜像复核三项 AGPL 上游源码 bundle、容器 notices 与 runtime manifest；运行容器确认 `network_mode=none`、只读 rootfs、UID 65532、drop-all capabilities、no-new-privileges 和 CPU/内存/PID 上限；真实 RFC digital fast、W-9 accurate、复杂论文 accurate、扫描件 OCR 及 auto fast-quality-rejected → 原始 PDF Docling 均成功，运行中取消在 0.141s 内收敛并恢复 healthy，`runtime_ready=true`；最终 exchange 固定到源码树外 `.test-tmp`，smoke CLI 对源码树内 exchange/output fail fast 并有回归，避免运行态文件破坏精确 Source Offer
-  - [ ] 前端支持 Space、Source、解析状态和 Raw artifact 浏览；不得复活 Chunk 检索 UI，完整 Pages/Graph/Changes/Conversations 页面仍属于阶段 7
-- [ ] **阶段 4：实现 Wiki 页面、Revision 与原子 Change Set**：每个来源生成入口页草稿，允许 Agent 提出主题子页面；创建/更新/删除页面及 edge add/delete 统一生成稳定 diff；用户一次批准后全有或全无发布，任一 page version/SHA 或 graph revision 变化时整个 Change Set 标记 stale
-- [ ] **阶段 5：实现页面级 FTS5 与页面知识图谱**：只索引 active 页面当前已批准 revision；支持 `related_to`、`references`、`extends`、`contradicts`、`part_of`，强制同 Space、去重、自环/`part_of` 循环校验；`derived_from` 只由服务端依据可信来源证据维护
-- [ ] **阶段 6：实现 Knowledge Agent 模式与 Space 多对话**：复用 Agent loop、消息/流、lane、compaction 和持久化，新增独立 Knowledge Prompt、内置 Wiki Skill 和工具白名单；`space_id`/`conversation_id` 由可信上下文注入，Agent 只读 Raw、只能写 Change Set staging，禁止跨 Space
-- [ ] **阶段 7：实现独立 Knowledge 页面并完成退役验收**：将现有弹窗替换为 Pages/Sources/Graph/Changes/Conversations 页面；支持来源/解析产物查看、页面阅读与 revision、图谱、统一 diff 审批和多对话；完成静态检查、Backend/Frontend/E2E、安全、并发、恢复、真实双 Parser 与大文件配额验收后退役旧 API/Worker/UI
+  - [x] 前端支持 Space、Source、解析状态和 Raw artifact 安全浏览；未复活 Chunk 检索 UI
+- [x] **阶段 4–6：按固定顺序完成页面中心主链路**
+  1. [x] **Agent 总结**：schema v3 新增 immutable `wiki_source_summaries` Summary Draft；tool-free core Agent 分页读取当前 selected Raw page Markdown，严格 JSON/页码引用校验，记录 source/parse revision/selection version、原件与 parsed/manifest SHA、prompt revision、实际 provider/model 及正文 SHA；大文档分批后再由同一模型合并，重解析并发 CAS 失败，非法输出只失败 Job，不改 Raw/Page/FTS/Graph；提供生成、列表、读取 REST API。Wiki 全量 `177 passed, 4 skipped`，新增后定向 `36 passed, 1 skipped`，Ruff PASS、strict Mypy 14 Wiki/App source files / 0 issues
+  2. [x] **Wiki 入口页**：schema v4 新增 immutable `wiki_page_proposals`；只消费仍绑定当前 selected parse revision 的 Summary Draft，以确定性模板生成一篇 entry proposal，转义 Markdown/HTML 主动结构、生成稳定 Unicode slug 与别名、保存可信来源 locator 和正文 SHA；重复请求幂等，重解析后拒绝旧 Draft，只完成 `synthesize_entry_page` Job，不写正式 Page/Revision/FTS/Graph。生成/列表/读取 REST 已接入；Wiki 全量 `180 passed, 4 skipped`，Ruff PASS、strict Mypy 15 Wiki/App source files / 0 issues
+  3. [x] **主题子页面**：schema v5 新增 `synthesize_topic_pages` Job；严格要求入口 proposal 已存在，从同一 Summary Draft 的 topic candidates 确定性生成零到多个 topic proposals，固定 ordinal/父入口/稳定 slug，只合并页码相交的关键点并保存可信 locator；同一 Job 在单事务中全量插入，重复请求幂等，仍不写正式 Page/Revision/FTS/Graph。REST 已接入；Wiki 全量 `183 passed, 4 skipped`，定向 `42 passed, 1 skipped`，Ruff PASS、strict Mypy 15 Wiki/App source files / 0 issues
+  4. [x] **Change Set diff**：schema v6 将 Change Set 可信绑定 `source_summary_id`；按 entry→topic ordinal 稳定顺序把全部 proposals 原子冻结为一个 `awaiting_approval` Change Set，page-create item 同时保存 canonical payload JSON、来源 locator、正文 SHA 与确定性 unified diff；重复请求幂等，slug/来源/selected revision/graph base 冲突 fail closed，不提供发布入口。REST 已接入；Wiki 全量 `185 passed, 4 skipped`，定向 `44 passed, 1 skipped`，Ruff PASS、strict Mypy 16 Wiki/App source files / 0 issues
+  5. [x] **用户批准**：实现 approve/reject 单入口与幂等决策；approve 在 Space 写锁/`BEGIN IMMEDIATE` 中重验 graph revision、selected parse revision、Summary/Proposal/payload/diff/slug，原子创建全部 Page、immutable Revision、PageSource，回填 Change Item target、推进 graph revision 并发布 Change Set；任一前提变化持久化整体 `stale` 且零部分写入，reject 零发布。commit 后按 DB current revision 原子刷新 `pages/*.md` 与 `space.json`，启动可修复缺失镜像；Page/Revision/decision REST 已接入。Wiki 全量 `188 passed, 4 skipped`，定向 `47 passed, 1 skipped`，Ruff PASS、strict Mypy 16 Wiki/App source files / 0 issues
+  6. [x] **页面 FTS5**：schema v7 新增独立 `wiki_pages_fts`（unicode61）；索引插入与 Change Set approve 同事务，只投影 active Page 的 current approved Revision，启动可从规范 Page/Revision 全量重建；Raw、Summary、Proposal、未批准 Change Set、历史 Revision 和 Chunk 均无写入路径。查询由服务端固定 Space，用户文本逐 term 编译为 quoted literal phrase，限制长度/limit，返回 page/revision/snippet/BM25 rank；REST 已接入。Wiki 全量 `190 passed, 4 skipped`，定向 `49 passed, 1 skipped`，Ruff PASS、strict Mypy 17 Wiki/App source files / 0 issues
+  7. [x] **页面知识图谱**：主题页→入口页的 `part_of` 作为 edge-add item 与所有 page-create item 进入同一 Change Set，批准事务在任何写入前重验 canonical payload/diff、固定关系类型、同 Space 端点、去重、自环、`related_to` 规范方向和 `part_of` 无环性，再原子写入 Page/Revision/PageSource/FTS/Edge 并统一推进 graph revision；`derived_from` 不进入 `wiki_edges`，只从可信 `wiki_page_sources` 动态投影为 system-managed 边。提供稳定全图与单页邻接 REST 快照，草稿/拒绝/stale 内容均不可见。Wiki 全量 `191 passed, 4 skipped`，图谱/API 定向 `22 passed`，全量 Ruff PASS、strict Mypy 17 Wiki/App source files / 0 issues
+  8. [x] **Knowledge Agent 对话**：实现每个 Space 多个独立 Knowledge Conversation，并以持久 Session 作为唯一可信运行时绑定；创建对话采用补偿式 saga 初始化 Session/provider/workspace/Wiki binding，Session 删除自动归档对应对话。Prompt 执行、regenerate 和 context budget 均自动识别 Knowledge 模式，复用既有 Agent loop、text/thinking/tool 流事件、lane、消息树与 compaction，同时拒绝请求伪造 Conversation、Workspace 附件和用户可选 Skill。运行时临时替换为固定内置 Knowledge Prompt/Skill policy 与 10 个 `wiki_*` 白名单工具，`finally` 恢复普通 Agent registry；读工具只访问可信 Space 的已批准 Page/FTS/Graph 和受限 Raw artifact。Agent 对页面创建、修改、删除及固定页面关系增删只能生成 conversation-bound `awaiting_approval` Change Set 和完整 diff；批准事务重新校验 graph/page revision、payload/diff、Space、关系方向/去重/无环后才原子更新 Page/Revision/FTS/Graph/镜像，竞态整体 stale；`derived_from` 无 proposal/写入路径。Conversation REST 已接入；真实 tool-call loop、跨 Space/Session 隔离、审批前不可见、批准后发布、stale、删除镜像和禁止伪造来源边均有回归。Wiki 全量 `195 passed, 4 skipped`，Knowledge/Store/API 定向 `54 passed, 1 skipped`，全量 Ruff PASS、strict Mypy 19 Wiki/App source files / 0 issues
+- [x] **阶段 7：实现独立 Knowledge 页面并完成退役验收**：新增 `/knowledge` 独立路由与 Pages/Sources/Graph/Changes/Conversations 五视图，支持来源/解析产物、页面/revision、FTS5、图谱、统一 diff 审批及多 Knowledge 对话；删除旧 Library/Document/Chunk 前端，开发与 E2E 产品组合不再启动旧 DB/ingestion/indexing/`search_knowledge`/REST，旧 Backend 仅保留显式兼容入口且默认测试只验证其不可被产品误启动。当前门禁结果记录于 [`STATUS.md`](STATUS.md)
+- [x] **阶段 8：实现 Source retention 与安全 Raw 清理**：新增 Source 删除 API 与前端二次确认入口；请求后立即进入不可逆 `deleting` 并禁止原件/Artifact 内容读取，默认保留 7 天后由独立 retention 协程清理该 Source 的完整 Raw bundle。清理采用同目录原子改名和拒绝 link/reparse/special file 的不跟随遍历，崩溃遗留 staging 可重试；Source、解析、Summary 与审批审计行永久保留。active Page 的 `derived_from`、运行中 Job 或待审批 Change Set 会以 409 阻断删除；不修改 schema。新增/修改 2 个 API 行为测试，定向 2/2、既有 Worker 4/4、Wiki 视图 4/4 通过；Ruff、定向 strict Mypy、Frontend typecheck/ESLint 通过
+- [x] **阶段 9：补齐 Wiki Space 生命周期**：新增 `active ↔ archived` API 和前端 Archive/Restore，归档后不再作为默认活动 Space；新增 Space 删除 API 与明确二次确认。删除仍是审计保留的 `deleting` 终态，只有全部 Source 已 deleting、Page 已 deleted、Conversation 已 archived，且不存在 queued/running Job 或 draft/awaiting-approval Change Set 时才允许，任一未收敛项统一返回 `space_in_use` 409；数据库及 Space 目录不物理删除。新增/修改 2 个 API 行为测试，定向 2/2、既有 Store 状态机 1/1 通过；Ruff、定向 strict Mypy、Frontend typecheck/ESLint 与既有 Wiki Workspace 测试通过
+- [x] **阶段 10：收紧 archived Space 只读语义**：Archive 事务拒绝 queued/running Job、active Conversation 和 draft/awaiting-approval Change Set；上传、解析 claim、Summary/Proposal Job、新对话及 Source/Knowledge Change Set 均在写事务内重验 Space 仍为 active，避免“先检查、后归档”的竞态。读取、页面搜索、图谱和审计浏览保持可用；Restore、对话归档、Change Set reject、Source/Space 删除收敛路径保持可用。统一返回 `space_read_only` 409。未新增测试，仅在现有 Space 生命周期测试中增加代表性上传阻断断言；相关 API/Summary/Worker 6/6、Ruff 与定向 strict Mypy 通过
 
 ## P0 — 托管 Coding Sandbox 与安全发布
 
@@ -118,6 +128,7 @@ Modal 与 Local Docker 作为后续兼容后端，最终用户不需要安装 Py
 - [x] 在仓库根补齐标准 MIT `LICENSE`，`pyproject.toml` 直接引用该文件，并验证 wheel 同时携带 `License-File: LICENSE` 与许可证正文
 - [x] 在发布前复跑当前 HEAD 的完整 Playwright E2E：45/45 passed，单 worker、`CI=1`、独立端口 8012，production build 已由 posttest 恢复
 - [x] 通过固定 secret-safe 脚本复跑真实网络 smoke：DDGS 1 项 + GLM 2 项，3/3 passed，未输出 API Key
+- [x] 整理并提交 LLM Wiki 阶段 3–10 发布候选（完成：清除并忽略 `.t/` 测试产物；设计/状态同步到阶段 10；Ruff、strict Mypy 168 files、Frontend ESLint/typecheck/build 通过；Backend 2091 passed / 7 skipped / 9 deselected，Frontend 180/180，Wiki 定向 Backend 67 passed / 1 skipped、Frontend 16/16、Playwright 1/1；修复测试精简后保留安全用例引用已删除 fixture 的问题）
 - [ ] 决定并创建 `0.0.28` 对应的 release tag；package baseline 已确定，但 tag 名称与创建动作仍需用户单独授权
 - [ ] 如需 push，先配置 Git remote；当前仓库没有 remote，push 仍需用户单独授权
 - [ ] 评估本地初始账号 `admin / 123456` 的改密入口；在此之前继续保持 localhost-only
@@ -143,7 +154,7 @@ Modal 与 Local Docker 作为后续兼容后端，最终用户不需要安装 Py
 
 ## 明确延期 / Out of scope
 
-- [ ] OCR 与图片理解：Docling OCR preset 的 engine、语言、模型许可证、版本/hash、资源与真实语料质量须先通过双 Parser Gate；公式/代码/VLM enrichment 首版默认关闭
+- [ ] 扩展图片理解与富版面 enrichment：Docling OCR preset 基线已通过双 Parser Gate；更多 OCR 语言/语料质量、公式、代码与 VLM enrichment 仍默认关闭，启用前需独立版本/hash/许可证/资源 Gate
 - [ ] Multi-Agent、Plan Mode；托管 Coding Sandbox 已提升到 P0，Local Docker/Git provider integration 仍按其独立阶段实施
 - [ ] RBAC、OAuth、企业级多租户、TLS 公网部署、横向扩展
 - [ ] 向量数据库、embedding、hybrid retrieval 与 Chunk RAG；LLM Wiki 仅保留已批准页面的 SQLite FTS5
