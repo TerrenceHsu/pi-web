@@ -244,6 +244,7 @@ class PublisherResult(BaseModel):
     artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     changed_paths: tuple[str, ...]
     deleted_paths: tuple[str, ...]
+    workspace_revision: int | None = Field(default=None, ge=0)
     started_at_ms: int = Field(ge=0)
     finished_at_ms: int = Field(ge=0)
 

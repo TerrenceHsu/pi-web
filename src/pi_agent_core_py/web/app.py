@@ -970,6 +970,10 @@ def create_app(
                     from coding_sandbox import HMACSHA256ArtifactSigner
 
                     from .coding_sandbox.runtime import sandbox_runtime_context
+                    from .coding_sandbox.workspace import (
+                        WorkspaceSandboxArtifactPublisher,
+                        WorkspaceSandboxBaselineProvider,
+                    )
 
                     database_path = await asyncio.to_thread(
                         Path(str(db_path)).resolve,
@@ -993,6 +997,46 @@ def create_app(
                             f"sandbox:{event.operation_id}",
                             event.session_id,
                         )
+                        if event.event_type == "sandbox_publish_finished":
+                            workspace_revision = event.payload.get("workspace_revision")
+                            if isinstance(workspace_revision, int):
+                                await _emit_web_payload(
+                                    {
+                                        "type": "workspace_changed",
+                                        "source": "coding_sandbox",
+                                        "operation_id": event.operation_id,
+                                        "workspace_revision": workspace_revision,
+                                        "changed_paths": event.payload.get(
+                                            "changed_paths",
+                                            [],
+                                        ),
+                                        "deleted_paths": event.payload.get(
+                                            "deleted_paths",
+                                            [],
+                                        ),
+                                    },
+                                    f"workspace:{event.operation_id}",
+                                    event.session_id,
+                                )
+
+                    sandbox_staging_root = database_path.parent / "coding-sandbox-staging"
+                    sandbox_projects_root: Path | None = (
+                        database_path.parent / "coding-sandbox-projects"
+                    )
+                    sandbox_baseline_provider = None
+                    sandbox_artifact_publisher = None
+                    if state.file_store is not None:
+                        sandbox_projects_root = None
+                        sandbox_baseline_provider = WorkspaceSandboxBaselineProvider(
+                            state.file_store,
+                            materialization_root=(
+                                sandbox_staging_root / "workspace-materializations"
+                            ),
+                        )
+                        sandbox_artifact_publisher = WorkspaceSandboxArtifactPublisher(
+                            state.file_store,
+                            staging_root=(sandbox_staging_root / "workspace-publishes"),
+                        )
 
                     sandbox_runtime_cm = sandbox_runtime_context(
                         database_path=str(db_path),
@@ -1000,9 +1044,11 @@ def create_app(
                         backend_factory=coding_sandbox_backend_factory,
                         artifact_signer=artifact_signer,
                         session_exists=_session_exists_cb,
-                        projects_root=(database_path.parent / "coding-sandbox-projects"),
+                        projects_root=sandbox_projects_root,
+                        baseline_provider=sandbox_baseline_provider,
+                        artifact_publisher=sandbox_artifact_publisher,
                         publisher_state_root=(database_path.parent / "coding-sandbox-publisher"),
-                        staging_root=(database_path.parent / "coding-sandbox-staging"),
+                        staging_root=sandbox_staging_root,
                         event_sink=_sandbox_event_sink,
                     )
                     _app.state.coding_sandbox_runtime = await sandbox_runtime_cm.__aenter__()

@@ -19,6 +19,10 @@ from .runtime import (
     resolve_sandbox_runtime_configuration,
     sandbox_runtime_context,
 )
+from .workspace import (
+    WorkspaceSandboxArtifactPublisher,
+    WorkspaceSandboxBaselineProvider,
+)
 
 __all__ = [
     "SQLiteSandboxConfigStore",
@@ -35,4 +39,6 @@ __all__ = [
     "SandboxRuntimeState",
     "resolve_sandbox_runtime_configuration",
     "sandbox_runtime_context",
+    "WorkspaceSandboxArtifactPublisher",
+    "WorkspaceSandboxBaselineProvider",
 ]

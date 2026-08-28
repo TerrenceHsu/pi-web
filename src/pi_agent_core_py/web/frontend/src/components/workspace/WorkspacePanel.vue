@@ -32,6 +32,7 @@ const markdownPath = ref("notes/new-note.md")
 const markdownContent = ref("# New note\n")
 const fileInput = ref<HTMLInputElement | null>(null)
 const handledArtifactSignals = new Set<string>()
+const handledPublishSignals = new Set<string>()
 
 const sessionId = computed(() => sessionStore.activeSessionId)
 const files = computed(() => {
@@ -103,6 +104,31 @@ watch(sessionId, () => {
   activeTab.value = "files"
   createOpen.value = false
 })
+
+watch(
+  () =>
+    [
+      sessionId.value,
+      operation.value?.status,
+      operation.value?.published_workspace_revision,
+    ] as const,
+  async ([sid, status, revision]) => {
+    const current = operation.value
+    if (!sid || status !== "published" || revision == null || !current) return
+    const signal = `${sid}:${current.operation_id}:${revision}`
+    if (handledPublishSignals.has(signal)) return
+    await fileStore.revealPublishedWorkspace(
+      sid,
+      current.changed_paths,
+      revision,
+      current.operation_id,
+    )
+    if (fileStore.workspaceBySession[sid]?.revision !== revision) return
+    handledPublishSignals.add(signal)
+    activeTab.value = "files"
+  },
+  { immediate: true },
+)
 
 async function refresh(): Promise<void> {
   if (sessionId.value) await fileStore.loadFiles(sessionId.value)

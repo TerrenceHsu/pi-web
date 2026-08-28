@@ -10,6 +10,7 @@ import type {
   SandboxDiff,
 } from "../types/codingSandbox"
 import { isWebEventEnvelope } from "../types/events"
+import { useFileStore } from "./fileStore"
 
 const TRANSIENT_STATUSES = new Set([
   "creating",
@@ -211,7 +212,21 @@ export const useCodingSandboxStore = defineStore("codingSandbox", () => {
       },
       onEvent: (event) => {
         if (!isWebEventEnvelope(event)) return
-        if (event.session_id !== activeSessionId.value) return
+        if (!event.session_id || event.session_id !== activeSessionId.value) return
+        if (event.type === "workspace_changed") {
+          const revision = event.payload.workspace_revision
+          const changedPaths = event.payload.changed_paths
+          if (typeof revision === "number" && Array.isArray(changedPaths)) {
+            const paths = changedPaths.filter((path): path is string => typeof path === "string")
+            void useFileStore().revealPublishedWorkspace(
+              event.session_id,
+              paths,
+              revision,
+              String(event.payload.operation_id ?? event.event_id),
+            )
+          }
+          return
+        }
         if (!event.type.startsWith("sandbox_")) return
         if (operation.value && event.payload.operation_id !== operation.value.operation_id) {
           return

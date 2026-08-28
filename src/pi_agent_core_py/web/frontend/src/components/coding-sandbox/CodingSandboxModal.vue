@@ -3,7 +3,7 @@ import { computed, ref, watch } from "vue"
 
 import { useCodingSandboxStore } from "../../stores/codingSandboxStore"
 import { useSessionStore } from "../../stores/sessionStore"
-import type { ManagedSandboxEvent } from "../../types/codingSandbox"
+import type { ManagedSandboxAction, ManagedSandboxEvent } from "../../types/codingSandbox"
 import ErrorBanner from "../common/ErrorBanner.vue"
 import LoadingSpinner from "../common/LoadingSpinner.vue"
 import Modal from "../common/Modal.vue"
@@ -19,19 +19,30 @@ const operation = computed(() => sandboxStore.operation)
 const canStart = computed(
   () => !!sessionStore.activeSessionId && (!operation.value || operation.value.terminal),
 )
-const canValidate = computed(() =>
-  ["ready", "validation_failed", "validated"].includes(operation.value?.status ?? ""),
-)
+
+function hasAction(action: ManagedSandboxAction): boolean {
+  const current = operation.value
+  if (!current) return false
+  if (current.allowed_actions) return current.allowed_actions.includes(action)
+  if (action === "validate") {
+    return ["ready", "validation_failed", "validated"].includes(current.status)
+  }
+  if (action === "prepare_publish") return current.status === "validated"
+  if (action === "publish") return current.status === "awaiting_approval"
+  if (action === "cancel") return current.cancellable
+  return !["published", "publishing", "cancelled", "discarded"].includes(current.status)
+}
+
+const canValidate = computed(() => hasAction("validate"))
 const canDiff = computed(() =>
   ["ready", "validation_failed", "validated", "awaiting_approval"].includes(
     operation.value?.status ?? "",
   ),
 )
-const canDiscard = computed(
-  () =>
-    !!operation.value &&
-    !["published", "publishing", "cancelled", "discarded"].includes(operation.value.status),
-)
+const canPreparePublish = computed(() => hasAction("prepare_publish"))
+const canPublish = computed(() => hasAction("publish"))
+const canCancel = computed(() => hasAction("cancel"))
+const canDiscard = computed(() => hasAction("discard"))
 
 watch(
   () => props.open,
@@ -112,6 +123,9 @@ function eventDetail(event: ManagedSandboxEvent): string {
             {{ statusLabel(operation.status) }}
           </span>
           <span class="revision">revision {{ operation.workspace_revision }}</span>
+          <span v-if="operation.baseline_workspace_revision != null" class="revision">
+            Workspace baseline {{ operation.baseline_workspace_revision }}
+          </span>
         </div>
         <div class="operation-id">{{ operation.operation_id }}</div>
         <div v-if="operation.error_code" class="operation-error">
@@ -148,13 +162,13 @@ function eventDetail(event: ManagedSandboxEvent): string {
         <button
           type="button"
           data-testid="sandbox-prepare-publish"
-          :disabled="sandboxStore.busy || operation.status !== 'validated'"
+          :disabled="sandboxStore.busy || !canPreparePublish"
           @click="sandboxStore.preparePublish"
         >
           Freeze for review
         </button>
         <button
-          v-if="operation.cancellable"
+          v-if="canCancel"
           type="button"
           data-testid="sandbox-cancel"
           :disabled="sandboxStore.busy"
@@ -215,19 +229,25 @@ function eventDetail(event: ManagedSandboxEvent): string {
           The artifact is frozen. Publishing applies exactly the reviewed paths transactionally to
           the managed local project.
         </p>
-        <label>
-          <input v-model="approvalConfirmed" type="checkbox" />
-          I reviewed the validation result and complete diff.
-        </label>
-        <button
-          type="button"
-          class="primary"
-          data-testid="sandbox-publish"
-          :disabled="sandboxStore.busy || !approvalConfirmed"
-          @click="sandboxStore.publish"
-        >
-          Publish to workspace
-        </button>
+        <p v-if="operation.publish_available === false" class="muted">
+          This artifact was created from a Workspace revision. Publishing is paused until the
+          transactional Workspace publisher is available; you can review or discard it safely.
+        </p>
+        <template v-else>
+          <label>
+            <input v-model="approvalConfirmed" type="checkbox" />
+            I reviewed the validation result and complete diff.
+          </label>
+          <button
+            type="button"
+            class="primary"
+            data-testid="sandbox-publish"
+            :disabled="sandboxStore.busy || !canPublish || !approvalConfirmed"
+            @click="sandboxStore.publish"
+          >
+            Publish to workspace
+          </button>
+        </template>
       </section>
 
       <section v-if="operation.status === 'published'" class="published-panel">

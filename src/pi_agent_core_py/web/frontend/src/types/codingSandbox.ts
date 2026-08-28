@@ -15,6 +15,8 @@ export type ManagedSandboxStatus =
   | "failed"
   | "interrupted"
 
+export type ManagedSandboxAction = "validate" | "prepare_publish" | "publish" | "cancel" | "discard"
+
 export interface SandboxDiffEntry {
   path: string
   status: "added" | "modified" | "deleted"
@@ -62,14 +64,21 @@ export interface ManagedSandboxOperation {
   workspace_revision: number
   baseline_archive_sha256: string | null
   baseline_manifest_sha256: string | null
+  baseline_workspace_revision?: number | null
+  baseline_workspace_sha256?: string | null
+  publish_available?: boolean
   validation: SandboxValidationEvidence | null
   diff: SandboxDiff | null
   artifact_id: string | null
   artifact_sha256: string | null
   publish_transaction_id: string | null
+  published_workspace_revision?: number | null
   changed_paths: string[]
   deleted_paths: string[]
   error_code: string | null
+  state_machine_version?: "pi-agent-managed-sandbox-state/v1"
+  allowed_actions?: ManagedSandboxAction[]
+  allowed_transitions?: ManagedSandboxStatus[]
   terminal: boolean
   cancellable: boolean
   approval_required: boolean

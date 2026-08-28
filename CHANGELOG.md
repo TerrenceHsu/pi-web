@@ -8,6 +8,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Coding Sandbox WorkspaceStore transactional publish（2026-08-28）
+
+- 新增 provider-neutral Artifact Publisher 与主应用 Workspace adapter：签名 Artifact 先在隔离镜像中复用既有本机事务 Publisher 完整复验，再把最终允许文件交给 `WorkspaceStore`，真实 Workspace 不进入 Sandbox
+- `WorkspaceStore` 新增 journaled multi-file publish：Session 锁内核验 baseline revision/tree/content，固定白名单为 `scripts/**` 与普通 UTF-8 Markdown，保护固定根、系统状态和 `documents/**`；payload staging、immutable generation、metadata pointer、删除 tombstone、单次 revision、rollback 与启动恢复形成完整事务边界
+- operation 记录目标 `published_workspace_revision`；发布事件携带 revision/changed/deleted paths 并广播 `workspace_changed`，右侧 Workspace 面板自动刷新和聚焦最新成果
+- 未新增测试文件，在 1 个既有文件新增 2 项验证批量成功与 stale baseline 零写入；Backend 86 passed / 2 capability skipped，Ruff、strict Mypy、Frontend typecheck/lint 与相关 Vitest 6/6 均通过
+
+### Coding Sandbox WorkspaceStore baseline（2026-08-28）
+
+- `WorkspaceStore` 新增 revision-bound logical-tree materialization：在 Session mutation lock 内逐文件复核 containment、regular file、metadata size/SHA 和打开前后 stat，只导出逻辑路径与内容，不泄露 file id、metadata、隐藏 revision state 或物理路径
+- 新增 Web 组合层 baseline adapter，向物化树注入受保护 validation config 后复用既有确定性 `ProjectSnapshot`；Managed operation 持久化源 Workspace revision/tree SHA，源 Workspace 后续变化不改写 baseline
+- 主应用启用 WorkspaceStore 时不再使用 `coding-sandbox-projects` 作为输入事实源；阶段 4C Publisher 未接入前，Workspace 来源 operation 的 `publish_available=false`，Backend/API/UI 均隐藏并拒绝 publish，但运行、验证、冻结和审阅保持可用
+- 未新增测试文件，修改 1 个既有 lifecycle 测试覆盖 Workspace baseline、后续 revision 隔离与发布暂停；Backend 73 passed / 1 capability skipped，Ruff、strict Mypy、Frontend typecheck/lint 与 CodingSandbox Vitest 均通过
+
+### Coding Sandbox explicit state machine and TOCTOU barrier（2026-08-28）
+
+- 以单一 Backend 转换表定义 Managed Sandbox 状态、动作和直接后继状态；REST 返回版本化 `allowed_actions` / `allowed_transitions`，前端不再独立推断操作权限
+- 生命周期持久化从 blind update 改为完整旧记录 compare-and-swap；并发 validate/freeze/cancel/discard 只有一个转换可提交，旧请求固定返回 `operation_conflict`
+- 明确 Validation→Freeze 屏障：屏障前 `validation_stale` 回到可重验状态，屏障后远端归档或最终指纹变化保留 `artifact_stale` 并终态销毁，不在 fail-closed operation 内重试
+- 修改 1 个既有测试验证公开状态动作和 stale CAS；Backend 定向 9 passed，Ruff、strict Mypy、Frontend typecheck/lint 与 CodingSandbox Vitest 均通过
+
 ### Complete-turn compaction semantics（2026-08-20）
 
 - `CompactionConfig` 默认边界从 message 改为完整 turn；固定 turn 数与 `keep_recent_tokens` 均只在 user 边界切分，最新 turn 即使超目标也不会拆散 tool-call/tool-result

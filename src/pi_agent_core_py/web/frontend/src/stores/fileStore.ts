@@ -208,6 +208,42 @@ export const useFileStore = defineStore("files", () => {
     return true
   }
 
+  async function revealPublishedWorkspace(
+    sessionId: string,
+    changedPaths: string[],
+    revision: number,
+    signalId: string,
+  ) {
+    const cached = filesBySession.value[sessionId] ?? []
+    if (
+      workspaceBySession.value[sessionId]?.revision !== revision ||
+      changedPaths.some(
+        (path) =>
+          !cached.some(
+            (file) => file.logical_path?.toLocaleLowerCase() === path.toLocaleLowerCase(),
+          ),
+      )
+    ) {
+      await loadFiles(sessionId)
+    }
+    const published = changedPaths
+      .map((path) =>
+        (filesBySession.value[sessionId] ?? []).find(
+          (file) => file.logical_path?.toLocaleLowerCase() === path.toLocaleLowerCase(),
+        ),
+      )
+      .find((file): file is FileRef => file !== undefined)
+    if (!published) return
+    latestArtifactBySession.value[sessionId] = {
+      fileId: published.id,
+      logicalPath: published.logical_path,
+      revision,
+      signalId,
+      unseen: true,
+    }
+    selectedFileIdBySession.value[sessionId] = published.id
+  }
+
   function acknowledgeArtifact(sessionId: string) {
     const artifact = latestArtifactBySession.value[sessionId]
     if (artifact?.unseen) {
@@ -250,6 +286,7 @@ export const useFileStore = defineStore("files", () => {
     createMarkdownFile,
     selectFile,
     revealAgentArtifact,
+    revealPublishedWorkspace,
     acknowledgeArtifact,
     resetForSession,
     resetWorkspace,

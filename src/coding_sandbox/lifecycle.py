@@ -11,18 +11,18 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 import aiosqlite
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from .admin.models import SandboxAdminConfig, SandboxConfigRecord
-from .artifact import ArtifactSigner
+from .artifact import ArtifactSigner, SandboxOutputArtifact
 from .backend import SandboxBackend
 from .models import SandboxCreateSpec, SandboxHandle, SandboxOutputChunk
 from .operation import SandboxOperation
-from .publisher import LocalTransactionalPublisher, PublisherError
+from .publisher import LocalTransactionalPublisher, PublisherError, PublisherResult
 from .snapshot import (
     ProjectSnapshot,
     SnapshotError,
@@ -47,6 +47,9 @@ MANAGED_OPERATION_SCHEMA: Literal["pi-agent-managed-sandbox-operation/v1"] = (
 )
 MANAGED_EVENT_SCHEMA: Literal["pi-agent-managed-sandbox-event/v1"] = (
     "pi-agent-managed-sandbox-event/v1"
+)
+SANDBOX_STATE_MACHINE_VERSION: Literal["pi-agent-managed-sandbox-state/v1"] = (
+    "pi-agent-managed-sandbox-state/v1"
 )
 _STORE_SCHEMA_VERSION = 2
 _MAX_RECORD_BYTES = 8 * 1024 * 1024
@@ -82,10 +85,95 @@ ManagedOperationStatus = Literal[
     "failed",
     "interrupted",
 ]
+SandboxOperationAction = Literal[
+    "validate",
+    "prepare_publish",
+    "publish",
+    "cancel",
+    "discard",
+]
 
 _TERMINAL_STATUSES: frozenset[ManagedOperationStatus] = frozenset(
     {"published", "cancelled", "discarded", "failed", "interrupted"}
 )
+
+_ALLOWED_STATUS_TRANSITIONS: dict[
+    ManagedOperationStatus,
+    frozenset[ManagedOperationStatus],
+] = {
+    "creating": frozenset({"ready", "cancelling", "discarding", "failed", "interrupted"}),
+    "ready": frozenset({"validating", "cancelling", "discarding", "failed", "interrupted"}),
+    "validating": frozenset(
+        {
+            "validated",
+            "validation_failed",
+            "cancelling",
+            "discarding",
+            "failed",
+            "interrupted",
+        }
+    ),
+    "validation_failed": frozenset(
+        {"ready", "validating", "cancelling", "discarding", "failed", "interrupted"}
+    ),
+    "validated": frozenset(
+        {"ready", "validating", "freezing", "cancelling", "discarding", "failed", "interrupted"}
+    ),
+    "freezing": frozenset(
+        {
+            "awaiting_approval",
+            "validation_failed",
+            "cancelling",
+            "discarding",
+            "failed",
+            "interrupted",
+        }
+    ),
+    "awaiting_approval": frozenset(
+        {"publishing", "cancelling", "discarding", "failed", "interrupted"}
+    ),
+    "publishing": frozenset({"published", "failed", "interrupted"}),
+    "published": frozenset(),
+    "cancelling": frozenset({"cancelled", "failed", "interrupted"}),
+    "cancelled": frozenset(),
+    "discarding": frozenset({"discarded", "failed", "interrupted"}),
+    "discarded": frozenset(),
+    "failed": frozenset({"discarding"}),
+    "interrupted": frozenset({"discarding"}),
+}
+
+_ALLOWED_ACTIONS: dict[ManagedOperationStatus, tuple[SandboxOperationAction, ...]] = {
+    "creating": ("cancel", "discard"),
+    "ready": ("validate", "cancel", "discard"),
+    "validating": ("cancel", "discard"),
+    "validation_failed": ("validate", "cancel", "discard"),
+    "validated": ("validate", "prepare_publish", "cancel", "discard"),
+    "freezing": ("cancel", "discard"),
+    "awaiting_approval": ("publish", "cancel", "discard"),
+    "publishing": (),
+    "published": (),
+    "cancelling": (),
+    "cancelled": (),
+    "discarding": (),
+    "discarded": (),
+    "failed": ("discard",),
+    "interrupted": ("discard",),
+}
+
+
+def allowed_sandbox_transitions(
+    status: ManagedOperationStatus,
+) -> tuple[ManagedOperationStatus, ...]:
+    """Return the state machine's stable, public successor list."""
+    return tuple(sorted(_ALLOWED_STATUS_TRANSITIONS[status]))
+
+
+def allowed_sandbox_actions(
+    status: ManagedOperationStatus,
+) -> tuple[SandboxOperationAction, ...]:
+    """Return commands accepted by the state machine in this state."""
+    return _ALLOWED_ACTIONS[status]
+
 
 LifecycleErrorCode = Literal[
     "sandbox_disabled",
@@ -98,6 +186,7 @@ LifecycleErrorCode = Literal[
     "project_invalid",
     "provider_error",
     "publisher_error",
+    "publisher_unavailable",
     "operation_failed",
 ]
 
@@ -112,6 +201,7 @@ _ERROR_MESSAGES: dict[LifecycleErrorCode, str] = {
     "project_invalid": "The managed local project is invalid.",
     "provider_error": "The Sandbox provider operation failed.",
     "publisher_error": "The local Publisher operation failed.",
+    "publisher_unavailable": "Workspace publishing is not available for this operation.",
     "operation_failed": "Managed Sandbox operation failed.",
 }
 
@@ -151,6 +241,12 @@ class ManagedSandboxOperationRecord(BaseModel):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
+    baseline_workspace_revision: int | None = Field(default=None, ge=0)
+    baseline_workspace_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    publish_available: bool = True
     validation: SandboxValidationEvidence | None = None
     diff: SandboxDiffResult | None = None
     artifact_id: str | None = Field(
@@ -165,6 +261,7 @@ class ManagedSandboxOperationRecord(BaseModel):
         default=None,
         pattern=r"^publish-[0-9a-f]{32}$",
     )
+    published_workspace_revision: int | None = Field(default=None, ge=0)
     changed_paths: tuple[str, ...] = ()
     deleted_paths: tuple[str, ...] = ()
     error_code: str | None = Field(default=None, max_length=128)
@@ -177,6 +274,8 @@ class ManagedSandboxOperationRecord(BaseModel):
             raise ValueError("approval state requires a frozen artifact")
         if self.status == "published" and self.publish_transaction_id is None:
             raise ValueError("published state requires a Publisher transaction")
+        if (self.baseline_workspace_revision is None) != (self.baseline_workspace_sha256 is None):
+            raise ValueError("Workspace baseline revision and SHA must be recorded together")
         return self
 
     @property
@@ -185,7 +284,21 @@ class ManagedSandboxOperationRecord(BaseModel):
 
     @property
     def cancellable(self) -> bool:
-        return self.status not in _TERMINAL_STATUSES and self.status != "publishing"
+        return "cancel" in allowed_sandbox_actions(self.status)
+
+    @property
+    def allowed_actions(self) -> tuple[SandboxOperationAction, ...]:
+        actions = allowed_sandbox_actions(self.status)
+        if self.publish_available:
+            return actions
+        return tuple(action for action in actions if action != "publish")
+
+    @property
+    def allowed_transitions(self) -> tuple[ManagedOperationStatus, ...]:
+        transitions = allowed_sandbox_transitions(self.status)
+        if self.publish_available:
+            return transitions
+        return tuple(status for status in transitions if status != "publishing")
 
 
 class ManagedSandboxEvent(BaseModel):
@@ -214,6 +327,10 @@ class ManagedSandboxEventPage(BaseModel):
 
 class SandboxOperationStoreError(Exception):
     """Safe persistence failure for managed operation state."""
+
+
+class SandboxOperationStoreConflictError(SandboxOperationStoreError):
+    """The persisted operation no longer matches the caller's old record."""
 
 
 class SQLiteSandboxOperationStore:
@@ -282,28 +399,37 @@ class SQLiteSandboxOperationStore:
             raise SandboxOperationStoreError("managed Sandbox operation already exists") from exc
         return record
 
-    async def put(
+    async def compare_and_swap(
         self,
-        record: ManagedSandboxOperationRecord,
+        expected: ManagedSandboxOperationRecord,
+        updated: ManagedSandboxOperationRecord,
     ) -> ManagedSandboxOperationRecord:
+        """Replace exactly one previously read record or reject a stale writer."""
         self._ensure_open()
-        payload = record.model_dump_json()
-        _require_payload_size(payload, _MAX_RECORD_BYTES)
-        cursor = await self._connection.execute(
-            "UPDATE web_coding_sandbox_operations SET status = ?, record_json = ?, "
-            "updated_at_ms = ? WHERE operation_id = ?",
-            (
-                record.status,
-                payload,
-                record.updated_at_ms,
-                record.operation_id,
-            ),
-        )
-        if cursor.rowcount != 1:
+        if expected.operation_id != updated.operation_id:
+            raise SandboxOperationStoreError("managed Sandbox operation identity changed")
+        expected_payload = expected.model_dump_json()
+        updated_payload = updated.model_dump_json()
+        _require_payload_size(updated_payload, _MAX_RECORD_BYTES)
+        async with self._write_lock:
+            cursor = await self._connection.execute(
+                "UPDATE web_coding_sandbox_operations SET status = ?, record_json = ?, "
+                "updated_at_ms = ? WHERE operation_id = ? AND record_json = ?",
+                (
+                    updated.status,
+                    updated_payload,
+                    updated.updated_at_ms,
+                    updated.operation_id,
+                    expected_payload,
+                ),
+            )
+            changed = cursor.rowcount
             await cursor.close()
-            raise SandboxOperationStoreError("managed Sandbox operation is missing")
-        await cursor.close()
-        return record
+        if changed != 1:
+            raise SandboxOperationStoreConflictError(
+                "managed Sandbox operation changed concurrently"
+            )
+        return updated
 
     async def get(self, operation_id: str) -> ManagedSandboxOperationRecord | None:
         self._ensure_open()
@@ -499,12 +625,53 @@ SandboxSessionExists = Callable[[str], Awaitable[bool]]
 SandboxLifecycleEventSink = Callable[[ManagedSandboxEvent], Awaitable[None]]
 
 
+class SandboxBaseline(BaseModel):
+    """Provider-neutral snapshot plus its product source provenance."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    snapshot: ProjectSnapshot
+    source_workspace_revision: int | None = Field(default=None, ge=0)
+    source_workspace_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    publish_root: Path | None = None
+
+    @model_validator(mode="after")
+    def _validate_workspace_provenance(self) -> SandboxBaseline:
+        if (self.source_workspace_revision is None) != (self.source_workspace_sha256 is None):
+            raise ValueError("Workspace baseline revision and SHA must be paired")
+        return self
+
+
+SandboxBaselineProvider = Callable[
+    [str, Path, SnapshotPolicy, bytes],
+    Awaitable[SandboxBaseline],
+]
+
+
+class SandboxArtifactPublisher(Protocol):
+    """Provider-neutral target for one approved, immutable output artifact."""
+
+    async def publish(
+        self,
+        artifact: SandboxOutputArtifact,
+        *,
+        baseline: ProjectSnapshot,
+        signer: ArtifactSigner,
+        session_id: str,
+        expected_workspace_revision: int,
+        expected_workspace_sha256: str,
+    ) -> PublisherResult: ...
+
+
 @dataclass
 class _LiveOperation:
     operation: SandboxOperation
     snapshot: ProjectSnapshot
     artifact_signer: ArtifactSigner
-    project_root: Path
+    publish_root: Path | None
     cancel_event: asyncio.Event
 
 
@@ -519,9 +686,11 @@ class ManagedSandboxLifecycle:
         backend_resolver: SandboxBackendResolver,
         artifact_signer: ArtifactSigner,
         session_exists: SandboxSessionExists,
-        projects_root: Path,
+        projects_root: Path | None,
         state_root: Path,
         staging_root: Path,
+        baseline_provider: SandboxBaselineProvider | None = None,
+        artifact_publisher: SandboxArtifactPublisher | None = None,
         event_sink: SandboxLifecycleEventSink | None = None,
         now_ms: Callable[[], int] | None = None,
     ) -> None:
@@ -530,9 +699,13 @@ class ManagedSandboxLifecycle:
         self._backend_resolver = backend_resolver
         self._artifact_signer = artifact_signer
         self._session_exists = session_exists
-        self._projects_root = _absolute_root(projects_root)
+        if projects_root is None and baseline_provider is None:
+            raise ValueError("managed Sandbox lifecycle requires a baseline provider")
+        self._projects_root = None if projects_root is None else _absolute_root(projects_root)
         self._state_root = _absolute_root(state_root)
         self._staging_root = _absolute_root(staging_root)
+        self._baseline_provider = baseline_provider
+        self._artifact_publisher = artifact_publisher
         self._event_sink = event_sink
         self._now_ms = now_ms or (lambda: int(time.time() * 1000))
         self._live: dict[str, _LiveOperation] = {}
@@ -545,14 +718,11 @@ class ManagedSandboxLifecycle:
         """Mark old live records interrupted; never replay model or commands."""
         interrupted: list[str] = []
         for record in await self._store.active_records():
-            updated = record.model_copy(
-                update={
-                    "status": "interrupted",
-                    "updated_at_ms": self._now_ms(),
-                    "error_code": "server_restarted",
-                }
+            updated = await self._update(
+                record,
+                status="interrupted",
+                error_code="server_restarted",
             )
-            await self._store.put(updated)
             await self._emit(updated, "sandbox_operation_interrupted", {})
             interrupted.append(record.operation_id)
         return tuple(interrupted)
@@ -607,17 +777,22 @@ class ManagedSandboxLifecycle:
             status = record.status
             if status in {"validated", "validation_failed"} and validation is None:
                 status = "ready"
-            record = await self._update(
-                record,
-                status=status,
-                workspace_revision=live.operation.workspace_revision,
-                validation=validation,
-                diff=None,
-                artifact_id=None,
-                artifact_sha256=None,
-                changed_paths=(),
-                deleted_paths=(),
-            )
+            try:
+                record = await self._update(
+                    record,
+                    status=status,
+                    workspace_revision=live.operation.workspace_revision,
+                    validation=validation,
+                    diff=None,
+                    artifact_id=None,
+                    artifact_sha256=None,
+                    changed_paths=(),
+                    deleted_paths=(),
+                )
+            except SandboxLifecycleError as exc:
+                if exc.code != "operation_conflict":
+                    raise
+                record = await self._record(operation_id)
         return record
 
     async def latest_for_session(
@@ -642,7 +817,7 @@ class ManagedSandboxLifecycle:
 
     async def validate(self, operation_id: str) -> ManagedSandboxOperationRecord:
         record = await self.get(operation_id)
-        if record.status not in {"ready", "validation_failed", "validated"}:
+        if "validate" not in record.allowed_actions:
             raise SandboxLifecycleError(
                 "operation_not_ready",
                 operation_id=operation_id,
@@ -659,7 +834,7 @@ class ManagedSandboxLifecycle:
         operation_id: str,
     ) -> ManagedSandboxOperationRecord:
         record = await self.get(operation_id)
-        if record.status != "validated":
+        if "prepare_publish" not in record.allowed_actions:
             raise SandboxLifecycleError(
                 "validation_required",
                 operation_id=operation_id,
@@ -673,7 +848,12 @@ class ManagedSandboxLifecycle:
 
     async def publish(self, operation_id: str) -> ManagedSandboxOperationRecord:
         record = await self.get(operation_id)
-        if record.status != "awaiting_approval":
+        if not record.publish_available:
+            raise SandboxLifecycleError(
+                "publisher_unavailable",
+                operation_id=operation_id,
+            )
+        if "publish" not in record.allowed_actions:
             raise SandboxLifecycleError(
                 "approval_required",
                 operation_id=operation_id,
@@ -705,7 +885,7 @@ class ManagedSandboxLifecycle:
 
     async def cancel(self, operation_id: str) -> ManagedSandboxOperationRecord:
         record = await self.get(operation_id)
-        if not record.cancellable:
+        if "cancel" not in record.allowed_actions:
             raise SandboxLifecycleError(
                 "operation_not_ready",
                 operation_id=operation_id,
@@ -727,13 +907,13 @@ class ManagedSandboxLifecycle:
 
     async def discard(self, operation_id: str) -> ManagedSandboxOperationRecord:
         record = await self.get(operation_id)
-        if record.status in {"published", "publishing", "cancelled"}:
+        if record.status == "discarded":
+            return record
+        if "discard" not in record.allowed_actions:
             raise SandboxLifecycleError(
                 "operation_not_ready",
                 operation_id=operation_id,
             )
-        if record.status == "discarded":
-            return record
         record = await self._update(record, status="discarding", error_code=None)
         await self._emit(record, "sandbox_discard_started", {})
         task = self._actions.get(operation_id)
@@ -797,19 +977,32 @@ class ManagedSandboxLifecycle:
         backend: SandboxBackend | None = None
         handle: SandboxHandle | None = None
         try:
-            project_root = await asyncio.to_thread(
-                self._ensure_project_root,
-                record.session_id,
-                config.limits.command_timeout_seconds,
-            )
             snapshot_path = self._staging_root / "snapshots" / (record.operation_id + ".tar.gz")
             snapshot_path.parent.mkdir(parents=True, exist_ok=True)
             policy = SnapshotPolicy.from_limits(config.limits)
-            snapshot = await build_project_snapshot(
-                project_root,
-                snapshot_path,
-                policy=policy,
-            )
+            if self._baseline_provider is None:
+                project_root = await asyncio.to_thread(
+                    self._ensure_project_root,
+                    record.session_id,
+                    config.limits.command_timeout_seconds,
+                )
+                snapshot = await build_project_snapshot(
+                    project_root,
+                    snapshot_path,
+                    policy=policy,
+                )
+                baseline = SandboxBaseline(
+                    snapshot=snapshot,
+                    publish_root=project_root,
+                )
+            else:
+                baseline = await self._baseline_provider(
+                    record.session_id,
+                    snapshot_path,
+                    policy,
+                    _default_validation_config(config.limits.command_timeout_seconds),
+                )
+                snapshot = baseline.snapshot
             validation_plan = load_sandbox_validation_plan(snapshot, policy=policy)
             backend = await self._backend_resolver(config)
             handle = await backend.create(
@@ -852,7 +1045,7 @@ class ManagedSandboxLifecycle:
                 operation=operation,
                 snapshot=snapshot,
                 artifact_signer=self._artifact_signer,
-                project_root=project_root,
+                publish_root=baseline.publish_root,
                 cancel_event=asyncio.Event(),
             )
             self._detach_current_action(record.operation_id)
@@ -861,6 +1054,15 @@ class ManagedSandboxLifecycle:
                 status="ready",
                 baseline_archive_sha256=snapshot.archive_sha256,
                 baseline_manifest_sha256=snapshot.manifest.manifest_sha256,
+                baseline_workspace_revision=baseline.source_workspace_revision,
+                baseline_workspace_sha256=baseline.source_workspace_sha256,
+                publish_available=(
+                    baseline.publish_root is not None
+                    or (
+                        self._artifact_publisher is not None
+                        and baseline.source_workspace_revision is not None
+                    )
+                ),
                 error_code=None,
             )
             await self._emit(updated, "sandbox_operation_ready", {})
@@ -876,6 +1078,14 @@ class ManagedSandboxLifecycle:
             elif backend is not None and handle is not None:
                 await _destroy_quietly(backend, handle)
             await self._fail(record, "project_invalid", type(exc).__name__)
+        except SandboxLifecycleError as exc:
+            if operation is not None:
+                await _close_quietly(operation)
+                self._live.pop(record.operation_id, None)
+            elif backend is not None and handle is not None:
+                await _destroy_quietly(backend, handle)
+            if exc.code != "operation_conflict":
+                await self._fail(record, "operation_failed", type(exc).__name__)
         except Exception as exc:
             if operation is not None:
                 await _close_quietly(operation)
@@ -918,6 +1128,9 @@ class ManagedSandboxLifecycle:
             )
         except asyncio.CancelledError:
             raise
+        except SandboxLifecycleError as exc:
+            if exc.code != "operation_conflict":
+                await self._fail(record, "operation_failed", type(exc).__name__)
         except SandboxWorkspaceError as exc:
             await self._fail(record, exc.code, type(exc).__name__)
         except Exception as exc:
@@ -955,6 +1168,8 @@ class ManagedSandboxLifecycle:
         except SandboxWorkspaceError as exc:
             if exc.code == "validation_stale":
                 current = await self._record(record.operation_id)
+                if current.status != "freezing":
+                    return
                 self._detach_current_action(record.operation_id)
                 updated = await self._update(
                     current,
@@ -970,6 +1185,12 @@ class ManagedSandboxLifecycle:
                     {"error_code": "validation_required"},
                 )
             else:
+                error_code = (
+                    "artifact_stale" if exc.code == "artifact_stale" else "operation_failed"
+                )
+                await self._fail(record, error_code, type(exc).__name__)
+        except SandboxLifecycleError as exc:
+            if exc.code != "operation_conflict":
                 await self._fail(record, "operation_failed", type(exc).__name__)
         except Exception as exc:
             await self._fail(record, "operation_failed", type(exc).__name__)
@@ -983,21 +1204,41 @@ class ManagedSandboxLifecycle:
         if artifact is None:
             await self._fail(record, "approval_required", "MissingArtifact")
             return
-        publisher = LocalTransactionalPublisher(
-            project_root=live.project_root,
-            state_root=self._state_root,
-        )
+        if live.publish_root is None and self._artifact_publisher is None:
+            await self._fail(record, "publisher_unavailable", "MissingPublisher")
+            return
         try:
-            result = await publisher.publish(
-                artifact,
-                baseline=live.snapshot,
-                signer=live.artifact_signer,
-            )
+            if live.publish_root is not None:
+                publisher = LocalTransactionalPublisher(
+                    project_root=live.publish_root,
+                    state_root=self._state_root,
+                )
+                result = await publisher.publish(
+                    artifact,
+                    baseline=live.snapshot,
+                    signer=live.artifact_signer,
+                )
+            else:
+                if (
+                    self._artifact_publisher is None
+                    or record.baseline_workspace_revision is None
+                    or record.baseline_workspace_sha256 is None
+                ):
+                    raise PublisherError("baseline_invalid")
+                result = await self._artifact_publisher.publish(
+                    artifact,
+                    baseline=live.snapshot,
+                    signer=live.artifact_signer,
+                    session_id=record.session_id,
+                    expected_workspace_revision=record.baseline_workspace_revision,
+                    expected_workspace_sha256=record.baseline_workspace_sha256,
+                )
             self._detach_current_action(record.operation_id)
             updated = await self._update(
                 record,
                 status="published",
                 publish_transaction_id=result.transaction_id,
+                published_workspace_revision=result.workspace_revision,
                 changed_paths=result.changed_paths,
                 deleted_paths=result.deleted_paths,
                 error_code=None,
@@ -1005,12 +1246,20 @@ class ManagedSandboxLifecycle:
             await self._emit(
                 updated,
                 "sandbox_publish_finished",
-                {"publish_status": result.status},
+                {
+                    "publish_status": result.status,
+                    "workspace_revision": result.workspace_revision,
+                    "changed_paths": list(result.changed_paths),
+                    "deleted_paths": list(result.deleted_paths),
+                },
             )
             await self._close_live(record.operation_id)
             self._release_session(updated)
         except PublisherError as exc:
             await self._fail(record, exc.code, type(exc).__name__)
+        except SandboxLifecycleError as exc:
+            if exc.code != "operation_conflict":
+                await self._fail(record, "operation_failed", type(exc).__name__)
         except Exception as exc:
             await self._fail(record, "publisher_error", type(exc).__name__)
 
@@ -1036,9 +1285,10 @@ class ManagedSandboxLifecycle:
             )
         live.cancel_event = asyncio.Event()
         updated = await self._update(record, status=status, error_code=None)
-        await self._emit(updated, event_type, {})
+        start_gate = asyncio.Event()
 
         async def run_action() -> None:
+            await start_gate.wait()
             await action(updated, live)
 
         task: asyncio.Task[None] = asyncio.create_task(
@@ -1047,6 +1297,13 @@ class ManagedSandboxLifecycle:
         )
         self._actions[record.operation_id] = task
         task.add_done_callback(partial(self._action_done, record.operation_id))
+        try:
+            await self._emit(updated, event_type, {})
+        except BaseException:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+        start_gate.set()
         return updated
 
     async def _update(
@@ -1058,7 +1315,21 @@ class ManagedSandboxLifecycle:
         updated = ManagedSandboxOperationRecord.model_validate(
             {**record.model_dump(mode="python"), **updates}
         )
-        return await self._store.put(updated)
+        if (
+            updated.status != record.status
+            and updated.status not in _ALLOWED_STATUS_TRANSITIONS[record.status]
+        ):
+            raise SandboxLifecycleError(
+                "operation_not_ready",
+                operation_id=record.operation_id,
+            )
+        try:
+            return await self._store.compare_and_swap(record, updated)
+        except SandboxOperationStoreConflictError as exc:
+            raise SandboxLifecycleError(
+                "operation_conflict",
+                operation_id=record.operation_id,
+            ) from exc
 
     async def _fail(
         self,
@@ -1068,11 +1339,28 @@ class ManagedSandboxLifecycle:
     ) -> None:
         self._detach_current_action(record.operation_id)
         current = await self._store.get(record.operation_id) or record
-        updated = await self._update(
-            current,
-            status="failed",
-            error_code=error_code[:128],
-        )
+        if current.status in {
+            "cancelling",
+            "cancelled",
+            "discarding",
+            "discarded",
+            "published",
+        }:
+            return
+        if current.status in {"failed", "interrupted"}:
+            await self._close_live(record.operation_id)
+            self._release_session(current)
+            return
+        try:
+            updated = await self._update(
+                current,
+                status="failed",
+                error_code=error_code[:128],
+            )
+        except SandboxLifecycleError as exc:
+            if exc.code == "operation_conflict":
+                return
+            raise
         await self._emit(
             updated,
             "sandbox_operation_failed",
@@ -1142,6 +1430,8 @@ class ManagedSandboxLifecycle:
         session_id: str,
         command_timeout_seconds: int,
     ) -> Path:
+        if self._projects_root is None:
+            raise SandboxLifecycleError("project_invalid")
         self._projects_root.mkdir(parents=True, exist_ok=True)
         _validate_directory(self._projects_root)
         project_key = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:32]
@@ -1242,6 +1532,10 @@ __all__ = [
     "LifecycleErrorCode",
     "MANAGED_EVENT_SCHEMA",
     "MANAGED_OPERATION_SCHEMA",
+    "SANDBOX_STATE_MACHINE_VERSION",
+    "SandboxArtifactPublisher",
+    "SandboxBaseline",
+    "SandboxBaselineProvider",
     "ManagedOperationStatus",
     "ManagedSandboxEvent",
     "ManagedSandboxEventPage",
@@ -1251,6 +1545,10 @@ __all__ = [
     "SandboxBackendResolver",
     "SandboxLifecycleError",
     "SandboxLifecycleEventSink",
+    "SandboxOperationAction",
+    "SandboxOperationStoreConflictError",
     "SandboxOperationStoreError",
     "SandboxSessionExists",
+    "allowed_sandbox_actions",
+    "allowed_sandbox_transitions",
 ]

@@ -17,7 +17,11 @@ from .store import SQLiteSandboxConfigStore
 
 if TYPE_CHECKING:
     from ..artifact import ArtifactSigner
-    from ..lifecycle import ManagedSandboxEvent
+    from ..lifecycle import (
+        ManagedSandboxEvent,
+        SandboxArtifactPublisher,
+        SandboxBaselineProvider,
+    )
 
 
 class SandboxRuntimeConfigurationError(RuntimeError):
@@ -74,6 +78,8 @@ async def sandbox_runtime_context(
     artifact_signer: ArtifactSigner | None = None,
     session_exists: Callable[[str], Awaitable[bool]] | None = None,
     projects_root: Path | None = None,
+    baseline_provider: SandboxBaselineProvider | None = None,
+    artifact_publisher: SandboxArtifactPublisher | None = None,
     publisher_state_root: Path | None = None,
     staging_root: Path | None = None,
     event_sink: Callable[[ManagedSandboxEvent], Awaitable[None]] | None = None,
@@ -90,7 +96,7 @@ async def sandbox_runtime_context(
         if artifact_signer is not None:
             if (
                 session_exists is None
-                or projects_root is None
+                or (projects_root is None and baseline_provider is None)
                 or publisher_state_root is None
                 or staging_root is None
             ):
@@ -112,6 +118,8 @@ async def sandbox_runtime_context(
                 projects_root=projects_root,
                 state_root=publisher_state_root,
                 staging_root=staging_root,
+                baseline_provider=baseline_provider,
+                artifact_publisher=artifact_publisher,
                 event_sink=event_sink,
             )
             await lifecycle.recover_startup()

@@ -1,6 +1,6 @@
 # Workspace 与 Coding Sandbox 一体化设计
 
-> 状态：阶段 1–3 已完成，阶段 4 待实施
+> 状态：阶段 1–3、4A–4C 已完成；阶段 4 Sandbox/Workspace 主链路闭环
 > 日期：2026-08-22
 > 范围：Session Workspace、Agent 文件工具、E2B Coding Sandbox、安全发布与后续文档转换
 
@@ -210,9 +210,21 @@ Chat Store 中成功 `write_file` 的 ToolResult，同时兼容 live result wrap
 
 ### 阶段 4：统一 Sandbox 快照与发布目标
 
-- Sandbox 从 WorkspaceStore 物化快照，不再使用独立项目目录作为产品事实源。
-- 仅发布允许的 `scripts/**`/Markdown 变更，保护固定根与转换产物。
-- 发布完成原子提升 revision，并广播 Workspace event。
+- 阶段 4A 已完成：以 [`coding-sandbox-state-machine.md`](coding-sandbox-state-machine.md)
+  固定显式状态机、持久转换 CAS，以及 Validation→Freeze 的 fail-closed TOCTOU 屏障。
+- 阶段 4B 已完成：从 WorkspaceStore 物化快照，不再使用独立项目目录作为产品事实源：
+  - 在同一 Session mutation lock 内冻结 `WorkspaceState.revision` 和按 logical path 排序的 `FileRef`；
+  - 从 immutable content generation 逐文件读取，复核 containment、regular-file、前后 stat、size 与 SHA；
+  - 输出全新 staging 逻辑树及 canonical tree SHA，不复制 file id 目录、metadata 或 `.workspace.json`；
+  - Sandbox 单独注入不可由用户伪造的 `.pi-agent/sandbox.toml`，再构建既有确定性 `ProjectSnapshot`；
+  - baseline record 保存 Workspace revision/tree SHA 和 snapshot archive/manifest SHA，源 Workspace 后续变化不改写已创建 baseline；
+  - 4B 完成时尚未接入 Publisher，因此 Workspace baseline 曾以 `publish_available=false` 暂停发布。
+- 阶段 4C 已完成：
+  - 主应用注入 provider-neutral Artifact Publisher；隔离镜像复用既有 `LocalTransactionalPublisher` 复验签名制品、baseline 和最终文件树，真实 Workspace 从不挂载到云端或镜像 Publisher；
+  - 只允许 `scripts/**` 和普通 UTF-8 Markdown，固定拒绝 `AGENT.md`、`Memory.md`、`.pi-agent/**`、`documents/**`、非规范/大小写冲突路径及 link/reparse；
+  - 在同一 Session mutation lock 内重新核验 baseline revision、canonical tree SHA 和每个 immutable generation 的 stat/size/content SHA，审阅期间任意 Workspace mutation 均以冲突终止且零写入；
+  - 先把全部 payload 写入隐藏 transaction staging，再持久化 intent/phase journal；commit 使用 immutable generation、metadata pointer 和删除 tombstone，一批变更只写一次 Workspace revision；失败反向恢复全部 metadata/目录/state，重启时 rollback 未提交事务并清理已提交残留；
+  - operation 持久化 `published_workspace_revision`；`sandbox_publish_finished` 同时广播 `workspace_changed`，前端刷新文件树并聚焦最新成果。
 
 ### 阶段 5：文档转换框架
 

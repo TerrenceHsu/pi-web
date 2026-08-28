@@ -28,13 +28,15 @@ import json
 import mimetypes
 import os
 import re
+import shutil
+import stat
 import time
 import uuid
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from fastapi import UploadFile
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # ============================================================================
 # 常量
@@ -58,6 +60,19 @@ SCRIPTS_PATH = "scripts"
 
 #: Workspace revision 的隐藏持久化状态；不属于用户可见文件树。
 WORKSPACE_STATE_FILENAME = ".workspace.json"
+
+#: WorkspaceStore logical-tree materialization contract used by managed Sandboxes.
+WORKSPACE_MATERIALIZATION_SCHEMA: Literal["pi-agent-workspace-materialization/v1"] = (
+    "pi-agent-workspace-materialization/v1"
+)
+
+#: Sandbox Publisher to WorkspaceStore transaction contract.
+WORKSPACE_PUBLISH_TRANSACTION_SCHEMA: Literal[
+    "pi-agent-workspace-publish-transaction/v1"
+] = "pi-agent-workspace-publish-transaction/v1"
+WORKSPACE_PUBLISH_PHASE_SCHEMA: Literal["pi-agent-workspace-publish-phase/v1"] = (
+    "pi-agent-workspace-publish-phase/v1"
+)
 
 #: 明确视为可执行/工程代码的扩展名。配置和普通文本不自动搬入 scripts。
 CODE_EXTENSIONS: frozenset[str] = frozenset({
@@ -197,6 +212,14 @@ class WorkspacePathConflictError(FileStoreError):
     """目标逻辑路径已被另一个文件占用。"""
 
 
+class WorkspaceTreeConflictError(FileStoreError):
+    """Workspace bytes no longer match an immutable Sandbox baseline."""
+
+
+class WorkspacePublishPolicyError(FileStoreError):
+    """A Sandbox artifact attempted to mutate a protected Workspace path."""
+
+
 # ============================================================================
 # FileRef
 # ============================================================================
@@ -236,6 +259,112 @@ class WorkspaceState(BaseModel):
     revision: int = Field(ge=0)
     created_at: int
     updated_at: int
+
+
+class WorkspaceMaterializationEntry(BaseModel):
+    """One logical Workspace file copied into an immutable staging tree."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    logical_path: str
+    size: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class WorkspaceMaterialization(BaseModel):
+    """Revision-bound logical tree produced without storage metadata leakage."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["pi-agent-workspace-materialization/v1"] = (
+        WORKSPACE_MATERIALIZATION_SCHEMA
+    )
+    session_id: str
+    revision: int = Field(ge=0)
+    root_path: Path
+    entries: tuple[WorkspaceMaterializationEntry, ...]
+    file_count: int = Field(ge=0)
+    total_bytes: int = Field(ge=0)
+    tree_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _validate_tree(self) -> WorkspaceMaterialization:
+        paths = tuple(entry.logical_path for entry in self.entries)
+        if paths != tuple(sorted(paths)):
+            raise ValueError("Workspace materialization entries must be sorted")
+        if len({path.casefold() for path in paths}) != len(paths):
+            raise ValueError("Workspace materialization paths must be unique")
+        if self.file_count != len(self.entries):
+            raise ValueError("Workspace materialization file_count is inconsistent")
+        if self.total_bytes != sum(entry.size for entry in self.entries):
+            raise ValueError("Workspace materialization total_bytes is inconsistent")
+        if self.tree_sha256 != _workspace_materialization_digest(self.entries):
+            raise ValueError("Workspace materialization tree SHA is inconsistent")
+        return self
+
+
+class WorkspacePublishChange(BaseModel):
+    """One verified final file supplied by a Sandbox artifact publisher."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    logical_path: str
+    source_path: Path
+    size: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class WorkspacePublishResult(BaseModel):
+    """Observable result of one atomic WorkspaceStore publish transaction."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    transaction_id: str = Field(pattern=r"^publish-[0-9a-f]{32}$")
+    previous_revision: int = Field(ge=0)
+    revision: int = Field(ge=0)
+    changed_paths: tuple[str, ...]
+    deleted_paths: tuple[str, ...]
+
+
+class _WorkspacePublishIntentChange(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    logical_path: str
+    before_ref: FileRef | None
+    after_ref: FileRef
+    staged_path: str
+
+
+class _WorkspacePublishIntentDelete(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    logical_path: str
+    before_ref: FileRef
+    tombstone_path: str
+
+
+class _WorkspacePublishIntent(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["pi-agent-workspace-publish-transaction/v1"] = (
+        WORKSPACE_PUBLISH_TRANSACTION_SCHEMA
+    )
+    transaction_id: str = Field(pattern=r"^publish-[0-9a-f]{32}$")
+    session_id: str
+    expected_tree_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    before_state: WorkspaceState
+    after_state: WorkspaceState
+    changes: tuple[_WorkspacePublishIntentChange, ...]
+    deletions: tuple[_WorkspacePublishIntentDelete, ...]
+
+
+class _WorkspacePublishPhase(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["pi-agent-workspace-publish-phase/v1"] = (
+        WORKSPACE_PUBLISH_PHASE_SCHEMA
+    )
+    phase: Literal["prepared", "committing", "committed"]
 
 
 # ============================================================================
@@ -390,6 +519,199 @@ def _sha256_of_file(path: Path) -> str:
                 break
             h.update(chunk)
     return h.hexdigest()
+
+
+def _workspace_materialization_digest(
+    entries: tuple[WorkspaceMaterializationEntry, ...],
+) -> str:
+    digest = hashlib.sha256()
+    for entry in entries:
+        digest.update(entry.logical_path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(entry.size).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(entry.sha256.encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def is_sandbox_publishable_workspace_path(logical_path: str) -> bool:
+    """Return whether Sandbox output may replace this logical Workspace path."""
+    try:
+        normalized = normalize_workspace_logical_path(logical_path)
+    except FileStoreError:
+        return False
+    if normalized != logical_path:
+        return False
+    parts = PurePosixPath(normalized).parts
+    folded = tuple(part.casefold() for part in parts)
+    if normalized.casefold() in {
+        AGENT_INSTRUCTIONS_PATH.casefold(),
+        MEMORY_PATH.casefold(),
+    }:
+        return False
+    if folded[0] == "documents":
+        return False
+    if folded[0] == SCRIPTS_PATH and len(parts) > 1:
+        return True
+    return is_markdown_filename(parts[-1])
+
+
+def _write_model_atomic(path: Path, model: BaseModel) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    raw = json.dumps(
+        model.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    try:
+        with temp_path.open("wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temp_path.replace(path)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def _regular_file_identity(info: os.stat_result) -> tuple[int, int, int, int]:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def _is_link_reparse_or_non_regular(path: Path, info: os.stat_result) -> bool:
+    is_junction = getattr(path, "is_junction", None)
+    return (
+        not stat.S_ISREG(info.st_mode)
+        or path.is_symlink()
+        or (is_junction is not None and is_junction())
+        or bool(
+            getattr(info, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        )
+    )
+
+
+def _ensure_plain_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    info = path.stat(follow_symlinks=False)
+    is_junction = getattr(path, "is_junction", None)
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or path.is_symlink()
+        or (is_junction is not None and is_junction())
+        or bool(
+            getattr(info, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        )
+    ):
+        raise UnsafeFilenameError("Workspace transaction directory is unsafe")
+
+
+def _copy_verified_workspace_file(
+    source: Path,
+    target: Path,
+    *,
+    expected_size: int,
+    expected_sha256: str,
+) -> tuple[int, str]:
+    """Copy one immutable generation and reject path/content races."""
+    before = source.stat(follow_symlinks=False)
+    if _is_link_reparse_or_non_regular(source, before) or before.st_size != expected_size:
+        raise FileStoreError("Workspace content metadata does not match a regular file")
+
+    source_flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    target_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    source_fd = os.open(source, source_flags)
+    target_fd: int | None = None
+    target_created = False
+    digest = hashlib.sha256()
+    copied = 0
+    succeeded = False
+    try:
+        opened = os.fstat(source_fd)
+        if not stat.S_ISREG(opened.st_mode) or _regular_file_identity(
+            opened
+        ) != _regular_file_identity(before):
+            raise FileStoreError("Workspace content changed before materialization")
+        target_fd = os.open(target, target_flags, 0o600)
+        target_created = True
+        while chunk := os.read(source_fd, _CHUNK_SIZE):
+            copied += len(chunk)
+            if copied > expected_size:
+                raise FileStoreError("Workspace content changed during materialization")
+            digest.update(chunk)
+            offset = 0
+            while offset < len(chunk):
+                written = os.write(target_fd, chunk[offset:])
+                if written <= 0:
+                    raise OSError("Workspace materialization write made no progress")
+                offset += written
+        os.fsync(target_fd)
+        final_open = os.fstat(source_fd)
+        final_path = source.stat(follow_symlinks=False)
+        actual_sha256 = digest.hexdigest()
+        if (
+            _regular_file_identity(final_open) != _regular_file_identity(before)
+            or _regular_file_identity(final_path) != _regular_file_identity(before)
+            or _is_link_reparse_or_non_regular(source, final_path)
+            or copied != expected_size
+            or actual_sha256 != expected_sha256
+        ):
+            raise FileStoreError("Workspace content changed during materialization")
+        succeeded = True
+    finally:
+        if target_fd is not None:
+            os.close(target_fd)
+        os.close(source_fd)
+        if target_created and not succeeded:
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    return copied, digest.hexdigest()
+
+
+def _verify_workspace_file(
+    source: Path,
+    *,
+    expected_size: int,
+    expected_sha256: str,
+) -> None:
+    """Re-hash an immutable generation and reject link/content races."""
+    before = source.stat(follow_symlinks=False)
+    if _is_link_reparse_or_non_regular(source, before) or before.st_size != expected_size:
+        raise WorkspaceTreeConflictError("Workspace content metadata no longer matches")
+    source_flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(source, source_flags)
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or _regular_file_identity(
+            opened
+        ) != _regular_file_identity(before):
+            raise WorkspaceTreeConflictError("Workspace content changed before publish")
+        while chunk := os.read(descriptor, _CHUNK_SIZE):
+            size += len(chunk)
+            if size > expected_size:
+                raise WorkspaceTreeConflictError("Workspace content changed during publish")
+            digest.update(chunk)
+        final_open = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    final_path = source.stat(follow_symlinks=False)
+    if (
+        _regular_file_identity(final_open) != _regular_file_identity(before)
+        or _regular_file_identity(final_path) != _regular_file_identity(before)
+        or _is_link_reparse_or_non_regular(source, final_path)
+        or size != expected_size
+        or digest.hexdigest() != expected_sha256
+    ):
+        raise WorkspaceTreeConflictError("Workspace content changed during publish")
 
 
 def _extended_length_path(path: Path) -> Path:
@@ -583,6 +905,494 @@ class WorkspaceStore:
         async with self._session_lock(session_id):
             return await self._ensure_workspace_state_unlocked(session_id)
 
+    async def materialize_workspace_revision(
+        self,
+        session_id: str,
+        destination: Path,
+        *,
+        expected_workspace_revision: int | None = None,
+    ) -> WorkspaceMaterialization:
+        """Export one revision as a new logical tree without storage metadata.
+
+        The Session mutation lock remains held while immutable content
+        generations are copied and verified. The returned tree is independent
+        from later Workspace mutations and is safe to feed into a Sandbox
+        snapshot builder.
+        """
+        if not destination.is_absolute():
+            raise UnsafeFilenameError("Workspace materialization path must be absolute")
+        await self.ensure_session_workspace(session_id)
+        target = _extended_length_path(destination).resolve(strict=False)
+        uploads_root = self._root_dir.resolve(strict=False)
+        if (
+            target == uploads_root
+            or target.is_relative_to(uploads_root)
+            or uploads_root.is_relative_to(target)
+        ):
+            raise UnsafeFilenameError(
+                "Workspace materialization must be outside the WorkspaceStore root"
+            )
+
+        async with self._session_lock(session_id):
+            state = await self._ensure_workspace_state_unlocked(session_id)
+            self._check_workspace_revision(state, expected_workspace_revision)
+            refs = await self.list_session(session_id)
+            materialized = await asyncio.to_thread(
+                self._materialize_workspace_revision_unlocked,
+                state,
+                refs,
+                target,
+            )
+            current = self._read_workspace_state_unlocked(session_id)
+            if current is None or current.revision != state.revision:
+                shutil.rmtree(target, ignore_errors=True)
+                raise FileStoreError("Workspace revision changed during materialization")
+            return materialized
+
+    def _materialize_workspace_revision_unlocked(
+        self,
+        state: WorkspaceState,
+        refs: list[FileRef],
+        destination: Path,
+    ) -> WorkspaceMaterialization:
+        """Synchronous copy body; caller owns the Session mutation lock."""
+        if destination.exists():
+            raise FileStoreError("Workspace materialization destination already exists")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.mkdir(mode=0o700)
+        entries: list[WorkspaceMaterializationEntry] = []
+        seen_paths: set[str] = set()
+        try:
+            for ref in sorted(refs, key=lambda item: item.logical_path):
+                if ref.session_id != state.session_id:
+                    raise FileAccessDeniedError(
+                        "Workspace materialization contains a cross-session file"
+                    )
+                logical_path = normalize_workspace_logical_path(ref.logical_path)
+                if logical_path != ref.logical_path:
+                    raise UnsafeFilenameError(
+                        "Workspace materialization requires canonical logical paths"
+                    )
+                folded = logical_path.casefold()
+                if folded in seen_paths:
+                    raise WorkspacePathConflictError(
+                        "Workspace materialization contains duplicate logical paths"
+                    )
+                seen_paths.add(folded)
+
+                file_dir = self._file_dir(state.session_id, ref.id)
+                source = self._resolve_and_check(Path(ref.path), expect_under=file_dir)
+                target = destination.joinpath(*PurePosixPath(logical_path).parts)
+                target = self._resolve_and_check(target, expect_under=destination)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                size, digest = _copy_verified_workspace_file(
+                    source,
+                    target,
+                    expected_size=ref.size,
+                    expected_sha256=ref.sha256,
+                )
+                entries.append(
+                    WorkspaceMaterializationEntry(
+                        logical_path=logical_path,
+                        size=size,
+                        sha256=digest,
+                    )
+                )
+        except BaseException:
+            shutil.rmtree(destination, ignore_errors=True)
+            raise
+
+        frozen_entries = tuple(entries)
+        return WorkspaceMaterialization(
+            session_id=state.session_id,
+            revision=state.revision,
+            root_path=destination.resolve(strict=True),
+            entries=frozen_entries,
+            file_count=len(frozen_entries),
+            total_bytes=sum(entry.size for entry in frozen_entries),
+            tree_sha256=_workspace_materialization_digest(frozen_entries),
+        )
+
+    async def publish_workspace_changes(
+        self,
+        session_id: str,
+        *,
+        transaction_id: str,
+        expected_workspace_revision: int,
+        expected_workspace_sha256: str,
+        changes: tuple[WorkspacePublishChange, ...],
+        deleted_paths: tuple[str, ...],
+    ) -> WorkspacePublishResult:
+        """Atomically commit an approved Sandbox change set into one Workspace.
+
+        All payloads are copied and verified before the durable intent enters
+        ``committing``. The Session mutation lock covers baseline revalidation,
+        pointer swaps, the single revision increment and rollback. Startup
+        recovery rolls back any intent without a durable ``committed`` phase.
+        """
+        if re.fullmatch(r"publish-[0-9a-f]{32}", transaction_id) is None:
+            raise FileStoreError("Workspace publish transaction id is invalid")
+        if re.fullmatch(r"[0-9a-f]{64}", expected_workspace_sha256) is None:
+            raise FileStoreError("Workspace publish baseline SHA is invalid")
+        await self.ensure_session_workspace(session_id)
+        async with self._session_lock(session_id):
+            state = await self._ensure_workspace_state_unlocked(session_id)
+            self._check_workspace_revision(state, expected_workspace_revision)
+            refs = await self.list_session(session_id)
+            return self._publish_workspace_changes_unlocked(
+                state,
+                refs,
+                transaction_id=transaction_id,
+                expected_workspace_sha256=expected_workspace_sha256,
+                changes=changes,
+                deleted_paths=deleted_paths,
+            )
+
+    def _publish_workspace_changes_unlocked(
+        self,
+        state: WorkspaceState,
+        refs: list[FileRef],
+        *,
+        transaction_id: str,
+        expected_workspace_sha256: str,
+        changes: tuple[WorkspacePublishChange, ...],
+        deleted_paths: tuple[str, ...],
+    ) -> WorkspacePublishResult:
+        entries: list[WorkspaceMaterializationEntry] = []
+        refs_by_path: dict[str, FileRef] = {}
+        for ref in sorted(refs, key=lambda item: item.logical_path):
+            logical_path = normalize_workspace_logical_path(ref.logical_path)
+            if logical_path != ref.logical_path or ref.session_id != state.session_id:
+                raise WorkspaceTreeConflictError("Workspace metadata is not canonical")
+            folded = logical_path.casefold()
+            if folded in refs_by_path:
+                raise WorkspaceTreeConflictError("Workspace paths are not unique")
+            file_dir = self._file_dir(state.session_id, ref.id)
+            source = self._resolve_and_check(Path(ref.path), expect_under=file_dir)
+            _verify_workspace_file(
+                source,
+                expected_size=ref.size,
+                expected_sha256=ref.sha256,
+            )
+            refs_by_path[folded] = ref
+            entries.append(
+                WorkspaceMaterializationEntry(
+                    logical_path=logical_path,
+                    size=ref.size,
+                    sha256=ref.sha256,
+                )
+            )
+        current_tree_sha256 = _workspace_materialization_digest(tuple(entries))
+        if current_tree_sha256 != expected_workspace_sha256:
+            raise WorkspaceTreeConflictError("Workspace tree changed after Sandbox creation")
+
+        ordered_changes = tuple(sorted(changes, key=lambda item: item.logical_path))
+        ordered_deleted = tuple(sorted(deleted_paths))
+        requested_paths: set[str] = set()
+        for logical_path in (
+            *(change.logical_path for change in ordered_changes),
+            *ordered_deleted,
+        ):
+            normalized = normalize_workspace_logical_path(logical_path)
+            folded = normalized.casefold()
+            if normalized != logical_path or folded in requested_paths:
+                raise WorkspacePublishPolicyError("Workspace publish paths are not unique")
+            if not is_sandbox_publishable_workspace_path(normalized):
+                raise WorkspacePublishPolicyError(
+                    f"Sandbox cannot publish protected path {logical_path!r}"
+                )
+            requested_paths.add(folded)
+
+        if not ordered_changes and not ordered_deleted:
+            return WorkspacePublishResult(
+                transaction_id=transaction_id,
+                previous_revision=state.revision,
+                revision=state.revision,
+                changed_paths=(),
+                deleted_paths=(),
+            )
+
+        session_dir = self._session_dir(state.session_id)
+        transactions_root = session_dir / ".workspace-transactions"
+        self._resolve_and_check(transactions_root, expect_under=session_dir)
+        _ensure_plain_directory(transactions_root)
+        transaction_root = transactions_root / transaction_id
+        self._resolve_and_check(transaction_root, expect_under=transactions_root)
+        if transaction_root.exists():
+            raise FileStoreError("Workspace publish transaction already exists")
+        transaction_root.mkdir(mode=0o700)
+        payload_root = transaction_root / "payloads"
+        payload_root.mkdir(mode=0o700)
+
+        intent_changes: list[_WorkspacePublishIntentChange] = []
+        intent_deletions: list[_WorkspacePublishIntentDelete] = []
+        replaced_bytes = 0
+        new_bytes = 0
+        now = _now_ms()
+        try:
+            for index, change in enumerate(ordered_changes):
+                existing = refs_by_path.get(change.logical_path.casefold())
+                if existing is not None:
+                    if (
+                        existing.purpose != "file"
+                        or existing.logical_path != change.logical_path
+                    ):
+                        raise WorkspacePublishPolicyError(
+                            "Sandbox cannot replace a protected Workspace file"
+                        )
+                    file_id = existing.id
+                    created_at = existing.created_at
+                    replaced_bytes += existing.size
+                else:
+                    file_id = _gen_file_id()
+                    created_at = now
+                file_dir = self._file_dir(state.session_id, file_id)
+                self._resolve_and_check(file_dir, expect_under=session_dir)
+                generation_path = file_dir / f".content-{uuid.uuid4().hex}.blob"
+                self._resolve_and_check(generation_path, expect_under=file_dir)
+                staged_path = payload_root / f"{index:08d}.blob"
+                self._resolve_and_check(staged_path, expect_under=payload_root)
+                if change.size > self._max_file_size:
+                    raise FileTooLargeError(
+                        size=change.size,
+                        limit=self._max_file_size,
+                    )
+                source_path = change.source_path
+                if not source_path.is_absolute():
+                    raise WorkspacePublishPolicyError(
+                        "Workspace publish source path must be absolute"
+                    )
+                copied, digest = _copy_verified_workspace_file(
+                    source_path,
+                    staged_path,
+                    expected_size=change.size,
+                    expected_sha256=change.sha256,
+                )
+                if PurePosixPath(change.logical_path).parts[0].casefold() != SCRIPTS_PATH:
+                    try:
+                        with staged_path.open("r", encoding="utf-8") as stream:
+                            while stream.read(_CHUNK_SIZE):
+                                pass
+                    except UnicodeDecodeError as exc:
+                        raise WorkspacePublishPolicyError(
+                            "Sandbox Markdown output must be valid UTF-8"
+                        ) from exc
+                filename = PurePosixPath(change.logical_path).name
+                after_ref = FileRef(
+                    id=file_id,
+                    session_id=state.session_id,
+                    name=filename,
+                    size=copied,
+                    mime=_guess_mime(filename, None),
+                    sha256=digest,
+                    path=str(generation_path),
+                    created_at=created_at,
+                    logical_path=change.logical_path,
+                    origin="agent",
+                    purpose="file",
+                    updated_at=now,
+                )
+                intent_changes.append(
+                    _WorkspacePublishIntentChange(
+                        logical_path=change.logical_path,
+                        before_ref=existing,
+                        after_ref=after_ref,
+                        staged_path=str(staged_path),
+                    )
+                )
+                new_bytes += copied
+
+            deleted_bytes = 0
+            for index, logical_path in enumerate(ordered_deleted):
+                existing = refs_by_path.get(logical_path.casefold())
+                if existing is None:
+                    raise WorkspaceTreeConflictError(
+                        "Sandbox deletion target is no longer present"
+                    )
+                if existing.purpose != "file" or existing.logical_path != logical_path:
+                    raise WorkspacePublishPolicyError(
+                        "Sandbox cannot delete a protected Workspace file"
+                    )
+                deleted_bytes += existing.size
+                tombstone_path = session_dir / (
+                    f".publish-deleted-{transaction_id[8:]}-{index:08d}-{existing.id}"
+                )
+                self._resolve_and_check(tombstone_path, expect_under=session_dir)
+                intent_deletions.append(
+                    _WorkspacePublishIntentDelete(
+                        logical_path=logical_path,
+                        before_ref=existing,
+                        tombstone_path=str(tombstone_path),
+                    )
+                )
+
+            projected_size = (
+                sum(ref.size for ref in refs)
+                - replaced_bytes
+                - deleted_bytes
+                + new_bytes
+            )
+            if projected_size > self._max_session_size:
+                raise SessionStorageLimitError(
+                    current=sum(ref.size for ref in refs) - replaced_bytes - deleted_bytes,
+                    new=new_bytes,
+                    limit=self._max_session_size,
+                )
+            after_state = state.model_copy(update={
+                "revision": state.revision + 1,
+                "updated_at": now,
+            })
+            intent = _WorkspacePublishIntent(
+                transaction_id=transaction_id,
+                session_id=state.session_id,
+                expected_tree_sha256=expected_workspace_sha256,
+                before_state=state,
+                after_state=after_state,
+                changes=tuple(intent_changes),
+                deletions=tuple(intent_deletions),
+            )
+            _write_model_atomic(transaction_root / "intent.json", intent)
+            _write_model_atomic(
+                transaction_root / "phase.json",
+                _WorkspacePublishPhase(phase="prepared"),
+            )
+            try:
+                self._apply_workspace_publish_intent_unlocked(intent, transaction_root)
+            except BaseException:
+                try:
+                    self._rollback_workspace_publish_intent_unlocked(intent, transaction_root)
+                except BaseException as rollback_exc:
+                    raise FileStoreError(
+                        "Workspace publish failed and could not be rolled back"
+                    ) from rollback_exc
+                raise
+        except BaseException:
+            if transaction_root.exists() and not (transaction_root / "intent.json").exists():
+                shutil.rmtree(transaction_root, ignore_errors=True)
+            raise
+
+        try:
+            self._cleanup_workspace_publish_intent_unlocked(intent, transaction_root)
+        except Exception:
+            # ``committed`` is durable; init recovery can repeat cleanup.
+            pass
+        return WorkspacePublishResult(
+            transaction_id=transaction_id,
+            previous_revision=state.revision,
+            revision=intent.after_state.revision,
+            changed_paths=tuple(change.logical_path for change in intent.changes),
+            deleted_paths=tuple(entry.logical_path for entry in intent.deletions),
+        )
+
+    def _apply_workspace_publish_intent_unlocked(
+        self,
+        intent: _WorkspacePublishIntent,
+        transaction_root: Path,
+    ) -> None:
+        _write_model_atomic(
+            transaction_root / "phase.json",
+            _WorkspacePublishPhase(phase="committing"),
+        )
+        for change in intent.changes:
+            after = change.after_ref
+            file_dir = self._file_dir(intent.session_id, after.id)
+            staged_path = self._resolve_and_check(
+                Path(change.staged_path),
+                expect_under=transaction_root / "payloads",
+            )
+            generation_path = self._resolve_and_check(
+                Path(after.path),
+                expect_under=file_dir,
+            )
+            if change.before_ref is None:
+                file_dir.mkdir(mode=0o700, exist_ok=False)
+            else:
+                current = self._read_metadata(file_dir)
+                if current != change.before_ref:
+                    raise WorkspaceTreeConflictError(
+                        "Workspace metadata changed during publish"
+                    )
+            os.replace(staged_path, generation_path)
+            self._write_metadata(file_dir, after)
+
+        for deletion in intent.deletions:
+            file_dir = self._file_dir(intent.session_id, deletion.before_ref.id)
+            current = self._read_metadata(file_dir)
+            if current != deletion.before_ref:
+                raise WorkspaceTreeConflictError("Workspace deletion target changed")
+            tombstone = self._resolve_and_check(
+                Path(deletion.tombstone_path),
+                expect_under=self._session_dir(intent.session_id),
+            )
+            if tombstone.exists():
+                raise WorkspaceTreeConflictError("Workspace tombstone already exists")
+            os.replace(file_dir, tombstone)
+
+        current_state = self._read_workspace_state_unlocked(intent.session_id)
+        if current_state != intent.before_state:
+            raise WorkspaceTreeConflictError("Workspace revision changed during publish")
+        self._write_workspace_state_unlocked(intent.after_state)
+        _write_model_atomic(
+            transaction_root / "phase.json",
+            _WorkspacePublishPhase(phase="committed"),
+        )
+
+    def _rollback_workspace_publish_intent_unlocked(
+        self,
+        intent: _WorkspacePublishIntent,
+        transaction_root: Path,
+    ) -> None:
+        for deletion in reversed(intent.deletions):
+            file_dir = self._file_dir(intent.session_id, deletion.before_ref.id)
+            tombstone = self._resolve_and_check(
+                Path(deletion.tombstone_path),
+                expect_under=self._session_dir(intent.session_id),
+            )
+            if tombstone.exists():
+                if file_dir.exists():
+                    raise FileStoreError("Workspace rollback found conflicting delete state")
+                os.replace(tombstone, file_dir)
+        for change in reversed(intent.changes):
+            file_dir = self._file_dir(intent.session_id, change.after_ref.id)
+            generation_path = self._resolve_and_check(
+                Path(change.after_ref.path),
+                expect_under=file_dir,
+            )
+            if change.before_ref is None:
+                if file_dir.exists():
+                    self._delete_file_dir_unlocked(intent.session_id, change.after_ref.id)
+            else:
+                if not file_dir.is_dir():
+                    raise FileStoreError("Workspace rollback target is missing")
+                self._write_metadata(file_dir, change.before_ref)
+                if generation_path != Path(change.before_ref.path):
+                    generation_path.unlink(missing_ok=True)
+        self._write_workspace_state_unlocked(intent.before_state)
+        shutil.rmtree(transaction_root, ignore_errors=False)
+
+    def _cleanup_workspace_publish_intent_unlocked(
+        self,
+        intent: _WorkspacePublishIntent,
+        transaction_root: Path,
+    ) -> None:
+        for change in intent.changes:
+            if change.before_ref is None:
+                continue
+            prior_path = self._resolve_and_check(
+                Path(change.before_ref.path),
+                expect_under=self._file_dir(intent.session_id, change.before_ref.id),
+            )
+            if prior_path != Path(change.after_ref.path):
+                prior_path.unlink(missing_ok=True)
+        for deletion in intent.deletions:
+            tombstone = self._resolve_and_check(
+                Path(deletion.tombstone_path),
+                expect_under=self._session_dir(intent.session_id),
+            )
+            if tombstone.exists():
+                shutil.rmtree(tombstone)
+        shutil.rmtree(transaction_root)
+
     # ------------------------------------------------------------------
     # 内部辅助：路径构造 + 边界检查
     # ------------------------------------------------------------------
@@ -656,6 +1466,124 @@ class WorkspaceStore:
             temp_path.unlink(missing_ok=True)
             raise
 
+    def _validate_workspace_publish_intent_unlocked(
+        self,
+        intent: _WorkspacePublishIntent,
+        transaction_root: Path,
+    ) -> None:
+        if (
+            intent.transaction_id != transaction_root.name
+            or intent.before_state.session_id != intent.session_id
+            or intent.after_state.session_id != intent.session_id
+            or intent.after_state.revision != intent.before_state.revision + 1
+        ):
+            raise FileStoreError("Workspace publish intent identity is invalid")
+        session_dir = self._session_dir(intent.session_id)
+        transactions_root = session_dir / ".workspace-transactions"
+        if transaction_root.parent.resolve(strict=False) != transactions_root.resolve(
+            strict=False
+        ):
+            raise FileStoreError("Workspace publish intent is outside its Session")
+        seen: set[str] = set()
+        for change in intent.changes:
+            logical_path = normalize_workspace_logical_path(change.logical_path)
+            if (
+                logical_path != change.logical_path
+                or not is_sandbox_publishable_workspace_path(logical_path)
+                or logical_path.casefold() in seen
+                or change.after_ref.logical_path != logical_path
+                or change.after_ref.session_id != intent.session_id
+                or change.after_ref.purpose != "file"
+            ):
+                raise FileStoreError("Workspace publish change intent is invalid")
+            seen.add(logical_path.casefold())
+            if change.before_ref is not None and (
+                change.before_ref.session_id != intent.session_id
+                or change.before_ref.logical_path != logical_path
+                or change.before_ref.id != change.after_ref.id
+                or change.before_ref.purpose != "file"
+            ):
+                raise FileStoreError("Workspace publish replacement intent is invalid")
+            file_dir = self._file_dir(intent.session_id, change.after_ref.id)
+            self._resolve_and_check(Path(change.after_ref.path), expect_under=file_dir)
+            self._resolve_and_check(
+                Path(change.staged_path),
+                expect_under=transaction_root / "payloads",
+            )
+        for deletion in intent.deletions:
+            logical_path = normalize_workspace_logical_path(deletion.logical_path)
+            if (
+                logical_path != deletion.logical_path
+                or not is_sandbox_publishable_workspace_path(logical_path)
+                or logical_path.casefold() in seen
+                or deletion.before_ref.session_id != intent.session_id
+                or deletion.before_ref.logical_path != logical_path
+                or deletion.before_ref.purpose != "file"
+            ):
+                raise FileStoreError("Workspace publish deletion intent is invalid")
+            seen.add(logical_path.casefold())
+            self._resolve_and_check(
+                Path(deletion.before_ref.path),
+                expect_under=self._file_dir(intent.session_id, deletion.before_ref.id),
+            )
+            tombstone = self._resolve_and_check(
+                Path(deletion.tombstone_path),
+                expect_under=session_dir,
+            )
+            if not tombstone.name.startswith(
+                f".publish-deleted-{intent.transaction_id[8:]}-"
+            ):
+                raise FileStoreError("Workspace publish tombstone is invalid")
+
+    def _recover_workspace_publish_transactions_unlocked(self, session_id: str) -> None:
+        session_dir = self._session_dir(session_id)
+        transactions_root = session_dir / ".workspace-transactions"
+        if not transactions_root.exists():
+            return
+        _ensure_plain_directory(transactions_root)
+        for transaction_root in sorted(transactions_root.iterdir()):
+            try:
+                _ensure_plain_directory(transaction_root)
+            except (OSError, UnsafeFilenameError) as exc:
+                raise FileStoreError(
+                    "Workspace publish transaction directory is invalid"
+                ) from exc
+            intent_path = transaction_root / "intent.json"
+            if not intent_path.is_file():
+                shutil.rmtree(transaction_root)
+                continue
+            try:
+                intent = _WorkspacePublishIntent.model_validate_json(
+                    intent_path.read_text(encoding="utf-8")
+                )
+                phase_path = transaction_root / "phase.json"
+                phase = (
+                    _WorkspacePublishPhase.model_validate_json(
+                        phase_path.read_text(encoding="utf-8")
+                    )
+                    if phase_path.is_file()
+                    else _WorkspacePublishPhase(phase="prepared")
+                )
+                self._validate_workspace_publish_intent_unlocked(
+                    intent,
+                    transaction_root,
+                )
+            except FileStoreError:
+                raise
+            except Exception as exc:
+                raise FileStoreError("Workspace publish recovery state is invalid") from exc
+            if phase.phase == "committed":
+                self._cleanup_workspace_publish_intent_unlocked(intent, transaction_root)
+                continue
+            current_state = self._read_workspace_state_unlocked(session_id)
+            if current_state not in (intent.before_state, intent.after_state):
+                raise FileStoreError("Workspace publish recovery found a revision conflict")
+            self._rollback_workspace_publish_intent_unlocked(intent, transaction_root)
+        try:
+            transactions_root.rmdir()
+        except OSError:
+            pass
+
     def _recover_managed_files(self) -> None:
         """Repair old interrupted writes and remove unreferenced temp generations.
 
@@ -669,6 +1597,7 @@ class WorkspaceStore:
         for session_dir in self._root_dir.iterdir():
             if not session_dir.is_dir():
                 continue
+            self._recover_workspace_publish_transactions_unlocked(session_dir.name)
             for child in list(session_dir.iterdir()):
                 if (
                     child.is_file()
@@ -1548,6 +2477,9 @@ __all__ = [
     "MEMORY_PATH",
     "SCRIPTS_PATH",
     "WORKSPACE_STATE_FILENAME",
+    "WORKSPACE_MATERIALIZATION_SCHEMA",
+    "WORKSPACE_PUBLISH_TRANSACTION_SCHEMA",
+    "WORKSPACE_PUBLISH_PHASE_SCHEMA",
     "CODE_EXTENSIONS",
     "MARKDOWN_EXTENSIONS",
     "DEFAULT_AGENT_INSTRUCTIONS",
@@ -1562,15 +2494,22 @@ __all__ = [
     "FileVersionConflictError",
     "WorkspaceVersionConflictError",
     "WorkspacePathConflictError",
+    "WorkspaceTreeConflictError",
+    "WorkspacePublishPolicyError",
     # 数据模型
     "FileRef",
     "WorkspaceState",
+    "WorkspaceMaterialization",
+    "WorkspaceMaterializationEntry",
+    "WorkspacePublishChange",
+    "WorkspacePublishResult",
     # 工具函数
     "sanitize_filename",
     "normalize_logical_path",
     "normalize_workspace_logical_path",
     "is_code_filename",
     "is_markdown_filename",
+    "is_sandbox_publishable_workspace_path",
     "workspace_logical_path",
     # 主类
     "WorkspaceStore",

@@ -20,6 +20,7 @@ from coding_sandbox.admin import (
     SandboxConfigStoreError,
 )
 from coding_sandbox.lifecycle import (
+    SANDBOX_STATE_MACHINE_VERSION,
     ManagedSandboxLifecycle,
     ManagedSandboxOperationRecord,
     SandboxLifecycleError,
@@ -98,6 +99,7 @@ class SandboxAPIRoute(APIRoute):
                     "project_invalid": status.HTTP_422_UNPROCESSABLE_CONTENT,
                     "provider_error": status.HTTP_502_BAD_GATEWAY,
                     "publisher_error": status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    "publisher_unavailable": status.HTTP_409_CONFLICT,
                     "operation_failed": status.HTTP_500_INTERNAL_SERVER_ERROR,
                 }[exc.code]
                 return _error(status_code, exc.code, str(exc))
@@ -158,6 +160,9 @@ def get_sandbox_lifecycle(request: Request) -> ManagedSandboxLifecycle:
 
 def _operation_payload(record: ManagedSandboxOperationRecord) -> dict[str, Any]:
     payload = record.model_dump(mode="json")
+    payload["state_machine_version"] = SANDBOX_STATE_MACHINE_VERSION
+    payload["allowed_actions"] = list(record.allowed_actions)
+    payload["allowed_transitions"] = list(record.allowed_transitions)
     payload["terminal"] = record.terminal
     payload["cancellable"] = record.cancellable
     payload["approval_required"] = record.status == "awaiting_approval"

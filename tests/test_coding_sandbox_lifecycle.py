@@ -16,11 +16,21 @@ from coding_sandbox import (
     SandboxCommandResult,
     SandboxFileEntry,
     SandboxLifecycleError,
+    SandboxOperationStoreConflictError,
     SQLiteSandboxOperationStore,
 )
 from coding_sandbox.admin import SandboxAdminConfig, SandboxConfigRecord
 from coding_sandbox.fake import FakeSandboxBackend
 from coding_sandbox.lifecycle import DEFAULT_VALIDATION_CONFIG
+from pi_agent_core_py.web.coding_sandbox.workspace import (
+    WorkspaceSandboxArtifactPublisher,
+    WorkspaceSandboxBaselineProvider,
+)
+from pi_agent_core_py.web.files import (
+    WorkspacePublishChange,
+    WorkspaceStore,
+    WorkspaceVersionConflictError,
+)
 
 
 def _helper(result: dict[str, object]) -> SandboxCommandResult:
@@ -99,11 +109,20 @@ async def test_operation_store_persists_records_and_bounded_replay(tmp_path: Pat
         "sandbox_operation_creating",
         {"status": "creating"},
     )
+    ready = ManagedSandboxOperationRecord.model_validate(
+        {**record.model_dump(mode="python"), "status": "ready", "updated_at_ms": 201}
+    )
+    assert record.allowed_actions == ("cancel", "discard")
+    assert "ready" in record.allowed_transitions
+    assert await store.compare_and_swap(record, ready) == ready
+    with pytest.raises(SandboxOperationStoreConflictError):
+        await store.compare_and_swap(record, ready)
     await store.close()
 
     reopened = await SQLiteSandboxOperationStore.open(database, now_ms=lambda: 300)
     try:
-        assert await reopened.latest_for_session(record.session_id) == record
+        assert await reopened.latest_for_session(record.session_id) == ready
+        assert ready.allowed_actions == ("validate", "cancel", "discard")
         page = await reopened.list_events(record.operation_id)
         assert page.events == (event,)
         assert page.first_available_sequence == 1
@@ -155,24 +174,43 @@ async def test_startup_recovery_marks_state_without_replaying_work(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_lifecycle_creates_seeds_validates_and_cancels(tmp_path: Path) -> None:
+    workspace_store = WorkspaceStore(tmp_path / "uploads")
+    await workspace_store.init()
+    await workspace_store.ensure_session_workspace("session-one")
+    source_code = await workspace_store.write_text(
+        "session-one",
+        "main.py",
+        "print('workspace baseline')\n",
+    )
     config_data = DEFAULT_VALIDATION_CONFIG
     config_entry = SandboxFileEntry(
         path=".pi-agent/sandbox.toml",
         size=len(config_data),
         sha256=hashlib.sha256(config_data).hexdigest(),
     )
-    baseline = (config_entry,)
+    workspace_entries = tuple(
+        SandboxFileEntry(
+            path=ref.logical_path,
+            size=ref.size,
+            sha256=ref.sha256,
+        )
+        for ref in await workspace_store.list_session("session-one")
+    )
+    baseline = tuple(sorted((*workspace_entries, config_entry), key=lambda entry: entry.path))
     backend = FakeSandboxBackend(
         id_factory=lambda: "managed-lifecycle",
         command_results=(
             _helper(_fingerprint(())),
-            _helper(
-                {
-                    "path": config_entry.path,
-                    "size": config_entry.size,
-                    "sha256": config_entry.sha256,
-                    "created": True,
-                }
+            *(
+                _helper(
+                    {
+                        "path": entry.path,
+                        "size": entry.size,
+                        "sha256": entry.sha256,
+                        "created": True,
+                    }
+                )
+                for entry in baseline
             ),
             _helper(_fingerprint(baseline)),
             _helper(
@@ -202,7 +240,7 @@ async def test_lifecycle_creates_seeds_validates_and_cancels(tmp_path: Path) -> 
             _helper(
                 {
                     "root": ".",
-                    "files": [config_entry.model_dump(mode="json")],
+                    "files": [entry.model_dump(mode="json") for entry in baseline],
                     "truncated": False,
                 }
             ),
@@ -223,15 +261,36 @@ async def test_lifecycle_creates_seeds_validates_and_cancels(tmp_path: Path) -> 
         backend_resolver=backend_resolver,
         artifact_signer=HMACSHA256ArtifactSigner(key_id="test", secret=b"k" * 32),
         session_exists=lambda _session_id: asyncio.sleep(0, result=True),
-        projects_root=tmp_path / "projects",
+        projects_root=None,
         state_root=tmp_path / "publisher",
         staging_root=tmp_path / "staging",
+        baseline_provider=WorkspaceSandboxBaselineProvider(
+            workspace_store,
+            materialization_root=(tmp_path / "staging" / "materialized"),
+        ),
+        artifact_publisher=WorkspaceSandboxArtifactPublisher(
+            workspace_store,
+            staging_root=(tmp_path / "staging" / "publishes"),
+        ),
     )
     try:
         creating = await lifecycle.start("session-one")
         ready = await _wait_for_status(lifecycle, creating.operation_id, "ready")
         assert ready.config_revision == 3
+        assert ready.baseline_workspace_revision == 1
+        assert ready.baseline_workspace_sha256 is not None
+        assert ready.publish_available is True
         assert lifecycle.workspace_for_session("session-one").workspace_revision == 0
+
+        await workspace_store.update_text(
+            "session-one",
+            source_code.id,
+            "print('newer workspace revision')\n",
+            expected_sha256=source_code.sha256,
+            expected_workspace_revision=1,
+        )
+        assert (await workspace_store.get_workspace_state("session-one")).revision == 2
+        assert (await lifecycle.get(ready.operation_id)).baseline_workspace_revision == 1
 
         validating = await lifecycle.validate(ready.operation_id)
         assert validating.status == "validating"
@@ -240,6 +299,9 @@ async def test_lifecycle_creates_seeds_validates_and_cancels(tmp_path: Path) -> 
         assert validated.validation.passed is True
         assert validated.diff is not None
         assert validated.diff.entries == ()
+        with pytest.raises(SandboxLifecycleError) as unavailable:
+            await lifecycle.publish(ready.operation_id)
+        assert unavailable.value.code == "approval_required"
 
         cancelled = await lifecycle.cancel(ready.operation_id)
         assert cancelled.status == "cancelled"
@@ -250,6 +312,134 @@ async def test_lifecycle_creates_seeds_validates_and_cancels(tmp_path: Path) -> 
     finally:
         await lifecycle.shutdown()
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_workspace_publish_commits_one_revision_atomically(tmp_path: Path) -> None:
+    workspace_store = WorkspaceStore(tmp_path / "uploads")
+    await workspace_store.init()
+    await workspace_store.ensure_session_workspace("session-one")
+    main = await workspace_store.write_text(
+        "session-one",
+        "main.py",
+        "print('before')\n",
+    )
+    obsolete = await workspace_store.write_text(
+        "session-one",
+        "obsolete.py",
+        "print('remove me')\n",
+    )
+    baseline = await workspace_store.materialize_workspace_revision(
+        "session-one",
+        (tmp_path / "baseline").resolve(),
+    )
+    next_main = tmp_path / "next-main.py"
+    next_main.write_text("print('after')\n", encoding="utf-8")
+    new_note = tmp_path / "result.md"
+    new_note.write_text("# Result\n", encoding="utf-8")
+
+    result = await workspace_store.publish_workspace_changes(
+        "session-one",
+        transaction_id="publish-" + "a" * 32,
+        expected_workspace_revision=baseline.revision,
+        expected_workspace_sha256=baseline.tree_sha256,
+        changes=(
+            WorkspacePublishChange(
+                logical_path=main.logical_path,
+                source_path=next_main,
+                size=next_main.stat().st_size,
+                sha256=hashlib.sha256(next_main.read_bytes()).hexdigest(),
+            ),
+            WorkspacePublishChange(
+                logical_path="notes/result.md",
+                source_path=new_note,
+                size=new_note.stat().st_size,
+                sha256=hashlib.sha256(new_note.read_bytes()).hexdigest(),
+            ),
+        ),
+        deleted_paths=(obsolete.logical_path,),
+    )
+
+    assert result.previous_revision == baseline.revision
+    assert result.revision == baseline.revision + 1
+    assert (await workspace_store.get_workspace_state("session-one")).revision == result.revision
+    published = {
+        ref.logical_path: ref for ref in await workspace_store.list_session("session-one")
+    }
+    assert published[main.logical_path].id == main.id
+    assert await asyncio.to_thread(
+        Path(published[main.logical_path].path).read_text,
+        encoding="utf-8",
+    ) == (
+        "print('after')\n"
+    )
+    assert await asyncio.to_thread(
+        Path(published["notes/result.md"].path).read_text,
+        encoding="utf-8",
+    ) == (
+        "# Result\n"
+    )
+    assert obsolete.logical_path not in published
+    assert {"AGENT.md", "Memory.md"}.issubset(published)
+
+
+@pytest.mark.asyncio
+async def test_workspace_publish_rejects_stale_baseline_without_writes(tmp_path: Path) -> None:
+    workspace_store = WorkspaceStore(tmp_path / "uploads")
+    await workspace_store.init()
+    await workspace_store.ensure_session_workspace("session-one")
+    main = await workspace_store.write_text(
+        "session-one",
+        "main.py",
+        "print('baseline')\n",
+    )
+    baseline = await workspace_store.materialize_workspace_revision(
+        "session-one",
+        (tmp_path / "baseline").resolve(),
+    )
+    await workspace_store.update_text(
+        "session-one",
+        main.id,
+        "print('user edit')\n",
+        expected_sha256=main.sha256,
+        expected_workspace_revision=baseline.revision,
+    )
+    before_state = await workspace_store.get_workspace_state("session-one")
+    before_refs = await workspace_store.list_session("session-one")
+    before_files = await asyncio.to_thread(
+        lambda: {
+            ref.logical_path: (ref.sha256, Path(ref.path).read_bytes())
+            for ref in before_refs
+        }
+    )
+    sandbox_output = tmp_path / "sandbox-main.py"
+    sandbox_output.write_text("print('sandbox edit')\n", encoding="utf-8")
+
+    with pytest.raises(WorkspaceVersionConflictError):
+        await workspace_store.publish_workspace_changes(
+            "session-one",
+            transaction_id="publish-" + "b" * 32,
+            expected_workspace_revision=baseline.revision,
+            expected_workspace_sha256=baseline.tree_sha256,
+            changes=(
+                WorkspacePublishChange(
+                    logical_path=main.logical_path,
+                    source_path=sandbox_output,
+                    size=sandbox_output.stat().st_size,
+                    sha256=hashlib.sha256(sandbox_output.read_bytes()).hexdigest(),
+                ),
+            ),
+            deleted_paths=(),
+        )
+
+    assert await workspace_store.get_workspace_state("session-one") == before_state
+    after_refs = await workspace_store.list_session("session-one")
+    assert await asyncio.to_thread(
+        lambda: {
+            ref.logical_path: (ref.sha256, Path(ref.path).read_bytes())
+            for ref in after_refs
+        }
+    ) == before_files
 
 
 @pytest.mark.asyncio
