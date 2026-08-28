@@ -1,4 +1,6 @@
 import { expect, test, type Page } from "@playwright/test"
+import { readFile } from "node:fs/promises"
+import { fileURLToPath } from "node:url"
 
 type Session = { id: string; title: string }
 
@@ -92,6 +94,32 @@ test("Workspace panel creates Markdown and uploads code without attaching it to 
     "uploaded result",
   )
   await expect(page.locator("[data-testid='file-chip']")).toHaveCount(0)
+})
+
+test("uploaded workbook is converted and shown read-only in the Workspace panel", async ({
+  page,
+}) => {
+  await page.goto("/")
+  await waitForApp(page)
+  const session = await createSession(page)
+  await page.goto(`/chat/${session.id}`)
+  await waitForApp(page)
+
+  const fixture = fileURLToPath(new URL("./fixtures/metrics.xlsx.b64", import.meta.url))
+  const workbook = Buffer.from((await readFile(fixture, "utf8")).trim(), "base64")
+  await page.locator("[data-testid='workspace-upload-input']").setInputFiles({
+    name: "metrics.xlsx",
+    mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    buffer: workbook,
+  })
+
+  const preview = page.locator("[data-testid='workspace-file-preview']")
+  await expect(preview).toContainText("content.md")
+  await expect(preview).toContainText("Generated document")
+  await expect(preview).toContainText("Workbook summary")
+  await expect(preview).toContainText("Metrics")
+  await expect(preview).toContainText("Generated document output is read-only.")
+  await expect(page.getByRole("tab", { name: "Edit" })).toHaveCount(0)
 })
 
 test("narrow layout exposes Workspace results as a drawer", async ({ page }) => {

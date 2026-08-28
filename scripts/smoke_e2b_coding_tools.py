@@ -1,4 +1,4 @@
-"""Run coding tools and the fixed validation gate against persisted E2B.
+"""Run coding tools and managed Workspace publishing against persisted E2B.
 
 This diagnostic never accepts or prints an API key. It resolves the existing
 credential through the application's Keyring-backed CredentialService.
@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import secrets
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -20,26 +21,37 @@ if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 from coding_sandbox import (  # noqa: E402
+    ArtifactSigner,
+    CodingWorkspace,
     E2BSandboxBackend,
     HMACSHA256ArtifactSigner,
-    LocalTransactionalPublisher,
+    ManagedSandboxLifecycle,
+    ManagedSandboxOperationRecord,
+    ProjectSnapshot,
     PublisherError,
-    SandboxCreateSpec,
-    SandboxOperationManager,
-    SandboxWorkspaceError,
-    build_project_snapshot,
-    parse_sandbox_validation_config,
-    verify_output_artifact,
+    PublisherResult,
+    SandboxLifecycleError,
+    SandboxOutputArtifact,
+    SQLiteSandboxOperationStore,
 )
-from coding_sandbox.admin import SQLiteSandboxConfigStore  # noqa: E402
+from coding_sandbox.admin import (  # noqa: E402
+    SandboxAdminConfig,
+    SandboxConfigRecord,
+    SQLiteSandboxConfigStore,
+)
 from pi_agent_core_py.tools import (  # noqa: E402
     create_coding_sandbox_tools,
     create_coding_validation_tool,
+)
+from pi_agent_core_py.web.coding_sandbox.workspace import (  # noqa: E402
+    WorkspaceSandboxArtifactPublisher,
+    WorkspaceSandboxBaselineProvider,
 )
 from pi_agent_core_py.web.credentials.runtime import (  # noqa: E402
     build_credential_runtime_config,
     credential_runtime_context,
 )
+from pi_agent_core_py.web.files import WorkspaceStore  # noqa: E402
 from pi_agent_core_py.web.local_web_security import WebSecurityConfig  # noqa: E402
 
 
@@ -47,18 +59,47 @@ class SmokeError(RuntimeError):
     """Safe, secret-free smoke failure."""
 
 
-VALIDATION_CONFIG = (
-    b'version = 1\n\n[[required_checks]]\nid = "python"\n'
-    b'argv = ["python3", "-c", "import pathlib,sys;'
-    b"p=pathlib.Path('src/sandbox_smoke.py');"
-    b"sys.exit(0 if p.is_file() and 'sandbox-ok' in p.read_text() else 1)\"]\n"
-    b'cwd = "."\ntimeout_seconds = 20\n'
-)
+class _DiagnosingWorkspacePublisher:
+    """Capture only fixed-code/OS-category evidence from release-smoke failures."""
+
+    def __init__(self, delegate: WorkspaceSandboxArtifactPublisher) -> None:
+        self._delegate = delegate
+        self.error_detail: str | None = None
+
+    async def publish(
+        self,
+        artifact: SandboxOutputArtifact,
+        *,
+        baseline: ProjectSnapshot,
+        signer: ArtifactSigner,
+        session_id: str,
+        expected_workspace_revision: int,
+        expected_workspace_sha256: str,
+    ) -> PublisherResult:
+        try:
+            return await self._delegate.publish(
+                artifact,
+                baseline=baseline,
+                signer=signer,
+                session_id=session_id,
+                expected_workspace_revision=expected_workspace_revision,
+                expected_workspace_sha256=expected_workspace_sha256,
+            )
+        except PublisherError as exc:
+            cause = exc.__cause__
+            self.error_detail = (
+                f"{exc.code}:cause={type(cause).__name__ if cause else 'none'}:"
+                f"winerror={getattr(cause, 'winerror', None)}"
+            )
+            raise
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Exercise all coding tools in a disposable E2B sandbox.",
+        description=(
+            "Exercise all coding tools and approval-bound Workspace publishing "
+            "in a disposable E2B sandbox."
+        ),
         allow_abbrev=False,
     )
     parser.add_argument(
@@ -98,265 +139,282 @@ async def _require_success(name: str, result: object) -> None:
         raise SmokeError(f"{name} failed ({error_code})")
 
 
-def _workspace_bytes(root: Path) -> dict[str, bytes]:
-    return {
-        path.relative_to(root).as_posix(): path.read_bytes()
-        for path in root.rglob("*")
-        if path.is_file()
-    }
+async def _wait_for_status(
+    lifecycle: ManagedSandboxLifecycle,
+    operation_id: str,
+    expected: str,
+    *,
+    timeout_seconds: float = 120,
+) -> ManagedSandboxOperationRecord:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        record = await lifecycle.get(operation_id)
+        if record.status == expected:
+            return record
+        if record.terminal:
+            page = await lifecycle.events(operation_id)
+            error_type = (
+                page.events[-1].payload.get("error_type", "unknown") if page.events else "unknown"
+            )
+            raise SmokeError(
+                f"operation failed before {expected}: {record.status} "
+                f"({record.error_code or 'no_error_code'}; type={error_type})"
+            )
+        await asyncio.sleep(0.1)
+    raise SmokeError(f"operation did not reach {expected}")
 
 
 async def _smoke(database_path: Path) -> None:
+    smoke_root = REPOSITORY_ROOT / ".test-tmp" / f"e2b-workspace-smoke-{uuid4().hex}"
+    operation_store: SQLiteSandboxOperationStore | None = None
+    lifecycle: ManagedSandboxLifecycle | None = None
     credential_config = build_credential_runtime_config(
         database_path=database_path,
         secret_backend_mode="keyring",
         web_security=WebSecurityConfig(),
     )
-    async with credential_runtime_context(credential_config) as credential_runtime:
-        sandbox_store = await SQLiteSandboxConfigStore.open(database_path)
-        try:
-            record = await sandbox_store.get()
-            config = record.config
-            if not config.enabled or config.credential_id is None:
-                raise SmokeError("the persisted E2B sandbox configuration is unavailable")
-            api_key = await credential_runtime.service.resolve_secret_for_request(
-                config.credential_id
-            )
+    try:
+        async with credential_runtime_context(credential_config) as credential_runtime:
+            sandbox_store = await SQLiteSandboxConfigStore.open(database_path)
             try:
-                backend = E2BSandboxBackend(
-                    api_key=api_key,
-                    default_limits=config.limits,
+                config_record = await sandbox_store.get()
+                config = config_record.config
+                if not config.enabled or config.credential_id is None:
+                    raise SmokeError("the persisted E2B sandbox configuration is unavailable")
+                api_key = await credential_runtime.service.resolve_secret_for_request(
+                    config.credential_id
                 )
-            finally:
-                del api_key
+                try:
+                    backend = E2BSandboxBackend(
+                        api_key=api_key,
+                        default_limits=config.limits,
+                    )
+                finally:
+                    del api_key
 
-            artifact_signer = HMACSHA256ArtifactSigner(
-                key_id="e2b-smoke-ephemeral",
-                secret=secrets.token_bytes(32),
-            )
-            publisher_smoke_root = (
-                REPOSITORY_ROOT
-                / ".test-tmp"
-                / f"e2b-publisher-smoke-{uuid4().hex}"
-            )
-            publisher_project_root = publisher_smoke_root / "project"
-            publisher_state_root = publisher_smoke_root / "state"
-            publisher_project_root.mkdir(parents=True)
-            baseline = await build_project_snapshot(
-                publisher_project_root,
-                publisher_smoke_root / "baseline.tar.gz",
-            )
-            manager = SandboxOperationManager(
-                backend=backend,
-                staging_root=(
-                    REPOSITORY_ROOT
-                    / ".test-tmp"
-                    / "e2b-coding-smoke"
-                ),
-                artifact_signer=artifact_signer,
-            )
-            spec = SandboxCreateSpec(
-                operation_id=f"coding-smoke-{uuid4().hex}",
-                runtime_id=config.runtime_id,
-                workdir=config.workdir,
-                network=config.network,
-                limits=config.limits,
-            )
-            validation_plan = parse_sandbox_validation_config(VALIDATION_CONFIG)
-            async with manager.scope(
-                spec,
-                validation_plan=validation_plan,
-            ) as operation:
-                await operation.write_file(
-                    ".pi-agent/sandbox.toml",
-                    VALIDATION_CONFIG.decode("utf-8"),
+                workspace_store = WorkspaceStore(smoke_root / "uploads")
+                await workspace_store.init()
+                session_id = f"session-e2b-smoke-{uuid4().hex}"
+                await workspace_store.ensure_session_workspace(session_id)
+                operation_store = await SQLiteSandboxOperationStore.open(
+                    smoke_root / "operations.sqlite"
                 )
-                tools = {tool.name: tool for tool in create_coding_sandbox_tools()}
-                validation_tool = create_coding_validation_tool()
+
+                async def config_provider() -> SandboxConfigRecord:
+                    return config_record
+
+                async def backend_resolver(
+                    _config: SandboxAdminConfig,
+                ) -> E2BSandboxBackend:
+                    return backend
+
+                async def session_exists(candidate: str) -> bool:
+                    return candidate == session_id
+
+                workspace_publisher = _DiagnosingWorkspacePublisher(
+                    WorkspaceSandboxArtifactPublisher(
+                        workspace_store,
+                        staging_root=smoke_root / "workspace-publishes",
+                    )
+                )
+                lifecycle = ManagedSandboxLifecycle(
+                    store=operation_store,
+                    config_provider=config_provider,
+                    backend_resolver=backend_resolver,
+                    artifact_signer=HMACSHA256ArtifactSigner(
+                        key_id="e2b-smoke-ephemeral",
+                        secret=secrets.token_bytes(32),
+                    ),
+                    session_exists=session_exists,
+                    projects_root=None,
+                    state_root=smoke_root / "publisher-state",
+                    staging_root=smoke_root / "staging",
+                    baseline_provider=WorkspaceSandboxBaselineProvider(
+                        workspace_store,
+                        materialization_root=smoke_root / "materialized",
+                    ),
+                    artifact_publisher=workspace_publisher,
+                )
+                creating = await lifecycle.start(session_id)
+                ready = await _wait_for_status(lifecycle, creating.operation_id, "ready")
+                if (
+                    ready.baseline_workspace_revision is None
+                    or ready.baseline_workspace_sha256 is None
+                    or not ready.publish_available
+                ):
+                    raise SmokeError("managed operation did not bind a Workspace baseline")
+
+                def workspace_getter() -> CodingWorkspace:
+                    assert lifecycle is not None
+                    return lifecycle.workspace_for_session(session_id)
+
+                tools = {
+                    tool.name: tool
+                    for tool in create_coding_sandbox_tools(workspace_getter=workspace_getter)
+                }
+                validation_tool = create_coding_validation_tool(workspace_getter=workspace_getter)
                 tools[validation_tool.name] = validation_tool
-                results = []
-                results.append(
+                initial_results = [
                     (
                         "coding_list_files",
                         await tools["coding_list_files"].execute("list", {}),
-                    )
-                )
-                results.append(
+                    ),
                     (
                         "coding_write_file",
                         await tools["coding_write_file"].execute(
-                            "write",
+                            "write-invalid",
                             {
-                                "path": "src/sandbox_smoke.py",
-                                "content": 'print("before")\n',
+                                "path": "scripts/sandbox_smoke.py",
+                                "content": "def broken(:\n",
                             },
                         ),
-                    )
-                )
-                results.append(
+                    ),
                     (
                         "coding_read_file",
                         await tools["coding_read_file"].execute(
-                            "read", {"path": "src/sandbox_smoke.py"}
+                            "read",
+                            {"path": "scripts/sandbox_smoke.py"},
                         ),
-                    )
-                )
-                results.append(
-                    (
-                        "coding_apply_patch",
-                        await tools["coding_apply_patch"].execute(
-                            "patch",
-                            {
-                                "patch": (
-                                    "--- a/src/sandbox_smoke.py\n"
-                                    "+++ b/src/sandbox_smoke.py\n"
-                                    "@@ -1 +1 @@\n"
-                                    '-print("before")\n'
-                                    '+print("sandbox-ok")\n'
-                                )
-                            },
-                        ),
-                    )
-                )
-                results.append(
+                    ),
                     (
                         "coding_search",
                         await tools["coding_search"].execute(
-                            "search", {"query": "sandbox-ok", "path": "src"}
+                            "search",
+                            {"query": "broken", "path": "scripts"},
                         ),
-                    )
-                )
-                run_result = await tools["coding_run"].execute(
-                    "run", {"argv": ["python3", "src/sandbox_smoke.py"]}
-                )
-                results.append(("coding_run", run_result))
-                results.append(
+                    ),
                     (
                         "coding_diff",
                         await tools["coding_diff"].execute("diff", {}),
-                    )
-                )
-                for name, result in results:
+                    ),
+                ]
+                for name, result in initial_results:
                     await _require_success(name, result)
-                first_validation = await tools["coding_validate"].execute(
-                    "validate-before-delete",
-                    {},
+
+                await lifecycle.validate(ready.operation_id)
+                failed = await _wait_for_status(
+                    lifecycle,
+                    ready.operation_id,
+                    "validation_failed",
                 )
-                await _require_success("coding_validate", first_validation)
-                delete_result = await tools["coding_delete_file"].execute(
-                    "delete", {"path": "src/sandbox_smoke.py"}
-                )
-                await _require_success("coding_delete_file", delete_result)
-                try:
-                    await operation.require_current_validation()
-                except SandboxWorkspaceError as exc:
-                    if exc.code != "validation_stale":
-                        raise
-                else:
-                    raise SmokeError("workspace mutation did not invalidate validation")
-                local_before_failed_validation = _workspace_bytes(
-                    publisher_project_root
-                )
-                failed_validation = await tools["coding_validate"].execute(
-                    "validate-expected-failure",
-                    {},
-                )
+                if failed.error_code != "check_failed":
+                    raise SmokeError("invalid Python did not fail the fixed validation gate")
                 if (
-                    not failed_validation.is_error
-                    or failed_validation.details.get("failure_code") != "check_failed"
+                    await workspace_store.get_by_logical_path(
+                        session_id,
+                        "scripts/sandbox_smoke.py",
+                    )
+                    is not None
                 ):
-                    raise SmokeError("required validation failure was not enforced")
-                if _workspace_bytes(publisher_project_root) != local_before_failed_validation:
-                    raise SmokeError("failed validation changed the local project")
+                    raise SmokeError("failed validation changed WorkspaceStore")
                 try:
-                    await operation.freeze_output_artifact()
-                except SandboxWorkspaceError as exc:
-                    if exc.code != "validation_stale":
+                    await lifecycle.prepare_publish(ready.operation_id)
+                except SandboxLifecycleError as freeze_error:
+                    if freeze_error.code != "validation_required":
                         raise
                 else:
-                    raise SmokeError("failed validation still allowed artifact freeze")
-                restore_result = await tools["coding_write_file"].execute(
-                    "restore",
+                    raise SmokeError("failed validation still allowed freeze")
+
+                patch_result = await tools["coding_apply_patch"].execute(
+                    "fix",
                     {
-                        "path": "src/sandbox_smoke.py",
-                        "content": 'print("sandbox-ok")\n',
+                        "patch": (
+                            "--- a/scripts/sandbox_smoke.py\n"
+                            "+++ b/scripts/sandbox_smoke.py\n"
+                            "@@ -1 +1 @@\n"
+                            "-def broken(:\n"
+                            '+print("sandbox-ok")\n'
+                        )
                     },
                 )
-                await _require_success("coding_write_file", restore_result)
-                final_validation = await tools["coding_validate"].execute(
-                    "validate-after-restore",
+                await _require_success("coding_apply_patch", patch_result)
+                temporary = await tools["coding_write_file"].execute(
+                    "write-temporary",
+                    {
+                        "path": "scripts/delete_me.py",
+                        "content": "print('delete me')\n",
+                    },
+                )
+                await _require_success("coding_write_file", temporary)
+                deleted = await tools["coding_delete_file"].execute(
+                    "delete",
+                    {"path": "scripts/delete_me.py"},
+                )
+                await _require_success("coding_delete_file", deleted)
+                run_result = await tools["coding_run"].execute(
+                    "run",
+                    {"argv": ["python3", "scripts/sandbox_smoke.py"]},
+                )
+                await _require_success("coding_run", run_result)
+                tool_validation = await tools["coding_validate"].execute(
+                    "validate-tool",
                     {},
                 )
-                await _require_success("coding_validate", final_validation)
-                await operation.require_current_validation()
-                artifact = await operation.freeze_output_artifact()
-                verified = verify_output_artifact(
-                    artifact,
-                    artifact_signer,
-                    max_archive_bytes=config.limits.max_upload_bytes,
-                    max_file_bytes=config.limits.max_file_bytes,
-                    max_file_count=config.limits.max_file_count,
+                await _require_success("coding_validate", tool_validation)
+
+                await lifecycle.validate(ready.operation_id)
+                validated = await _wait_for_status(
+                    lifecycle,
+                    ready.operation_id,
+                    "validated",
                 )
-                if verified.manifest.changed_file_count != 2:
-                    raise SmokeError("frozen artifact did not contain the expected files")
-                publisher = LocalTransactionalPublisher(
-                    project_root=publisher_project_root,
-                    state_root=publisher_state_root,
-                )
-                conflict_path = publisher_project_root / "local-conflict.txt"
-                conflict_path.write_bytes(b"local change must survive\n")
-                conflict_before = _workspace_bytes(publisher_project_root)
+                if validated.validation is None or not validated.validation.passed:
+                    raise SmokeError("managed validation evidence was not persisted")
                 try:
-                    await publisher.publish(
-                        artifact,
-                        baseline=baseline,
-                        signer=artifact_signer,
+                    await lifecycle.publish(ready.operation_id)
+                except SandboxLifecycleError as approval_error:
+                    if approval_error.code != "approval_required":
+                        raise
+                else:
+                    raise SmokeError("publish did not require an approval state")
+
+                await lifecycle.prepare_publish(ready.operation_id)
+                awaiting = await _wait_for_status(
+                    lifecycle,
+                    ready.operation_id,
+                    "awaiting_approval",
+                )
+                if awaiting.artifact_id is None or "publish" not in awaiting.allowed_actions:
+                    raise SmokeError("freeze did not produce an approval-bound artifact")
+                await lifecycle.publish(ready.operation_id)
+                try:
+                    published = await _wait_for_status(
+                        lifecycle,
+                        ready.operation_id,
+                        "published",
                     )
-                except PublisherError as exc:
-                    if exc.code != "publish_conflict":
-                        raise
-                else:
-                    raise SmokeError("Publisher accepted a changed baseline")
-                if _workspace_bytes(publisher_project_root) != conflict_before:
-                    raise SmokeError("Publisher conflict changed the local project")
-                conflict_path.unlink()
-                publish_result = await publisher.publish(
-                    artifact,
-                    baseline=baseline,
-                    signer=artifact_signer,
+                except SmokeError as exc:
+                    if workspace_publisher.error_detail is not None:
+                        raise SmokeError(
+                            f"Workspace publisher failed ({workspace_publisher.error_detail})"
+                        ) from exc
+                    raise
+                expected_revision = ready.baseline_workspace_revision + 1
+                if published.published_workspace_revision != expected_revision:
+                    raise SmokeError("Workspace revision did not advance exactly once")
+                published_file = await workspace_store.get_by_logical_path(
+                    session_id,
+                    "scripts/sandbox_smoke.py",
                 )
-                if publish_result.status != "published":
-                    raise SmokeError("local Publisher did not commit the artifact")
-                published_files = _workspace_bytes(publisher_project_root)
-                if published_files != {
-                    ".pi-agent/sandbox.toml": VALIDATION_CONFIG,
-                    "src/sandbox_smoke.py": b'print("sandbox-ok")\n',
-                }:
-                    raise SmokeError("local Publisher output did not match the artifact")
-                recovery = await publisher.recover_pending()
-                if recovery.recovered_rollbacks:
-                    raise SmokeError("committed Publisher transaction was rolled back")
-                retry = await publisher.publish(
-                    artifact,
-                    baseline=baseline,
-                    signer=artifact_signer,
+                if published_file is None:
+                    raise SmokeError("approved artifact was not written to WorkspaceStore")
+                published_content = await asyncio.to_thread(
+                    Path(published_file.path).read_text,
+                    encoding="utf-8",
                 )
-                if retry.status != "already_published":
-                    raise SmokeError("local Publisher retry was not idempotent")
-                try:
-                    await operation.run(("python3", "-V"))
-                except SandboxWorkspaceError as frozen_error:
-                    if frozen_error.code != "operation_frozen":
-                        raise
-                else:
-                    raise SmokeError("frozen operation still accepted a command")
+                if published_content != 'print("sandbox-ok")\n':
+                    raise SmokeError("WorkspaceStore content did not match the artifact")
                 run_text = "\n".join(block.text for block in run_result.content)
                 if "sandbox-ok" not in run_text:
                     raise SmokeError("coding_run output did not contain the expected marker")
-                if operation.handle.operation_id != spec.operation_id:
-                    raise SmokeError("operation handle ownership mismatch")
-        finally:
-            await sandbox_store.close()
+            finally:
+                await sandbox_store.close()
+    finally:
+        if lifecycle is not None:
+            await lifecycle.shutdown()
+        if operation_store is not None:
+            await operation_store.close()
+        await asyncio.to_thread(shutil.rmtree, smoke_root, ignore_errors=True)
 
 
 def main() -> None:
@@ -378,9 +436,9 @@ def main() -> None:
     print("validation_failure_blocked=true")
     print("artifact_frozen=true")
     print("artifact_signed=true")
-    print("publisher_conflict_unchanged=true")
-    print("publisher_committed=true")
-    print("publisher_retry_idempotent=true")
+    print("approval_required=true")
+    print("workspace_store_published=true")
+    print("workspace_revision_advanced=true")
     print("sandbox_destroyed=true")
     print(f"duration_ms={int((time.monotonic() - started) * 1000)}")
 

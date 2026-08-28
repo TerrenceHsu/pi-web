@@ -123,6 +123,9 @@ watch(() => [props.file.id, props.file.sha256], load, { immediate: true })
     <div v-else-if="error" class="preview-error" role="alert">{{ error }}</div>
     <template v-else-if="canRead">
       <template v-if="isMarkdown">
+        <div v-if="isDocumentOutput" class="preview-readonly">
+          Generated document output is read-only.
+        </div>
         <div v-if="!editing" class="markdown-preview markdown-body">
           <!-- markdown-it disables raw HTML; only parser output is rendered. -->
           <!-- eslint-disable-next-line vue/no-v-html -->
@@ -142,7 +145,6 @@ watch(() => [props.file.id, props.file.sha256], load, { immediate: true })
             </button>
           </div>
         </div>
-        <div v-else class="preview-readonly">Generated document output is read-only.</div>
       </template>
       <pre
         v-else

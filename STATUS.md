@@ -6,9 +6,9 @@
 
 | 项 | 当前事实 |
 |---|---|
-| 代码基线 | `0.0.28` 发布基线之上已提交 Coding Sandbox 阶段 4A–4C（`0e1a758`）；当前工作树已完成 Session Workspace 阶段 5 固定文档转换 |
+| 代码基线 | `0.0.28` 发布基线之上已完成 Coding Sandbox 阶段 4A–4C、Session Workspace 阶段 5（`a4f62b2`）与阶段 6 完整验收；当前 HEAD 包含 Windows Publisher 路径修复和最终发布门禁证据 |
 | 分支 | `master` |
-| 最新 release tag | `0.0.28`；annotated tag 指向发布基线，不包含其后的阶段 4A–4C 提交与当前阶段 5 工作树 |
+| 最新 release tag | `0.0.28`；annotated tag 指向发布基线，不包含其后的阶段 4A–6 提交 |
 | Python / API 版本 | `0.0.28`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
 | 前端包版本 | `0.0.28`（`package.json` 与 lockfile 一致） |
 | 许可证 | MIT；根 `LICENSE` 为标准正文，`pyproject.toml` 与 wheel 均直接引用/携带该文件 |
@@ -46,9 +46,9 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 | ToolResult usage 与 deferred-tool metadata | ✅ 完成 | `b6baea8`；事件、LLM 边界、Snapshot、Session/SQLite 与 Web JSON 全链路保留 |
 | Durable operation / recovery | ✅ 完成 | `8a5c569`；append-only operation records、Checkpointer restart recovery、原子文件 generation、JSON journal |
 | Complete-turn Compaction semantics | ✅ 完成 | `0c72679`；完整 turn、token/window 审计、previous-summary envelope、瞬时错误重试 |
-| 全仓 Ruff / strict Mypy / CI 收敛 | ✅ 完成 | Ruff 0；strict Mypy 168 source files / 0 issues；Python CI timeout 30 分钟 |
+| 全仓 Ruff / strict Mypy / CI 收敛 | ✅ 完成 | Ruff 0；strict Mypy 170 source files / 0 issues；Python CI timeout 30 分钟 |
 | Release metadata 与 MIT License | ✅ 完成 | `8a6ff2e`；Python/API/前端统一 `0.0.28`，wheel 携带根许可证 |
-| 当前发布前浏览器/联网门禁 | ✅ 完成 | 精简 Playwright 18/18；此前 DDGS + GLM 真实 smoke 3/3 |
+| 当前发布前浏览器/联网门禁 | ✅ 完成 | 精简 Playwright 19/19、0 retry/flaky；真实 E2B Managed Sandbox/审批/WorkspaceStore 回写 PASS；此前 DDGS + GLM 真实 smoke 3/3 |
 | Managed Coding Sandbox P0 0–10 | ✅ 完成 | 独立包、快照、E2B、代码工具、固定验证、签名制品、本机事务 Publisher、Web 生命周期/状态恢复/审批发布 UI，以及真实 E2B、完整 CI、攻击矩阵和 Browser E2E 验收 |
 | Coding Sandbox 阶段 4A 状态机/TOCTOU | ✅ 完成 | Backend 单一转换表与公开 actions/transitions、SQLite 完整记录 CAS、UI 动作投影；Validation→Freeze 屏障前 stale 可重验，屏障后 `artifact_stale` fail-closed 终止 |
 | Coding Sandbox 阶段 4B Workspace baseline | ✅ 完成 | WorkspaceStore mutation lock 内按 logical path 物化 revision-bound 树，逐文件稳定 stat/SHA 校验；operation 记录源 revision/tree SHA，主应用不再以独立项目目录作为输入事实源；4C 前发布 fail closed |
@@ -115,18 +115,18 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 | API Key | OS Keyring、显式 session-only memory 或显式 env；不写入 SQLite 明文 |
 | Active request / pending approval / event subscribers | 当前后端进程内存；后端重启不恢复执行 |
 
-## 2026-08-28 当前验证基线
+## 2026-08-29 当前验证基线
 
-当前工作树已按快速开发阶段的“最小可观察行为”边界完成第二轮测试精简，并在发布候选整理中
-实际复跑当前 2107 项 Backend 套件、180 项 Frontend 套件与关键 Wiki Browser E2E。历史真实
-Parser、E2B、DDGS/GLM smoke 证据继续保留；本次未修改对应运行时边界，因此没有重复消耗外部服务：
+当前代码按快速开发阶段的“最小可观察行为”边界完成阶段 6 发布验收：全量离线 Backend、
+Frontend 与 Browser E2E 均实际复跑；真实 E2B 也重新执行 Managed Sandbox 写入、失败验证、
+重验、冻结、审批和 WorkspaceStore 回写。历史 Parser、DDGS/GLM 证据继续保留：
 
 | 验证 | 结果 | 备注 |
 |---|---|---|
 | Ruff 全量 | **PASS** | `ruff check .`；0 errors；包含 OCI Provider、Worker service 与 smoke CLI |
-| strict Mypy 全量 | **PASS** | `mypy src`：168 source files / 0 issues；覆盖 Wiki Summary/Page/Change Set/FTS/Graph/Conversation/Knowledge Agent 与前端组合边界 |
+| strict Mypy 全量 | **PASS** | `mypy src`：170 source files / 0 issues；覆盖 Wiki、Workspace 文档转换、Managed Sandbox 与前端组合边界 |
 | Backend 全量离线（第二轮前基线） | **3143 passed, 7 skipped, 9 deselected** | 当时为 3159 collected；`pytest tests --tb=short -q`；1053.41s；coverage 81.91% |
-| Backend 当前精简套件 | **2091 passed, 7 skipped, 9 deselected** | `pytest tests --tb=short -q --no-cov`；352.44s；移除历史 Step/Smoke、实现细节、机械 DTO/config 与重复 Provider/Wiki v1 矩阵后实际全量复跑 |
+| Backend 当前精简套件 | **2095 passed, 7 skipped, 9 deselected** | `pytest tests --tb=short -q --no-cov`；647.44s；默认排除真实外网、LLM 与 Docker marker |
 | Frontend 当前精简套件 | **180/180 passed** | 26 files；删除重复 Provider API/Store/表单/选择器矩阵，保留 Provider 设置弹窗和跨层集成行为 |
 | LLM Wiki 发布候选定向回归 | **Backend 67 passed, 1 skipped；Frontend 16/16；Browser 1/1** | 覆盖 Store/API/Summary/Fake Parser、五个 Wiki 前端视图与 source→approval→page→graph→conversation 浏览器主链路 |
 | Workspace 阶段 1 定向回归 | **125 passed** | `VirtualFileStore` 兼容别名、双根初始化、并发幂等、旧路径/purpose 迁移、固定根删除保护、Checkpointer/Auth/重启；`-W error` 下 0 warning |
@@ -146,7 +146,7 @@ Parser、E2B、DDGS/GLM smoke 证据继续保留；本次未修改对应运行�
 | LLM Wiki 阶段 1–3 定向回归 | **104 passed, 4 skipped** | Provider contract、Store/Files/Legacy、Source/Artifact/Job、HTML、Fake PDF、安全 tar 导入、API/lifespan、并发 claim 与崩溃后新 attempt；skip 为 Windows symlink capability |
 | Coding Sandbox 安全矩阵 | **151 passed, 2 skipped** | 离线 Fake/E2B 契约、路径/命令/网络/凭证攻击、故障注入、validation/artifact 篡改、Publisher 冲突/回滚/崩溃恢复，以及退役 Provider 空字段兼容迁移；Windows capability skip |
 | Sandbox Web 生命周期/API | **7 passed** | SQLite operation/event 恢复、启动 `interrupted` 收敛、snapshot seed、验证失败不得冻结/发布且真实工作区字节级不变、取消，以及 disabled/missing/latest API 边界 |
-| 真实 E2B + Publisher 安全 smoke | **PASS** | 9 个代码工具、故意验证失败与冻结拒绝、恢复重验、制品冻结/签名、本机冲突且工作区字节级不变、commit、幂等 retry、Sandbox destroy；20.577s；未输出凭证 |
+| 真实 E2B + WorkspaceStore 发布 smoke | **PASS** | 9 个代码工具、故意验证失败与冻结拒绝、恢复重验、制品冻结/签名、审批门禁、WorkspaceStore 单 revision 回写与 Sandbox destroy；27.171s；未输出凭证 |
 | Complete-turn Compaction 定向回归 | **50 passed** | 完整 turn/token target、超预算最新 turn、token/window、previous summary、retry lifecycle、失败不改源消息、Web API 与 durable-operation 邻接回归 |
 | Durable recovery 定向回归 | **PASS** | operation intent/effect/finish、同进程无模型重试、启动前滚、source-leaf conflict 保留消息、文件 pointer rollback、JSON torn-tail / legacy migration |
 | Session tree 定向回归 | **69 passed** | immutable entry/lane、旧库迁移、branch/fork/label/active leaf、重启、Web API、revision sibling 与 trailing suffix |
@@ -164,7 +164,7 @@ Parser、E2B、DDGS/GLM smoke 证据继续保留；本次未修改对应运行�
 | Keyring 定向回归 | **94/94 passed** | Runtime、launcher 与 restart 范围 |
 | 真实 Windows Keyring 探针 | **write/read = true；cleanup = true** | 随机非用户值，执行后删除；同账号/同解释器复验与安全取证步骤已形成 Windows smoke 文档 |
 | MCP/DDGS UTF-8 定向回归 | **34 passed, 1 deselected** | 含真实 Python 子进程中文 round-trip |
-| Browser E2E | **18/18 passed** | Chromium；8 个规格、单 worker、`CI=1`；47.2s；覆盖基础聊天、Session 恢复、MCP、Approval、Compaction、Workspace、Sandbox 与 LLM Wiki；0 retry / 0 failure |
+| Browser E2E | **19/19 passed** | Chromium；8 个规格、单 worker、`CI=1`；1.3m；覆盖基础聊天、Session 恢复、MCP、Approval、Compaction、Workspace 文档转换、Sandbox 与 LLM Wiki；0 retry / 0 flaky / 0 failure |
 | Context Compaction Browser E2E | **1/1 passed** | 修复逐轮 Prompt 未等待 202 导致的测试自身竞态；沙箱外真实启动浏览器；production build 由 posttest 恢复 |
 
 默认 pytest marker 排除真实 LLM、真实外网 integration 和 Docker；额外门禁还要求
@@ -206,15 +206,15 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 - 当前无 Git remote；tag/push 需要先决定版本并配置 remote
 - 旧 `.pytest_cache` 仍受本机 ACL 限制，但 pytest 已固定使用可写的 `.pytest-cache-workspace` 与 `.pytest-tmp`，不再读写旧目录或关闭 cacheprovider
-- Coding Sandbox P0 第 0–10 项和 Workspace 阶段 4A–5 已完成；显式状态机/CAS、双 TOCTOU、revision-bound baseline、事务发布、固定文档转换及右栏成果刷新均已固定
+- Coding Sandbox P0 第 0–10 项和 Workspace 阶段 4A–6 已完成；显式状态机/CAS、双 TOCTOU、revision-bound baseline、事务发布、固定文档转换、右栏成果刷新与发布门禁均已固定
 
 ## 当前阻塞项
 
-LLM Wiki 阶段 0–10 已完成，没有功能阻塞。真实 OCI Worker 为 `runtime_ready=true`，页面中心主链路、独立 Knowledge UI、来源保留与 Space 生命周期已实现，旧 Chunk Knowledge 已退出产品组合。发布候选静态检查、Backend/Frontend 全量精简套件、production build 与关键 Wiki Browser E2E 均已通过，release tag 为 `0.0.28`；Coding Sandbox 阶段 4A–4C 与 Workspace 固定文档转换主链路已闭环。若需 push，仍需先配置 Git remote。
+LLM Wiki 阶段 0–10 与 Session Workspace 阶段 1–6 已完成，没有功能阻塞。真实 OCI Worker 为 `runtime_ready=true`；发布候选静态检查、Backend/Frontend 全量精简套件、完整 Browser E2E 与真实 E2B Workspace 回写均已通过。release tag 仍为 `0.0.28`；若需发布后续提交或 push，仍需先决定新版本并配置 Git remote。
 
 ## 建议下一步
 
-1. 阶段 5 工作树完成后先审阅并提交。
-2. 阶段 6 完整验收仍冻结；解除后执行真实 E2B 写入、验证、审批、Workspace 回写，以及文档上传/右栏展示 Browser E2E。
+1. 审阅并提交阶段 6 验收改动。
+2. 若准备新发布，统一提升版本并创建下一 annotated tag；push 前先配置 Git remote。
 
 未完成事项的唯一清单见 [`TODO.md`](TODO.md)。使用与架构说明见 [`README.md`](README.md)。

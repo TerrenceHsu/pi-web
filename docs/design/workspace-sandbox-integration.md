@@ -254,6 +254,15 @@ Workspace metadata，缺失或不一致即重新转换。PDF/DOCX/XLSX 真实本
 - Playwright 覆盖上传、Sandbox 修改、验证失败不发布、确认发布、刷新/重启恢复。
 - 真实 E2B smoke 验证 Python 写入、执行、固定验证和 Workspace 回写。
 
+实施结果：已完成。全量 Backend `2095 passed, 7 skipped, 9 deselected`，Ruff 与 strict
+Mypy（170 source files）通过；Frontend 180/180、lint/typecheck/build 通过；完整 Playwright
+19/19、0 retry/flaky。新增的 Workspace 浏览器路径验证 XLSX 上传后同步转换、右栏优先打开
+`content.md` 并显示只读提示。真实 E2B smoke 通过 Managed Sandbox 状态机执行全部 9 个代码
+工具，证明失败验证不能冻结或写回，修复后重新验证、冻结签名、进入审批状态并把制品以单次
+revision 发布回一次性 `WorkspaceStore`。验收同时发现 Windows 深层 Publisher state 会超过传统
+MAX_PATH；adapter 现使用短 run key，并把事务 state 放到 staging 根下的短兄弟目录，真实 E2B
+回归已通过。
+
 ## 11. 验收标准
 
 1. 新 Session 初始文件树只有 `AGENT.md`、`Memory.md`，且各自唯一。

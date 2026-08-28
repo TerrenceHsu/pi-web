@@ -20,6 +20,11 @@ const emit = defineEmits<{
 }>()
 
 const expanded = ref(true)
+
+function editFile(fileId: string): void {
+  emit("select-file", fileId)
+  emit("edit-file", fileId)
+}
 </script>
 
 <template>
@@ -50,10 +55,7 @@ const expanded = ref(true)
         type="button"
         class="tree-main editable-file"
         :aria-label="`Edit ${node.name}`"
-        @click="
-          emit('select-file', node.file.id)
-          emit('edit-file', node.file.id)
-        "
+        @click="editFile(node.file.id)"
       >
         <span aria-hidden="true">{{ node.file.purpose === "memory" ? "🧠" : "⚙" }}</span>
         <span>{{ node.name }}</span>
@@ -83,7 +85,7 @@ const expanded = ref(true)
           >↓</a
         >
         <button
-          v-if="node.file.purpose === 'file'"
+          v-if="node.file.purpose === 'file' || node.file.purpose === 'memory'"
           type="button"
           class="tree-action"
           :aria-label="`Remove ${node.name}`"

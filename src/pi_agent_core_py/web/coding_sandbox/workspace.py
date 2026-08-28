@@ -123,9 +123,13 @@ class WorkspaceSandboxArtifactPublisher:
             if not is_sandbox_publishable_workspace_path(deleted_entry.path):
                 raise PublisherError("unsafe_path", relative_path=deleted_entry.path)
 
-        run_root = self._staging_root / (
-            f"workspace-publish-{artifact.manifest.artifact_id[9:]}-{uuid4().hex}"
-        )
+        # Keep disposable directory keys short and place Publisher state next
+        # to (not below) the artifact mirror. Journals add a project digest,
+        # transaction ID and backup filename, which can otherwise cross the
+        # traditional Windows MAX_PATH boundary.
+        run_key = uuid4().hex[:16]
+        run_root = self._staging_root / (f"wp-{artifact.manifest.artifact_id[9:17]}-{run_key}")
+        publisher_state_root = self._staging_root / f"ps-{run_key}"
         project_root = run_root / "project"
         try:
             try:
@@ -147,7 +151,7 @@ class WorkspaceSandboxArtifactPublisher:
 
             local_publisher = LocalTransactionalPublisher(
                 project_root=project_root,
-                state_root=run_root / "publisher-state",
+                state_root=publisher_state_root,
             )
             local_result = await local_publisher.publish(
                 artifact,
@@ -189,6 +193,11 @@ class WorkspaceSandboxArtifactPublisher:
             raise PublisherError("io_failure") from exc
         finally:
             await asyncio.to_thread(shutil.rmtree, run_root, ignore_errors=True)
+            await asyncio.to_thread(
+                shutil.rmtree,
+                publisher_state_root,
+                ignore_errors=True,
+            )
 
 
 def _write_new_file(path: Path, value: bytes) -> None:

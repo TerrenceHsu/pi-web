@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Session Workspace stage 6 release acceptance（2026-08-29）
+
+- Workspace Browser E2E 新增 XLSX 上传主路径：固定转换完成后右栏自动选中 `content.md`，展示 workbook 摘要并明确只读；修复文件树模板编译错误、生成文档只读提示不可达和 `Memory.md` 删除动作回归
+- 真实 E2B smoke 改走完整 Managed Sandbox 状态机和 `WorkspaceStore` adapter：覆盖 9 个代码工具、故意验证失败、重验、冻结签名、审批门禁、单 revision 回写与 Sandbox 销毁，不再只发布到普通本机目录
+- 修复 Windows Publisher 深层路径超过传统 MAX_PATH：Workspace adapter 使用短 run key，并把事务 state 放在 staging 根下的短兄弟目录；真实 E2B 首次暴露的 `winerror=206` 已回归通过
+- 发布门禁：Ruff PASS；strict Mypy 170 files / 0 issues；Backend `2095 passed, 7 skipped, 9 deselected`；Frontend `180/180`、typecheck/lint/build PASS；Playwright `19/19`、0 retry/flaky；真实 E2B smoke PASS（27.171s）
+
 ### Session Workspace fixed document conversion（2026-08-29）
 
 - `.pdf/.docx/.xlsx` 上传归档为 `documents/<document-id>/original.*` 不可变原件；固定转换器从 revision-bound Workspace 快照生成只读 Markdown、CSV/schema、图片和可审计 manifest，不复用 LLM Wiki 的 Provider、Worker、DB 或 Raw 制品
