@@ -286,9 +286,11 @@ Slash command 是独立的 Session 操作；命令文本不会作为 UserMessage
 
 ---
 
-## Files（P0-2 VirtualFileStore）
+## Files（Session WorkspaceStore）
 
-会话级 managed workspace，强 session 隔离。新建 Session 与应用启动时都会幂等确保唯一根 `AGENT.md`；已有内容不会被覆盖。文件 metadata 只公开逻辑路径，不公开服务器物理路径。
+会话级 managed workspace，强 session 隔离。新建 Session 与应用启动时都会幂等确保唯一根
+`AGENT.md` 和 `Memory.md`；已有内容不会被覆盖。文件 metadata 只公开逻辑路径，不公开服务器
+物理路径。
 
 ### `POST /api/sessions/{sid}/files`
 
@@ -321,11 +323,19 @@ Slash command 是独立的 Session 操作；命令文本不会作为 UserMessage
       "updated_at": ...
     }
   ],
-  "errors": []
+  "conversions": [],
+  "errors": [],
+  "workspace": {"schema_version": 1, "session_id": "sess-...", "revision": 3}
 }
 ```
 
-**Response 207**（部分成功，多文件时）: 同结构，`errors` 非空。
+`.pdf`、`.docx`、`.xlsx` 不进入普通上传路径，而是归档为
+`documents/<document-id>/original.<ext>`（`purpose=document_original`）。服务从不可变 Workspace
+快照执行固定转换；`conversions` 返回状态、primary/manifest file id、warning 和本次生成的
+`document_conversion` 文件。成功产物可包含 `content.md`、`tables/*.csv`、`tables/*.json`、
+`assets/*`、`manifest.json`。原件和生成物均只读；扫描 PDF 返回 `needs_ocr`，当前不会自动 OCR。
+
+**Response 200**（部分成功，多文件时）: 同结构，`errors` 非空。
 
 **Response 400 / 413**（全部失败）:
 
@@ -348,7 +358,23 @@ Slash command 是独立的 Session 操作；命令文本不会作为 UserMessage
 
 **Response 200**: `{"count": N, "files": [FileRef, ...]}`
 
-`FileRef.logical_path` 使用 `/` 分隔虚拟目录；`origin` 为 `system | upload | agent | user | legacy`，`purpose` 为 `file | agent_instructions | memory`。响应中没有物理 `path`。`Memory.md` 使用 `purpose=memory`。
+`FileRef.logical_path` 使用 `/` 分隔虚拟目录；`origin` 为
+`system | upload | agent | user | legacy`，`purpose` 为
+`file | agent_instructions | memory | document_original | document_conversion`。响应中没有物理
+`path`。`Memory.md` 使用 `purpose=memory`。
+
+### `POST /api/sessions/{sid}/documents/{source_file_id}/convert`
+
+对一个 `document_original` 显式重试固定转换。相同 source SHA、converter version、配置版本且
+manifest 声明的全部制品仍完整时直接返回 `reused=true`，不提升 Workspace revision；否则从新的
+revision 快照转换并以一个事务替换该文档的生成物。
+
+**Response 200**：`source_file_id`、`document_id`、`status`、`reused`、`workspace_revision`、
+`primary_file_id`、`manifest_file_id`、`files`、`warnings`、`error_code`。
+
+**Response 409**：转换期间 Workspace 发生并发修改或目标路径/原件不满足权限合同。
+
+**Response 415**：目标不是支持的不可变 Workspace 文档原件。
 
 ### `GET /api/sessions/{sid}/files/{fid}`
 
@@ -364,11 +390,12 @@ Slash command 是独立的 Session 操作；命令文本不会作为 UserMessage
 
 **Response 200**: `{"deleted": true, "file_id": "..."}`
 
-根 `AGENT.md`（`purpose=agent_instructions`）不可删除，返回 409；只能通过 content endpoint 编辑。
+根 `AGENT.md`、`Memory.md`、文档原件和固定转换产物不可通过单文件 API 删除，返回 409。
 
 ### `PUT /api/sessions/{sid}/files/{fid}/content`
 
-更新根 `AGENT.md` 或 `Memory.md` 的 UTF-8 正文。只允许编辑 `purpose=agent_instructions | memory` 的受管文件；普通上传或 Agent 创建文件返回 403。保存结果从该 Session 下一轮 Agent 请求起生效。
+更新根文件或普通 Workspace Markdown 的 UTF-8 正文；固定文档原件/生成物始终返回 403。保存
+结果从该 Session 下一轮 Agent 请求起生效。
 
 **Request**:
 

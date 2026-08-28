@@ -104,6 +104,7 @@ if TYPE_CHECKING:
 
     from .files import WorkspaceStore
     from .wiki.summary import WikiSummaryAgent
+    from .workspace_documents import WorkspaceDocumentConverterRegistry
 
 # ============================================================================
 # 常量
@@ -328,6 +329,7 @@ def create_app(
     uploads_dir: str | Path | None = None,
     max_file_size: int = 25 * 1024 * 1024,
     max_session_upload_size: int = 100 * 1024 * 1024,
+    workspace_document_converters: WorkspaceDocumentConverterRegistry | None = None,
     request_history_maxlen: int = 100,
     shutdown_grace_s: float = 5.0,
     # P1-E1-4A: Credential runtime composition（可选）
@@ -407,6 +409,8 @@ def create_app(
             上传路径；所有 `/api/.../files` endpoint 返回 503。生产场景传目录路径。
         max_file_size: 单文件大小上限，默认 25 MB
         max_session_upload_size: 单 session 总上传上限，默认 100 MB
+        workspace_document_converters: 固定文档 converter registry；None 使用
+            内建 PDF/DOCX/XLSX 实现，测试可注入同一 Protocol 的确定性实现。
     """
     if (
         wiki_source_retention_seconds < 0
@@ -534,6 +538,19 @@ def create_app(
                     await file_store.ensure_session_workspace(existing_session.id)
                 state.file_store = file_store
                 state.uploads_dir = Path(uploads_dir)
+                from .workspace_documents import WorkspaceDocumentService
+
+                uploads_path = await asyncio.to_thread(
+                    Path(uploads_dir).resolve,
+                    strict=False,
+                )
+                state.workspace_document_service = WorkspaceDocumentService(
+                    file_store,
+                    staging_root=(
+                        uploads_path.parent / f".{uploads_path.name}-document-conversions"
+                    ),
+                    registry=workspace_document_converters,
+                )
             except Exception:
                 # 文件存储不可用不阻塞 app 启动；endpoint 走 503。
                 # 但必须留下完整 traceback，避免深层文件系统错误只表现为下游 503。
@@ -543,9 +560,11 @@ def create_app(
                 )
                 state.file_store = None
                 state.uploads_dir = None
+                state.workspace_document_service = None
         else:
             state.file_store = None
             state.uploads_dir = None
+            state.workspace_document_service = None
 
         # P2 durable operations: reduce accepted checkpointer intents before
         # requests can observe the workspace. Recovery is evidence-only and
@@ -4872,6 +4891,20 @@ def create_app(
             "updated_at": workspace.updated_at,
         }
 
+    def _serialize_workspace_document_result(result: Any) -> dict[str, Any]:
+        return {
+            "source_file_id": result.source_file_id,
+            "document_id": result.document_id,
+            "status": result.status,
+            "reused": result.reused,
+            "workspace_revision": result.workspace_revision,
+            "manifest_file_id": result.manifest_file_id,
+            "primary_file_id": result.primary_file_id,
+            "files": [_serialize_managed_file(ref) for ref in result.files],
+            "warnings": list(result.warnings),
+            "error_code": result.error_code,
+        }
+
     @app.post("/api/sessions/{sid}/files", response_model=None)
     async def post_session_files(
         sid: str,
@@ -4918,6 +4951,7 @@ def create_app(
         )
 
         saved: list[dict[str, Any]] = []
+        conversions: list[dict[str, Any]] = []
         errors: list[dict[str, Any]] = []
         next_expected_revision = expected_workspace_revision
         for upload in files:
@@ -4929,6 +4963,33 @@ def create_app(
                     expected_workspace_revision=next_expected_revision,
                 )
                 saved.append(_serialize_managed_file(ref))
+                if (
+                    ref.purpose == "document_original"
+                    and state.workspace_document_service is not None
+                ):
+                    try:
+                        converted = await state.workspace_document_service.convert(
+                            ref.id,
+                            sid,
+                        )
+                        conversions.append(_serialize_workspace_document_result(converted))
+                    except FileStoreError as exc:
+                        conversions.append(
+                            {
+                                "source_file_id": ref.id,
+                                "document_id": PurePosixPath(ref.logical_path).parent.name,
+                                "status": "failed",
+                                "reused": False,
+                                "workspace_revision": (
+                                    await file_store.get_workspace_state(sid)
+                                ).revision,
+                                "manifest_file_id": None,
+                                "primary_file_id": None,
+                                "files": [],
+                                "warnings": [],
+                                "error_code": type(exc).__name__,
+                            }
+                        )
                 workspace = await file_store.get_workspace_state(sid)
                 next_expected_revision = workspace.revision
             except FileTooLargeError as e:
@@ -4993,10 +5054,65 @@ def create_app(
             content={
                 "count": len(saved),
                 "files": saved,
+                "conversions": conversions,
                 "errors": errors,
                 "workspace": _serialize_workspace_state(workspace),
             },
         )
+
+    @app.post(
+        "/api/sessions/{sid}/documents/{source_file_id}/convert",
+        response_model=None,
+    )
+    async def convert_session_workspace_document(
+        sid: str,
+        source_file_id: str,
+    ) -> dict[str, Any] | JSONResponse:
+        """Idempotently retry one immutable Workspace document conversion."""
+        from .files import (
+            FileAccessDeniedError,
+            FileStoreError,
+            VirtualFileNotFoundError,
+            WorkspacePublishPolicyError,
+            WorkspaceTreeConflictError,
+            WorkspaceVersionConflictError,
+        )
+        from .workspace_documents import UnsupportedWorkspaceDocumentError
+
+        store = state.session_store
+        if store is None:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "session store not initialized"},
+            )
+        if await store.get_session(sid) is None:
+            return JSONResponse(
+                status_code=404,
+                content={"detail": f"session {sid!r} not found"},
+            )
+        service = state.workspace_document_service
+        if service is None:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "Workspace document converter is unavailable"},
+            )
+        try:
+            converted = await service.convert(source_file_id, sid)
+        except VirtualFileNotFoundError as exc:
+            return JSONResponse(status_code=404, content={"detail": str(exc)})
+        except FileAccessDeniedError as exc:
+            return JSONResponse(status_code=403, content={"detail": str(exc)})
+        except UnsupportedWorkspaceDocumentError as exc:
+            return JSONResponse(status_code=415, content={"detail": str(exc)})
+        except (
+            WorkspacePublishPolicyError,
+            WorkspaceTreeConflictError,
+            WorkspaceVersionConflictError,
+        ) as exc:
+            return JSONResponse(status_code=409, content={"detail": str(exc)})
+        except FileStoreError as exc:
+            return JSONResponse(status_code=500, content={"detail": str(exc)})
+        return _serialize_workspace_document_result(converted)
 
     @app.get("/api/sessions/{sid}/files", response_model=None)
     async def get_session_files(sid: str) -> dict[str, Any] | JSONResponse:
@@ -5239,6 +5355,11 @@ def create_app(
         file_store = _require_file_store()
         try:
             current = await file_store.get_for_session(sid, fid)
+            if current.purpose in {"document_original", "document_conversion"}:
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Workspace document files are read-only"},
+                )
             if current.purpose not in {"agent_instructions", "memory"} and not is_markdown_filename(
                 current.name
             ):
@@ -5424,6 +5545,15 @@ def create_app(
                     content={
                         "detail": (
                             "AGENT.md and Memory.md are required; edit their content instead"
+                        )
+                    },
+                )
+            if current.purpose in {"document_original", "document_conversion"}:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "detail": (
+                            "Workspace document originals and conversion outputs are immutable"
                         )
                     },
                 )

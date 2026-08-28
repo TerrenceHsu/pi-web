@@ -20,6 +20,7 @@
 - SessionStorageLimitError —— session 总量超限
 - UnsafeFilenameError —— 路径穿越 / 不安全文件名
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -33,7 +34,7 @@ import stat
 import time
 import uuid
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import Literal, TypeAlias
 
 from fastapi import UploadFile
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -58,6 +59,21 @@ MEMORY_PATH = "Memory.md"
 #: Agent 与用户代码的唯一逻辑根。目录在第一份代码出现时自然进入文件树。
 SCRIPTS_PATH = "scripts"
 
+#: 富文档原件与固定转换产物的逻辑根。Sandbox 永远不能发布到这里。
+DOCUMENTS_PATH = "documents"
+
+#: Workspace 固定转换工作流首版支持的不可变原件格式。
+WORKSPACE_DOCUMENT_EXTENSIONS: frozenset[str] = frozenset({".pdf", ".docx", ".xlsx"})
+
+FilePurpose: TypeAlias = Literal[
+    "file",
+    "agent_instructions",
+    "memory",
+    "document_original",
+    "document_conversion",
+]
+WorkspacePublishKind: TypeAlias = Literal["sandbox", "document_conversion"]
+
 #: Workspace revision 的隐藏持久化状态；不属于用户可见文件树。
 WORKSPACE_STATE_FILENAME = ".workspace.json"
 
@@ -67,51 +83,53 @@ WORKSPACE_MATERIALIZATION_SCHEMA: Literal["pi-agent-workspace-materialization/v1
 )
 
 #: Sandbox Publisher to WorkspaceStore transaction contract.
-WORKSPACE_PUBLISH_TRANSACTION_SCHEMA: Literal[
+WORKSPACE_PUBLISH_TRANSACTION_SCHEMA: Literal["pi-agent-workspace-publish-transaction/v1"] = (
     "pi-agent-workspace-publish-transaction/v1"
-] = "pi-agent-workspace-publish-transaction/v1"
+)
 WORKSPACE_PUBLISH_PHASE_SCHEMA: Literal["pi-agent-workspace-publish-phase/v1"] = (
     "pi-agent-workspace-publish-phase/v1"
 )
 
 #: 明确视为可执行/工程代码的扩展名。配置和普通文本不自动搬入 scripts。
-CODE_EXTENSIONS: frozenset[str] = frozenset({
-    ".bash",
-    ".c",
-    ".cc",
-    ".cjs",
-    ".cpp",
-    ".cs",
-    ".css",
-    ".fish",
-    ".go",
-    ".h",
-    ".hh",
-    ".hpp",
-    ".java",
-    ".js",
-    ".jsx",
-    ".kt",
-    ".kts",
-    ".less",
-    ".lua",
-    ".mjs",
-    ".php",
-    ".py",
-    ".pyi",
-    ".r",
-    ".rb",
-    ".rs",
-    ".scss",
-    ".sh",
-    ".sql",
-    ".svelte",
-    ".swift",
-    ".ts",
-    ".tsx",
-    ".vue",
-    ".zsh",
-})
+CODE_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".bash",
+        ".c",
+        ".cc",
+        ".cjs",
+        ".cpp",
+        ".cs",
+        ".css",
+        ".fish",
+        ".go",
+        ".h",
+        ".hh",
+        ".hpp",
+        ".java",
+        ".js",
+        ".jsx",
+        ".kt",
+        ".kts",
+        ".less",
+        ".lua",
+        ".mjs",
+        ".php",
+        ".py",
+        ".pyi",
+        ".r",
+        ".rb",
+        ".rs",
+        ".scss",
+        ".sh",
+        ".sql",
+        ".svelte",
+        ".swift",
+        ".ts",
+        ".tsx",
+        ".vue",
+        ".zsh",
+    }
+)
 
 MARKDOWN_EXTENSIONS: frozenset[str] = frozenset({".md", ".markdown", ".mdx"})
 
@@ -170,9 +188,7 @@ class FileTooLargeError(FileStoreError):
     def __init__(self, size: int, limit: int):
         self.size = size
         self.limit = limit
-        super().__init__(
-            f"file size {size} bytes exceeds max_file_size {limit} bytes"
-        )
+        super().__init__(f"file size {size} bytes exceeds max_file_size {limit} bytes")
 
 
 class SessionStorageLimitError(FileStoreError):
@@ -238,7 +254,7 @@ class FileRef(BaseModel):
     created_at: int
     logical_path: str = ""
     origin: Literal["system", "upload", "agent", "user", "legacy"] = "legacy"
-    purpose: Literal["file", "agent_instructions", "memory"] = "file"
+    purpose: FilePurpose = "file"
     updated_at: int | None = None
 
     @model_validator(mode="after")
@@ -350,6 +366,8 @@ class _WorkspacePublishIntent(BaseModel):
         WORKSPACE_PUBLISH_TRANSACTION_SCHEMA
     )
     transaction_id: str = Field(pattern=r"^publish-[0-9a-f]{32}$")
+    publish_kind: WorkspacePublishKind = "sandbox"
+    document_root: str | None = None
     session_id: str
     expected_tree_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     before_state: WorkspaceState
@@ -361,9 +379,7 @@ class _WorkspacePublishIntent(BaseModel):
 class _WorkspacePublishPhase(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal["pi-agent-workspace-publish-phase/v1"] = (
-        WORKSPACE_PUBLISH_PHASE_SCHEMA
-    )
+    schema_version: Literal["pi-agent-workspace-publish-phase/v1"] = WORKSPACE_PUBLISH_PHASE_SCHEMA
     phase: Literal["prepared", "committing", "committed"]
 
 
@@ -469,7 +485,7 @@ def workspace_logical_path(
     filename: str,
     folder: str | None = None,
     *,
-    purpose: Literal["file", "agent_instructions", "memory"] = "file",
+    purpose: FilePurpose = "file",
 ) -> str:
     """Resolve a managed file into its canonical Workspace logical path."""
     safe_name = sanitize_filename(filename)
@@ -495,10 +511,58 @@ def workspace_logical_path(
         AGENT_INSTRUCTIONS_PATH.casefold(),
         MEMORY_PATH.casefold(),
     }:
+        raise UnsafeFilenameError("AGENT.md and Memory.md are reserved Workspace root files")
+    if PurePosixPath(logical_path).parts[0].casefold() == DOCUMENTS_PATH:
         raise UnsafeFilenameError(
-            "AGENT.md and Memory.md are reserved Workspace root files"
+            "documents/ is reserved for immutable originals and fixed converters"
         )
     return logical_path
+
+
+def is_workspace_document_filename(filename: str) -> bool:
+    """Return whether an upload enters the fixed Workspace document workflow."""
+    return PurePosixPath(filename.casefold()).suffix in WORKSPACE_DOCUMENT_EXTENSIONS
+
+
+def workspace_document_root(filename: str, file_id: str) -> str:
+    """Build a readable, collision-resistant logical root for one immutable source."""
+    safe_name = sanitize_filename(filename)
+    stem = sanitize_filename(PurePosixPath(safe_name).stem).strip(" ._-") or "document"
+    stem = stem[:80].rstrip(" ._-") or "document"
+    suffix = file_id.removeprefix("file-")[:12]
+    return normalize_workspace_logical_path(f"{DOCUMENTS_PATH}/{stem}-{suffix}")
+
+
+def is_document_conversion_workspace_path(
+    logical_path: str,
+    document_root: str,
+) -> bool:
+    """Restrict fixed converters to one document's generated-file namespace."""
+    try:
+        normalized = normalize_workspace_logical_path(logical_path)
+        normalized_root = normalize_workspace_logical_path(document_root)
+    except FileStoreError:
+        return False
+    root_parts = PurePosixPath(normalized_root).parts
+    parts = PurePosixPath(normalized).parts
+    if (
+        normalized != logical_path
+        or len(root_parts) != 2
+        or root_parts[0].casefold() != DOCUMENTS_PATH
+        or len(parts) <= len(root_parts)
+        or tuple(part.casefold() for part in parts[:2])
+        != tuple(part.casefold() for part in root_parts)
+    ):
+        return False
+    relative = parts[2:]
+    folded = tuple(part.casefold() for part in relative)
+    if len(relative) == 1:
+        return folded[0] in {"content.md", "manifest.json"}
+    if len(relative) != 2:
+        return False
+    if folded[0] == "tables":
+        return PurePosixPath(relative[1]).suffix.casefold() in {".csv", ".json"}
+    return folded[0] == "assets"
 
 
 def _guess_mime(filename: str, content_type: str | None) -> str:
@@ -826,9 +890,7 @@ class WorkspaceStore:
         if not state_path.is_file():
             return None
         try:
-            state = WorkspaceState.model_validate_json(
-                state_path.read_text(encoding="utf-8")
-            )
+            state = WorkspaceState.model_validate_json(state_path.read_text(encoding="utf-8"))
         except Exception as exc:
             raise FileStoreError("workspace revision state is invalid") from exc
         if state.session_id != session_id:
@@ -893,10 +955,12 @@ class WorkspaceStore:
         self,
         state: WorkspaceState,
     ) -> WorkspaceState:
-        advanced = state.model_copy(update={
-            "revision": state.revision + 1,
-            "updated_at": _now_ms(),
-        })
+        advanced = state.model_copy(
+            update={
+                "revision": state.revision + 1,
+                "updated_at": _now_ms(),
+            }
+        )
         self._write_workspace_state_unlocked(advanced)
         return advanced
 
@@ -1046,6 +1110,56 @@ class WorkspaceStore:
                 expected_workspace_sha256=expected_workspace_sha256,
                 changes=changes,
                 deleted_paths=deleted_paths,
+                publish_kind="sandbox",
+                document_root=None,
+            )
+
+    async def publish_document_conversion(
+        self,
+        session_id: str,
+        *,
+        source_file_id: str,
+        transaction_id: str,
+        expected_workspace_revision: int,
+        expected_workspace_sha256: str,
+        changes: tuple[WorkspacePublishChange, ...],
+        deleted_paths: tuple[str, ...],
+    ) -> WorkspacePublishResult:
+        """Atomically replace fixed-converter outputs for one immutable document.
+
+        This is deliberately separate from the Sandbox publisher. The source
+        must still be the exact ``document_original`` captured in the baseline;
+        only ``content.md``, ``manifest.json``, ``tables/*`` and ``assets/*``
+        below its own document root can change.
+        """
+        if re.fullmatch(r"publish-[0-9a-f]{32}", transaction_id) is None:
+            raise FileStoreError("Workspace document transaction id is invalid")
+        if re.fullmatch(r"[0-9a-f]{64}", expected_workspace_sha256) is None:
+            raise FileStoreError("Workspace document baseline SHA is invalid")
+        await self.ensure_session_workspace(session_id)
+        async with self._session_lock(session_id):
+            state = await self._ensure_workspace_state_unlocked(session_id)
+            self._check_workspace_revision(state, expected_workspace_revision)
+            source = await self.get_for_session(session_id, source_file_id)
+            if source.purpose != "document_original":
+                raise WorkspacePublishPolicyError(
+                    "Workspace document conversion requires an immutable original"
+                )
+            document_root = str(PurePosixPath(source.logical_path).parent)
+            if not source.logical_path.casefold().startswith(
+                f"{document_root.casefold()}/original."
+            ):
+                raise WorkspacePublishPolicyError("Workspace document original path is invalid")
+            refs = await self.list_session(session_id)
+            return self._publish_workspace_changes_unlocked(
+                state,
+                refs,
+                transaction_id=transaction_id,
+                expected_workspace_sha256=expected_workspace_sha256,
+                changes=changes,
+                deleted_paths=deleted_paths,
+                publish_kind="document_conversion",
+                document_root=document_root,
             )
 
     def _publish_workspace_changes_unlocked(
@@ -1057,6 +1171,8 @@ class WorkspaceStore:
         expected_workspace_sha256: str,
         changes: tuple[WorkspacePublishChange, ...],
         deleted_paths: tuple[str, ...],
+        publish_kind: WorkspacePublishKind,
+        document_root: str | None,
     ) -> WorkspacePublishResult:
         entries: list[WorkspaceMaterializationEntry] = []
         refs_by_path: dict[str, FileRef] = {}
@@ -1097,9 +1213,16 @@ class WorkspaceStore:
             folded = normalized.casefold()
             if normalized != logical_path or folded in requested_paths:
                 raise WorkspacePublishPolicyError("Workspace publish paths are not unique")
-            if not is_sandbox_publishable_workspace_path(normalized):
+            allowed = (
+                is_sandbox_publishable_workspace_path(normalized)
+                if publish_kind == "sandbox"
+                else document_root is not None
+                and is_document_conversion_workspace_path(normalized, document_root)
+            )
+            if not allowed:
+                actor = "Sandbox" if publish_kind == "sandbox" else "document converter"
                 raise WorkspacePublishPolicyError(
-                    f"Sandbox cannot publish protected path {logical_path!r}"
+                    f"{actor} cannot publish protected path {logical_path!r}"
                 )
             requested_paths.add(folded)
 
@@ -1133,12 +1256,15 @@ class WorkspaceStore:
             for index, change in enumerate(ordered_changes):
                 existing = refs_by_path.get(change.logical_path.casefold())
                 if existing is not None:
-                    if (
-                        existing.purpose != "file"
-                        or existing.logical_path != change.logical_path
+                    expected_purpose = (
+                        "file" if publish_kind == "sandbox" else "document_conversion"
+                    )
+                    if existing.purpose != expected_purpose or (
+                        existing.logical_path != change.logical_path
                     ):
+                        actor = "Sandbox" if publish_kind == "sandbox" else "document converter"
                         raise WorkspacePublishPolicyError(
-                            "Sandbox cannot replace a protected Workspace file"
+                            f"{actor} cannot replace a protected Workspace file"
                         )
                     file_id = existing.id
                     created_at = existing.created_at
@@ -1168,7 +1294,9 @@ class WorkspaceStore:
                     expected_size=change.size,
                     expected_sha256=change.sha256,
                 )
-                if PurePosixPath(change.logical_path).parts[0].casefold() != SCRIPTS_PATH:
+                if publish_kind == "sandbox" and (
+                    PurePosixPath(change.logical_path).parts[0].casefold() != SCRIPTS_PATH
+                ):
                     try:
                         with staged_path.open("r", encoding="utf-8") as stream:
                             while stream.read(_CHUNK_SIZE):
@@ -1188,8 +1316,8 @@ class WorkspaceStore:
                     path=str(generation_path),
                     created_at=created_at,
                     logical_path=change.logical_path,
-                    origin="agent",
-                    purpose="file",
+                    origin="agent" if publish_kind == "sandbox" else "system",
+                    purpose=("file" if publish_kind == "sandbox" else "document_conversion"),
                     updated_at=now,
                 )
                 intent_changes.append(
@@ -1207,11 +1335,13 @@ class WorkspaceStore:
                 existing = refs_by_path.get(logical_path.casefold())
                 if existing is None:
                     raise WorkspaceTreeConflictError(
-                        "Sandbox deletion target is no longer present"
+                        "Workspace deletion target is no longer present"
                     )
-                if existing.purpose != "file" or existing.logical_path != logical_path:
+                expected_purpose = "file" if publish_kind == "sandbox" else "document_conversion"
+                if existing.purpose != expected_purpose or (existing.logical_path != logical_path):
+                    actor = "Sandbox" if publish_kind == "sandbox" else "document converter"
                     raise WorkspacePublishPolicyError(
-                        "Sandbox cannot delete a protected Workspace file"
+                        f"{actor} cannot delete a protected Workspace file"
                     )
                 deleted_bytes += existing.size
                 tombstone_path = session_dir / (
@@ -1227,10 +1357,7 @@ class WorkspaceStore:
                 )
 
             projected_size = (
-                sum(ref.size for ref in refs)
-                - replaced_bytes
-                - deleted_bytes
-                + new_bytes
+                sum(ref.size for ref in refs) - replaced_bytes - deleted_bytes + new_bytes
             )
             if projected_size > self._max_session_size:
                 raise SessionStorageLimitError(
@@ -1238,12 +1365,16 @@ class WorkspaceStore:
                     new=new_bytes,
                     limit=self._max_session_size,
                 )
-            after_state = state.model_copy(update={
-                "revision": state.revision + 1,
-                "updated_at": now,
-            })
+            after_state = state.model_copy(
+                update={
+                    "revision": state.revision + 1,
+                    "updated_at": now,
+                }
+            )
             intent = _WorkspacePublishIntent(
                 transaction_id=transaction_id,
+                publish_kind=publish_kind,
+                document_root=document_root,
                 session_id=state.session_id,
                 expected_tree_sha256=expected_workspace_sha256,
                 before_state=state,
@@ -1309,9 +1440,7 @@ class WorkspaceStore:
             else:
                 current = self._read_metadata(file_dir)
                 if current != change.before_ref:
-                    raise WorkspaceTreeConflictError(
-                        "Workspace metadata changed during publish"
-                    )
+                    raise WorkspaceTreeConflictError("Workspace metadata changed during publish")
             os.replace(staged_path, generation_path)
             self._write_metadata(file_dir, after)
 
@@ -1400,35 +1529,30 @@ class WorkspaceStore:
     def _session_dir(self, session_id: str) -> Path:
         """session_id 不能含路径分隔符——只作为目录名。"""
         if not session_id or "/" in session_id or "\\" in session_id or ".." in session_id:
-            raise UnsafeFilenameError(
-                f"unsafe session_id {session_id!r}"
-            )
+            raise UnsafeFilenameError(f"unsafe session_id {session_id!r}")
         return self._root_dir / session_id
 
     def _file_dir(self, session_id: str, file_id: str) -> Path:
         """file_id 同样不能含路径分隔符。"""
         if not file_id or "/" in file_id or "\\" in file_id or ".." in file_id:
-            raise UnsafeFilenameError(
-                f"unsafe file_id {file_id!r}"
-            )
+            raise UnsafeFilenameError(f"unsafe file_id {file_id!r}")
         return self._session_dir(session_id) / file_id
 
     def _resolve_and_check(
-        self, target: Path, *, expect_under: Path,
+        self,
+        target: Path,
+        *,
+        expect_under: Path,
     ) -> Path:
         """resolve target 并校验仍在 expect_under 下；失败抛 UnsafeFilenameError。"""
         try:
             resolved = target.resolve(strict=False)
             root_resolved = expect_under.resolve(strict=False)
             if not resolved.is_relative_to(root_resolved):
-                raise UnsafeFilenameError(
-                    f"path {target!r} escapes uploads root {expect_under!r}"
-                )
+                raise UnsafeFilenameError(f"path {target!r} escapes uploads root {expect_under!r}")
             return resolved
         except OSError as e:
-            raise UnsafeFilenameError(
-                f"path resolve failed for {target!r}: {e}"
-            ) from e
+            raise UnsafeFilenameError(f"path resolve failed for {target!r}: {e}") from e
 
     def _read_metadata(self, file_dir: Path) -> FileRef | None:
         """读 metadata.json；不存在 / 损坏返回 None。"""
@@ -1453,9 +1577,7 @@ class WorkspaceStore:
         """以同目录 temp + replace 原子发布 metadata pointer。"""
         meta_path = file_dir / "metadata.json"
         temp_path = file_dir / f".metadata.{uuid.uuid4().hex}.tmp"
-        raw = json.dumps(
-            ref.model_dump(mode="json"), ensure_ascii=False, indent=2
-        ).encode("utf-8")
+        raw = json.dumps(ref.model_dump(mode="json"), ensure_ascii=False, indent=2).encode("utf-8")
         try:
             with temp_path.open("wb") as stream:
                 stream.write(raw)
@@ -1476,24 +1598,36 @@ class WorkspaceStore:
             or intent.before_state.session_id != intent.session_id
             or intent.after_state.session_id != intent.session_id
             or intent.after_state.revision != intent.before_state.revision + 1
+            or (intent.publish_kind == "sandbox" and intent.document_root is not None)
+            or (intent.publish_kind == "document_conversion" and intent.document_root is None)
         ):
             raise FileStoreError("Workspace publish intent identity is invalid")
         session_dir = self._session_dir(intent.session_id)
         transactions_root = session_dir / ".workspace-transactions"
-        if transaction_root.parent.resolve(strict=False) != transactions_root.resolve(
-            strict=False
-        ):
+        if transaction_root.parent.resolve(strict=False) != transactions_root.resolve(strict=False):
             raise FileStoreError("Workspace publish intent is outside its Session")
         seen: set[str] = set()
+        expected_purpose: FilePurpose = (
+            "file" if intent.publish_kind == "sandbox" else "document_conversion"
+        )
         for change in intent.changes:
             logical_path = normalize_workspace_logical_path(change.logical_path)
+            path_allowed = (
+                is_sandbox_publishable_workspace_path(logical_path)
+                if intent.publish_kind == "sandbox"
+                else intent.document_root is not None
+                and is_document_conversion_workspace_path(
+                    logical_path,
+                    intent.document_root,
+                )
+            )
             if (
                 logical_path != change.logical_path
-                or not is_sandbox_publishable_workspace_path(logical_path)
+                or not path_allowed
                 or logical_path.casefold() in seen
                 or change.after_ref.logical_path != logical_path
                 or change.after_ref.session_id != intent.session_id
-                or change.after_ref.purpose != "file"
+                or change.after_ref.purpose != expected_purpose
             ):
                 raise FileStoreError("Workspace publish change intent is invalid")
             seen.add(logical_path.casefold())
@@ -1501,7 +1635,7 @@ class WorkspaceStore:
                 change.before_ref.session_id != intent.session_id
                 or change.before_ref.logical_path != logical_path
                 or change.before_ref.id != change.after_ref.id
-                or change.before_ref.purpose != "file"
+                or change.before_ref.purpose != expected_purpose
             ):
                 raise FileStoreError("Workspace publish replacement intent is invalid")
             file_dir = self._file_dir(intent.session_id, change.after_ref.id)
@@ -1512,13 +1646,22 @@ class WorkspaceStore:
             )
         for deletion in intent.deletions:
             logical_path = normalize_workspace_logical_path(deletion.logical_path)
+            path_allowed = (
+                is_sandbox_publishable_workspace_path(logical_path)
+                if intent.publish_kind == "sandbox"
+                else intent.document_root is not None
+                and is_document_conversion_workspace_path(
+                    logical_path,
+                    intent.document_root,
+                )
+            )
             if (
                 logical_path != deletion.logical_path
-                or not is_sandbox_publishable_workspace_path(logical_path)
+                or not path_allowed
                 or logical_path.casefold() in seen
                 or deletion.before_ref.session_id != intent.session_id
                 or deletion.before_ref.logical_path != logical_path
-                or deletion.before_ref.purpose != "file"
+                or deletion.before_ref.purpose != expected_purpose
             ):
                 raise FileStoreError("Workspace publish deletion intent is invalid")
             seen.add(logical_path.casefold())
@@ -1530,9 +1673,7 @@ class WorkspaceStore:
                 Path(deletion.tombstone_path),
                 expect_under=session_dir,
             )
-            if not tombstone.name.startswith(
-                f".publish-deleted-{intent.transaction_id[8:]}-"
-            ):
+            if not tombstone.name.startswith(f".publish-deleted-{intent.transaction_id[8:]}-"):
                 raise FileStoreError("Workspace publish tombstone is invalid")
 
     def _recover_workspace_publish_transactions_unlocked(self, session_id: str) -> None:
@@ -1545,9 +1686,7 @@ class WorkspaceStore:
             try:
                 _ensure_plain_directory(transaction_root)
             except (OSError, UnsafeFilenameError) as exc:
-                raise FileStoreError(
-                    "Workspace publish transaction directory is invalid"
-                ) from exc
+                raise FileStoreError("Workspace publish transaction directory is invalid") from exc
             intent_path = transaction_root / "intent.json"
             if not intent_path.is_file():
                 shutil.rmtree(transaction_root)
@@ -1629,7 +1768,8 @@ class WorkspaceStore:
                 if not target.is_file():
                     backups = sorted(
                         (
-                            child for child in file_dir.iterdir()
+                            child
+                            for child in file_dir.iterdir()
                             if child.is_file() and child.name.endswith(".bak")
                         ),
                         key=lambda child: child.stat().st_mtime_ns,
@@ -1645,14 +1785,16 @@ class WorkspaceStore:
                 actual_size = target.stat().st_size
                 actual_sha = _sha256_of_file(target)
                 if ref.size != actual_size or ref.sha256 != actual_sha:
-                    ref = ref.model_copy(update={
-                        "size": actual_size,
-                        "sha256": actual_sha,
-                        "updated_at": max(
-                            ref.updated_at or ref.created_at,
-                            int(target.stat().st_mtime * 1000),
-                        ),
-                    })
+                    ref = ref.model_copy(
+                        update={
+                            "size": actual_size,
+                            "sha256": actual_sha,
+                            "updated_at": max(
+                                ref.updated_at or ref.created_at,
+                                int(target.stat().st_mtime * 1000),
+                            ),
+                        }
+                    )
                     self._write_metadata(file_dir, ref)
                 for child in file_dir.iterdir():
                     if child == target or child.name == "metadata.json":
@@ -1669,10 +1811,7 @@ class WorkspaceStore:
         requested_path: str,
     ) -> str:
         """为逻辑树分配不冲突的路径（Windows 语义下大小写不敏感）。"""
-        existing = {
-            ref.logical_path.casefold()
-            for ref in await self.list_session(session_id)
-        }
+        existing = {ref.logical_path.casefold() for ref in await self.list_session(session_id)}
         if requested_path.casefold() not in existing:
             return requested_path
 
@@ -1744,10 +1883,23 @@ class WorkspaceStore:
         # 文件名 sanitize
         original_name = upload.filename or "upload.bin"
         safe_name = sanitize_filename(original_name)
-        logical_path = await self._unique_logical_path(
-            session_id,
-            workspace_logical_path(safe_name, relative_folder),
-        )
+        file_id = _gen_file_id()
+        is_document = is_workspace_document_filename(safe_name)
+        if is_document:
+            if relative_folder is not None and relative_folder.strip():
+                raise UnsafeFilenameError("Workspace documents use a fixed documents/<id> layout")
+            document_root = workspace_document_root(safe_name, file_id)
+            extension = PurePosixPath(safe_name).suffix.casefold()
+            logical_path = f"{document_root}/original{extension}"
+            stored_name = f"original{extension}"
+            purpose: FilePurpose = "document_original"
+        else:
+            logical_path = await self._unique_logical_path(
+                session_id,
+                workspace_logical_path(safe_name, relative_folder),
+            )
+            stored_name = safe_name
+            purpose = "file"
 
         # 预检 session 总量
         current_size = await self.session_total_size(session_id)
@@ -1756,17 +1908,18 @@ class WorkspaceStore:
             # 若当前已接近上限，连最小文件都装不下——提前拒
             if current_size >= self._max_session_size:
                 raise SessionStorageLimitError(
-                    current=current_size, new=0, limit=self._max_session_size,
+                    current=current_size,
+                    new=0,
+                    limit=self._max_session_size,
                 )
 
         # 准备 file_dir + 文件路径
-        file_id = _gen_file_id()
         file_dir = self._file_dir(session_id, file_id)
         # 边界检查 file_dir（file_id 是 uuid，但二次防御）
         self._resolve_and_check(file_dir, expect_under=self._root_dir)
         file_dir.mkdir(parents=True, exist_ok=True)
 
-        target_path = file_dir / safe_name
+        target_path = file_dir / stored_name
         # 边界检查 target_path（safe_name 经过 sanitize，但 resolve 兜底）
         self._resolve_and_check(target_path, expect_under=file_dir)
 
@@ -1793,7 +1946,8 @@ class WorkspaceStore:
                         except Exception:
                             pass
                         raise FileTooLargeError(
-                            size=total, limit=self._max_file_size,
+                            size=total,
+                            limit=self._max_file_size,
                         )
                     # session 总量超限（边写边检，避免超大 chunk 撕开限制）
                     if current_size + total > self._max_session_size:
@@ -1807,7 +1961,8 @@ class WorkspaceStore:
                         except Exception:
                             pass
                         raise SessionStorageLimitError(
-                            current=current_size, new=total,
+                            current=current_size,
+                            new=total,
                             limit=self._max_session_size,
                         )
                     sha.update(chunk)
@@ -1844,7 +1999,7 @@ class WorkspaceStore:
             created_at=now,
             logical_path=logical_path,
             origin="upload",
-            purpose="file",
+            purpose=purpose,
             updated_at=now,
         )
         try:
@@ -1863,9 +2018,7 @@ class WorkspaceStore:
                 file_dir.rmdir()
             except Exception:
                 pass
-            raise FileStoreError(
-                f"write metadata failed: {type(e).__name__}: {e}"
-            ) from e
+            raise FileStoreError(f"write metadata failed: {type(e).__name__}: {e}") from e
 
         return ref
 
@@ -1878,7 +2031,7 @@ class WorkspaceStore:
         content_type: str | None = None,
         folder: str | None = None,
         origin: Literal["system", "agent", "user"] = "agent",
-        purpose: Literal["file", "agent_instructions", "memory"] = "file",
+        purpose: FilePurpose = "file",
         expected_workspace_revision: int | None = None,
         unique_logical_path: bool = True,
     ) -> FileRef:
@@ -1940,7 +2093,7 @@ class WorkspaceStore:
         logical_path: str,
         content_type: str | None,
         origin: Literal["system", "agent", "user"],
-        purpose: Literal["file", "agent_instructions", "memory"],
+        purpose: FilePurpose,
     ) -> FileRef:
         if not isinstance(content, str):
             raise FileStoreError("content must be a string")
@@ -2029,10 +2182,12 @@ class WorkspaceStore:
                     agent_ref.purpose != "agent_instructions"
                     or agent_ref.logical_path != AGENT_INSTRUCTIONS_PATH
                 ):
-                    agent_ref = agent_ref.model_copy(update={
-                        "logical_path": AGENT_INSTRUCTIONS_PATH,
-                        "purpose": "agent_instructions",
-                    })
+                    agent_ref = agent_ref.model_copy(
+                        update={
+                            "logical_path": AGENT_INSTRUCTIONS_PATH,
+                            "purpose": "agent_instructions",
+                        }
+                    )
                     self._write_metadata(
                         self._file_dir(session_id, agent_ref.id),
                         agent_ref,
@@ -2055,14 +2210,13 @@ class WorkspaceStore:
                     MEMORY_PATH,
                 )
                 if memory_ref is not None:
-                    if (
-                        memory_ref.purpose != "memory"
-                        or memory_ref.logical_path != MEMORY_PATH
-                    ):
-                        memory_ref = memory_ref.model_copy(update={
-                            "logical_path": MEMORY_PATH,
-                            "purpose": "memory",
-                        })
+                    if memory_ref.purpose != "memory" or memory_ref.logical_path != MEMORY_PATH:
+                        memory_ref = memory_ref.model_copy(
+                            update={
+                                "logical_path": MEMORY_PATH,
+                                "purpose": "memory",
+                            }
+                        )
                         self._write_metadata(
                             self._file_dir(session_id, memory_ref.id),
                             memory_ref,
@@ -2100,7 +2254,7 @@ class WorkspaceStore:
         expected_sha256: str | None = None,
         expected_workspace_revision: int | None = None,
         origin: Literal["system", "upload", "agent", "user", "legacy"] | None = "user",
-        purpose: Literal["file", "agent_instructions", "memory"] | None = None,
+        purpose: FilePurpose | None = None,
     ) -> FileRef:
         """用 sha256 乐观锁和 immutable generation 原子更新文本文件。
 
@@ -2118,6 +2272,10 @@ class WorkspaceStore:
             state = await self._ensure_workspace_state_unlocked(session_id)
             self._check_workspace_revision(state, expected_workspace_revision)
             ref = await self.get_for_session(session_id, file_id)
+            if ref.purpose in {"document_original", "document_conversion"}:
+                raise WorkspacePublishPolicyError(
+                    "Workspace document originals and conversion outputs are read-only"
+                )
             if expected_sha256 is not None and expected_sha256 != ref.sha256:
                 raise FileVersionConflictError("file changed since it was opened")
             current_size = await self.session_total_size(session_id)
@@ -2134,14 +2292,16 @@ class WorkspaceStore:
             generation_path = file_dir / f".content-{uuid.uuid4().hex}.blob"
             self._resolve_and_check(generation_path, expect_under=file_dir)
 
-            updated = ref.model_copy(update={
-                "size": len(raw),
-                "sha256": hashlib.sha256(raw).hexdigest(),
-                "path": str(generation_path),
-                "origin": origin or ref.origin,
-                "purpose": purpose or ref.purpose,
-                "updated_at": _now_ms(),
-            })
+            updated = ref.model_copy(
+                update={
+                    "size": len(raw),
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                    "path": str(generation_path),
+                    "origin": origin or ref.origin,
+                    "purpose": purpose or ref.purpose,
+                    "updated_at": _now_ms(),
+                }
+            )
             try:
                 with generation_path.open("wb") as stream:
                     stream.write(raw)
@@ -2207,19 +2367,19 @@ class WorkspaceStore:
                 raise FileVersionConflictError("file changed since it was opened")
             occupied = await self.get_by_logical_path(session_id, target_path)
             if occupied is not None and occupied.id != file_id:
-                raise WorkspacePathConflictError(
-                    f"workspace path {target_path!r} already exists"
-                )
+                raise WorkspacePathConflictError(f"workspace path {target_path!r} already exists")
             if ref.logical_path == target_path:
                 return ref
 
-            moved = ref.model_copy(update={
-                "name": target_name,
-                "logical_path": target_path,
-                "mime": _guess_mime(target_name, "text/markdown"),
-                "origin": "user",
-                "updated_at": _now_ms(),
-            })
+            moved = ref.model_copy(
+                update={
+                    "name": target_name,
+                    "logical_path": target_path,
+                    "mime": _guess_mime(target_name, "text/markdown"),
+                    "origin": "user",
+                    "updated_at": _now_ms(),
+                }
+            )
             file_dir = self._file_dir(session_id, file_id)
             self._write_metadata(file_dir, moved)
             try:
@@ -2262,7 +2422,9 @@ class WorkspaceStore:
         return None
 
     async def get_for_session(
-        self, session_id: str, file_id: str,
+        self,
+        session_id: str,
+        file_id: str,
     ) -> FileRef:
         """读取文件并强校验 session_id 匹配。
 
@@ -2283,9 +2445,7 @@ class WorkspaceStore:
                 raise FileAccessDeniedError(
                     f"file {file_id!r} does not belong to session {session_id!r}"
                 )
-            raise VirtualFileNotFoundError(
-                f"file {file_id!r} not found in session {session_id!r}"
-            )
+            raise VirtualFileNotFoundError(f"file {file_id!r} not found in session {session_id!r}")
 
         ref = self._read_metadata(file_dir)
         if ref is None:
@@ -2380,13 +2540,15 @@ class WorkspaceStore:
             state = await self._ensure_workspace_state_unlocked(session_id)
             self._check_workspace_revision(state, expected_workspace_revision)
             ref = await self.get_for_session(session_id, file_id)
+            if ref.purpose in {"document_original", "document_conversion"}:
+                raise WorkspacePublishPolicyError(
+                    "Workspace document originals and conversion outputs are immutable"
+                )
             if expected_sha256 is not None and expected_sha256 != ref.sha256:
                 raise FileVersionConflictError("file changed since it was opened")
 
             file_dir = self._file_dir(session_id, file_id)
-            tombstone = self._session_dir(session_id) / (
-                f".deleted-{file_id}-{uuid.uuid4().hex}"
-            )
+            tombstone = self._session_dir(session_id) / (f".deleted-{file_id}-{uuid.uuid4().hex}")
             self._resolve_and_check(
                 tombstone,
                 expect_under=self._session_dir(session_id),
@@ -2454,8 +2616,7 @@ class WorkspaceStore:
                     continue
             for child in session_dir.iterdir():
                 if child.is_file() and (
-                    child.name == WORKSPACE_STATE_FILENAME
-                    or child.name.startswith(".workspace.")
+                    child.name == WORKSPACE_STATE_FILENAME or child.name.startswith(".workspace.")
                 ):
                     child.unlink(missing_ok=True)
             session_dir.rmdir()
@@ -2476,6 +2637,8 @@ __all__ = [
     "AGENT_INSTRUCTIONS_PATH",
     "MEMORY_PATH",
     "SCRIPTS_PATH",
+    "DOCUMENTS_PATH",
+    "WORKSPACE_DOCUMENT_EXTENSIONS",
     "WORKSPACE_STATE_FILENAME",
     "WORKSPACE_MATERIALIZATION_SCHEMA",
     "WORKSPACE_PUBLISH_TRANSACTION_SCHEMA",
@@ -2484,6 +2647,8 @@ __all__ = [
     "MARKDOWN_EXTENSIONS",
     "DEFAULT_AGENT_INSTRUCTIONS",
     "DEFAULT_MEMORY",
+    "FilePurpose",
+    "WorkspacePublishKind",
     # 异常
     "FileStoreError",
     "VirtualFileNotFoundError",
@@ -2509,6 +2674,9 @@ __all__ = [
     "normalize_workspace_logical_path",
     "is_code_filename",
     "is_markdown_filename",
+    "is_workspace_document_filename",
+    "workspace_document_root",
+    "is_document_conversion_workspace_path",
     "is_sandbox_publishable_workspace_path",
     "workspace_logical_path",
     # 主类

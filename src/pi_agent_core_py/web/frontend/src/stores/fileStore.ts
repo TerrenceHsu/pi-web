@@ -71,16 +71,29 @@ export const useFileStore = defineStore("files", () => {
         relativeFolder: options.relativeFolder,
         expectedWorkspaceRevision: workspaceBySession.value[sessionId]?.revision,
       })
-      // 合并到 session 缓存
-      const existing = filesBySession.value[sessionId] ?? []
-      filesBySession.value[sessionId] = [...existing, ...resp.files]
       workspaceBySession.value[sessionId] = resp.workspace
-      // 同时进入 pending（用户可在 composer 中移除）
+      // 富文档会同步产生只读 content.md/manifest/tables/assets；重新读取
+      // 完整树，避免只合并原件而让右侧栏暂时看不到转换成果。
+      const refreshed = await loadFiles(sessionId)
+      const visibleFiles = refreshed?.files ?? resp.files
+      // 对普通上传附加原文件；对富文档优先附加可读 content.md。
+      const attachmentFiles = resp.files.map((uploaded) => {
+        const primaryId = resp.conversions?.find(
+          (conversion) => conversion.source_file_id === uploaded.id,
+        )?.primary_file_id
+        return visibleFiles.find((file) => file.id === primaryId) ?? uploaded
+      })
       if (options.attachToPrompt !== false) {
-        pendingAttachments.value.push(...resp.files)
+        pendingAttachments.value.push(...attachmentFiles)
       }
-      const lastUploaded = resp.files.at(-1)
-      if (lastUploaded) selectedFileIdBySession.value[sessionId] = lastUploaded.id
+      const lastVisible = attachmentFiles.at(-1)
+      if (lastVisible) selectedFileIdBySession.value[sessionId] = lastVisible.id
+      const failedConversion = resp.conversions?.find(
+        (conversion) => conversion.status === "failed",
+      )
+      if (failedConversion) {
+        error.value = `Document conversion failed: ${failedConversion.error_code || "unknown_error"}`
+      }
       return resp
     } catch (e: any) {
       error.value = e instanceof ApiError ? e.detail : String(e?.message ?? e)

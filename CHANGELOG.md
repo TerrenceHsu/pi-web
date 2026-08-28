@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Session Workspace fixed document conversion（2026-08-29）
+
+- `.pdf/.docx/.xlsx` 上传归档为 `documents/<document-id>/original.*` 不可变原件；固定转换器从 revision-bound Workspace 快照生成只读 Markdown、CSV/schema、图片和可审计 manifest，不复用 LLM Wiki 的 Provider、Worker、DB 或 Raw 制品
+- PDF 使用 `pypdf` 分页提取并标记 `needs_ocr`，DOCX 使用 `python-docx` 转换标题/段落/列表/表格/链接和图片，XLSX 使用 `openpyxl` 输出 workbook 摘要及逐 Sheet 制品，公式只保存为惰性文本
+- 生成物复用 WorkspaceStore durable transaction，在目标锁内重验 revision/tree/content 后一次提升 revision；source/converter/config 和输出 SHA 一致时幂等复用，失败不发布半成品且保留已有成功版本
+- 上传响应和 retry API 返回转换状态；前端刷新右侧 Workspace 并优先展示/附加 `content.md`。新增 1 个测试文件/2 项测试，邻接 Backend 118 passed，Ruff/strict Mypy/Frontend typecheck/lint 通过，三格式真实 smoke 3/3
+
 ### Coding Sandbox WorkspaceStore transactional publish（2026-08-28）
 
 - 新增 provider-neutral Artifact Publisher 与主应用 Workspace adapter：签名 Artifact 先在隔离镜像中复用既有本机事务 Publisher 完整复验，再把最终允许文件交给 `WorkspaceStore`，真实 Workspace 不进入 Sandbox

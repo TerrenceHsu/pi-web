@@ -32,7 +32,7 @@ export interface FileRef {
   /** Session 文件树中的逻辑路径；不会暴露后端物理路径。 */
   logical_path?: string
   origin?: "system" | "upload" | "agent" | "user" | "legacy"
-  purpose?: "file" | "agent_instructions" | "memory"
+  purpose?: "file" | "agent_instructions" | "memory" | "document_original" | "document_conversion"
   /** 后端通过 _classify_format 推断——前端 FileChip 据此显示是否支持。 */
   format: FileFormat
   /** 上传时间（ms） */
@@ -59,6 +59,7 @@ export type WorkspaceSnapshotResponse = FileListResponse
 export interface FileUploadResponse {
   count: number
   files: FileRef[]
+  conversions?: WorkspaceDocumentConversion[]
   errors?: Array<{
     filename: string
     error_type: string
@@ -67,6 +68,20 @@ export interface FileUploadResponse {
     current_revision?: number
   }>
   workspace: WorkspaceState
+}
+
+/** Fixed PDF/DOCX/XLSX conversion outcome for one immutable source. */
+export interface WorkspaceDocumentConversion {
+  source_file_id: string
+  document_id: string
+  status: "succeeded" | "needs_ocr" | "failed"
+  reused: boolean
+  workspace_revision: number
+  manifest_file_id?: string | null
+  primary_file_id?: string | null
+  files: FileRef[]
+  warnings: string[]
+  error_code?: string | null
 }
 
 /** DELETE /api/sessions/{sid}/files/{fid} response。 */

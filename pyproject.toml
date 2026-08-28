@@ -46,6 +46,11 @@ dev = [
 web = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
+    # Fixed Session Workspace document converters. These stay in the main
+    # application and never import or call the independent LLM Wiki workers.
+    "pypdf>=6.0,<7",
+    "python-docx>=1.1,<2",
+    "openpyxl>=3.1,<4",
     # Built-in DDGS web-search MCP server. The protocol wrapper lives in this
     # project so UI-managed defaults can be enforced server-side.
     "ddgs>=9.14,<10",

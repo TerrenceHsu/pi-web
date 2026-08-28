@@ -155,15 +155,24 @@ Sandbox 只获得可公开的 Workspace 快照，不获得本机绝对路径、�
 
 ## 9. PDF、Word、Excel 固定转换
 
-Agent 不能把二进制正文直接提交给 LLM。上传后由服务端排队执行
-`convert_workspace_document(entry_id)`：
+Agent 不能把二进制正文直接提交给 LLM。上传后由服务端固定转换服务执行
+`convert_workspace_document(entry_id)`；CPU/压缩包解析在线程中完成，上传 API 等待本次结果，另提供
+幂等 retry API：
 
-- PDF：提取分页文本、标题/段落、页码映射和表格；扫描件标记 `needs_ocr`，OCR 后续单列。
-- DOCX：转换标题层级、段落、列表、表格、链接和图片引用到 Markdown。
+- PDF：用 `pypdf` 提取分页文本、页码映射和内嵌图片；扫描件标记 `needs_ocr`。首版不伪造
+  结构化表格识别，而是在 manifest 写入 `pdf_tables_not_structurally_extracted`；OCR 和高质量表格解析后续单列。
+- DOCX：用 `python-docx` 转换标题层级、段落、列表和表格到 Markdown，并提取内嵌图片。
 - XLSX：生成 workbook 摘要，每个 sheet 输出 CSV 与 schema/范围信息；不执行宏和公式。
 
 `manifest.json` 固定记录原件 SHA、转换器名称/版本、状态、warning、生成文件及各自 SHA。
 原件永不就地改写，重复转换可按 source SHA + converter version 幂等复用。
+
+实施边界：该模块位于 `web/workspace_documents.py`，只依赖 `WorkspaceStore`，不 import Knowledge/
+Wiki 业务模块，不共享 Wiki Raw、DB、Provider、Worker 或解析制品。转换前物化 revision-bound 快照；
+发布时复用 Workspace durable intent/phase journal，并在目标 Session 锁内重验 revision、tree SHA 和
+全部内容 SHA。一组新建/替换/删除只提升一次 revision；源 Workspace 并发变化时零写入。原件 purpose
+为 `document_original`，生成物为 `document_conversion`，Web 编辑/移动/单文件删除、Agent 写入和
+Sandbox 发布均不能覆盖。转换失败时首次只发布不含异常正文的失败 manifest；若已有成功版本则保留。
 
 ## 10. 实施阶段
 
@@ -230,6 +239,13 @@ Chat Store 中成功 `write_file` 的 ToolResult，同时兼容 live result wrap
 
 - 先实现转换任务、manifest、隔离与幂等框架。
 - 依次接入 PDF、DOCX、XLSX；OCR 延后。
+
+实施结果：已完成。上传 API 自动运行固定转换并返回结果，`POST
+/api/sessions/{sid}/documents/{source_file_id}/convert` 提供显式幂等重试；前端在响应后刷新完整
+Workspace 树，转换成功时优先选中并作为聊天附件使用 `content.md`。manifest 记录原件 SHA、
+转换器/版本、配置版本、状态、warning 和每个输出 SHA；缓存复用前同时核验 manifest 声明与当前
+Workspace metadata，缺失或不一致即重新转换。PDF/DOCX/XLSX 真实本地 smoke 均通过；OCR 与 PDF
+结构化表格识别按上述 warning 明确延期。
 
 ### 阶段 6：完整验收
 

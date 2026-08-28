@@ -43,18 +43,17 @@ const expanded = ref(true)
     </div>
     <div
       v-else-if="node.file"
-      :class="[
-        'tree-row',
-        'file-row',
-        { selected: node.file.id === selectedFileId },
-      ]"
+      :class="['tree-row', 'file-row', { selected: node.file.id === selectedFileId }]"
     >
       <button
         v-if="node.file.purpose === 'agent_instructions' || node.file.purpose === 'memory'"
         type="button"
         class="tree-main editable-file"
         :aria-label="`Edit ${node.name}`"
-        @click="emit('select-file', node.file.id); emit('edit-file', node.file.id)"
+        @click="
+          emit('select-file', node.file.id)
+          emit('edit-file', node.file.id)
+        "
       >
         <span aria-hidden="true">{{ node.file.purpose === "memory" ? "🧠" : "⚙" }}</span>
         <span>{{ node.name }}</span>
@@ -81,14 +80,17 @@ const expanded = ref(true)
           :download="node.file.name"
           class="tree-action"
           :aria-label="`Download ${node.name}`"
-        >↓</a>
+          >↓</a
+        >
         <button
-          v-if="node.file.purpose !== 'agent_instructions'"
+          v-if="node.file.purpose === 'file'"
           type="button"
           class="tree-action"
           :aria-label="`Remove ${node.name}`"
           @click="emit('delete', node.file.id)"
-        >×</button>
+        >
+          ×
+        </button>
       </span>
     </div>
 

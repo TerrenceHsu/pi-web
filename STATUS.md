@@ -1,14 +1,14 @@
 # Project Status
 
-> 当前事实快照，校准日期：**2026-08-28**。本页只描述当前代码基线；阶段性测试数字和历史决策保留在 `docs/validation/`、`CHANGELOG.md` 与归档计划中。
+> 当前事实快照，校准日期：**2026-08-29**。本页只描述当前代码基线；阶段性测试数字和历史决策保留在 `docs/validation/`、`CHANGELOG.md` 与归档计划中。
 
 ## 基线身份
 
 | 项 | 当前事实 |
 |---|---|
-| 代码基线 | `0.0.28` 发布基线之上的工作树已完成 Coding Sandbox 阶段 4A–4C：显式状态机/双 TOCTOU 屏障、WorkspaceStore 不可变 baseline 与事务发布闭环 |
+| 代码基线 | `0.0.28` 发布基线之上已提交 Coding Sandbox 阶段 4A–4C（`0e1a758`）；当前工作树已完成 Session Workspace 阶段 5 固定文档转换 |
 | 分支 | `master` |
-| 最新 release tag | `0.0.28`；annotated tag 仍指向发布候选基线，不包含当前尚未提交的阶段 4A–4C 工作树改动 |
+| 最新 release tag | `0.0.28`；annotated tag 指向发布基线，不包含其后的阶段 4A–4C 提交与当前阶段 5 工作树 |
 | Python / API 版本 | `0.0.28`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
 | 前端包版本 | `0.0.28`（`package.json` 与 lockfile 一致） |
 | 许可证 | MIT；根 `LICENSE` 为标准正文，`pyproject.toml` 与 wheel 均直接引用/携带该文件 |
@@ -53,6 +53,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 | Coding Sandbox 阶段 4A 状态机/TOCTOU | ✅ 完成 | Backend 单一转换表与公开 actions/transitions、SQLite 完整记录 CAS、UI 动作投影；Validation→Freeze 屏障前 stale 可重验，屏障后 `artifact_stale` fail-closed 终止 |
 | Coding Sandbox 阶段 4B Workspace baseline | ✅ 完成 | WorkspaceStore mutation lock 内按 logical path 物化 revision-bound 树，逐文件稳定 stat/SHA 校验；operation 记录源 revision/tree SHA，主应用不再以独立项目目录作为输入事实源；4C 前发布 fail closed |
 | Coding Sandbox 阶段 4C Workspace 发布 | ✅ 完成 | 签名 Artifact 在隔离镜像复验后，通过 WorkspaceStore journaled multi-file transaction 发布；路径白名单、目标端 revision/tree/content TOCTOU、rollback/recovery、单次 revision 和 `workspace_changed` 右栏刷新均已接通 |
+| Session Workspace 固定文档转换 | ✅ 完成 | PDF/DOCX/XLSX 原件进入 `documents/<id>/original.*` 且不可变；本地固定转换器从 revision 快照生成只读 Markdown/CSV/schema/assets/manifest，并通过 WorkspaceStore 单 revision 事务发布；OCR 延期，完全独立于 LLM Wiki Parser |
 | Backend warning / pytest 状态目录 / ToolResult UTF-8 E2E | ✅ 完成 | Backend `-W error` 0 warning；cache/temp 固定到工作区；Playwright 48/48 |
 | Frontend warning 收敛 | ✅ 完成 | Modal/Teleport attrs、Vite mixed import 与 Playwright color env 三类提示归零；Vitest 404/404；Playwright 48/48 |
 | 历史消息 U+FFFD 完整性标记 | ✅ 完成 | 读取时递归检测并返回计数/RFC 6901 路径，不改写 SQLite、不伪造恢复；消息与工具卡可见，刷新保持；Playwright 49/49 |
@@ -72,6 +73,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 - 每个 Session 由唯一 `WorkspaceStore` 初始化独立文件夹和唯一根 `AGENT.md`、`Memory.md`；启动时幂等补齐旧 Session，保留已有正文/file id，两个根文件不可删除；`VirtualFileStore` 仅为同一实现的兼容别名
 - Agent 写入或用户上传的代码按扩展名自动进入逻辑 `scripts/**`；普通 Markdown 支持安全路径创建、编辑、移动/重命名和删除，`AGENT.md`/`Memory.md` 继续使用专用权限
 - Workspace revision 以隐藏状态持久化；上传、创建、更新、移动和删除可同时校验 revision 与逐文件 SHA，过期客户端收到 409 而不会静默覆盖
+- PDF、DOCX、XLSX 上传会归档不可变原件并生成可审计只读制品；右栏优先打开 `content.md`，XLSX 公式不会在转换阶段执行，失败不会暴露半套输出
 - 桌面右栏是 Agent 成果交付面：成功生成 `.md`、`.py` 等文件后立即刷新、选中并展示，整页刷新后仍从持久 ToolResult 恢复；窄屏使用带新成果提示的 drawer
 - `/checkpointer` 使用当前 Session Provider 把对话累计总结到 `Memory.md`；接受时持久化 source leaf/hash，文件发布后原子清空原 lane，进程退出可幂等前滚
 - 支持 Prompt、Stop、Regenerate 最新 Assistant、Markdown Export、实时事件、请求恢复和精确 ToolCall 审批
@@ -193,8 +195,8 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 ### 文件与 LLM Wiki
 
-- Session 文件已经统一到 `WorkspaceStore` 事实源，代码也已归一到逻辑 `scripts/**`，右侧成果面板已接入；物理布局仍沿用 `uploads/{session_id}`，Sandbox 发布回该事实源属于后续阶段
-- Session Folder 的 `view_file` 只对文本/Markdown/HTML/CSV/Parquet提供正文或结构化预览；Session PDF 只返回元信息
+- Session 文件统一到 `WorkspaceStore` 事实源，代码归一到逻辑 `scripts/**`，Sandbox 已事务发布回同一事实源；右侧成果面板展示代码、Markdown 和固定文档转换产物
+- Session PDF/DOCX/XLSX 上传后进入 `documents/<id>/`；Agent/右栏读取生成的 `content.md`、CSV/schema 与 assets，二进制原件只提供元信息/下载且不可变
 - PDF 扫描件由 Docling OCR preset 处理；MVP 不做通用图片语义理解或视觉模型问答
 - Wiki 只对已批准页面使用 SQLite FTS5/BM25，不建立 Chunk、向量数据库或 embedding 主链路
 - 新 Wiki 已独立接入 Web lifespan/API；真实用户旧 Chunk 库原样保留但产品不再打开。双 PDF Parser v2 与 OCI file-queue Provider 已接入；默认开发启动器未配置 Provider 时 PDF 保持 `uploaded`
@@ -204,15 +206,15 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 - 当前无 Git remote；tag/push 需要先决定版本并配置 remote
 - 旧 `.pytest_cache` 仍受本机 ACL 限制，但 pytest 已固定使用可写的 `.pytest-cache-workspace` 与 `.pytest-tmp`，不再读写旧目录或关闭 cacheprovider
-- Coding Sandbox P0 第 0–10 项和 Workspace 阶段 4A–4C 已完成；显式状态机/CAS、Validation→Freeze 与 publish-target 双 TOCTOU、revision-bound baseline、事务发布及右栏事件刷新均已固定
+- Coding Sandbox P0 第 0–10 项和 Workspace 阶段 4A–5 已完成；显式状态机/CAS、双 TOCTOU、revision-bound baseline、事务发布、固定文档转换及右栏成果刷新均已固定
 
 ## 当前阻塞项
 
-LLM Wiki 阶段 0–10 已完成，没有功能阻塞。真实 OCI Worker 为 `runtime_ready=true`，页面中心主链路、独立 Knowledge UI、来源保留与 Space 生命周期已实现，旧 Chunk Knowledge 已退出产品组合。发布候选静态检查、Backend/Frontend 全量精简套件、production build 与关键 Wiki Browser E2E 均已通过，release tag 为 `0.0.28`；Coding Sandbox 阶段 4A–4C 的 Workspace 编码、验证、审批和事务发布主链路已闭环。若需 push，仍需先配置 Git remote。
+LLM Wiki 阶段 0–10 已完成，没有功能阻塞。真实 OCI Worker 为 `runtime_ready=true`，页面中心主链路、独立 Knowledge UI、来源保留与 Space 生命周期已实现，旧 Chunk Knowledge 已退出产品组合。发布候选静态检查、Backend/Frontend 全量精简套件、production build 与关键 Wiki Browser E2E 均已通过，release tag 为 `0.0.28`；Coding Sandbox 阶段 4A–4C 与 Workspace 固定文档转换主链路已闭环。若需 push，仍需先配置 Git remote。
 
 ## 建议下一步
 
-1. 按冻结边界决定是否进入阶段 5 固定文档转换工作流；未解除冻结前不实施。
-2. 阶段 6 完整验收仍冻结；发布前再执行真实 E2B 写入、验证、审批、Workspace 回写和 Browser E2E。
+1. 阶段 5 工作树完成后先审阅并提交。
+2. 阶段 6 完整验收仍冻结；解除后执行真实 E2B 写入、验证、审批、Workspace 回写，以及文档上传/右栏展示 Browser E2E。
 
 未完成事项的唯一清单见 [`TODO.md`](TODO.md)。使用与架构说明见 [`README.md`](README.md)。

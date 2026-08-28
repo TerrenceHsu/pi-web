@@ -25,11 +25,15 @@ const editing = ref(false)
 
 const format = computed(() => refFormat(props.file))
 const isMarkdown = computed(() => format.value === "markdown")
+const isDocumentOutput = computed(() => props.file.purpose === "document_conversion")
+const canEditMarkdown = computed(() => isMarkdown.value && !isDocumentOutput.value)
 const canRead = computed(() => isSupported(format.value))
 const renderedMarkdown = computed(() => renderMarkdown(content.value))
 const dirty = computed(() => content.value !== baseline.value)
 const logicalPath = computed(() => props.file.logical_path || props.file.name)
 const originLabel = computed(() => {
+  if (props.file.purpose === "document_conversion") return "Generated document"
+  if (props.file.purpose === "document_original") return "Immutable original"
   if (props.file.origin === "agent") return "Agent result"
   if (props.file.origin === "upload") return "Uploaded"
   if (props.file.purpose === "memory") return "Session memory"
@@ -56,7 +60,7 @@ async function load(): Promise<void> {
 }
 
 async function save(): Promise<void> {
-  if (!isMarkdown.value || !dirty.value) return
+  if (!canEditMarkdown.value || !dirty.value) return
   busy.value = true
   error.value = ""
   try {
@@ -94,7 +98,7 @@ watch(() => [props.file.id, props.file.sha256], load, { immediate: true })
       >
     </header>
 
-    <div v-if="isMarkdown" class="preview-mode" role="tablist" aria-label="Markdown view mode">
+    <div v-if="canEditMarkdown" class="preview-mode" role="tablist" aria-label="Markdown view mode">
       <button
         type="button"
         :class="{ active: !editing }"
@@ -124,7 +128,7 @@ watch(() => [props.file.id, props.file.sha256], load, { immediate: true })
           <!-- eslint-disable-next-line vue/no-v-html -->
           <div v-html="renderedMarkdown"></div>
         </div>
-        <div v-else class="markdown-editor">
+        <div v-else-if="canEditMarkdown" class="markdown-editor">
           <textarea
             v-model="content"
             :aria-label="`${file.name} content`"
@@ -138,6 +142,7 @@ watch(() => [props.file.id, props.file.sha256], load, { immediate: true })
             </button>
           </div>
         </div>
+        <div v-else class="preview-readonly">Generated document output is read-only.</div>
       </template>
       <pre
         v-else

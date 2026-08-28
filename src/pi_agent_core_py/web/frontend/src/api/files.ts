@@ -6,6 +6,7 @@ import type {
   FileUploadResponse,
   UpdateTextFileResponse,
   WorkspaceFileMutationResponse,
+  WorkspaceDocumentConversion,
   WorkspaceSnapshotResponse,
 } from "../types"
 import { requestBlob, requestJson, uploadForm } from "./client"
@@ -50,6 +51,15 @@ export function uploadFiles(
         expected_workspace_revision: options.expectedWorkspaceRevision,
       },
     },
+  )
+}
+
+/** Retry an immutable Workspace document with the same fixed converter. */
+export function convertWorkspaceDocument(sessionId: string, sourceFileId: string) {
+  return requestJson<WorkspaceDocumentConversion>(
+    `/api/sessions/${encodeURIComponent(sessionId)}` +
+      `/documents/${encodeURIComponent(sourceFileId)}/convert`,
+    { method: "POST" },
   )
 }
 
