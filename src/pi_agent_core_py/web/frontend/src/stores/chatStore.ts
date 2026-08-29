@@ -951,6 +951,7 @@ export const useChatStore = defineStore("chat", () => {
     /** 本轮附件 FileRef——仅用于 user_message item 显示 FileChip；不发到后端 */
     files?: FileRef[]
     skillNames?: string[]
+    codingMode?: boolean
   }) {
     if (sending.value) return
     if (!input.text.trim()) return
@@ -1025,6 +1026,7 @@ export const useChatStore = defineStore("chat", () => {
         session_id: input.sessionId,
         file_ids: input.fileIds,
         skill_names: input.skillNames,
+        coding_mode: input.codingMode,
       })
 
       currentRequestId.value = resp.request_id

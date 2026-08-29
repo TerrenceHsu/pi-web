@@ -28,6 +28,7 @@ export interface ContextBudgetEstimateRequest {
   text?: string
   file_ids?: string[]
   skill_names?: string[]
+  coding_mode?: boolean
 }
 
 export interface ContextCompactionResponse {

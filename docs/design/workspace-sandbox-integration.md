@@ -167,7 +167,7 @@ Agent 不能把二进制正文直接提交给 LLM。上传后由服务端固定�
 `manifest.json` 固定记录原件 SHA、转换器名称/版本、状态、warning、生成文件及各自 SHA。
 原件永不就地改写，重复转换可按 source SHA + converter version 幂等复用。
 
-实施边界：该模块位于 `web/workspace_documents.py`，只依赖 `WorkspaceStore`，不 import Knowledge/
+实施边界：该模块现位于 `agent_workspace/documents.py`，只依赖 `WorkspaceStore`，不 import Knowledge/
 Wiki 业务模块，不共享 Wiki Raw、DB、Provider、Worker 或解析制品。转换前物化 revision-bound 快照；
 发布时复用 Workspace durable intent/phase journal，并在目标 Session 锁内重验 revision、tree SHA 和
 全部内容 SHA。一组新建/替换/删除只提升一次 revision；源 Workspace 并发变化时零写入。原件 purpose
@@ -262,6 +262,25 @@ Mypy（170 source files）通过；Frontend 180/180、lint/typecheck/build 通�
 revision 发布回一次性 `WorkspaceStore`。验收同时发现 Windows 深层 Publisher state 会超过传统
 MAX_PATH；adapter 现使用短 run key，并把事务 state 放到 staging 根下的短兄弟目录，真实 E2B
 回归已通过。
+
+### 阶段 7：自动 Coding 请求编排
+
+- 普通对话保持原行为；用户在 Chat 输入区显式启用 `Code` 后，请求携带
+  `coding_mode=true`，不依赖关键词或模型猜测意图。
+- Prompt runner 在模型执行前创建或复用当前 Session 唯一可变 Sandbox operation，并等待
+  `ready`；若已有冻结制品等待审批，则拒绝启动新 Coding 请求，防止把两次需求混入同一制品。
+- Coding turn 临时把 Agent ToolRegistry 收窄为 9 个 `coding_*` 工具，并使用仅作用于该白名单
+  的 allow-all permission policy。请求结束后原工具和权限策略必定恢复；模型不能绕过 Sandbox
+  调用 Session `write_file` 或其它外部工具。
+- 固定系统后缀要求 Agent 检查、实现、运行并调用 `coding_validate` 自验。无论 Agent 是否自验，
+  Backend 都在模型完成后重新执行服务器选定的完整 validation plan，不能接受模型提供命令。
+- 最终验证通过后自动调用 `prepare_publish`，复用阶段 4A 的 Validation→Freeze TOCTOU 屏障，
+  生成签名不可变 Artifact 并停在 `awaiting_approval`。自动编排没有 publish 权限；用户仍须在
+  右栏审阅完整 Diff、勾选确认并显式发布。
+- 验证失败停在 `validation_failed`，不冻结、不写回；下一次 Code 请求可以复用该 operation 修复。
+  Stop 在 Sandbox 创建、最终验证或冻结期间由 request abort flag 协作取消，并尽力销毁云端实例。
+- Coding prompt 后缀纳入 Context Budget 估算。`awaiting_approval` 会触发 Workspace attention，
+  右栏自动切到 Changes；发布后继续沿用 `workspace_changed` 自动刷新和成果预览。
 
 ## 11. 验收标准
 

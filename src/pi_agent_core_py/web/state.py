@@ -191,13 +191,15 @@ class WebAppState(BaseModel):
     # P0-1: SQLiteSessionStore 引用（None 表示未启用多会话路径）
     session_store: Any = None
     current_session_id: str | None = None
-    # Session WorkspaceStore 引用（None 表示未启用 Workspace）
+    # agent_workspace.WorkspaceStore 引用（None 表示未启用 Workspace）
     file_store: Any = None
     uploads_dir: Any = None
     # Fixed PDF/DOCX/XLSX converter for immutable Session Workspace documents.
     workspace_document_service: Any = None
     # 启动时 durable operation reducer 的 secret-free 计数。
     durable_recovery_summary: dict[str, int] = Field(default_factory=dict)
+    auto_memory_enabled: bool = False
+    continuity_recovery_summary: dict[str, int] = Field(default_factory=dict)
     # P0-4 Step 2: MCP server 配置（name → WebMCPServerConfig）
     mcp_server_configs: dict[str, WebMCPServerConfig] = Field(default_factory=dict)
     # P0-4 Step 2: disabled MCP tool 全名集合

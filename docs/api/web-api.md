@@ -220,6 +220,54 @@ Body 可包含尚未发送的 `text`、`file_ids` 与 `skill_names`，只读估�
 
 ---
 
+## Automatic Session Memory
+
+产品启动器默认开启自动 Session Memory；通用嵌入场景需显式设置
+`create_app(..., enable_auto_memory=True)`，并同时提供 Session `db_path` 与 `uploads_dir`。
+
+每个成功持久化的普通 Session Prompt，以及成功提交的新 Regenerate active answer，都会生成有界
+turn evidence。Backend 以每 Session 串行的 append-only `auto_memory` operation，使用当前绑定的
+Provider/Model 累计更新 `Memory.md`。该模型调用不进入 Agent loop，不启用 Tools、Skills 或 MCP，
+也不会清空 canonical messages。Knowledge Conversation 使用独立语义，返回 `skipped`。
+
+同步 Prompt 的响应、异步 Prompt 的 `result_summary` 与 Regenerate request 的 `result_summary` 可包含：
+
+```json
+{
+  "continuity": {
+    "status": "updated",
+    "operation_id": "op_...",
+    "source_sha256": "...",
+    "memory_file_id": "file_...",
+    "workspace_revision": 4,
+    "recovered": false
+  }
+}
+```
+
+`status` 可能为 `updated`、`deferred`、`pending_retry`、`unavailable` 或 `skipped`。自动记忆失败不会
+把已经持久化的主回答改为失败；未完成 evidence 在下一轮串行 preflight 先重试，持续失败时作为
+不可信历史上下文注入。若进程退出发生在消息提交后、operation intent 落库前，下一轮会从 canonical
+最新完整 turn 与最近覆盖 hash 重建 intent。
+
+自动 Coding 请求冻结到 `awaiting_approval` 时，operation 记录 Sandbox blocker 并返回 `deferred`；
+这是为了避免更新 `Memory.md` 提升 Workspace revision、使已签名 Artifact 的发布基线失效。Sandbox
+发布、拒绝、取消、失败或中断后自动续跑。成功发布会广播 `workspace_changed`，其中
+`source=auto_memory`。
+
+`GET /api/state` 公开：
+
+```json
+{
+  "auto_memory": {
+    "enabled": true,
+    "recovery": {"scanned": 0, "completed": 0, "pending": 0, "conflicts": 0}
+  }
+}
+```
+
+---
+
 ## Slash Commands
 
 Slash command 是独立的 Session 操作；命令文本不会作为 UserMessage 写入 canonical history。

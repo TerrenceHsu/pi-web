@@ -25,8 +25,7 @@ from . import AgentTool, ToolResult, ToolUpdateCallback
 from .view_file import _classify_format
 
 if TYPE_CHECKING:
-    # 仅用于类型提示——运行时不导入，避免循环依赖
-    from ..web.files import FileRef, WorkspaceStore
+    from agent_workspace.store import FileRef, WorkspaceStore
 
 
 class ListFilesTool(AgentTool):

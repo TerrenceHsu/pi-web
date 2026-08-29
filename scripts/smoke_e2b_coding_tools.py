@@ -20,6 +20,11 @@ SOURCE_ROOT = REPOSITORY_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
+from agent_workspace import WorkspaceStore  # noqa: E402
+from coding_agent_app.sandbox_workspace import (  # noqa: E402
+    WorkspaceSandboxArtifactPublisher,
+    WorkspaceSandboxBaselineProvider,
+)
 from coding_sandbox import (  # noqa: E402
     ArtifactSigner,
     CodingWorkspace,
@@ -43,15 +48,13 @@ from pi_agent_core_py.tools import (  # noqa: E402
     create_coding_sandbox_tools,
     create_coding_validation_tool,
 )
-from pi_agent_core_py.web.coding_sandbox.workspace import (  # noqa: E402
-    WorkspaceSandboxArtifactPublisher,
-    WorkspaceSandboxBaselineProvider,
+from pi_agent_core_py.web.coding_sandbox.automation import (  # noqa: E402
+    CodingSandboxAutomation,
 )
 from pi_agent_core_py.web.credentials.runtime import (  # noqa: E402
     build_credential_runtime_config,
     credential_runtime_context,
 )
-from pi_agent_core_py.web.files import WorkspaceStore  # noqa: E402
 from pi_agent_core_py.web.local_web_security import WebSecurityConfig  # noqa: E402
 
 
@@ -235,8 +238,8 @@ async def _smoke(database_path: Path) -> None:
                     ),
                     artifact_publisher=workspace_publisher,
                 )
-                creating = await lifecycle.start(session_id)
-                ready = await _wait_for_status(lifecycle, creating.operation_id, "ready")
+                automation = CodingSandboxAutomation(lifecycle)
+                ready = await automation.prepare(session_id)
                 if (
                     ready.baseline_workspace_revision is None
                     or ready.baseline_workspace_sha256 is None
@@ -352,28 +355,13 @@ async def _smoke(database_path: Path) -> None:
                 )
                 await _require_success("coding_validate", tool_validation)
 
-                await lifecycle.validate(ready.operation_id)
-                validated = await _wait_for_status(
-                    lifecycle,
-                    ready.operation_id,
-                    "validated",
-                )
+                automated = await automation.validate_and_freeze(ready.operation_id)
+                validated = await lifecycle.get(ready.operation_id)
                 if validated.validation is None or not validated.validation.passed:
                     raise SmokeError("managed validation evidence was not persisted")
-                try:
-                    await lifecycle.publish(ready.operation_id)
-                except SandboxLifecycleError as approval_error:
-                    if approval_error.code != "approval_required":
-                        raise
-                else:
-                    raise SmokeError("publish did not require an approval state")
-
-                await lifecycle.prepare_publish(ready.operation_id)
-                awaiting = await _wait_for_status(
-                    lifecycle,
-                    ready.operation_id,
-                    "awaiting_approval",
-                )
+                if automated.status != "awaiting_approval":
+                    raise SmokeError("automation did not stop at approval")
+                awaiting = await lifecycle.get(ready.operation_id)
                 if awaiting.artifact_id is None or "publish" not in awaiting.allowed_actions:
                     raise SmokeError("freeze did not produce an approval-bound artifact")
                 await lifecycle.publish(ready.operation_id)

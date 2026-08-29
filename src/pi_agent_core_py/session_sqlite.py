@@ -1554,6 +1554,27 @@ class SQLiteSessionStore:
         await cur.close()
         return [await self._operation_from_row(row) for row in rows]
 
+    async def get_latest_operation(
+        self,
+        *,
+        kind: str,
+        session_id: str,
+        lane: str | None = None,
+    ) -> SQLiteSessionOperation | None:
+        """Return the newest operation intent for one Session lane, including finished ones."""
+        db = self._require_db()
+        lane_name = lane or await self._active_lane_name(session_id)
+        cur = await db.execute(
+            "SELECT id, session_id, lane, kind, dedupe_key, source_leaf_id, "
+            "payload_json, created_at FROM session_operations "
+            "WHERE session_id = ? AND lane = ? AND kind = ? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (session_id, lane_name, kind),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        return await self._operation_from_row(row) if row is not None else None
+
     async def start_operation(
         self,
         session_id: str,

@@ -33,6 +33,15 @@ export interface AgentStateSummary {
     aborted: number
     conflicts: number
   }
+  auto_memory: {
+    enabled: boolean
+    recovery: {
+      scanned: number
+      completed: number
+      pending: number
+      conflicts: number
+    }
+  }
 }
 
 export interface EventsResponse {

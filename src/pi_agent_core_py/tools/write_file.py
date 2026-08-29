@@ -11,7 +11,7 @@ from . import AgentTool, ToolResult, ToolUpdateCallback
 from .view_file import _classify_format
 
 if TYPE_CHECKING:
-    from ..web.files import WorkspaceStore
+    from agent_workspace.store import WorkspaceStore
 
 
 class WriteFileTool(AgentTool):
@@ -101,7 +101,7 @@ class WriteFileTool(AgentTool):
                 error_type="NoActiveSession",
             )
 
-        from ..web.files import (
+        from agent_workspace.store import (
             FileStoreError,
             FileTooLargeError,
             SessionStorageLimitError,

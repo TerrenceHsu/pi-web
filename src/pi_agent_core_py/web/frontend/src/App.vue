@@ -38,7 +38,10 @@ let activationVersion = 0
 let activeUserId: string | null = null
 const workspaceAttention = computed(() => {
   const sid = sessionStore.activeSessionId
-  return sid ? !!fileStore.latestArtifactBySession[sid]?.unseen : false
+  return sid
+    ? !!fileStore.latestArtifactBySession[sid]?.unseen ||
+        codingSandboxStore.operation?.status === "awaiting_approval"
+    : false
 })
 
 function acknowledgeWorkspace(): void {

@@ -39,7 +39,7 @@ from ..messages import TextContent
 from . import AgentTool, ToolResult, ToolUpdateCallback
 
 if TYPE_CHECKING:
-    from ..web.files import FileRef, WorkspaceStore
+    from agent_workspace.store import FileRef, WorkspaceStore
 
 # ============================================================================
 # 常量
@@ -452,7 +452,7 @@ class ViewFileTool(AgentTool):
             )
 
         # deferred import：避免 tools module-load 时触发 web/__init__ 循环
-        from ..web.files import (
+        from agent_workspace.store import (
             FileAccessDeniedError,
             VirtualFileNotFoundError,
         )

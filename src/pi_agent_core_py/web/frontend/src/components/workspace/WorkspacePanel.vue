@@ -130,6 +130,14 @@ watch(
   { immediate: true },
 )
 
+watch(
+  () => operation.value?.status,
+  (status) => {
+    if (status === "awaiting_approval") activeTab.value = "changes"
+  },
+  { immediate: true },
+)
+
 async function refresh(): Promise<void> {
   if (sessionId.value) await fileStore.loadFiles(sessionId.value)
 }

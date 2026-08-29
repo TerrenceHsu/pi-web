@@ -11,7 +11,18 @@
 - [x] **5. 继续 pi-agent 对齐：补齐 model、thinking level、streaming message、pending tool calls 等公开 Agent 状态**（完成：新增 secret-free `AgentModelState`、完整 `ThinkingLevel`、`is_streaming` / `streaming_message` / `pending_tool_calls` / `error_message`；按消息与工具事件生命周期更新，request 结束、异常与 reset 统一清理；`/api/state` 与前端类型同步；提交 `848ae1d`）
 - [x] **6. 按当前开发阶段精简测试套件**：采用“最小可观察行为”预算，删除退役 Chunk-RAG、历史 Step/Smoke、Provider 内部实现与重复边界矩阵，只保留核心语义、安全/数据风险、公开 API 和关键用户旅程；Backend 从 4093 降到 2105 collected，Frontend Vitest 从 352 降到 180，Playwright 从 54 收敛为 8 个规格/18 项。第二轮仅改测试与策略文档，按开发阶段规则不复跑耗时全量门禁；当前收集、Ruff 和保留的最小定向测试通过。历史冻结证据继续归档在 `docs/validation/`
 
-## P0 — Session Workspace 一体化
+## P0 — Coding Agent Workspace 连续性
+
+整体架构、内容分类、自动记忆状态机和无上下文续作标准见
+[`docs/design/coding-agent-workspace-continuity.md`](docs/design/coding-agent-workspace-continuity.md)。
+
+- [x] **阶段 1：从 `pi_agent_core_py` 分离 Workspace 领域模块**（完成）：新增顶层 `agent_workspace`，迁移规范 Store、固定文档转换和 provider-neutral continuity；Store 以结构化 async upload port 替代 FastAPI 类型。新增 `coding_agent_app` 承载 Workspace/Sandbox 产品适配，Web/Core 只保留组合代码及旧 import 兼容层；新包不 import Core、FastAPI、Provider 或 Sandbox，独立 import boundary PASS，wheel 已包含两个新顶层包。未新增或修改测试，复用既有 Workspace/文件工具/Checkpointer/文档/Sandbox 回归 133 passed；全量 Ruff PASS、strict Mypy 177 files / 0 issues
+- [x] **阶段 2：每轮完成后自动提炼并更新 `Memory.md`**（完成）：普通 Session Prompt 与 Regenerate 在回答成功持久化后生成有界、可校验的 turn evidence，并以每 Session 串行 `auto_memory` durable operation 调用当前绑定 Provider，受控生成累计 `Memory.md`；主回答不会因记忆失败改成失败，未完成 intent 会在下一轮串行 preflight 重试，持续失败时把 evidence 作为不可信历史上下文注入。下一轮还能从 canonical 最新完整 turn 重建“消息已提交但 intent 尚未落库”的崩溃窗口。Coding turn 在签名 Artifact 待审批期间延迟写入，避免 `Memory.md` 提升 Workspace revision 破坏 Validation→Freeze 基线，Sandbox 终态后自动续跑；Knowledge 模式明确跳过。产品启动器默认启用，低层 `create_app` 保持显式 opt-in；公开 Prompt/request 与 `/api/state` 返回 secret-free continuity 状态。只修改 1 个既有测试文件并新增 2 项，覆盖成功更新且不清空消息、Provider 失败保留回答并在下一轮恢复；Backend 最小相关 11 passed，Ruff、strict Mypy、Frontend typecheck/lint PASS
+- [ ] **阶段 3：细分 Coding Workspace 内容**：增加 `HANDOFF.md`、`tasks/**`、`docs/**`、`inputs/**`、`artifacts/**` 与明确所有权/写入策略
+- [ ] **阶段 4：已发布代码的流程总结**：由用户上传或 `WorkspacePublished` 事件更新 architecture/code-flow/validation，并绑定 Workspace revision 和 stale 状态
+- [ ] **阶段 5：无聊天上下文续作验收**：统一 ContextAssembler，并验证进程重启、Pending Memory、待批准 Artifact 和过期代码总结场景
+
+## P0 — Session Workspace 一体化（既有基线）
 
 完整架构、所有权边界、Sandbox 发布流和富文档转换约定见
 [`docs/design/workspace-sandbox-integration.md`](docs/design/workspace-sandbox-integration.md)。
@@ -25,6 +36,7 @@
   - [x] **阶段 4C：WorkspaceStore 事务发布**（完成）：复用既有签名 Artifact 与本地事务 Publisher 在隔离镜像中完成签名、baseline、manifest、成员和最终树复验，再把允许的 `scripts/**` 与普通 UTF-8 Markdown 变更交给 `WorkspaceStore` 批量提交；固定保护 `AGENT.md`、`Memory.md`、`.pi-agent/**` 与 `documents/**`，大小写冲突和 symlink/reparse fail closed。目标 Session 锁内重新核验 baseline revision/tree SHA 和全部当前内容 SHA，使用 durable intent/phase journal、immutable generation、metadata pointer、删除 tombstone 与反向 rollback，一批新增/修改/删除只提升一次 revision，启动时收敛未提交或已提交待清理事务。发布完成记录 `published_workspace_revision`，广播 `workspace_changed`，右侧面板刷新并聚焦最新成果。未新增测试文件，在 1 个既有测试文件新增 2 项：成功批量提交/单 revision、stale baseline 零写入；Backend 86 passed / 2 capability skipped，Ruff PASS、strict Mypy 28 source files / 0 issues，Frontend typecheck/lint 与相关 Vitest 6/6 passed
 - [x] **阶段 5：固定文档转换工作流**（完成）：`.pdf/.docx/.xlsx` 上传固定归档到 `documents/<document-id>/original.*`，以 `document_original` purpose 保持不可变；转换器只读取 revision-bound Workspace 快照，`pypdf` 输出分页 Markdown/内嵌图片并把低文本 PDF 标为 `needs_ocr`，`python-docx` 输出标题/段落/列表/表格与图片，`openpyxl` 输出 workbook 摘要、逐 Sheet CSV/schema 并把公式转成惰性文本。`content.md/tables/assets/manifest.json` 作为 `document_conversion` 只读文件经复用 4C journal 的单 revision 事务发布，目标端重验 revision/tree/content；manifest 固定记录 source/converter/config/status/warning/输出 SHA，同 SHA+converter version 且制品完整时幂等复用，失败首试只发布安全 manifest、无半成品，重试失败保留旧成功制品。上传响应与显式 retry API 均返回转换结果，前端刷新右侧树并优先展示/附加 `content.md`。与 Knowledge/LLM Wiki 无 import、DB、队列或 Provider 复用；OCR 延期，PDF 结构化表格首版明确 warning。新增 1 个测试文件/2 项测试：成功事务+幂等复用、失败无半成品+原件不可变；Backend 邻接 118 passed，Ruff PASS、strict Mypy 4 source files / 0 issues，Frontend typecheck/lint PASS，PDF/DOCX/XLSX 真实本地 smoke 3/3
 - [x] **阶段 6：完整验收**（完成）：全量 Ruff 0 项、strict Mypy 170 source files / 0 issues、Backend `2095 passed, 7 skipped, 9 deselected`、Frontend typecheck/lint/build 与 Vitest `180/180`、Playwright `19/19` 且 0 retry/flaky。新增 1 项 Browser E2E 验证 XLSX 上传后自动转换、右栏优先展示 `content.md` 和只读提示；修复 Phase 5 文件树模板编译错误、`Memory.md` 删除动作回归与刷新测试未等待 Prompt 202 的竞态。真实 E2B Managed Sandbox smoke 通过 9 个代码工具、失败验证不得冻结/回写、修复后重验、签名 Artifact、审批门禁、`WorkspaceStore` 单 revision 发布和销毁；同时修复 Windows 下 Publisher state 深层路径超过 MAX_PATH 导致的 `winerror=206`，事务 state 改为 staging 根下的短兄弟目录
+- [x] **阶段 7：自动 Coding 请求编排**（完成）：Chat 输入区新增显式 `Code` 模式；请求携带 `coding_mode=true` 后由 Backend 自动创建或安全复用当前 Session Sandbox、等待 ready，并把本轮 ToolRegistry/PermissionPolicy 收窄为 9 个隔离的 `coding_*` 工具，避免通用策略产生逐工具审批。Agent 获得固定编码/自验约束；模型结束后 Backend 独立重跑服务器选定验证，只有成功才执行 Validation→Freeze TOCTOU 屏障并停在 `awaiting_approval`，绝不自动发布。Stop 在创建/验证/冻结阶段可取消并销毁；验证失败保留 `validation_failed` 供下一轮修复。Context Budget 包含 Coding 指令；右栏自动切换 Changes、窄屏 Results 显示审批提醒。只修改 1 个既有测试文件并新增 2 项，覆盖主路径和验证失败不冻结；真实 E2B 由新编排器完成创建、最终重验和冻结待批准，9 工具、签名、模拟批准后的单 revision 回写及销毁全部通过（25.328s）
 
 ## P0 — LLM Wiki（替代 Knowledge/RAG）
 

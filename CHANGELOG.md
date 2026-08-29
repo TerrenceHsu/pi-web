@@ -8,6 +8,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Automatic per-turn Session Memory（2026-08-29）
+
+- 普通 Session Prompt 与 Regenerate 成功提交后自动生成有界 turn evidence，并通过每 Session 串行、append-only `auto_memory` operation 使用当前 Provider 累计更新 `Memory.md`；模型调用不启用 Tools、Skills 或 MCP，聊天消息不会被清空
+- 自动记忆失败不改变主回答成功状态；evidence 保持可恢复，下一轮 preflight 先重试，仍不可用时把待处理 evidence 作为不可信历史上下文注入。canonical 最新完整 turn 可重建消息提交后、intent 落库前的进程退出窗口
+- Coding turn 在签名 Artifact 待审批期间延迟更新，避免 Workspace revision 变化使 Validation→Freeze 基线失效；Sandbox 进入发布/拒绝/取消/失败/中断终态后自动续跑。Knowledge Conversation 明确跳过
+- 产品启动器默认启用，低层 `create_app` 保留显式 opt-in；Prompt/request 与 `/api/state` 公开 secret-free continuity/recovery 状态并广播 `workspace_changed`
+- 遵守快速开发预算：只修改 1 个既有测试文件、新增 2 项，验证成功更新且保留消息，以及 Provider 失败后下一轮恢复；最小相关 Backend 11 passed，Ruff、strict Mypy、Frontend typecheck/lint PASS
+
+### Coding Agent Workspace module extraction（2026-08-29）
+
+- 新增顶层 `agent_workspace` 包，迁移 WorkspaceStore、事务/恢复、固定文档转换和 provider-neutral Checkpointer 领域逻辑；持久格式与公开 Web 行为保持不变
+- WorkspaceStore 不再依赖 FastAPI `UploadFile`，改用最小 async upload Protocol；新包独立 import 不加载 `pi_agent_core_py`、FastAPI、具体 Provider 或 Sandbox
+- 新增 `coding_agent_app` 产品适配层承载 WorkspaceStore 与 `coding_sandbox` 的 baseline/publisher 桥接；旧 Web 模块暂时提供兼容 re-export，Core 内 Checkpointer 只负责消息序列化和 ModelClient stream 翻译
+- 重构阶段未新增或修改测试；现有 Workspace/文件工具/Checkpointer/文档转换/Sandbox 定向 133 passed，Ruff PASS，strict Mypy 177 source files / 0 issues；构建 wheel 已包含 `agent_workspace` 与 `coding_agent_app`
+
+### Automated Coding request orchestration（2026-08-29）
+
+- Chat 新增显式 `Code` 模式；Backend 在 Agent turn 前自动创建/复用并等待 Session Sandbox，临时把工具与权限收窄到 9 个隔离 `coding_*` 工具，不再要求用户先点 Start 或逐工具批准
+- Agent 完成后 Backend 独立重跑固定 validation plan；通过后自动执行 Freeze/签名并严格停在 `awaiting_approval`，最终 Workspace 发布仍要求用户审阅完整 Diff、勾选确认
+- 验证失败保持 `validation_failed` 且不冻结/写回；Stop 覆盖创建、验证和冻结阶段。Coding 指令计入 Context Budget，右栏自动切换 Changes 并在桌面/窄屏显示审批提醒
+- 遵守快速开发测试预算：只修改 1 个既有测试文件、新增 2 项，验证自动创建→验证→待批准主路径和验证失败绝不冻结；全仓 Ruff、strict Mypy 171 files、Frontend typecheck/lint/build 通过，定向 Backend 31 passed、Vitest 21/21 passed；真实 E2B 由新编排器完成创建、重验、冻结待批准、模拟批准回写和销毁（25.328s）
+
 ### Session Workspace stage 6 release acceptance（2026-08-29）
 
 - Workspace Browser E2E 新增 XLSX 上传主路径：固定转换完成后右栏自动选中 `content.md`，展示 workbook 摘要并明确只读；修复文件树模板编译错误、生成文档只读提示不可达和 `Memory.md` 删除动作回归

@@ -12,6 +12,12 @@ from coding_sandbox.admin import (
     SQLiteSandboxConfigStore,
 )
 
+from .automation import (
+    AUTOMATED_CODING_PROMPT,
+    AutomatedCodingResult,
+    CodingSandboxAutomation,
+    CodingSandboxAutomationError,
+)
 from .runtime import (
     ResolvedSandboxRuntimeConfig,
     SandboxRuntimeConfigurationError,
@@ -25,6 +31,10 @@ from .workspace import (
 )
 
 __all__ = [
+    "AUTOMATED_CODING_PROMPT",
+    "AutomatedCodingResult",
+    "CodingSandboxAutomation",
+    "CodingSandboxAutomationError",
     "SQLiteSandboxConfigStore",
     "SandboxAdminConfig",
     "SandboxAdminService",

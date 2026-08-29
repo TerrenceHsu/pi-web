@@ -22,13 +22,19 @@ def _script(text: str) -> list[Any]:
     return [TextDeltaEvent(delta=text), DoneEvent(stop_reason="stop")]
 
 
-def _build_app(tmp_path: Path, scripts: list[list[Any]]):
+def _build_app(
+    tmp_path: Path,
+    scripts: list[list[Any]],
+    *,
+    auto_memory: bool = False,
+):
     fake = FakeClient(scripts)
     harness = AgentHarness(Agent(system_prompt="base-system", client=fake))
     app = create_app(
         harness,
         db_path=tmp_path / "workspace.sqlite",
         uploads_dir=tmp_path / "uploads",
+        enable_auto_memory=auto_memory,
     )
     return app, fake
 
@@ -345,4 +351,77 @@ def test_checkpointer_updates_one_cumulative_memory_file(tmp_path: Path) -> None
         ).text
         assert "First checkpoint" in content
         assert "Second checkpoint" in content
+    dispose_app(app)
+
+
+def test_prompt_automatically_updates_memory_without_clearing_messages(
+    tmp_path: Path,
+) -> None:
+    app, _fake = _build_app(
+        tmp_path,
+        [
+            _script("implemented the requested change"),
+            _script("# Memory\n\n## Work completed\n- Implemented the requested change."),
+        ],
+        auto_memory=True,
+    )
+    with TestClient(app) as client:
+        sid = _create_session(client)
+        response = client.post(
+            "/api/prompt",
+            json={"session_id": sid, "text": "implement this"},
+        )
+        assert response.status_code == 200
+        continuity = response.json()["continuity"]
+        assert continuity["status"] == "updated"
+        assert continuity["workspace_revision"] >= 1
+        assert client.get(f"/api/messages?session_id={sid}").json()["count"] == 2
+
+        files = client.get(f"/api/sessions/{sid}/files").json()["files"]
+        memory = next(item for item in files if item["logical_path"] == "Memory.md")
+        content = client.get(f"/api/sessions/{sid}/files/{memory['id']}").text
+        assert "operation: auto_memory" in content
+        assert "Implemented the requested change" in content
+    dispose_app(app)
+
+
+def test_auto_memory_failure_keeps_answer_and_retries_before_next_turn(
+    tmp_path: Path,
+) -> None:
+    app, _fake = _build_app(
+        tmp_path,
+        [
+            _script("first answer"),
+            [ErrorEvent(message="summary provider unavailable")],
+            _script("# Memory\n\n## Work completed\n- First turn retained."),
+            _script("second answer"),
+            _script(
+                "# Memory\n\n## Work completed\n- First turn retained.\n- Second turn retained."
+            ),
+        ],
+        auto_memory=True,
+    )
+    with TestClient(app) as client:
+        sid = _create_session(client)
+        first = client.post(
+            "/api/prompt",
+            json={"session_id": sid, "text": "first"},
+        )
+        assert first.status_code == 200
+        assert first.json()["continuity"]["status"] == "pending_retry"
+        assert client.get(f"/api/messages?session_id={sid}").json()["count"] == 2
+
+        second = client.post(
+            "/api/prompt",
+            json={"session_id": sid, "text": "second"},
+        )
+        assert second.status_code == 200
+        assert second.json()["continuity"]["status"] == "updated"
+        assert client.get(f"/api/messages?session_id={sid}").json()["count"] == 4
+
+        files = client.get(f"/api/sessions/{sid}/files").json()["files"]
+        memory = next(item for item in files if item["logical_path"] == "Memory.md")
+        content = client.get(f"/api/sessions/{sid}/files/{memory['id']}").text
+        assert "First turn retained" in content
+        assert "Second turn retained" in content
     dispose_app(app)

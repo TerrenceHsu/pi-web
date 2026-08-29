@@ -22,6 +22,10 @@ from coding_sandbox import (
 from coding_sandbox.admin import SandboxAdminConfig, SandboxConfigRecord
 from coding_sandbox.fake import FakeSandboxBackend
 from coding_sandbox.lifecycle import DEFAULT_VALIDATION_CONFIG
+from pi_agent_core_py.web.coding_sandbox.automation import (
+    CodingSandboxAutomation,
+    CodingSandboxAutomationError,
+)
 from pi_agent_core_py.web.coding_sandbox.workspace import (
     WorkspaceSandboxArtifactPublisher,
     WorkspaceSandboxBaselineProvider,
@@ -75,6 +79,103 @@ def _workspace_bytes(root: Path) -> dict[str, bytes]:
         for path in root.rglob("*")
         if path.is_file()
     }
+
+
+class _AutomationLifecycle:
+    def __init__(self, *, validation_passes: bool = True) -> None:
+        self.validation_passes = validation_passes
+        self.record: ManagedSandboxOperationRecord | None = None
+        self.calls: list[str] = []
+
+    def _set(self, status: str) -> ManagedSandboxOperationRecord:
+        assert status in {
+            "creating",
+            "ready",
+            "validating",
+            "validated",
+            "validation_failed",
+            "freezing",
+            "awaiting_approval",
+            "cancelled",
+        }
+        self.record = ManagedSandboxOperationRecord.model_construct(
+            operation_id="sandbox-" + "c" * 32,
+            session_id="session-one",
+            status=status,
+            config_revision=1,
+            created_at_ms=100,
+            updated_at_ms=101,
+            workspace_revision=1,
+            validation=(object() if status in {"validated", "validation_failed"} else None),
+            artifact_id=("artifact-" + "d" * 32 if status == "awaiting_approval" else None),
+        )
+        return self.record
+
+    async def latest_for_session(
+        self, _session_id: str
+    ) -> ManagedSandboxOperationRecord | None:
+        return self.record
+
+    async def start(self, _session_id: str) -> ManagedSandboxOperationRecord:
+        self.calls.append("start")
+        return self._set("creating")
+
+    async def get(self, _operation_id: str) -> ManagedSandboxOperationRecord:
+        assert self.record is not None
+        if self.record.status == "creating":
+            return self._set("ready")
+        if self.record.status == "validating":
+            return self._set("validated" if self.validation_passes else "validation_failed")
+        if self.record.status == "freezing":
+            return self._set("awaiting_approval")
+        return self.record
+
+    async def validate(self, _operation_id: str) -> ManagedSandboxOperationRecord:
+        self.calls.append("validate")
+        return self._set("validating")
+
+    async def prepare_publish(self, _operation_id: str) -> ManagedSandboxOperationRecord:
+        self.calls.append("prepare_publish")
+        return self._set("freezing")
+
+    async def cancel(self, _operation_id: str) -> ManagedSandboxOperationRecord:
+        self.calls.append("cancel")
+        return self._set("cancelled")
+
+
+@pytest.mark.asyncio
+async def test_automated_coding_creates_validates_and_stops_for_approval() -> None:
+    lifecycle = _AutomationLifecycle()
+    automation = CodingSandboxAutomation(
+        lifecycle,  # type: ignore[arg-type]
+        wait_timeout_seconds=1,
+        poll_interval_seconds=0,
+    )
+
+    ready = await automation.prepare("session-one")
+    result = await automation.validate_and_freeze(ready.operation_id)
+
+    assert result.status == "awaiting_approval"
+    assert result.public()["approval_required"] is True
+    assert lifecycle.calls == ["start", "validate", "prepare_publish"]
+
+
+@pytest.mark.asyncio
+async def test_automated_coding_validation_failure_never_freezes() -> None:
+    lifecycle = _AutomationLifecycle(validation_passes=False)
+    automation = CodingSandboxAutomation(
+        lifecycle,  # type: ignore[arg-type]
+        wait_timeout_seconds=1,
+        poll_interval_seconds=0,
+    )
+
+    ready = await automation.prepare("session-one")
+    with pytest.raises(CodingSandboxAutomationError) as raised:
+        await automation.validate_and_freeze(ready.operation_id)
+
+    assert raised.value.code == "coding_validation_failed"
+    assert lifecycle.record is not None and lifecycle.record.status == "validation_failed"
+    assert lifecycle.calls == ["start", "validate"]
 
 
 async def _wait_for_status(

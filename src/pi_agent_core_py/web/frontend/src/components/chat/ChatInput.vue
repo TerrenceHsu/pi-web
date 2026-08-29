@@ -19,6 +19,8 @@ const props = withDefaults(
     slashCommands?: SlashCommandDefinition[]
     attachmentsEnabled?: boolean
     knowledgeMode?: boolean
+    codingMode?: boolean
+    codingModeAvailable?: boolean
   }>(),
   {
     uploading: false,
@@ -30,6 +32,8 @@ const props = withDefaults(
     slashCommands: () => [],
     attachmentsEnabled: true,
     knowledgeMode: false,
+    codingMode: false,
+    codingModeAvailable: true,
   },
 )
 
@@ -38,6 +42,7 @@ const emit = defineEmits<{
   (e: "abort"): void
   (e: "upload-files", files: FileList | File[]): void
   (e: "remove-attachment", fileId: string): void
+  (e: "update:codingMode", enabled: boolean): void
 }>()
 
 const text = ref("")
@@ -162,6 +167,24 @@ function onDragOver(e: DragEvent) {
     </div>
 
     <div class="input-row">
+      <button
+        v-if="!knowledgeMode"
+        type="button"
+        class="coding-mode-btn"
+        :class="{ active: codingMode }"
+        data-testid="coding-mode-toggle"
+        :aria-pressed="codingMode"
+        :disabled="sending || !codingModeAvailable"
+        :title="
+          codingModeAvailable
+            ? 'Automatically run this request in the managed Coding Sandbox'
+            : 'Managed Coding Sandbox is unavailable'
+        "
+        @click="emit('update:codingMode', !codingMode)"
+      >
+        &lt;/&gt; Code
+      </button>
+
       <input
         v-if="attachmentsEnabled"
         ref="fileInput"
@@ -231,6 +254,9 @@ function onDragOver(e: DragEvent) {
       <span v-else-if="knowledgeMode" class="muted"
         >Knowledge mode · approved Wiki pages and read-only Raw evidence · edits require
         approval</span
+      >
+      <span v-else-if="codingMode" class="coding-hint"
+        >Coding mode · Sandbox starts automatically · validated changes require approval</span
       >
       <span v-else-if="!wsConnected" class="muted"
         >○ disconnected · supports md / html / csv / parquet / text</span
@@ -308,6 +334,33 @@ function onDragOver(e: DragEvent) {
   font-size: 16px;
   color: var(--muted);
   flex-shrink: 0;
+}
+.coding-mode-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 68px;
+  height: 32px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: 600 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.coding-mode-btn:hover:not(:disabled),
+.coding-mode-btn.active {
+  border-color: #93c5fd;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+.coding-mode-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.coding-hint {
+  color: #1d4ed8;
 }
 .attach-btn:hover:not(:disabled) {
   background: var(--border);

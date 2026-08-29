@@ -4,6 +4,7 @@ import { computed, onMounted, ref, watch } from "vue"
 import { abortRun, listSlashCommands } from "../../api"
 import type { SlashCommandDefinition } from "../../types"
 import { useChatStore } from "../../stores/chatStore"
+import { useCodingSandboxStore } from "../../stores/codingSandboxStore"
 import { useContextBudgetStore } from "../../stores/contextBudgetStore"
 import { useFileStore } from "../../stores/fileStore"
 import { useProviderStore } from "../../stores/providerStore"
@@ -22,11 +23,13 @@ const props = withDefaults(defineProps<{ mode?: "default" | "knowledge" }>(), {
 
 const sessionStore = useSessionStore()
 const chatStore = useChatStore()
+const codingSandboxStore = useCodingSandboxStore()
 const contextBudgetStore = useContextBudgetStore()
 const fileStore = useFileStore()
 const skillStore = useSkillStore()
 const providerStore = useProviderStore()
 const knowledgeMode = computed(() => props.mode === "knowledge")
+const codingMode = ref(false)
 
 const activeSessionId = computed(() => sessionStore.activeSessionId)
 const hasSession = computed(() => !!activeSessionId.value)
@@ -44,6 +47,13 @@ const slashCommands = ref<SlashCommandDefinition[]>([
     accepts_arguments: false,
   },
 ])
+
+watch(
+  () => codingSandboxStore.available,
+  (available) => {
+    if (!available) codingMode.value = false
+  },
+)
 
 /** 保留最后一次失败的输入文本——失败时还原，避免用户重新打字。 */
 const lastFailedText = ref<string>("")
@@ -129,6 +139,7 @@ async function onSubmit(text: string) {
       text,
       file_ids: fileIds,
       skill_names: skillNames,
+      coding_mode: codingMode.value,
     })
     if (preview?.estimate.level === "blocked") {
       contextBudgetStore.error =
@@ -142,6 +153,7 @@ async function onSubmit(text: string) {
       fileIds,
       files,
       skillNames,
+      codingMode: codingMode.value,
     })
     // 成功：清空 pending；reload session files（让侧栏其它视图也同步）
     fileStore.clearPendingAttachments()
@@ -194,6 +206,12 @@ function dismissError() {
         @compact="onCompactContext"
       />
       <span v-if="chatStore.checkpointing" class="header-status running">checkpointing</span>
+      <span
+        v-else-if="codingSandboxStore.operation?.status === 'awaiting_approval'"
+        class="header-status approval"
+      >
+        code approval required
+      </span>
       <span v-else-if="chatStore.pendingApprovalCount" class="header-status approval">
         approval required
       </span>
@@ -239,6 +257,9 @@ function dismissError() {
       :slash-commands="slashCommands"
       :attachments-enabled="!knowledgeMode"
       :knowledge-mode="knowledgeMode"
+      :coding-mode="codingMode"
+      :coding-mode-available="codingSandboxStore.available"
+      @update:coding-mode="codingMode = $event"
       @submit="onSubmit"
       @abort="onAbort"
       @upload-files="onUploadFiles"

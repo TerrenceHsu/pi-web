@@ -156,6 +156,8 @@ export interface PromptRequest {
   text: string
   session_id?: string
   file_ids?: string[]
+  /** 自动创建/复用 Sandbox，限制为 coding_* 工具，并在结束后验证、冻结。 */
+  coding_mode?: boolean
   /** 顶层快捷字段——等价于 skill_selection.names；后端会合并去重。 */
   skill_names?: string[]
   skill_selection?: {
@@ -186,6 +188,24 @@ export interface PromptResponse {
   }
   error?: string
   error_type?: string
+  coding_sandbox?: {
+    operation_id: string
+    status: string
+    workspace_revision: number
+    artifact_id: string | null
+    approval_required: boolean
+  } | null
+  continuity?: {
+    status: "updated" | "pending_retry" | "deferred" | "skipped" | "unavailable"
+    operation_id?: string
+    source_sha256?: string
+    memory_file_id?: string
+    workspace_revision?: number
+    recovered?: boolean
+    blocked_by_sandbox_operation_id?: string | null
+    error_code?: string
+    reason?: string
+  } | null
   /** detail 字段——某些 4xx 路径会返回这个（HTTPException） */
   detail?: string
 }
@@ -264,6 +284,8 @@ export interface RequestSummary {
     source_message_count?: number
     source_sha256?: string
     idempotent_recovery?: boolean
+    coding_sandbox?: PromptResponse["coding_sandbox"]
+    continuity?: PromptResponse["continuity"]
   } | null
   event_start_sequence: number | null
   event_end_sequence: number | null

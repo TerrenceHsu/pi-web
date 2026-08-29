@@ -85,7 +85,13 @@ build-backend = "hatchling.build"
 path = "src/pi_agent_core_py/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/pi_agent_core_py", "src/coding_sandbox", "src/wiki_parser"]
+packages = [
+    "src/pi_agent_core_py",
+    "src/coding_sandbox",
+    "src/wiki_parser",
+    "src/agent_workspace",
+    "src/coding_agent_app",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -106,7 +112,7 @@ addopts = [
 ]
 
 [tool.coverage.run]
-source = ["pi_agent_core_py"]
+source = ["pi_agent_core_py", "agent_workspace"]
 branch = true
 omit = [
     # demo / tutorial scripts——不在发布包范围内
