@@ -11,6 +11,7 @@
 - [x] **5. 继续 pi-agent 对齐：补齐 model、thinking level、streaming message、pending tool calls 等公开 Agent 状态**（完成：新增 secret-free `AgentModelState`、完整 `ThinkingLevel`、`is_streaming` / `streaming_message` / `pending_tool_calls` / `error_message`；按消息与工具事件生命周期更新，request 结束、异常与 reset 统一清理；`/api/state` 与前端类型同步；提交 `848ae1d`）
 - [x] **6. 按当前开发阶段精简测试套件**：采用“最小可观察行为”预算，删除退役 Chunk-RAG、历史 Step/Smoke、Provider 内部实现与重复边界矩阵，只保留核心语义、安全/数据风险、公开 API 和关键用户旅程；Backend 从 4093 降到 2105 collected，Frontend Vitest 从 352 降到 180，Playwright 从 54 收敛为 8 个规格/18 项。第二轮仅改测试与策略文档，按开发阶段规则不复跑耗时全量门禁；当前收集、Ruff 和保留的最小定向测试通过。历史冻结证据继续归档在 `docs/validation/`
 - [x] **7. 发布 `0.0.29`**（完成）：Python/API、Web 前端与 Wiki Parser Worker 的 package/lock/OCI/compliance metadata 已统一；CHANGELOG 分隔 `0.0.28`/`0.0.29`；Ruff、strict Mypy 179 source files、Backend 51、Frontend 11、typecheck/lint/build 通过；两个 `0.0.29` wheel 的版本与许可证已核验；创建本地 annotated tag `0.0.29`，未配置 remote 因而未 push
+- [x] **8. 实现三类意图路由**（完成）：产品入口默认启用 provider-neutral 的 `read_only | coding | knowledge` 决策；Knowledge 只由 durable Conversation binding 选择，Coding 复用现有 Sandbox 自动编排，只读路线同时裁剪写入/执行工具并注入只读约束。支持 `intent_mode` 显式覆盖和旧 `coding_mode=true`；Prompt、async request、Context Budget、`/api/state` 与 Turn 卡公开 secret-free 决策审计。仅修改 1 个既有测试文件并新增 2 项，覆盖三条路线、否定约束和显式覆盖；定向 Backend 2 passed，Ruff、strict Mypy、Frontend typecheck/lint 通过。设计见 [`docs/design/coding-agent-intent-routing.md`](docs/design/coding-agent-intent-routing.md)
 
 ## P0 — Coding Agent Workspace 连续性
 

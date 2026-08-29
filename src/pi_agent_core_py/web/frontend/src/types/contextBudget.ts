@@ -1,3 +1,5 @@
+import type { IntentAudit, IntentMode } from "./messages"
+
 export type ContextBudgetLevel = "unknown" | "normal" | "warning" | "compact" | "blocked"
 
 export interface ContextEstimate {
@@ -23,6 +25,7 @@ export interface ContextBudgetResponse {
   capability_source: "user" | "static" | "unknown"
   estimate: ContextEstimate
   workspace_context: Record<string, unknown> | null
+  intent: IntentAudit | null
 }
 
 export interface ContextBudgetEstimateRequest {
@@ -30,6 +33,7 @@ export interface ContextBudgetEstimateRequest {
   file_ids?: string[]
   skill_names?: string[]
   coding_mode?: boolean
+  intent_mode?: IntentMode
 }
 
 export interface ContextCompactionResponse {

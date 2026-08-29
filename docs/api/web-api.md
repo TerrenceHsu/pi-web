@@ -569,6 +569,8 @@ revision 快照转换并以一个事务替换该文档的生成物。
   "text": "hello",
   "session_id": "sess-...",
   "file_ids": ["f-..."],
+  "intent_mode": "auto",
+  "coding_mode": false,
   "skill_names": ["coding_review"],
   "skill_selection": {
     "names": ["coding_review"],
@@ -585,6 +587,8 @@ revision 快照转换并以一个事务替换该文档的生成物。
 | `text` | ✅ | 用户输入（trim 后非空） |
 | `session_id` | ❌ | 显式指定 session；不传则用 `state.current_session_id` |
 | `file_ids` | ❌ | 附件 file_id 列表；后端校验每个 fid 属于该 session（跨 session → 403） |
+| `intent_mode` | ❌ | 产品路由覆盖：`auto`（默认）、`read_only`、`coding`、`knowledge`；`knowledge` 只接受已绑定 Knowledge Conversation |
+| `coding_mode` | ❌ | 兼容字段；`true` 等价于显式 `intent_mode=coding`，`false` 仍使用自动路由 |
 | `skill_names` | ❌ | 顶层 skill name 列表；与 `skill_selection.names` 合并去重 |
 | `skill_selection` | ❌ | Step 14 引入的 skill 选择结构；保留向后兼容 |
 
@@ -609,6 +613,13 @@ revision 快照转换并以一个事务替换该文档的生成物。
     "attached_unsupported_file_count": 0
   },
   "applied_skill_names": ["coding_review"],
+  "intent": {
+    "route": "read_only",
+    "confidence": 0.98,
+    "source": "rule",
+    "reason_code": "read_only_constraint",
+    "explicit": false
+  },
   "workspace_context": {
     "schema": "pi-agent-workspace-context/v1",
     "workspace_revision": 7,
@@ -629,6 +640,11 @@ revision 快照转换并以一个事务替换该文档的生成物。
 **Response 503**: file store 未初始化但传了 `file_ids`。
 **Response 500**: harness / agent 异常（`state.last_error` 留详情）。
 
+产品入口启用三类路由。优先级为：durable Knowledge Conversation binding → 显式覆盖 →
+否定/只读约束 → 问题或方案请求 → 编码动作 → 安全默认 `read_only`。只读路线只向模型暴露
+本地读取工具和名称可确定为读取语义的 MCP 工具；Coding 路线只暴露 `coding_*` 工具并进入
+Sandbox 创建、验证和 Freeze 流程。`intent` 只含规则审计，不包含 Prompt、文件内容或凭证。
+
 > ℹ️ **同步路径**——LLM 调用结束才返回响应。前端通过 `WS /ws/events` 实时展示 streaming events，POST 请求本身等后端 run_prompt 返回。**异步路径**见下方 `POST /api/prompt/async`（P1-B1）。
 
 ---
@@ -637,7 +653,7 @@ revision 快照转换并以一个事务替换该文档的生成物。
 
 异步触发 prompt——立即返回 `request_id` + HTTP 202；后台 task 执行 Agent。
 
-请求 Body 与同步 `POST /api/prompt` **完全一致**（text / session_id / file_ids / skill_names / skill_selection）。
+请求 Body 与同步 `POST /api/prompt` **完全一致**（包括 `intent_mode` / `coding_mode`）。202 响应会立即返回解析后的 `intent`，终态 request 的 `result_summary.intent` 保留同一审计投影。
 
 **完整乐观校验**：所有 4xx 错误（400 参数 / 404 session 不存在 / 403 跨 session / 400 unknown skill）在校验阶段抛出，**不创建 request record**——调用方立即收到 4xx。
 

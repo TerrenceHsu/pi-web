@@ -204,6 +204,8 @@ class WebAppState(BaseModel):
     # 启动时 durable operation reducer 的 secret-free 计数。
     durable_recovery_summary: dict[str, int] = Field(default_factory=dict)
     auto_memory_enabled: bool = False
+    # Product-level deterministic routing; low-level embedders opt in.
+    intent_routing_enabled: bool = False
     continuity_recovery_summary: dict[str, int] = Field(default_factory=dict)
     # P0-4 Step 2: MCP server 配置（name → WebMCPServerConfig）
     mcp_server_configs: dict[str, WebMCPServerConfig] = Field(default_factory=dict)

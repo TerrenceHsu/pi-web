@@ -70,6 +70,7 @@ export const useContextBudgetStore = defineStore("contextBudget", () => {
         capability_source: event.capability_source ?? current?.capability_source ?? "unknown",
         estimate: event.estimate as ContextEstimate,
         workspace_context: current?.workspace_context ?? null,
+        intent: event.intent ?? current?.intent ?? null,
       },
     }
   }

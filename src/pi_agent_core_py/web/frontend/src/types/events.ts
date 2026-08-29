@@ -11,6 +11,7 @@ import type { FileRef } from "./files"
 import type { ToolApprovalStatus } from "./approvals"
 import type {
   GenerationMetrics,
+  IntentAudit,
   MessageContentWarning,
   MessageUsage,
 } from "./messages"
@@ -126,6 +127,7 @@ export interface TurnInfoItem extends ContentWarningAwareItem {
   status?: TurnStatus
   /** 展开后显示的额外信息（事件计数 / request_id / duration 等） */
   details?: unknown
+  intent?: IntentAudit | null
   /** UI 折叠状态（可选） */
   collapsed?: boolean
   /** 标记淡化样式——必须为 true */

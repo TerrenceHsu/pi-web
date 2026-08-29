@@ -25,6 +25,7 @@
 - 本地账号登录；每账号独立 Session、文件、Skills、MCP、Wiki Space/Conversation 和 Provider 配置
 - `/chat/{session_id}` 路由；整页刷新恢复 Session、历史、文件树及当前进程中的 active request
 - Prompt、Stop、Regenerate 最新 Assistant、Markdown Export、SSE/WebSocket 实时事件
+- 产品入口以确定性规则把请求路由到 `read_only`、`coding` 或会话绑定的 `knowledge`；只读模式移除写入/执行工具，Coding 进入受管 Sandbox，路由依据在 Turn 卡与 API 中可审计
 - Human Approval：高风险 ToolCall 在当前 Turn 内暂停，支持 Approve once / Deny
 - Context Budget：完整输入估算、70/85/95% 分级、hard stop、手动 Turn-safe compaction
 - Assistant Markdown 渲染、usage、总 latency 与 TTFT 展示

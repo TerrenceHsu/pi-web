@@ -151,6 +151,17 @@ export function isPersistedMessageDto(
   return typeof (m as PersistedMessageDto).message_id === "string"
 }
 
+export type IntentRoute = "read_only" | "coding" | "knowledge"
+export type IntentMode = "auto" | IntentRoute
+
+export interface IntentAudit {
+  route: IntentRoute
+  confidence: number
+  source: "explicit" | "rule" | "fallback" | "session_binding"
+  reason_code: string
+  explicit: boolean
+}
+
 /** POST /api/prompt body。 */
 export interface PromptRequest {
   text: string
@@ -158,6 +169,8 @@ export interface PromptRequest {
   file_ids?: string[]
   /** 自动创建/复用 Sandbox，限制为 coding_* 工具，并在结束后验证、冻结。 */
   coding_mode?: boolean
+  /** 可选显式覆盖；省略或 auto 时由产品路由器判定。 */
+  intent_mode?: IntentMode
   /** 顶层快捷字段——等价于 skill_selection.names；后端会合并去重。 */
   skill_names?: string[]
   skill_selection?: {
@@ -195,6 +208,7 @@ export interface PromptResponse {
     artifact_id: string | null
     approval_required: boolean
   } | null
+  intent?: IntentAudit | null
   continuity?: {
     status: "updated" | "pending_retry" | "deferred" | "skipped" | "unavailable"
     operation_id?: string
@@ -254,6 +268,7 @@ export interface PromptAsyncResponse {
   events_url: string
   request_url: string
   abort_url: string
+  intent: IntentAudit | null
 }
 
 /**
@@ -286,6 +301,7 @@ export interface RequestSummary {
     idempotent_recovery?: boolean
     coding_sandbox?: PromptResponse["coding_sandbox"]
     continuity?: PromptResponse["continuity"]
+    intent?: IntentAudit | null
   } | null
   event_start_sequence: number | null
   event_end_sequence: number | null

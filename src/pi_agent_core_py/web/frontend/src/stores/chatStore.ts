@@ -1031,6 +1031,15 @@ export const useChatStore = defineStore("chat", () => {
 
       currentRequestId.value = resp.request_id
       pendingRequest.value = false
+      const routedIntent = resp.intent
+      if (currentTurnInfoId && routedIntent) {
+        updateItem(currentTurnInfoId, (it: any) => {
+          if (it.kind === "turn_info") {
+            it.intent = routedIntent
+            it.summary = `Running · ${routedIntent.route}`
+          }
+        })
+      }
       // D2-7: 记录 metadata——assistant delta 路由用
       requestMetadataById.set(resp.request_id, {
         operation: "prompt",
@@ -1369,6 +1378,7 @@ export const useChatStore = defineStore("chat", () => {
           status === "done"
             ? `Finished (${currentTurnEvents.value.length} events)`
             : `Errored (${currentTurnEvents.value.length} events)`
+        if (it.intent?.route) it.summary += ` · ${it.intent.route}`
       }
     })
   }

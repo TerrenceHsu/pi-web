@@ -67,6 +67,13 @@ from agent_workspace.continuity import (
     merge_checkpoint_sources,
     recover_auto_memory_operations,
 )
+from coding_agent_app.intent_router import (
+    READ_ONLY_SYSTEM_PROMPT,
+    IntentDecision,
+    is_read_only_tool_name,
+    parse_intent_mode,
+    route_intent,
+)
 
 from .. import __version__
 from ..harness import AgentHarness
@@ -205,6 +212,7 @@ class _PromptValidated:
     attached_summary: list[dict[str, Any]]
     knowledge_conversation: Any = None
     coding_mode: bool = False
+    intent: IntentDecision | None = None
     pending_continuity_evidence: AutoMemoryOperationEvidence | None = None
 
 
@@ -283,6 +291,7 @@ class PromptRunOutcome:
     coding_sandbox: dict[str, object] | None = None
     continuity: dict[str, object] | None = None
     workspace_context: dict[str, Any] | None = None
+    intent: dict[str, object] | None = None
     turn_messages: tuple[Any, ...] = ()
     session_persisted: bool = False
 
@@ -381,6 +390,9 @@ def create_app(
     # Trusted architecture/code-flow/validation summaries for published code.
     # Product composition enables this; embedders opt in explicitly.
     enable_code_continuity: bool = False,
+    # Deterministic read-only / coding / Knowledge routing for the product app.
+    # Disabled by default to preserve low-level embedder tool semantics.
+    enable_intent_routing: bool = False,
     # Deprecated Chunk Knowledge compatibility root.
     # The legacy DB, workers, Tool and REST API only start when
     # enable_knowledge_api=True is also explicit. Product composition uses
@@ -1416,6 +1428,7 @@ def create_app(
         harness=harness,
         auto_memory_enabled=enable_auto_memory,
         code_continuity_enabled=enable_code_continuity,
+        intent_routing_enabled=enable_intent_routing,
     )
     checkpointer_locks: dict[str, asyncio.Lock] = {}
     continuity_locks: dict[str, asyncio.Lock] = {}
@@ -2238,7 +2251,18 @@ def create_app(
             coding_mode_raw = (payload or {}).get("coding_mode", False)
             if not isinstance(coding_mode_raw, bool):
                 raise PromptValidationError(400, "coding_mode must be a boolean")
-            coding_mode = coding_mode_raw
+            intent_mode_raw = (payload or {}).get("intent_mode")
+            if not state.intent_routing_enabled and intent_mode_raw is not None:
+                raise PromptValidationError(400, "intent routing is not enabled")
+            try:
+                intent_mode = parse_intent_mode(intent_mode_raw)
+            except ValueError as exc:
+                raise PromptValidationError(400, str(exc)) from None
+            if coding_mode_raw and intent_mode in {"read_only", "knowledge"}:
+                raise PromptValidationError(
+                    400,
+                    "coding_mode conflicts with intent_mode",
+                )
 
             skill_sel_raw = (payload or {}).get("skill_selection") or {}
             skill_names_raw = (payload or {}).get("skill_names")
@@ -2315,11 +2339,29 @@ def create_app(
                     400,
                     "Knowledge conversations use a fixed built-in Skill",
                 )
-            if coding_mode and knowledge_conversation is not None:
+            if knowledge_conversation is not None and (
+                coding_mode_raw or intent_mode in {"coding", "read_only"}
+            ):
                 raise PromptValidationError(
                     400,
-                    "Automated Coding mode is unavailable in Knowledge conversations",
+                    "Knowledge conversations use their bound Knowledge route",
                 )
+            if knowledge_conversation is None and intent_mode == "knowledge":
+                raise PromptValidationError(
+                    400,
+                    "Knowledge mode requires a bound Knowledge conversation",
+                )
+
+            intent = None
+            coding_mode = coding_mode_raw
+            if state.intent_routing_enabled:
+                intent = route_intent(
+                    text,
+                    knowledge_bound=knowledge_conversation is not None,
+                    intent_mode=intent_mode,
+                    legacy_coding_mode=coding_mode_raw,
+                )
+                coding_mode = intent.route == "coding"
             if coding_mode and session_id is None:
                 raise PromptValidationError(
                     400,
@@ -2355,6 +2397,7 @@ def create_app(
                 attached_summary=attached_summary,
                 knowledge_conversation=knowledge_conversation,
                 coding_mode=coding_mode,
+                intent=intent,
             )
         except Exception:
             # Rollback the reservation if any validation step fails.
@@ -3181,6 +3224,7 @@ def create_app(
         file_ids: list[str] | None = None,
         skill_selection: SkillSelection | None = None,
         coding_mode: bool = False,
+        intent_mode: str | None = None,
     ) -> tuple[dict[str, Any], ContextEstimate]:
         """Estimate the canonical Provider input without reading a secret."""
         if state.running or harness.context.phase != "idle":
@@ -3199,6 +3243,15 @@ def create_app(
             if isinstance(exc, SessionNotFoundError):
                 raise HTTPException(status_code=404, detail="session not found") from None
             raise
+
+        if not state.intent_routing_enabled and intent_mode is not None:
+            raise HTTPException(status_code=400, detail="intent routing is not enabled")
+        try:
+            parsed_intent_mode = parse_intent_mode(intent_mode)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        if coding_mode and parsed_intent_mode in {"read_only", "knowledge"}:
+            raise HTTPException(status_code=400, detail="coding_mode conflicts with intent_mode")
 
         knowledge_conversation = None
         if state.wiki_store is not None:
@@ -3220,11 +3273,27 @@ def create_app(
                         status_code=400,
                         detail="Knowledge conversations use a fixed built-in Skill",
                     )
-                if coding_mode:
+                if coding_mode or parsed_intent_mode in {"coding", "read_only"}:
                     raise HTTPException(
                         status_code=400,
-                        detail="Automated Coding mode is unavailable in Knowledge conversations",
+                        detail="Knowledge conversations use their bound Knowledge route",
                     )
+
+        if knowledge_conversation is None and parsed_intent_mode == "knowledge":
+            raise HTTPException(
+                status_code=400,
+                detail="Knowledge mode requires a bound Knowledge conversation",
+            )
+        intent = None
+        resolved_coding_mode = coding_mode
+        if state.intent_routing_enabled:
+            intent = route_intent(
+                draft_text,
+                knowledge_bound=knowledge_conversation is not None,
+                intent_mode=parsed_intent_mode,
+                legacy_coding_mode=coding_mode,
+            )
+            resolved_coding_mode = intent.route == "coding"
 
         attached_blocks: list[Any] = []
         if file_ids:
@@ -3283,16 +3352,18 @@ def create_app(
                         status_code=409,
                         detail="Workspace continuation context is unavailable",
                     ) from None
-                coding_instructions = None
-                if coding_mode:
+                route_instructions = None
+                if resolved_coding_mode:
                     from .coding_sandbox.automation import AUTOMATED_CODING_PROMPT
 
-                    coding_instructions = AUTOMATED_CODING_PROMPT
+                    route_instructions = AUTOMATED_CODING_PROMPT
+                elif intent is not None and intent.route == "read_only":
+                    route_instructions = READ_ONLY_SYSTEM_PROMPT
                 suffix = (
                     "\n\n".join(
                         block
                         for block in (
-                            coding_instructions,
+                            route_instructions,
                             workspace_context,
                         )
                         if block
@@ -3341,11 +3412,29 @@ def create_app(
             if capability_store is not None
             else None
         )
-        tool_registry = (
-            state.wiki_knowledge_tools
-            if knowledge_conversation is not None
-            else harness.agent.tools
-        )
+        tool_registry = state.wiki_knowledge_tools if knowledge_conversation is not None else None
+        if knowledge_conversation is None:
+            from ..tools import ToolRegistry
+
+            if intent is not None and intent.route == "read_only":
+                tool_registry = ToolRegistry(
+                    [
+                        tool
+                        for tool in harness.agent.tools.list()
+                        if is_read_only_tool_name(tool.name)
+                    ]
+                )
+            elif resolved_coding_mode:
+                registered_names: set[str] = container["coding_sandbox_tool_names"]
+                tool_registry = ToolRegistry(
+                    [
+                        tool
+                        for tool in harness.agent.tools.list()
+                        if tool.name in registered_names
+                    ]
+                )
+            else:
+                tool_registry = harness.agent.tools
         if tool_registry is None:
             raise HTTPException(status_code=503, detail="Knowledge tools unavailable")
         estimate = estimate_context(
@@ -3362,6 +3451,7 @@ def create_app(
             "capability_source": capabilities.source if capabilities else "unknown",
             "estimate": estimate.to_dict(),
             "workspace_context": workspace_context_metadata,
+            "intent": intent.public() if intent is not None else None,
         }
         return payload, estimate
 
@@ -3372,6 +3462,7 @@ def create_app(
         file_ids: list[str] | None = None,
         skill_selection: SkillSelection | None = None,
         coding_mode: bool = False,
+        intent_mode: str | None = None,
     ) -> dict[str, Any]:
         payload, _ = await _estimate_session_context_budget_details(
             session_id=session_id,
@@ -3379,6 +3470,7 @@ def create_app(
             file_ids=file_ids,
             skill_selection=skill_selection,
             coding_mode=coding_mode,
+            intent_mode=intent_mode,
         )
         return payload
 
@@ -3453,16 +3545,18 @@ def create_app(
                     state.last_error,
                     "workspace_context_unavailable",
                 ) from None
-            coding_instructions = None
+            route_instructions = None
             if validated.coding_mode:
                 from .coding_sandbox.automation import AUTOMATED_CODING_PROMPT
 
-                coding_instructions = AUTOMATED_CODING_PROMPT
+                route_instructions = AUTOMATED_CODING_PROMPT
+            elif validated.intent is not None and validated.intent.route == "read_only":
+                route_instructions = READ_ONLY_SYSTEM_PROMPT
             prompt_suffix = (
                 "\n\n".join(
                     block
                     for block in (
-                        coding_instructions,
+                        route_instructions,
                         workspace_context,
                     )
                     if block
@@ -3508,6 +3602,21 @@ def create_app(
             # M1-5: bind_to_harness 在 active-request ownership 内部；
             # AsyncExitStack 让 selection=None 时跳过绑定（legacy path）.
             async with AsyncExitStack() as stack:
+                if validated.intent is not None and validated.intent.route == "read_only":
+                    from ..tools import ToolRegistry
+
+                    original_tools = harness.agent.tools
+                    read_only_tools = [
+                        tool
+                        for tool in original_tools.list()
+                        if is_read_only_tool_name(tool.name)
+                    ]
+                    harness.agent.tools = ToolRegistry(read_only_tools)
+
+                    def _restore_read_only_mode() -> None:
+                        harness.agent.tools = original_tools
+
+                    stack.callback(_restore_read_only_mode)
                 if validated.coding_mode:
                     from ..policy import AllowAllToolPermissionPolicy
                     from ..tools import ToolRegistry
@@ -3717,6 +3826,7 @@ def create_app(
                 if execution.result_summary is not None
                 else None
             ),
+            intent=validated.intent.public() if validated.intent is not None else None,
             turn_messages=tuple(
                 execution.messages_after[len(execution.messages_before) :]
             ),
@@ -3794,6 +3904,7 @@ def create_app(
                 if execution.result_summary is not None
                 else None
             ),
+            intent=validated.intent.public() if validated.intent is not None else None,
             session_persisted=True,
         )
 
@@ -3961,6 +4072,7 @@ def create_app(
                 "coding_sandbox": result.coding_sandbox,
                 "continuity": result.continuity,
                 "workspace_context": result.workspace_context,
+                "intent": result.intent,
                 # 不放 message 全文（安全 + 内存）
             }
         finally:
@@ -4628,6 +4740,10 @@ def create_app(
             "code_continuity": {
                 "enabled": state.code_continuity_enabled,
             },
+            "intent_routing": {
+                "enabled": state.intent_routing_enabled,
+                "routes": ["read_only", "coding", "knowledge"],
+            },
         }
 
     # ========================================================================
@@ -5036,6 +5152,7 @@ def create_app(
         file_ids = (payload or {}).get("file_ids") or []
         skill_names = (payload or {}).get("skill_names") or []
         coding_mode = (payload or {}).get("coding_mode", False)
+        intent_mode = (payload or {}).get("intent_mode")
         if not isinstance(text, str):
             raise HTTPException(status_code=422, detail="text must be a string")
         if not isinstance(file_ids, list) or any(
@@ -5048,6 +5165,8 @@ def create_app(
             raise HTTPException(status_code=422, detail="skill_names must be strings")
         if not isinstance(coding_mode, bool):
             raise HTTPException(status_code=422, detail="coding_mode must be a boolean")
+        if intent_mode is not None and not isinstance(intent_mode, str):
+            raise HTTPException(status_code=422, detail="intent_mode must be a string")
         if len(text) > 1_000_000 or len(file_ids) > 100 or len(skill_names) > 100:
             raise HTTPException(status_code=413, detail="context estimate payload too large")
         if skill_names and harness.skill_registry is not None:
@@ -5061,6 +5180,7 @@ def create_app(
             file_ids=file_ids,
             skill_selection=selection,
             coding_mode=coding_mode,
+            intent_mode=intent_mode,
         )
 
     @app.post("/api/sessions/{sid}/context/compact")
@@ -8008,6 +8128,7 @@ def create_app(
             "coding_sandbox": result.coding_sandbox,
             "continuity": result.continuity,
             "workspace_context": result.workspace_context,
+            "intent": result.intent,
         }
 
     # ========================================================================
@@ -8064,7 +8185,12 @@ def create_app(
             status="queued",
             created_at=_now_utc(),
             # payload 仅内存——debug 用；不进任何 JSON response
-            payload=dict(payload) if isinstance(payload, dict) else None,
+            payload={
+                **(dict(payload) if isinstance(payload, dict) else {}),
+                # Resolved value is private request state used by abort while
+                # Coding preflight/finalization runs with the Harness idle.
+                "coding_mode": validated.coding_mode,
+            },
         )
         state.active_requests[request_id] = web_request
         if session_id:
@@ -8089,6 +8215,9 @@ def create_app(
                 "events_url": events_url,
                 "request_url": f"/api/requests/{request_id}",
                 "abort_url": f"/api/requests/{request_id}/abort",
+                "intent": (
+                    validated.intent.public() if validated.intent is not None else None
+                ),
             },
         )
 

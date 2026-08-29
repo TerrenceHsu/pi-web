@@ -20,6 +20,7 @@ const icon = computed(() => {
     <div class="turn-row">
       <span class="turn-icon">{{ icon }}</span>
       <span class="turn-title">{{ item.title }}</span>
+      <span v-if="item.intent" class="intent-route">{{ item.intent.route }}</span>
       <span v-if="item.status" :class="['turn-status', `status-${item.status}`]">
         {{ item.status }}
       </span>
@@ -67,6 +68,13 @@ const icon = computed(() => {
   color: var(--fg);
   flex: 1;
   font-size: 12px;
+}
+.intent-route {
+  font-size: 10px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1px 6px;
 }
 .turn-status {
   font-size: 10px;

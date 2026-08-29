@@ -45,6 +45,10 @@ export interface AgentStateSummary {
   code_continuity: {
     enabled: boolean
   }
+  intent_routing: {
+    enabled: boolean
+    routes: ["read_only", "coding", "knowledge"]
+  }
 }
 
 export interface EventsResponse {

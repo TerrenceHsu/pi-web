@@ -137,6 +137,7 @@ def main() -> None:
             enable_builtin_ddgs=True,
             enable_auto_memory=True,
             enable_code_continuity=True,
+            enable_intent_routing=True,
         )
 
     app = create_authenticated_app(

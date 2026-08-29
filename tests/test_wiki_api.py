@@ -39,6 +39,7 @@ def _app(
     model_text: str = "ok",
     model_scripts: list[list[Any]] | None = None,
     source_retention_seconds: float = 7 * 24 * 60 * 60,
+    enable_intent_routing: bool = False,
 ) -> FastAPI:
     fake = FakeClient(
         scripts=model_scripts or [[TextDeltaEvent(delta=model_text), DoneEvent(stop_reason="stop")]]
@@ -59,6 +60,7 @@ def _app(
         wiki_pdf_provider=provider,
         wiki_pdf_provider_v2=provider_v2,
         wiki_source_retention_seconds=source_retention_seconds,
+        enable_intent_routing=enable_intent_routing,
     )
 
 
@@ -517,6 +519,114 @@ def test_knowledge_conversation_reuses_agent_with_fixed_wiki_mode(
         )
         assert fetched.status_code == 200
         assert fetched.json()["status"] == "archived"
+
+
+def test_intent_router_exposes_and_enforces_all_three_routes(tmp_path: Path) -> None:
+    app = _app(
+        tmp_path,
+        enable_intent_routing=True,
+        model_scripts=[
+            [TextDeltaEvent(delta="Read-only answer"), DoneEvent(stop_reason="stop")],
+            [TextDeltaEvent(delta="Knowledge answer"), DoneEvent(stop_reason="stop")],
+        ],
+    )
+    with TestClient(app) as client:
+        session_id = client.post(
+            "/api/sessions",
+            json={"title": "Intent routes"},
+        ).json()["id"]
+        read_response = client.post(
+            "/api/prompt",
+            json={
+                "session_id": session_id,
+                "text": "只检查当前实现是否完整，不要修改或运行代码",
+            },
+        )
+        assert read_response.status_code == 200, read_response.text
+        assert read_response.json()["intent"]["route"] == "read_only"
+        fake = app.state.web.harness.agent.client
+        assert fake.last_tools is not None
+        read_tool_names = {tool.name for tool in fake.last_tools}
+        assert {"list_files", "view_file"} <= read_tool_names
+        assert "write_file" not in read_tool_names
+
+        coding_response = client.post(
+            "/api/prompt",
+            json={"session_id": session_id, "text": "实现一个新的 Python 解析器"},
+        )
+        assert coding_response.status_code == 409
+        assert coding_response.json()["error_type"] == "coding_sandbox_disabled"
+
+        space = client.post(
+            "/api/wiki/spaces",
+            headers=_HEADERS,
+            json={"name": "Routed knowledge"},
+        ).json()
+        conversation = client.post(
+            f"/api/wiki/spaces/{space['id']}/conversations",
+            headers=_HEADERS,
+            json={"title": "Bound route"},
+        ).json()
+        knowledge_response = client.post(
+            "/api/prompt",
+            json={
+                "session_id": conversation["session_id"],
+                "knowledge_conversation_id": conversation["id"],
+                "text": "总结这个 Wiki",
+            },
+        )
+        assert knowledge_response.status_code == 200, knowledge_response.text
+        assert knowledge_response.json()["intent"]["route"] == "knowledge"
+        assert tuple(tool.name for tool in fake.last_tools or ()) == KNOWLEDGE_AGENT_TOOL_NAMES
+
+
+def test_intent_router_honors_negation_and_explicit_overrides(tmp_path: Path) -> None:
+    app = _app(
+        tmp_path,
+        enable_intent_routing=True,
+        model_scripts=[
+            [TextDeltaEvent(delta="No changes"), DoneEvent(stop_reason="stop")],
+            [TextDeltaEvent(delta="Still no changes"), DoneEvent(stop_reason="stop")],
+        ],
+    )
+    with TestClient(app) as client:
+        session_id = client.post(
+            "/api/sessions",
+            json={"title": "Intent overrides"},
+        ).json()["id"]
+        negated = client.post(
+            "/api/prompt",
+            json={
+                "session_id": session_id,
+                "text": "修复建议可以说明，但不要修改或运行代码",
+            },
+        )
+        assert negated.status_code == 200, negated.text
+        assert negated.json()["intent"]["reason_code"] == "read_only_constraint"
+
+        explicit_read = client.post(
+            "/api/prompt",
+            json={
+                "session_id": session_id,
+                "text": "实现这个功能",
+                "intent_mode": "read_only",
+            },
+        )
+        assert explicit_read.status_code == 200, explicit_read.text
+        assert explicit_read.json()["intent"] == {
+            "route": "read_only",
+            "confidence": 1.0,
+            "source": "explicit",
+            "reason_code": "explicit_read_only_mode",
+            "explicit": True,
+        }
+
+        explicit_code = client.post(
+            f"/api/sessions/{session_id}/context-budget/estimate",
+            json={"text": "只解释方案", "intent_mode": "coding"},
+        )
+        assert explicit_code.status_code == 200, explicit_code.text
+        assert explicit_code.json()["intent"]["route"] == "coding"
 
 
 def test_pdf_stays_uploaded_until_provider_is_configured(tmp_path: Path) -> None:
