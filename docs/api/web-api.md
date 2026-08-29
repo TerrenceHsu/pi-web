@@ -182,7 +182,8 @@ Agent 当前 messages。**P0-1 起支持 `?session_id=`**：
 
 返回当前 Provider 绑定下的确定性上下文预算估算。`estimate` 分别列出 system、
 messages、tools、output reserve、projected tokens、context window 与占用比例；
-`approximate=true` 表示当前使用安全余量 estimator，而非 Provider 官方 tokenizer。
+`approximate=true` 表示当前使用安全余量 estimator，而非 Provider 官方 tokenizer。普通 Session 还返回
+`workspace_context` 审计投影；Knowledge Conversation 返回 `null`。
 
 ### `POST /api/sessions/{sid}/context-budget/estimate`
 
@@ -255,6 +256,37 @@ Provider/Model 累计更新 `Memory.md`。该模型调用不进入 Agent loop，
 发布、拒绝、取消、失败或中断后自动续跑。成功发布会广播 `workspace_changed`，其中
 `source=auto_memory`。
 
+### Workspace continuation context
+
+普通 Prompt、Regenerate 与 Context Budget 通过同一 `WorkspaceContextAssembler` 读取稳定 revision 的
+Session Workspace。优先内容包括 `AGENT.md`、可选 `tasks/current.md`/`HANDOFF.md`、Pending Memory
+evidence、`Memory.md`、current 代码摘要、Workspace 树和最近一个非终态 Sandbox operation。总量和
+单文件均有界，不默认展开完整 `scripts/**`。只有 current 代码摘要会进入 Prompt；stale/failed 摘要
+要求 Agent 按需读取源码。待批准 Artifact 始终标记为未发布。
+
+`workspace_context` 是 secret-free 审计对象，出现在同步 Prompt 响应、异步/Regenerate 的 request
+`result_summary` 和 Context Budget 响应中：
+
+```json
+{
+  "schema": "pi-agent-workspace-context/v1",
+  "workspace_revision": 7,
+  "context_sha256": "...",
+  "included_sections": ["workspace_manifest", "agent_instructions", "durable_memory"],
+  "omitted_sections": [],
+  "included_paths": ["AGENT.md", "Memory.md"],
+  "total_characters": 4096,
+  "truncated": false,
+  "code_continuity_status": "current",
+  "pending_memory": false,
+  "sandbox_status": null
+}
+```
+
+必需根文件、current 代码文档或其 stat/SHA-256 无法稳定验证时，Prompt 在调用 Provider 前返回
+`workspace_context_unavailable`（HTTP 409）；Context Budget 返回 HTTP 409。Knowledge Conversation
+和 Checkpointer 不加载此上下文，也不会复用上一请求的 Workspace metadata。
+
 `GET /api/state` 公开：
 
 ```json
@@ -325,7 +357,7 @@ Slash command 是独立的 Session 操作；命令文本不会作为 UserMessage
 
 `Memory.md` 更新使用 immutable content generation，`metadata.json` 的原子 replace 是 commit point。应用启动在接受请求前扫描未完成 Checkpointer operation；`GET /api/state` 的 `durable_recovery` 返回本次启动的 `scanned` / `completed` / `aborted` / `conflicts` 计数。
 
-成功仅清空当前 Session 的 canonical messages 与当前 UI 消息流；Session、`AGENT.md`、其它文件和 snapshots 保留。后续 Prompt/Regenerate 自动加载最多 32 KiB `Memory.md`，并将其标记为不可信历史事实而非行为指令。
+成功仅清空当前 Session 的 canonical messages 与当前 UI 消息流；Session、`AGENT.md`、其它文件和 snapshots 保留。后续 Prompt/Regenerate 通过统一 Workspace continuation context 有界加载 `Memory.md`，并将其标记为不可信历史事实而非行为指令。
 
 **Response 400**: `invalid_command` / `unknown_slash_command` / `slash_command_arguments_not_supported`。
 
@@ -576,7 +608,12 @@ revision 快照转换并以一个事务替换该文档的生成物。
     "attached_supported_file_count": 1,
     "attached_unsupported_file_count": 0
   },
-  "applied_skill_names": ["coding_review"]
+  "applied_skill_names": ["coding_review"],
+  "workspace_context": {
+    "schema": "pi-agent-workspace-context/v1",
+    "workspace_revision": 7,
+    "context_sha256": "..."
+  }
 }
 ```
 

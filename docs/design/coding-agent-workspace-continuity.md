@@ -1,6 +1,6 @@
 # Coding Agent Workspace 与 Session 连续性设计
 
-> 状态：阶段 1–4 已完成；阶段 5 待实施。校准日期：2026-08-29。
+> 状态：阶段 1–5 已完成。校准日期：2026-08-29。
 
 ## 1. 产品目标
 
@@ -136,9 +136,28 @@ Knowledge Conversation 使用独立连续性语义，阶段 2 明确跳过自动
 
 ## 6. 无上下文启动
 
-`ContextAssembler` 按有界优先级加载 `AGENT.md`、`HANDOFF.md`、`tasks/current.md`、`Memory.md`、
-代码流程、最近验证、Workspace 树摘要和未提炼 evidence。它不默认加载全部源码；Agent 通过只读
-Workspace 工具按需查看文件。
+阶段 5 已在顶层 `agent_workspace` 实现 provider-neutral `WorkspaceContextAssembler`，普通 Session
+Prompt、Regenerate 和 Context Budget 共用同一条组装路径。Knowledge Conversation 使用自己的固定
+Prompt/Skill，Checkpointer 把 Workspace 文件当数据处理，因此两者不会继承普通 Coding Workspace
+上下文或上一次请求留下的 Harness metadata。
+
+组装器在稳定 Workspace revision 上按以下有界顺序读取：manifest、`AGENT.md`、未发布 Sandbox
+operation、`tasks/current.md`、`HANDOFF.md`、未提炼 turn evidence、`Memory.md`、可信代码连续性文档和
+Workspace 树。单文件有独立字符上限，总输入上限为 96,000 字符；超限时按优先级整段省略并在末尾
+审计块列出 omitted sections。源文件使用 strict UTF-8、普通文件/非 symlink/reparse、稳定 stat 和完整
+SHA-256 复验；所需根文件或标记为 current 的代码文档不可验证时，本轮在 Provider 调用前以 409
+fail closed。
+
+只有 `code_continuity.status=current` 才注入 `docs/architecture.md`、`docs/code-flow.md` 和
+`docs/validation.md` 正文。stale/failed 状态只公开状态并要求 Agent 通过 Workspace 只读工具检查
+`scripts/**`，避免旧摘要冒充当前代码。最近一个非终态 Sandbox operation 以 secret-free 投影注入，
+明确标记 Artifact 尚未发布；Pending Memory evidence 标记为不可信历史事实。组装内容为单行 JSON
+payload，并转义尖括号，避免 Workspace 正文闭合系统标签。
+
+同步 Prompt、异步 request summary、Regenerate request summary 和 Context Budget 响应都公开同一份
+`workspace_context` 审计投影，包括 revision、context SHA、included/omitted sections、included paths、
+截断、代码连续性状态、Pending Memory 与 Sandbox 状态。验收覆盖零历史重启续作，以及 Pending
+Memory + 待批准 Artifact + stale code summary 的组合场景；不默认加载完整源码。
 
 ## 7. 实施顺序
 
@@ -148,7 +167,8 @@ Workspace 工具按需查看文件。
    `artifacts/**` 的所有权、默认路由、API metadata 与写入/发布策略；空目录继续惰性。
 4. **代码连续性**（完成）：批准发布/用户上传驱动 code-flow/architecture/validation 更新、revision
    绑定、stale/failed 恢复和右栏状态。
-5. **无上下文验收**：统一 ContextAssembler、重启续作、Pending Memory 与待批准 Artifact 场景。
+5. **无上下文验收**（完成）：统一 ContextAssembler、重启续作、Pending Memory、待批准 Artifact、
+   stale code summary 和 secret-free 审计投影。
 
 测试继续遵守快速开发预算：阶段 1 不新增测试，只运行现有回归；阶段 2 新功能最多增加一个成功
 路径和一个恢复失败路径测试；后续阶段优先复用现有 Workspace/Sandbox/Browser 测试。

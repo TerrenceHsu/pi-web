@@ -14,6 +14,13 @@ from .code_continuity import (
     CodeFileSummary,
     code_source_sha256,
 )
+from .context_assembler import (
+    MAX_WORKSPACE_CONTEXT_CHARS,
+    WORKSPACE_CONTEXT_SCHEMA,
+    SandboxContinuationState,
+    WorkspaceContextAssembler,
+    WorkspaceContextAssembly,
+)
 from .continuity import (
     AUTO_MEMORY_OPERATION_KIND,
     CHECKPOINTER_COMMAND,
@@ -170,6 +177,7 @@ __all__ = [
     "GeneratedDocumentFile",
     "InvalidWorkspaceDocumentError",
     "MARKDOWN_EXTENSIONS",
+    "MAX_WORKSPACE_CONTEXT_CHARS",
     "MEMORY_PATH",
     "NOTES_PATH",
     "PypdfWorkspaceConverter",
@@ -178,6 +186,7 @@ __all__ = [
     "TASKS_PATH",
     "SESSION_MEMORY_PATH",
     "SLASH_COMMANDS",
+    "SandboxContinuationState",
     "TURN_EVIDENCE_SCHEMA",
     "SessionStorageLimitError",
     "UnsupportedWorkspaceDocumentError",
@@ -186,6 +195,7 @@ __all__ = [
     "VirtualFileNotFoundError",
     "VirtualFileStore",
     "WORKSPACE_DOCUMENT_EXTENSIONS",
+    "WORKSPACE_CONTEXT_SCHEMA",
     "WORKSPACE_MATERIALIZATION_SCHEMA",
     "WORKSPACE_PUBLISH_PHASE_SCHEMA",
     "WORKSPACE_PUBLISH_TRANSACTION_SCHEMA",
@@ -201,6 +211,8 @@ __all__ = [
     "WorkspaceMaterialization",
     "WorkspaceMaterializationEntry",
     "WorkspaceCategory",
+    "WorkspaceContextAssembler",
+    "WorkspaceContextAssembly",
     "WorkspaceOwner",
     "WorkspacePathPolicy",
     "WorkspacePathConflictError",

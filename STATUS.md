@@ -6,7 +6,7 @@
 
 | 项 | 当前事实 |
 |---|---|
-| 代码基线 | `0.0.28` 发布基线之上已完成 Coding Sandbox 阶段 4A–4C、Session Workspace 阶段 5–7；Coding Agent Workspace 连续性阶段 1–3 已提交至 `1535485`，当前工作树完成阶段 4 代码连续性 |
+| 代码基线 | `0.0.28` 发布基线之上已完成 Coding Sandbox 阶段 4A–4C、Session Workspace 阶段 5–7；Coding Agent Workspace 连续性阶段 1–4 已提交至 `e9a2124`，当前工作树完成阶段 5 无聊天上下文续作 |
 | 分支 | `master` |
 | 最新 release tag | `0.0.28`；annotated tag 指向发布基线，不包含其后的阶段 4A–6 提交 |
 | Python / API 版本 | `0.0.28`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
@@ -36,6 +36,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 | 每轮自动 Session Memory | ✅ 阶段 2 完成 | Prompt/Regenerate 以有界 turn evidence 和串行 durable operation 累计更新 `Memory.md`；失败不影响主回答并在下一轮 preflight 恢复，Coding 待审批期间按 Sandbox blocker 延迟以保护 Workspace revision，Knowledge 模式跳过；产品入口默认启用 |
 | Coding Workspace 内容分类 | ✅ 阶段 3 完成 | `WorkspacePathPolicy` 统一 HANDOFF/tasks/docs/scripts/inputs/artifacts/documents 所有权与写入/发布边界；普通上传进入只读 `inputs/**`，Agent 非代码产物进入 `artifacts/**`，空目录保持惰性；Backend 定向 124 passed，strict Mypy 177 files、Frontend typecheck PASS |
 | 已发布代码流程总结 | ✅ 阶段 4 完成 | revision-bound `scripts/**` 生成固定 architecture/code-flow/validation；mutation 先 stale、全套持久化后 current，并发/失败 fail closed；真实 Sandbox evidence 与普通上传“未验证”严格区分；Backend 30 + 邻接 85 passed，Frontend 6/6，静态检查通过 |
+| 无聊天上下文续作 | ✅ 阶段 5 完成 | 单一 provider-neutral assembler 为 Prompt/Regenerate/Context Budget 装配 revision-bound Workspace；stale 摘要与未发布 Artifact fail closed/显式标记，公开 secret-free context hash/audit；零历史重启与复合恢复风险已验收 |
 | Workspace 代码/Markdown 规则与 revision | ✅ 完成 | 代码统一映射到逻辑 `scripts/**`；Markdown CRUD、逐文件 SHA 与持久 Workspace revision 冲突契约已接入 Store/Web/Agent/Frontend API |
 | 右侧 Workspace 成果面板 | ✅ 完成 | 桌面三栏/窄屏 drawer；Agent `write_file` 完成后按 file id/revision 自动聚焦成果，支持 Markdown 预览编辑、代码查看、上传下载及 Sandbox/Changes |
 | P0 Runtime 上游契约对齐 | ✅ 完成 | `b529bbc` |
@@ -162,6 +163,7 @@ Frontend 与 Browser E2E 均实际复跑；真实 E2B 也重新执行 Managed Sa
 | 自动 Session Memory 阶段 2 | **11 passed** | 1 个既有测试文件新增 2 项：成功更新且不清空消息、Provider 失败保留回答并在下一轮恢复；另复用 2 条 Regenerate 主路径。Ruff、strict Mypy、Frontend typecheck/lint PASS |
 | Coding Workspace 内容分类阶段 3 | **124 Backend + 8 Frontend passed** | 只修改 1 个既有 Backend 测试文件中的 2 项；覆盖 `inputs/**`/`artifacts/**` 默认路由、公开 ownership/mutation metadata 与系统路径拒绝，并复用 Workspace/文件工具/Sandbox lifecycle 和右栏现有回归。全量 Ruff、strict Mypy 177 files、Frontend typecheck/lint PASS |
 | Coding Workspace 代码连续性阶段 4 | **30 Backend + 85 邻接 + 6 Frontend passed** | 只修改 1 个既有 Backend 测试文件并新增 2 项；覆盖 revision-bound 固定摘要、普通上传不伪造验证，以及 renderer 故障时上传保留且状态 stale/failed；复用 Workspace/Sandbox lifecycle 与右栏现有测试。Ruff、strict Mypy、Frontend typecheck/lint PASS |
+| Coding Workspace 无上下文续作阶段 5 | **43 Backend + 85 邻接 + 6 Frontend passed** | 只修改 1 个既有 Backend 测试文件并新增 2 项；覆盖零聊天历史进程重启后从 AGENT/Memory/current code/tree 续作，以及 Pending Memory、待批准 Artifact、stale code summary 同时存在时的可信边界；Ruff、strict Mypy、Frontend typecheck/lint PASS |
 | Session tree 定向回归 | **69 passed** | immutable entry/lane、旧库迁移、branch/fork/label/active leaf、重启、Web API、revision sibling 与 trailing suffix |
 | ToolResult metadata 定向回归 | **173 passed** | usage / added names、hook 边界、消息/事件、provider context、Snapshot、Session/SQLite、Web serializer 与旧数据默认值 |
 | Agent 公开状态定向回归 | **137 passed** | Agent、Harness、stream、Provider runtime 与 Web state；系统 temp ACL 阻断项改用工作区 `basetemp` 后通过 |
@@ -223,11 +225,11 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 ## 当前阻塞项
 
-LLM Wiki 阶段 0–10、Session Workspace 阶段 1–7 与 Coding Agent Workspace 连续性阶段 1–4 已完成，没有功能阻塞。真实 OCI Worker 为 `runtime_ready=true`；release tag 仍为 `0.0.28`；若需发布后续提交或 push，仍需先决定新版本并配置 Git remote。
+LLM Wiki 阶段 0–10、Session Workspace 阶段 1–7 与 Coding Agent Workspace 连续性阶段 1–5 已完成，没有功能阻塞。真实 OCI Worker 为 `runtime_ready=true`；release tag 仍为 `0.0.28`；若需发布后续提交或 push，仍需先决定新版本并配置 Git remote。
 
 ## 建议下一步
 
-1. 实现 Coding Agent Workspace 连续性阶段 5：统一 ContextAssembler 与无聊天上下文续作验收。
-2. 阶段 5 完成后再整理提交；若准备新发布，统一提升版本并创建下一 annotated tag。
+1. 整理并提交 Coding Agent Workspace 连续性阶段 5。
+2. 若准备新发布，统一提升版本并创建下一 annotated tag。
 
 未完成事项的唯一清单见 [`TODO.md`](TODO.md)。使用与架构说明见 [`README.md`](README.md)。

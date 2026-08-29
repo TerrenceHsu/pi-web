@@ -69,6 +69,7 @@ export const useContextBudgetStore = defineStore("contextBudget", () => {
         model_id: String(event.model_id ?? current?.model_id ?? "unknown"),
         capability_source: event.capability_source ?? current?.capability_source ?? "unknown",
         estimate: event.estimate as ContextEstimate,
+        workspace_context: current?.workspace_context ?? null,
       },
     }
   }

@@ -22,6 +22,7 @@ export interface ContextBudgetResponse {
   model_id: string
   capability_source: "user" | "static" | "unknown"
   estimate: ContextEstimate
+  workspace_context: Record<string, unknown> | null
 }
 
 export interface ContextBudgetEstimateRequest {
