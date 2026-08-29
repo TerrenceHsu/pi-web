@@ -262,6 +262,9 @@ Provider/Model 累计更新 `Memory.md`。该模型调用不进入 Agent loop，
   "auto_memory": {
     "enabled": true,
     "recovery": {"scanned": 0, "completed": 0, "pending": 0, "conflicts": 0}
+  },
+  "code_continuity": {
+    "enabled": true
   }
 }
 ```
@@ -373,9 +376,31 @@ Slash command 是独立的 Session 操作；命令文本不会作为 UserMessage
   ],
   "conversions": [],
   "errors": [],
-  "workspace": {"schema_version": 1, "session_id": "sess-...", "revision": 3}
+  "workspace": {
+    "schema_version": 1,
+    "session_id": "sess-...",
+    "revision": 3,
+    "code_continuity": {
+      "schema_version": "pi-agent-code-continuity/v1",
+      "status": "current",
+      "stale": false,
+      "latest_code_workspace_revision": 1,
+      "summarized_code_workspace_revision": 1,
+      "summary_workspace_revision": 3,
+      "code_source_sha256": "...",
+      "trigger": "user_upload",
+      "validation_evidence_id": null,
+      "error_code": null,
+      "updated_at": 1787000000000
+    }
+  }
 }
 ```
+
+代码上传保存成功后，启用 `enable_code_continuity` 的产品组合会从实际 `scripts/**` revision 同步生成
+只读 `docs/architecture.md`、`docs/code-flow.md` 与 `docs/validation.md`。摘要失败不撤销上传，
+`code_continuity` 会返回 `failed` 且 `stale=true`，并在启动恢复时重试。普通上传没有 Sandbox
+validation evidence，因此 `validation.md` 会明确标为未验证。批准的 Sandbox 发布携带真实验证证据。
 
 `.pdf`、`.docx`、`.xlsx` 不进入普通上传路径，而是归档为
 `documents/<document-id>/original.<ext>`（`purpose=document_original`）。服务从不可变 Workspace
@@ -408,7 +433,8 @@ Slash command 是独立的 Session 操作；命令文本不会作为 UserMessage
 
 `FileRef.logical_path` 使用 `/` 分隔虚拟目录；`origin` 为
 `system | upload | agent | user | legacy`，`purpose` 为
-`file | agent_instructions | memory | document_original | document_conversion`。响应中没有物理
+`file | agent_instructions | memory | input | handoff | task | workspace_documentation |
+document_original | document_conversion`。响应中没有物理
 `path`。`Memory.md` 使用 `purpose=memory`。
 
 ### `POST /api/sessions/{sid}/documents/{source_file_id}/convert`

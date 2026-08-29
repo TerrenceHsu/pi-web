@@ -43,6 +43,14 @@ const workspace = computed(() => {
   const sid = sessionId.value
   return sid ? fileStore.workspaceBySession[sid] : undefined
 })
+const codeContinuity = computed(() => workspace.value?.code_continuity)
+const codeContinuityLabel = computed(() => {
+  const status = codeContinuity.value?.status ?? "not_initialized"
+  if (status === "current") return "Code docs current"
+  if (status === "failed") return "Code docs failed"
+  if (status === "stale") return "Code docs stale"
+  return "Code docs pending"
+})
 const selectedFileId = computed(() => {
   const sid = sessionId.value
   return sid ? fileStore.selectedFileIdBySession[sid] : null
@@ -203,9 +211,18 @@ function statusLabel(status: string): string {
         <span class="workspace-eyebrow">Agent deliverables</span>
         <strong>Workspace</strong>
       </div>
-      <span class="workspace-revision" data-testid="workspace-revision">
-        r{{ workspace?.revision ?? 0 }}
-      </span>
+      <div class="workspace-state-badges">
+        <span
+          :class="['code-continuity', `status-${codeContinuity?.status ?? 'not_initialized'}`]"
+          data-testid="code-continuity-status"
+          :title="codeContinuity?.error_code || undefined"
+        >
+          {{ codeContinuityLabel }}
+        </span>
+        <span class="workspace-revision" data-testid="workspace-revision">
+          r{{ workspace?.revision ?? 0 }}
+        </span>
+      </div>
     </header>
 
     <nav class="workspace-tabs" aria-label="Workspace views">
@@ -366,6 +383,21 @@ function statusLabel(status: string): string {
   display: flex;
   flex-direction: column;
   line-height: 1.25;
+}
+.workspace-state-badges {
+  align-items: flex-end;
+  gap: 4px;
+}
+.code-continuity {
+  color: var(--muted);
+  font-size: 9px;
+}
+.code-continuity.status-current {
+  color: #15803d;
+}
+.code-continuity.status-stale,
+.code-continuity.status-failed {
+  color: #b45309;
 }
 .workspace-header strong {
   font-size: 15px;

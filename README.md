@@ -38,6 +38,8 @@
 - 每个 Session 通过唯一 `WorkspaceStore` 初始化独立目录和唯一根 `AGENT.md`、`Memory.md`；旧 `VirtualFileStore` 名称仅为兼容别名
 - 用户上传的普通输入归入只读 `inputs/**`，代码归入 `scripts/**`；Agent 的非代码交付物默认归入 `artifacts/**`
 - 文件树可查看、下载、删除和刷新；API/右栏共享路径的 category、owner 与编辑/发布权限，`AGENT.md`、`Memory.md` 可用 SHA-256 乐观锁编辑
+- 用户代码上传/删除或批准 Sandbox 发布后，可信 renderer 从对应 revision 的实际代码字节更新只读 `docs/architecture.md`、`docs/code-flow.md`、`docs/validation.md`；右栏显示代码摘要 current/stale/failed 状态
+- `validation.md` 只投影真实 Sandbox 验证证据；普通上传明确标为未验证，不把 Agent 自述当作通过证据
 - `/checkpointer` 使用当前 Session 绑定的 LLM 总结对话到累计 `Memory.md`；文件以 immutable generation 原子发布，成功后在同一 SQLite 事务清空原 lane 并完成 operation
 - 重新登录或重启后恢复同账号的 Session、历史消息、受管文件和配置
 
@@ -201,7 +203,7 @@ D:\miniconda\envs\pipy\python.exe scripts/dev_web_app.py
         │       ├── Memory.md        # Session 初始化时创建，checkpointer 累计更新
         │       ├── HANDOFF.md       # continuity renderer 首次写入时惰性出现
         │       ├── tasks/           # current + archive；系统拥有
-        │       ├── docs/            # 固定工程摘要 + shared notes
+        │       ├── docs/            # revision-bound 代码摘要 + shared notes
         │       ├── scripts/         # 用户代码和已批准 Sandbox 代码
         │       ├── inputs/          # 普通上传，只读正文
         │       ├── artifacts/       # Agent/Sandbox 非代码交付物

@@ -1,6 +1,6 @@
 # Coding Agent Workspace 与 Session 连续性设计
 
-> 状态：阶段 1–3 已完成；阶段 4–5 待实施。校准日期：2026-08-29。
+> 状态：阶段 1–4 已完成；阶段 5 待实施。校准日期：2026-08-29。
 
 ## 1. 产品目标
 
@@ -114,10 +114,25 @@ Knowledge Conversation 使用独立连续性语义，阶段 2 明确跳过自动
 
 ## 5. 代码连续性
 
-代码总结只由 `WorkspacePublished` 或用户代码上传事件触发。Worker 读取实际 revision 的文件清单、
-diff、入口和验证记录，更新 `architecture.md`、`code-flow.md` 与 `validation.md`。未批准 Sandbox
-变更只能进入 `HANDOFF.md` 的 `pending_approval`，不得写成已完成代码事实。所有生成文档记录
-`workspace_revision` 和 source hash；代码已经变化而总结尚未更新时明确标记 `stale`。
+阶段 4 已实现顶层 `agent_workspace.CodeContinuityService`。它只由用户代码上传/删除、已批准的
+`sandbox_publish_finished` 和启动恢复触发，读取 `WorkspaceStore` 在指定 revision 下物化并逐文件
+校验过的 `scripts/**` 字节。固定 renderer 生成：
+
+- `docs/architecture.md`：文件/语言/入口和受支持语言的 import 关系；
+- `docs/code-flow.md`：触发变更、文件 SHA、入口候选、顶层 symbol 和 import 提示；
+- `docs/validation.md`：仅投影真实 Sandbox validation evidence 的 check id、状态、退出码、耗时和
+  captured-output SHA，不复制输出正文。用户上传没有 Sandbox evidence 时明确写明“未验证”，绝不
+  根据 Assistant 自述宣称测试通过。
+
+这条路径不调用 LLM，也不给 Agent 固定文档写权限。每篇文档都包含 schema、代码来源 revision、
+代码树 SHA、触发类型和 validation evidence id。代码 mutation 在同一个 Workspace 状态提交中先把
+`code_continuity` 标为 `stale`；三个文档全部持久化后才以状态写入发布 `current`，该状态写入不再
+提升文件 revision。期间若并发代码变更，source revision CAS 失败并继续保持 stale；renderer/磁盘
+失败标记 `failed + stale`，但不回滚已成功的用户上传或 Sandbox 发布。启动会重试 stale/failed，
+也会首次接管功能上线前已有的 `scripts/**`。右侧 Workspace header 公开 current/stale/failed/pending。
+
+未批准 Sandbox 变更仍只存在于 Sandbox operation/diff，不进入上述代码事实。通用嵌入者通过
+`create_app(..., enable_code_continuity=True)` 显式启用，Coding Agent 产品启动器默认启用。
 
 ## 6. 无上下文启动
 
@@ -131,7 +146,8 @@ Workspace 工具按需查看文件。
 2. **每轮 Memory**：Turn evidence、durable operation、结构化自动提炼、失败恢复。
 3. **内容分类**（完成）：固定 `HANDOFF.md`、`tasks/**`、`docs/**`、`inputs/**`、
    `artifacts/**` 的所有权、默认路由、API metadata 与写入/发布策略；空目录继续惰性。
-4. **代码连续性**：批准发布事件驱动 code-flow/architecture/validation 更新和 stale 检测。
+4. **代码连续性**（完成）：批准发布/用户上传驱动 code-flow/architecture/validation 更新、revision
+   绑定、stale/failed 恢复和右栏状态。
 5. **无上下文验收**：统一 ContextAssembler、重启续作、Pending Memory 与待批准 Artifact 场景。
 
 测试继续遵守快速开发预算：阶段 1 不新增测试，只运行现有回归；阶段 2 新功能最多增加一个成功

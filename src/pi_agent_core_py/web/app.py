@@ -107,6 +107,7 @@ from .serializers import (
 from .state import WebAppState, WebMCPServerConfig, WebRunRequest
 
 if TYPE_CHECKING:
+    from agent_workspace.code_continuity import CodeContinuityTrigger
     from agent_workspace.documents import WorkspaceDocumentConverterRegistry
     from agent_workspace.store import WorkspaceStore
     from coding_sandbox import ArtifactSigner
@@ -372,6 +373,9 @@ def create_app(
     # Low-level embedders opt in explicitly; the coding-agent product entrypoint
     # enables this by default. Requires a Session Workspace.
     enable_auto_memory: bool = False,
+    # Trusted architecture/code-flow/validation summaries for published code.
+    # Product composition enables this; embedders opt in explicitly.
+    enable_code_continuity: bool = False,
     # Deprecated Chunk Knowledge compatibility root.
     # The legacy DB, workers, Tool and REST API only start when
     # enable_knowledge_api=True is also explicit. Product composition uses
@@ -429,6 +433,9 @@ def create_app(
         max_session_upload_size: 单 session 总上传上限，默认 100 MB
         workspace_document_converters: 固定文档 converter registry；None 使用
             内建 PDF/DOCX/XLSX 实现，测试可注入同一 Protocol 的确定性实现。
+        enable_code_continuity: 是否从已发布 `scripts/**` revision 生成固定
+            architecture/code-flow/validation 文档。需要 `uploads_dir`；低层
+            工厂默认关闭，Coding Agent 产品入口默认开启。
     """
     if (
         wiki_source_retention_seconds < 0
@@ -439,6 +446,8 @@ def create_app(
         raise ValueError("Wiki Source retention durations are invalid")
     if enable_auto_memory and uploads_dir is None:
         raise ValueError("automatic Memory requires uploads_dir")
+    if enable_code_continuity and uploads_dir is None:
+        raise ValueError("code continuity requires uploads_dir")
     # 用 closure 持有 hook / clients——lifespan 退出时清理
     container: dict[str, Any] = {
         "hook": None,
@@ -572,6 +581,18 @@ def create_app(
                     ),
                     registry=workspace_document_converters,
                 )
+                if enable_code_continuity:
+                    from agent_workspace.code_continuity import CodeContinuityService
+
+                    state.code_continuity_service = CodeContinuityService(
+                        file_store,
+                        staging_root=(
+                            uploads_path.parent
+                            / f".{uploads_path.name}-code-continuity"
+                        ),
+                    )
+                else:
+                    state.code_continuity_service = None
             except Exception:
                 # 文件存储不可用不阻塞 app 启动；endpoint 走 503。
                 # 但必须留下完整 traceback，避免深层文件系统错误只表现为下游 503。
@@ -582,10 +603,12 @@ def create_app(
                 state.file_store = None
                 state.uploads_dir = None
                 state.workspace_document_service = None
+                state.code_continuity_service = None
         else:
             state.file_store = None
             state.uploads_dir = None
             state.workspace_document_service = None
+            state.code_continuity_service = None
 
         # P2 durable operations: reduce accepted checkpointer intents before
         # requests can observe the workspace. Recovery is evidence-only and
@@ -608,6 +631,23 @@ def create_app(
                 "pending": continuity_recovery.pending,
                 "conflicts": continuity_recovery.conflicts,
             }
+            if state.code_continuity_service is not None:
+                for existing_session in await session_store.list_sessions():
+                    workspace = await state.file_store.get_workspace_state(
+                        existing_session.id
+                    )
+                    if workspace.code_continuity.status == "current":
+                        continue
+                    try:
+                        await state.code_continuity_service.refresh(
+                            existing_session.id,
+                            trigger="recovery",
+                        )
+                    except Exception:
+                        _logger.warning(
+                            "Code continuity recovery remains stale (session_id=%s)",
+                            existing_session.id,
+                        )
         else:
             state.durable_recovery_summary = {
                 "scanned": 0,
@@ -1055,6 +1095,14 @@ def create_app(
                         )
                         if event.event_type == "sandbox_publish_finished":
                             workspace_revision = event.payload.get("workspace_revision")
+                            raw_changed_paths = event.payload.get("changed_paths", [])
+                            raw_deleted_paths = event.payload.get("deleted_paths", [])
+                            changed_paths = tuple(
+                                path for path in raw_changed_paths if isinstance(path, str)
+                            )
+                            deleted_paths = tuple(
+                                path for path in raw_deleted_paths if isinstance(path, str)
+                            )
                             if isinstance(workspace_revision, int):
                                 await _emit_web_payload(
                                     {
@@ -1062,17 +1110,33 @@ def create_app(
                                         "source": "coding_sandbox",
                                         "operation_id": event.operation_id,
                                         "workspace_revision": workspace_revision,
-                                        "changed_paths": event.payload.get(
-                                            "changed_paths",
-                                            [],
-                                        ),
-                                        "deleted_paths": event.payload.get(
-                                            "deleted_paths",
-                                            [],
-                                        ),
+                                        "changed_paths": list(changed_paths),
+                                        "deleted_paths": list(deleted_paths),
                                     },
                                     f"workspace:{event.operation_id}",
                                     event.session_id,
+                                )
+                                validation: dict[str, Any] | None = None
+                                runtime = getattr(
+                                    _app.state,
+                                    "coding_sandbox_runtime",
+                                    None,
+                                )
+                                lifecycle = None if runtime is None else runtime.lifecycle
+                                if lifecycle is not None:
+                                    try:
+                                        published = await lifecycle.get(event.operation_id)
+                                    except Exception:
+                                        published = None
+                                    if published is not None and published.validation is not None:
+                                        validation = published.validation.model_dump(mode="json")
+                                await _refresh_code_continuity(
+                                    event.session_id,
+                                    trigger="workspace_published",
+                                    changed_paths=changed_paths,
+                                    deleted_paths=deleted_paths,
+                                    validation=validation,
+                                    operation_id=event.operation_id,
                                 )
                         if event.event_type in {
                             "sandbox_publish_finished",
@@ -1334,7 +1398,11 @@ def create_app(
         lifespan=_lifespan,
     )
 
-    state = WebAppState(harness=harness, auto_memory_enabled=enable_auto_memory)
+    state = WebAppState(
+        harness=harness,
+        auto_memory_enabled=enable_auto_memory,
+        code_continuity_enabled=enable_code_continuity,
+    )
     checkpointer_locks: dict[str, asyncio.Lock] = {}
     continuity_locks: dict[str, asyncio.Lock] = {}
     # 用入参覆盖默认 maxlen
@@ -4547,6 +4615,9 @@ def create_app(
                 "enabled": state.auto_memory_enabled,
                 "recovery": dict(state.continuity_recovery_summary),
             },
+            "code_continuity": {
+                "enabled": state.code_continuity_enabled,
+            },
         }
 
     # ========================================================================
@@ -5658,7 +5729,90 @@ def create_app(
             "revision": workspace.revision,
             "created_at": workspace.created_at,
             "updated_at": workspace.updated_at,
+            "code_continuity": workspace.code_continuity.model_dump(mode="json"),
         }
+
+    async def _refresh_code_continuity(
+        session_id: str,
+        *,
+        trigger: CodeContinuityTrigger,
+        changed_paths: tuple[str, ...] = (),
+        deleted_paths: tuple[str, ...] = (),
+        validation: dict[str, Any] | None = None,
+        operation_id: str | None = None,
+    ) -> Any:
+        from agent_workspace.store import is_code_workspace_path
+
+        service = state.code_continuity_service
+        if service is None:
+            return None
+        if trigger != "recovery" and not any(
+            is_code_workspace_path(path)
+            for path in (*changed_paths, *deleted_paths)
+        ):
+            return None
+        try:
+            result = await service.refresh(
+                session_id,
+                trigger=trigger,
+                changed_paths=changed_paths,
+                deleted_paths=deleted_paths,
+                validation=validation,
+            )
+        except Exception as exc:
+            state.last_error = f"code_continuity: {type(exc).__name__}"
+            file_store = state.file_store
+            if file_store is not None:
+                try:
+                    workspace = await file_store.get_workspace_state(session_id)
+                    await _emit_web_payload(
+                        {
+                            "type": "workspace_changed",
+                            "source": "code_continuity",
+                            "operation_id": operation_id,
+                            "workspace_revision": workspace.revision,
+                            "source_workspace_revision": (
+                                workspace.code_continuity.latest_code_workspace_revision
+                            ),
+                            "changed_paths": [],
+                            "deleted_paths": [],
+                            "code_continuity": workspace.code_continuity.model_dump(
+                                mode="json"
+                            ),
+                        },
+                        (
+                            f"code-continuity-failed:{operation_id}"
+                            if operation_id is not None
+                            else f"code-continuity-failed:{session_id}:{workspace.revision}"
+                        ),
+                        session_id,
+                    )
+                except Exception:
+                    pass
+            return None
+        if result is None:
+            return None
+        await _emit_web_payload(
+            {
+                "type": "workspace_changed",
+                "source": "code_continuity",
+                "operation_id": operation_id,
+                "workspace_revision": result.workspace.revision,
+                "source_workspace_revision": result.source_workspace_revision,
+                "changed_paths": list(result.changed_paths),
+                "deleted_paths": [],
+                "code_continuity": result.workspace.code_continuity.model_dump(
+                    mode="json"
+                ),
+            },
+            (
+                f"code-continuity:{operation_id}"
+                if operation_id is not None
+                else f"code-continuity:{session_id}:{result.workspace.revision}"
+            ),
+            session_id,
+        )
+        return result
 
     def _serialize_workspace_document_result(result: Any) -> dict[str, Any]:
         return {
@@ -5717,11 +5871,13 @@ def create_app(
             SessionStorageLimitError,
             UnsafeFilenameError,
             WorkspaceVersionConflictError,
+            is_code_workspace_path,
         )
 
         saved: list[dict[str, Any]] = []
         conversions: list[dict[str, Any]] = []
         errors: list[dict[str, Any]] = []
+        code_changed_paths: list[str] = []
         next_expected_revision = expected_workspace_revision
         for upload in files:
             try:
@@ -5732,6 +5888,8 @@ def create_app(
                     expected_workspace_revision=next_expected_revision,
                 )
                 saved.append(_serialize_managed_file(ref))
+                if is_code_workspace_path(ref.logical_path):
+                    code_changed_paths.append(ref.logical_path)
                 if (
                     ref.purpose == "document_original"
                     and state.workspace_document_service is not None
@@ -5804,6 +5962,12 @@ def create_app(
                         "error": str(e),
                     }
                 )
+        if code_changed_paths:
+            await _refresh_code_continuity(
+                sid,
+                trigger="user_upload",
+                changed_paths=tuple(code_changed_paths),
+            )
         status_code = 200
         if not saved and errors:
             # 全部失败——客户端可以据此显示
@@ -6289,6 +6453,7 @@ def create_app(
             UnsafeFilenameError,
             VirtualFileNotFoundError,
             WorkspaceVersionConflictError,
+            is_code_workspace_path,
             workspace_path_policy,
         )
 
@@ -6353,6 +6518,12 @@ def create_app(
             return JSONResponse(
                 status_code=500,
                 content={"detail": str(e)},
+            )
+        if is_code_workspace_path(current.logical_path):
+            await _refresh_code_continuity(
+                sid,
+                trigger="user_delete",
+                deleted_paths=(current.logical_path,),
             )
         workspace = await file_store.get_workspace_state(sid)
         return {

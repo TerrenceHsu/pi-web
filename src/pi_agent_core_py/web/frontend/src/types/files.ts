@@ -1,5 +1,22 @@
 // Files 类型（WorkspaceStore + FileBlock 注入）。
 
+export type CodeContinuityStatus = "not_initialized" | "stale" | "current" | "failed"
+
+/** Published-code summaries are current only for this exact code revision. */
+export interface CodeContinuityState {
+  schema_version: "pi-agent-code-continuity/v1"
+  status: CodeContinuityStatus
+  stale: boolean
+  latest_code_workspace_revision: number | null
+  summarized_code_workspace_revision: number | null
+  summary_workspace_revision: number | null
+  code_source_sha256: string | null
+  trigger: string | null
+  validation_evidence_id: string | null
+  error_code: string | null
+  updated_at: number | null
+}
+
 /** Session Workspace 的持久化乐观锁状态。 */
 export interface WorkspaceState {
   schema_version: 1
@@ -7,6 +24,7 @@ export interface WorkspaceState {
   revision: number
   created_at: number
   updated_at: number
+  code_continuity?: CodeContinuityState
 }
 
 /** 文件被分类后的 format——后端 tools/view_file.py 的 _classify_format 决定。 */

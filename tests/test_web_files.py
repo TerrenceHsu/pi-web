@@ -767,3 +767,99 @@ def test_workspace_markdown_crud_and_revision_conflicts(web_client):
     )
     assert deleted.status_code == 200
     assert deleted.json()["workspace"]["revision"] == 5
+
+
+def test_code_upload_refreshes_revision_bound_workspace_summaries(tmp_path):
+    app = create_app(
+        AgentHarness(Agent(system_prompt="", client=FakeClient([]))),
+        db_path=tmp_path / "workspace.sqlite",
+        uploads_dir=tmp_path / "uploads",
+        enable_code_continuity=True,
+    )
+    with TestClient(app) as client:
+        sid = _make_session(client, "code-continuity")
+        uploaded = client.post(
+            f"/api/sessions/{sid}/files",
+            files=[
+                _upload_payload(
+                    b"import pathlib\n\ndef main():\n    return pathlib.Path('.')\n",
+                    "main.py",
+                    "text/x-python",
+                )
+            ],
+        )
+
+        assert uploaded.status_code == 200
+        continuity = uploaded.json()["workspace"]["code_continuity"]
+        assert continuity["status"] == "current"
+        assert continuity["stale"] is False
+        assert continuity["latest_code_workspace_revision"] == 1
+        assert continuity["summarized_code_workspace_revision"] == 1
+        assert continuity["summary_workspace_revision"] == 4
+
+        snapshot = client.get(f"/api/sessions/{sid}/workspace").json()
+        summaries = {
+            item["logical_path"]: item
+            for item in snapshot["files"]
+            if item["purpose"] == "workspace_documentation"
+        }
+        assert set(summaries) == {
+            "docs/architecture.md",
+            "docs/code-flow.md",
+            "docs/validation.md",
+        }
+        architecture = client.get(
+            f"/api/sessions/{sid}/files/{summaries['docs/architecture.md']['id']}"
+        ).text
+        flow = client.get(
+            f"/api/sessions/{sid}/files/{summaries['docs/code-flow.md']['id']}"
+        ).text
+        validation = client.get(
+            f"/api/sessions/{sid}/files/{summaries['docs/validation.md']['id']}"
+        ).text
+        assert "source_workspace_revision: 1" in architecture
+        assert "`scripts/main.py` imports `pathlib`" in architecture
+        assert "function main" in flow
+        assert "No Sandbox validation evidence" in validation
+        assert "this is not a claim that tests passed" in validation
+    dispose_app(app)
+
+
+def test_code_summary_failure_keeps_upload_and_marks_workspace_stale(
+    tmp_path,
+    monkeypatch,
+):
+    app = create_app(
+        AgentHarness(Agent(system_prompt="", client=FakeClient([]))),
+        db_path=tmp_path / "workspace.sqlite",
+        uploads_dir=tmp_path / "uploads",
+        enable_code_continuity=True,
+    )
+    with TestClient(app) as client:
+        service = app.state.web.code_continuity_service
+
+        async def fail_summary_write(*_args, **_kwargs):
+            raise OSError("injected summary write failure")
+
+        monkeypatch.setattr(service, "_upsert_document", fail_summary_write)
+        sid = _make_session(client, "code-continuity-failure")
+        uploaded = client.post(
+            f"/api/sessions/{sid}/files",
+            files=[_upload_payload(b"print('kept')\n", "kept.py", "text/x-python")],
+        )
+
+        assert uploaded.status_code == 200
+        continuity = uploaded.json()["workspace"]["code_continuity"]
+        assert continuity["status"] == "failed"
+        assert continuity["stale"] is True
+        assert continuity["error_code"] == "OSError"
+        snapshot = client.get(f"/api/sessions/{sid}/workspace").json()
+        assert any(
+            item["logical_path"] == "scripts/kept.py"
+            for item in snapshot["files"]
+        )
+        assert not any(
+            item["purpose"] == "workspace_documentation"
+            for item in snapshot["files"]
+        )
+    dispose_app(app)

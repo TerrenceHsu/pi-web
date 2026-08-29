@@ -127,6 +127,12 @@ WorkspaceOwner: TypeAlias = Literal[
     "sandbox",
     "document_converter",
 ]
+CodeContinuityStatus: TypeAlias = Literal[
+    "not_initialized",
+    "stale",
+    "current",
+    "failed",
+]
 WorkspacePublishKind: TypeAlias = Literal["sandbox", "document_conversion"]
 
 #: Workspace revision 的隐藏持久化状态；不属于用户可见文件树。
@@ -338,6 +344,61 @@ class FileRef(BaseModel):
         return self
 
 
+class CodeContinuityState(BaseModel):
+    """Durable freshness projection for trusted code summary documents."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["pi-agent-code-continuity/v1"] = (
+        "pi-agent-code-continuity/v1"
+    )
+    status: CodeContinuityStatus = "not_initialized"
+    stale: bool = False
+    latest_code_workspace_revision: int | None = Field(default=None, ge=0)
+    summarized_code_workspace_revision: int | None = Field(default=None, ge=0)
+    summary_workspace_revision: int | None = Field(default=None, ge=0)
+    code_source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    trigger: str | None = Field(default=None, max_length=64)
+    validation_evidence_id: str | None = Field(default=None, max_length=128)
+    error_code: str | None = Field(default=None, max_length=128)
+    updated_at: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_freshness(self) -> CodeContinuityState:
+        if self.status == "current" and (
+            self.stale
+            or self.latest_code_workspace_revision is None
+            or self.summarized_code_workspace_revision
+            != self.latest_code_workspace_revision
+            or self.summary_workspace_revision is None
+            or self.code_source_sha256 is None
+            or self.error_code is not None
+        ):
+            raise ValueError("current code continuity state is inconsistent")
+        if self.status in {"stale", "failed"} and not self.stale:
+            raise ValueError("non-current code continuity state must be stale")
+        if (
+            self.status in {"stale", "failed"}
+            and self.latest_code_workspace_revision is None
+        ):
+            raise ValueError("stale code continuity state requires a code revision")
+        if self.status == "failed" and self.error_code is None:
+            raise ValueError("failed code continuity state requires an error code")
+        if self.status == "not_initialized" and (
+            self.stale
+            or self.latest_code_workspace_revision is not None
+            or self.summarized_code_workspace_revision is not None
+            or self.summary_workspace_revision is not None
+            or self.code_source_sha256 is not None
+            or self.trigger is not None
+            or self.validation_evidence_id is not None
+            or self.error_code is not None
+            or self.updated_at is not None
+        ):
+            raise ValueError("uninitialized code continuity state contains evidence")
+        return self
+
+
 class WorkspaceState(BaseModel):
     """Session Workspace 的持久化并发状态。"""
 
@@ -346,6 +407,9 @@ class WorkspaceState(BaseModel):
     revision: int = Field(ge=0)
     created_at: int
     updated_at: int
+    code_continuity: CodeContinuityState = Field(
+        default_factory=CodeContinuityState
+    )
 
 
 class WorkspaceMaterializationEntry(BaseModel):
@@ -550,6 +614,16 @@ def is_code_filename(filename: str) -> bool:
 def is_markdown_filename(filename: str) -> bool:
     """Return whether a filename is an editable Markdown document."""
     return PurePosixPath(filename.casefold()).suffix in MARKDOWN_EXTENSIONS
+
+
+def is_code_workspace_path(logical_path: str) -> bool:
+    """Return whether a canonical path contributes to the published code tree."""
+    try:
+        normalized = normalize_workspace_logical_path(logical_path)
+    except FileStoreError:
+        return False
+    parts = PurePosixPath(normalized).parts
+    return normalized == logical_path and _is_below(parts, SCRIPTS_PATH)
 
 
 def _is_below(parts: tuple[str, ...], root: str) -> bool:
@@ -1177,15 +1251,44 @@ class WorkspaceStore:
                 state.revision,
             )
 
+    def _workspace_state_after_mutation(
+        self,
+        state: WorkspaceState,
+        *,
+        changed_paths: tuple[str, ...] = (),
+    ) -> WorkspaceState:
+        next_revision = state.revision + 1
+        now = _now_ms()
+        code_continuity = state.code_continuity
+        if any(is_code_workspace_path(path) for path in changed_paths):
+            code_continuity = code_continuity.model_copy(
+                update={
+                    "status": "stale",
+                    "stale": True,
+                    "latest_code_workspace_revision": next_revision,
+                    "trigger": None,
+                    "validation_evidence_id": None,
+                    "error_code": None,
+                    "updated_at": now,
+                }
+            )
+        return state.model_copy(
+            update={
+                "revision": next_revision,
+                "updated_at": now,
+                "code_continuity": code_continuity,
+            }
+        )
+
     def _advance_workspace_revision_unlocked(
         self,
         state: WorkspaceState,
+        *,
+        changed_paths: tuple[str, ...] = (),
     ) -> WorkspaceState:
-        advanced = state.model_copy(
-            update={
-                "revision": state.revision + 1,
-                "updated_at": _now_ms(),
-            }
+        advanced = self._workspace_state_after_mutation(
+            state,
+            changed_paths=changed_paths,
         )
         self._write_workspace_state_unlocked(advanced)
         return advanced
@@ -1194,6 +1297,109 @@ class WorkspaceStore:
         """Read or migrate the persistent Workspace revision state."""
         async with self._session_lock(session_id):
             return await self._ensure_workspace_state_unlocked(session_id)
+
+    async def mark_code_continuity_current(
+        self,
+        session_id: str,
+        *,
+        expected_code_workspace_revision: int,
+        code_source_sha256: str,
+        trigger: str,
+        validation_evidence_id: str | None,
+    ) -> WorkspaceState:
+        """Publish freshness only after every trusted summary file is durable."""
+        if re.fullmatch(r"[0-9a-f]{64}", code_source_sha256) is None:
+            raise FileStoreError("code continuity source SHA is invalid")
+        async with self._session_lock(session_id):
+            state = await self._ensure_workspace_state_unlocked(session_id)
+            if (
+                state.code_continuity.latest_code_workspace_revision
+                != expected_code_workspace_revision
+            ):
+                raise WorkspaceVersionConflictError(
+                    expected_code_workspace_revision,
+                    state.code_continuity.latest_code_workspace_revision or state.revision,
+                )
+            now = _now_ms()
+            continuity = CodeContinuityState(
+                status="current",
+                stale=False,
+                latest_code_workspace_revision=expected_code_workspace_revision,
+                summarized_code_workspace_revision=expected_code_workspace_revision,
+                summary_workspace_revision=state.revision,
+                code_source_sha256=code_source_sha256,
+                trigger=trigger[:64],
+                validation_evidence_id=(
+                    validation_evidence_id[:128]
+                    if validation_evidence_id is not None
+                    else None
+                ),
+                error_code=None,
+                updated_at=now,
+            )
+            updated = state.model_copy(
+                update={"code_continuity": continuity, "updated_at": now}
+            )
+            self._write_workspace_state_unlocked(updated)
+            return updated
+
+    async def initialize_code_continuity_stale(
+        self,
+        session_id: str,
+        *,
+        expected_workspace_revision: int,
+    ) -> WorkspaceState:
+        """Adopt a pre-feature code tree without changing its byte revision."""
+        async with self._session_lock(session_id):
+            state = await self._ensure_workspace_state_unlocked(session_id)
+            self._check_workspace_revision(state, expected_workspace_revision)
+            if state.code_continuity.status != "not_initialized":
+                return state
+            now = _now_ms()
+            continuity = state.code_continuity.model_copy(
+                update={
+                    "status": "stale",
+                    "stale": True,
+                    "latest_code_workspace_revision": state.revision,
+                    "updated_at": now,
+                }
+            )
+            updated = state.model_copy(
+                update={"code_continuity": continuity, "updated_at": now}
+            )
+            self._write_workspace_state_unlocked(updated)
+            return updated
+
+    async def mark_code_continuity_failed(
+        self,
+        session_id: str,
+        *,
+        expected_code_workspace_revision: int,
+        error_code: str,
+    ) -> WorkspaceState:
+        """Retain a visible stale state without advancing Workspace bytes."""
+        async with self._session_lock(session_id):
+            state = await self._ensure_workspace_state_unlocked(session_id)
+            continuity = state.code_continuity
+            if (
+                continuity.latest_code_workspace_revision
+                != expected_code_workspace_revision
+            ):
+                return state
+            now = _now_ms()
+            failed = continuity.model_copy(
+                update={
+                    "status": "failed",
+                    "stale": True,
+                    "error_code": error_code[:128],
+                    "updated_at": now,
+                }
+            )
+            updated = state.model_copy(
+                update={"code_continuity": failed, "updated_at": now}
+            )
+            self._write_workspace_state_unlocked(updated)
+            return updated
 
     async def materialize_workspace_revision(
         self,
@@ -1591,11 +1797,12 @@ class WorkspaceStore:
                     new=new_bytes,
                     limit=self._max_session_size,
                 )
-            after_state = state.model_copy(
-                update={
-                    "revision": state.revision + 1,
-                    "updated_at": now,
-                }
+            after_state = self._workspace_state_after_mutation(
+                state,
+                changed_paths=tuple(
+                    [change.logical_path for change in ordered_changes]
+                    + list(ordered_deleted)
+                ),
             )
             intent = _WorkspacePublishIntent(
                 transaction_id=transaction_id,
@@ -2075,7 +2282,10 @@ class WorkspaceStore:
                 relative_folder=relative_folder,
             )
             try:
-                self._advance_workspace_revision_unlocked(state)
+                self._advance_workspace_revision_unlocked(
+                    state,
+                    changed_paths=(ref.logical_path,),
+                )
             except Exception:
                 try:
                     self._delete_file_dir_unlocked(session_id, ref.id)
@@ -2301,7 +2511,10 @@ class WorkspaceStore:
                 purpose=purpose,
             )
             try:
-                self._advance_workspace_revision_unlocked(state)
+                self._advance_workspace_revision_unlocked(
+                    state,
+                    changed_paths=(ref.logical_path,),
+                )
             except Exception:
                 try:
                     self._delete_file_dir_unlocked(session_id, ref.id)
@@ -2543,7 +2756,10 @@ class WorkspaceStore:
                     f"update_text failed for {ref.name!r}: {type(e).__name__}: {e}"
                 ) from e
             try:
-                self._advance_workspace_revision_unlocked(state)
+                self._advance_workspace_revision_unlocked(
+                    state,
+                    changed_paths=(ref.logical_path,),
+                )
             except Exception as exc:
                 try:
                     self._write_metadata(file_dir, ref)
@@ -2608,7 +2824,10 @@ class WorkspaceStore:
             file_dir = self._file_dir(session_id, file_id)
             self._write_metadata(file_dir, moved)
             try:
-                self._advance_workspace_revision_unlocked(state)
+                self._advance_workspace_revision_unlocked(
+                    state,
+                    changed_paths=(ref.logical_path, target_path),
+                )
             except Exception as exc:
                 try:
                     self._write_metadata(file_dir, ref)
@@ -2791,7 +3010,10 @@ class WorkspaceStore:
                 ) from exc
 
             try:
-                self._advance_workspace_revision_unlocked(state)
+                self._advance_workspace_revision_unlocked(
+                    state,
+                    changed_paths=(ref.logical_path,),
+                )
             except Exception as exc:
                 try:
                     tombstone.replace(file_dir)
@@ -2885,6 +3107,7 @@ __all__ = [
     "MARKDOWN_EXTENSIONS",
     "DEFAULT_AGENT_INSTRUCTIONS",
     "DEFAULT_MEMORY",
+    "CodeContinuityStatus",
     "FilePurpose",
     "WorkspaceCategory",
     "WorkspaceOwner",
@@ -2902,6 +3125,7 @@ __all__ = [
     "WorkspaceTreeConflictError",
     "WorkspacePublishPolicyError",
     # 数据模型
+    "CodeContinuityState",
     "FileRef",
     "WorkspacePathPolicy",
     "WorkspaceState",
@@ -2915,6 +3139,7 @@ __all__ = [
     "normalize_logical_path",
     "normalize_workspace_logical_path",
     "is_code_filename",
+    "is_code_workspace_path",
     "is_markdown_filename",
     "is_workspace_document_filename",
     "workspace_document_root",

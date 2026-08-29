@@ -136,6 +136,7 @@ def main() -> None:
             credential_secret_backend=secret_backend,
             enable_builtin_ddgs=True,
             enable_auto_memory=True,
+            enable_code_continuity=True,
         )
 
     app = create_authenticated_app(

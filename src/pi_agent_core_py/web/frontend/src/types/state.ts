@@ -42,6 +42,9 @@ export interface AgentStateSummary {
       conflicts: number
     }
   }
+  code_continuity: {
+    enabled: boolean
+  }
 }
 
 export interface EventsResponse {

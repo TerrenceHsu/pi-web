@@ -214,11 +214,18 @@ export const useCodingSandboxStore = defineStore("codingSandbox", () => {
         if (!isWebEventEnvelope(event)) return
         if (!event.session_id || event.session_id !== activeSessionId.value) return
         if (event.type === "workspace_changed") {
+          const fileStore = useFileStore()
+          if (event.payload.source === "code_continuity") {
+            // Freshness metadata is a state-only commit and may keep the same
+            // byte revision after a failed renderer, so always reload it.
+            void fileStore.loadFiles(event.session_id)
+            return
+          }
           const revision = event.payload.workspace_revision
           const changedPaths = event.payload.changed_paths
           if (typeof revision === "number" && Array.isArray(changedPaths)) {
             const paths = changedPaths.filter((path): path is string => typeof path === "string")
-            void useFileStore().revealPublishedWorkspace(
+            void fileStore.revealPublishedWorkspace(
               event.session_id,
               paths,
               revision,
