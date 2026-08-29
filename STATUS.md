@@ -6,7 +6,7 @@
 
 | 项 | 当前事实 |
 |---|---|
-| 代码基线 | `0.0.28` 发布基线之上已完成 Coding Sandbox 阶段 4A–4C、Session Workspace 阶段 5–7；Coding Agent Workspace 连续性阶段 1–4 已提交至 `e9a2124`，当前工作树完成阶段 5 无聊天上下文续作 |
+| 代码基线 | `0.0.28` 发布基线之上已完成 Coding Sandbox 阶段 4A–4C、Session Workspace 阶段 5–7；Coding Agent Workspace 连续性阶段 1–5 已提交，阶段 5 实现提交为 `c9ed330` |
 | 分支 | `master` |
 | 最新 release tag | `0.0.28`；annotated tag 指向发布基线，不包含其后的阶段 4A–6 提交 |
 | Python / API 版本 | `0.0.28`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
@@ -229,7 +229,7 @@ LLM Wiki 阶段 0–10、Session Workspace 阶段 1–7 与 Coding Agent Workspa
 
 ## 建议下一步
 
-1. 整理并提交 Coding Agent Workspace 连续性阶段 5。
-2. 若准备新发布，统一提升版本并创建下一 annotated tag。
+1. 若准备新发布，统一提升版本并创建下一 annotated tag（建议从 `0.0.28` 提升到 `0.0.29`）。
+2. 若继续功能开发，下一项可进入 P2-D Session organization；Modal 与图片能力继续按既有决定暂缓。
 
 未完成事项的唯一清单见 [`TODO.md`](TODO.md)。使用与架构说明见 [`README.md`](README.md)。
