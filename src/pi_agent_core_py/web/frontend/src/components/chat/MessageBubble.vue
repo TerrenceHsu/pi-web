@@ -16,6 +16,7 @@ import TurnInfoCard from "./TurnInfoCard.vue"
 import ApprovalCard from "./ApprovalCard.vue"
 import ContextSummaryCard from "./ContextSummaryCard.vue"
 import ContentIntegrityWarning from "./ContentIntegrityWarning.vue"
+import PlanTaskCard from "./PlanTaskCard.vue"
 
 const props = withDefaults(
   defineProps<{
@@ -261,6 +262,10 @@ _watch(
 
   <div v-else-if="kind === 'tool_approval'" class="row row-card">
     <ApprovalCard :item="item as any" />
+  </div>
+
+  <div v-else-if="kind === 'plan_run'" class="row row-card">
+    <PlanTaskCard :item="item as any" />
   </div>
 
   <!-- file_read -->

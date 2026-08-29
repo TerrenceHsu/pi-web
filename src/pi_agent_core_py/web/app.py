@@ -39,7 +39,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
 from uuid import uuid4
 
 from fastapi import (
@@ -212,6 +212,7 @@ class _PromptValidated:
     attached_summary: list[dict[str, Any]]
     knowledge_conversation: Any = None
     coding_mode: bool = False
+    execution_mode: Literal["direct", "plan"] = "direct"
     intent: IntentDecision | None = None
     pending_continuity_evidence: AutoMemoryOperationEvidence | None = None
 
@@ -292,6 +293,7 @@ class PromptRunOutcome:
     continuity: dict[str, object] | None = None
     workspace_context: dict[str, Any] | None = None
     intent: dict[str, object] | None = None
+    plan_run: dict[str, object] | None = None
     turn_messages: tuple[Any, ...] = ()
     session_persisted: bool = False
 
@@ -393,6 +395,9 @@ def create_app(
     # Deterministic read-only / coding / Knowledge routing for the product app.
     # Disabled by default to preserve low-level embedder tool semantics.
     enable_intent_routing: bool = False,
+    # Independent Planner–Executor–Verifier execution for Coding requests.
+    # The product entrypoint enables it; low-level embedders opt in.
+    enable_plan_mode: bool = False,
     # Deprecated Chunk Knowledge compatibility root.
     # The legacy DB, workers, Tool and REST API only start when
     # enable_knowledge_api=True is also explicit. Product composition uses
@@ -472,6 +477,7 @@ def create_app(
         "ws_clients": set(),
         "coding_sandbox_tool_names": set(),
         "continuity_tasks": set(),
+        "plan_approval_events": {},
     }
     # Agent file tools may run concurrently for different sessions. A task-local
     # binding prevents one request from observing another request's global web
@@ -568,6 +574,16 @@ def create_app(
         model_capability_store = SQLiteModelCapabilityStore(session_connection)
         await model_capability_store.init()
         state.model_capability_store = model_capability_store
+
+        if state.plan_mode_enabled:
+            from coding_agent_app.planning import PlanStore
+
+            plan_store = PlanStore(session_connection)
+            await plan_store.init()
+            state.plan_store = plan_store
+            await plan_store.recover_interrupted()
+        else:
+            state.plan_store = None
 
         # Session Workspace：初始化唯一 WorkspaceStore，并为所有已有 session
         # 立即创建独立目录（而不是等第一次上传时才惰性出现）。
@@ -1119,6 +1135,52 @@ def create_app(
                             f"sandbox:{event.operation_id}",
                             event.session_id,
                         )
+                        if event.event_type in {
+                            "sandbox_publish_finished",
+                            "sandbox_operation_cancelled",
+                            "sandbox_operation_discarded",
+                        } and state.plan_store is not None:
+                            try:
+                                plan = await state.plan_store.find_by_sandbox_operation(
+                                    event.operation_id
+                                )
+                                if (
+                                    plan is not None
+                                    and event.event_type == "sandbox_publish_finished"
+                                    and plan.status == "awaiting_artifact_approval"
+                                ):
+                                    plan = await state.plan_store.mark_completed(plan.id)
+                                    await _emit_web_payload(
+                                        {
+                                            "type": "plan_completed",
+                                            "plan": plan.model_dump(mode="json"),
+                                        },
+                                        None,
+                                        plan.session_id,
+                                    )
+                                elif (
+                                    plan is not None
+                                    and plan.status == "awaiting_artifact_approval"
+                                ):
+                                    plan = await state.plan_store.finish(
+                                        plan.id,
+                                        "cancelled",
+                                        failure_code="artifact_not_published",
+                                    )
+                                    await _emit_web_payload(
+                                        {
+                                            "type": "plan_cancelled",
+                                            "plan": plan.model_dump(mode="json"),
+                                        },
+                                        None,
+                                        plan.session_id,
+                                    )
+                            except Exception:
+                                _logger.warning(
+                                    "Plan state did not follow Sandbox terminal event "
+                                    "(operation_id=%s)",
+                                    event.operation_id,
+                                )
                         if event.event_type == "sandbox_publish_finished":
                             workspace_revision = event.payload.get("workspace_revision")
                             raw_changed_paths = event.payload.get("changed_paths", [])
@@ -1429,6 +1491,7 @@ def create_app(
         auto_memory_enabled=enable_auto_memory,
         code_continuity_enabled=enable_code_continuity,
         intent_routing_enabled=enable_intent_routing,
+        plan_mode_enabled=enable_plan_mode,
     )
     checkpointer_locks: dict[str, asyncio.Lock] = {}
     continuity_locks: dict[str, asyncio.Lock] = {}
@@ -2251,6 +2314,15 @@ def create_app(
             coding_mode_raw = (payload or {}).get("coding_mode", False)
             if not isinstance(coding_mode_raw, bool):
                 raise PromptValidationError(400, "coding_mode must be a boolean")
+            execution_mode_raw = (payload or {}).get("execution_mode", "direct")
+            if execution_mode_raw not in {"direct", "plan"}:
+                raise PromptValidationError(
+                    400,
+                    "execution_mode must be 'direct' or 'plan'",
+                )
+            execution_mode = cast(Literal["direct", "plan"], execution_mode_raw)
+            if execution_mode == "plan" and not state.plan_mode_enabled:
+                raise PromptValidationError(400, "Plan mode is not enabled")
             intent_mode_raw = (payload or {}).get("intent_mode")
             if not state.intent_routing_enabled and intent_mode_raw is not None:
                 raise PromptValidationError(400, "intent routing is not enabled")
@@ -2258,10 +2330,13 @@ def create_app(
                 intent_mode = parse_intent_mode(intent_mode_raw)
             except ValueError as exc:
                 raise PromptValidationError(400, str(exc)) from None
-            if coding_mode_raw and intent_mode in {"read_only", "knowledge"}:
+            if (coding_mode_raw or execution_mode == "plan") and intent_mode in {
+                "read_only",
+                "knowledge",
+            }:
                 raise PromptValidationError(
                     400,
-                    "coding_mode conflicts with intent_mode",
+                    "Coding execution conflicts with intent_mode",
                 )
 
             skill_sel_raw = (payload or {}).get("skill_selection") or {}
@@ -2280,6 +2355,11 @@ def create_app(
                 skill_sel_raw, skill_names_raw
             )
             skill_selection = _build_skill_selection(skill_sel_raw, merged_names)
+            if execution_mode == "plan" and skill_selection is not None:
+                raise PromptValidationError(
+                    400,
+                    "Plan mode uses fixed Planner, Executor, and Verifier prompts",
+                )
 
             if merged_names and harness.skill_registry is not None:
                 missing = [n for n in merged_names if not harness.skill_registry.has(n)]
@@ -2340,7 +2420,9 @@ def create_app(
                     "Knowledge conversations use a fixed built-in Skill",
                 )
             if knowledge_conversation is not None and (
-                coding_mode_raw or intent_mode in {"coding", "read_only"}
+                coding_mode_raw
+                or execution_mode == "plan"
+                or intent_mode in {"coding", "read_only"}
             ):
                 raise PromptValidationError(
                     400,
@@ -2353,13 +2435,13 @@ def create_app(
                 )
 
             intent = None
-            coding_mode = coding_mode_raw
+            coding_mode = coding_mode_raw or execution_mode == "plan"
             if state.intent_routing_enabled:
                 intent = route_intent(
                     text,
                     knowledge_bound=knowledge_conversation is not None,
                     intent_mode=intent_mode,
-                    legacy_coding_mode=coding_mode_raw,
+                    legacy_coding_mode=coding_mode,
                 )
                 coding_mode = intent.route == "coding"
             if coding_mode and session_id is None:
@@ -2397,6 +2479,7 @@ def create_app(
                 attached_summary=attached_summary,
                 knowledge_conversation=knowledge_conversation,
                 coding_mode=coding_mode,
+                execution_mode=execution_mode,
                 intent=intent,
             )
         except Exception:
@@ -2841,6 +2924,198 @@ def create_app(
         tasks.add(task)
         task.add_done_callback(tasks.discard)
 
+    async def _run_plan_prompt(
+        validated: _PromptValidated,
+        *,
+        abort_requested: Callable[[], bool] | None,
+    ) -> PromptRunOutcome:
+        """Run isolated Planner/Executor/Verifier roles and persist one public turn."""
+        from coding_agent_app.planning.orchestrator import (
+            PlanOrchestrationError,
+            PlanOrchestrator,
+        )
+        from coding_agent_app.planning.store import PlanStore
+
+        from ..messages import AssistantMessage, TextContent, Usage, UserMessage
+        from .coding_sandbox.automation import (
+            CodingSandboxAutomation,
+            CodingSandboxAutomationError,
+        )
+
+        session_id = validated.session_id
+        session_store = validated.store
+        plan_store = cast(PlanStore | None, state.plan_store)
+        runtime = getattr(app.state, "coding_sandbox_runtime", None)
+        lifecycle = None if runtime is None else runtime.lifecycle
+        request_id = state.current_request_id
+        if (
+            session_id is None
+            or session_store is None
+            or plan_store is None
+            or lifecycle is None
+            or request_id is None
+        ):
+            raise PromptRuntimeError(
+                503,
+                "Plan mode is unavailable.",
+                "plan_mode_unavailable",
+            )
+
+        cancelled = abort_requested or (lambda: False)
+        approval_events = cast(dict[str, asyncio.Event], container["plan_approval_events"])
+
+        async def wait_for_approval(run_id: str) -> None:
+            event = approval_events.setdefault(run_id, asyncio.Event())
+            try:
+                while True:
+                    if cancelled():
+                        raise PlanOrchestrationError(
+                            "plan_cancelled", "Plan run was cancelled."
+                        )
+                    current = await plan_store.get_run(run_id)
+                    if current.status == "executing":
+                        return
+                    try:
+                        await asyncio.wait_for(event.wait(), timeout=0.1)
+                    except TimeoutError:
+                        continue
+                    event.clear()
+            finally:
+                approval_events.pop(run_id, None)
+
+        async def notify(event_type: str, run: Any) -> None:
+            await _emit_web_payload(
+                {
+                    "type": event_type,
+                    "plan": run.model_dump(mode="json"),
+                },
+                request_id,
+                session_id,
+            )
+
+        workspace_context: str | None = None
+        workspace_context_metadata: dict[str, Any] | None = None
+        try:
+            workspace_context = await _assemble_workspace_context(
+                session_id,
+                pending_memory=validated.pending_continuity_evidence,
+            )
+            metadata = harness.context.metadata.get("workspace_context")
+            if isinstance(metadata, dict):
+                workspace_context_metadata = dict(metadata)
+        except Exception:
+            raise PromptRuntimeError(
+                409,
+                "Workspace continuation context is unavailable.",
+                "workspace_context_unavailable",
+            ) from None
+
+        provider_runtime = app.state.request_provider_runtime
+        selection: RequestProviderSelection | None = None
+        result_client = harness.agent.client
+        try:
+            if provider_runtime is not None:
+                selection = await provider_runtime.resolve_selection(session_id)
+            async with AsyncExitStack() as stack:
+                if provider_runtime is not None and selection is not None:
+                    await stack.enter_async_context(
+                        provider_runtime.bind_to_harness(
+                            harness=harness,
+                            selection=selection,
+                        )
+                    )
+                registered_names: set[str] = container["coding_sandbox_tool_names"]
+                coding_tools = [
+                    tool
+                    for tool in harness.agent.tools.list()
+                    if tool.name in registered_names
+                ]
+                if len(coding_tools) != len(registered_names) or not coding_tools:
+                    raise PlanOrchestrationError(
+                        "coding_tools_unavailable",
+                        "Automated Coding tools are unavailable.",
+                    )
+                read_tools = [
+                    tool
+                    for tool in harness.agent.tools.list()
+                    if not tool.name.startswith("coding_")
+                    and is_read_only_tool_name(tool.name)
+                ]
+                orchestrator = PlanOrchestrator(
+                    store=plan_store,
+                    client=harness.agent.client,
+                    automation=CodingSandboxAutomation(lifecycle),
+                    read_tools=read_tools,
+                    coding_tools=coding_tools,
+                    wait_for_approval=wait_for_approval,
+                    notify=notify,
+                    cancelled=cancelled,
+                )
+                result_client = harness.agent.client
+                plan_result = await orchestrator.run(
+                    session_id=session_id,
+                    request_id=request_id,
+                    goal=validated.text,
+                    planning_context=workspace_context,
+                )
+        except ProviderSelectionNotFoundError:
+            raise PromptRuntimeError(
+                500,
+                "Selected provider profile is unavailable.",
+                "provider_profile_unavailable",
+            ) from None
+        except ProviderSelectionDisabledError:
+            raise PromptRuntimeError(
+                500,
+                "Selected provider profile is disabled.",
+                "provider_profile_disabled",
+            ) from None
+        except ProviderSelectionUnavailableError:
+            raise PromptRuntimeError(
+                500,
+                "Selected provider credential is unavailable.",
+                "provider_credential_unavailable",
+            ) from None
+        except ProviderInitializationError:
+            raise PromptRuntimeError(
+                500,
+                "Selected provider could not be initialized.",
+                "provider_initialization_failed",
+            ) from None
+        except CodingSandboxAutomationError as exc:
+            raise PromptRuntimeError(409, str(exc), exc.code) from None
+        except PlanOrchestrationError as exc:
+            status_code = 409 if exc.code == "plan_cancelled" else 500
+            raise PromptRuntimeError(status_code, str(exc), exc.code) from None
+
+        history = list(await session_store.list_messages(session_id))
+        user_message = UserMessage(
+            content=[TextContent(text=validated.text), *validated.attached_blocks]
+        )
+        assistant_message = AssistantMessage(
+            content=[TextContent(text=plan_result.summary)],
+            api=result_client.api_id or result_client.provider_id or "unknown",
+            provider=result_client.provider_id or "unknown",
+            model=result_client.model or "unknown",
+            stop_reason="stop",
+            usage=Usage(),
+        )
+        final_messages = [*history, user_message, assistant_message]
+        await session_store.replace_messages(session_id, final_messages)
+        return PromptRunOutcome(
+            messages=final_messages,
+            serialized_messages=[serialize_message(message) for message in final_messages],
+            session_id=session_id,
+            attachment_meta=_build_attachment_meta(validated.attached_summary),
+            applied_skill_names=[],
+            coding_sandbox=plan_result.sandbox,
+            workspace_context=workspace_context_metadata,
+            intent=validated.intent.public() if validated.intent is not None else None,
+            plan_run=plan_result.run.model_dump(mode="json"),
+            turn_messages=(user_message, assistant_message),
+            session_persisted=True,
+        )
+
     async def _run_prompt_request(
         validated: _PromptValidated,
         *,
@@ -2849,6 +3124,7 @@ def create_app(
         """Own continuity finalization and the optional automated Coding lifecycle."""
         state.running = True
         model_persisted = False
+        is_plan_request = validated.execution_mode == "plan"
         pending_evidence: AutoMemoryOperationEvidence | None = None
         pending_operation_id: str | None = None
         try:
@@ -2879,9 +3155,26 @@ def create_app(
                     abort_requested=abort_requested,
                 )
                 return result
+            if is_plan_request:
+                result = await _run_plan_prompt(
+                    validated,
+                    abort_requested=abort_requested,
+                )
+                model_persisted = result.session_persisted
+                await _try_finalize_auto_memory(
+                    validated,
+                    result,
+                    pending_evidence=pending_evidence,
+                    pending_operation_id=pending_operation_id,
+                    abort_requested=abort_requested,
+                )
+                return result
         finally:
-            if not validated.coding_mode:
-                if not model_persisted and validated.original_messages is not None:
+            if not validated.coding_mode or is_plan_request:
+                if (
+                    validated.original_messages is not None
+                    and (is_plan_request or not model_persisted)
+                ):
                     harness.agent.state.messages = validated.original_messages
                 state.running = False
 
@@ -4073,6 +4366,7 @@ def create_app(
                 "continuity": result.continuity,
                 "workspace_context": result.workspace_context,
                 "intent": result.intent,
+                "plan_run": result.plan_run,
                 # 不放 message 全文（安全 + 内存）
             }
         finally:
@@ -4743,6 +5037,10 @@ def create_app(
             "intent_routing": {
                 "enabled": state.intent_routing_enabled,
                 "routes": ["read_only", "coding", "knowledge"],
+            },
+            "plan_mode": {
+                "enabled": state.plan_mode_enabled,
+                "execution_modes": ["direct", "plan"],
             },
         }
 
@@ -8083,6 +8381,74 @@ def create_app(
         )
 
     # ========================================================================
+    # Plan Mode control plane
+    # ========================================================================
+
+    @app.get("/api/plan-runs/{run_id}", response_model=None)
+    async def get_plan_run(run_id: str) -> dict[str, object] | JSONResponse:
+        from coding_agent_app.planning.store import PlanNotFoundError
+
+        if state.plan_store is None:
+            return JSONResponse(status_code=404, content={"detail": "Plan mode is disabled"})
+        try:
+            run = await state.plan_store.get_run(run_id)
+        except PlanNotFoundError:
+            return JSONResponse(status_code=404, content={"detail": "Plan run not found"})
+        return {"plan": run.model_dump(mode="json")}
+
+    @app.get("/api/sessions/{session_id}/plan-runs/latest", response_model=None)
+    async def get_latest_plan_run(
+        session_id: str,
+    ) -> dict[str, object] | JSONResponse:
+        if state.plan_store is None:
+            return {"plan": None}
+        store = state.session_store
+        if store is None or await store.get_session(session_id) is None:
+            return JSONResponse(status_code=404, content={"detail": "Session not found"})
+        run = await state.plan_store.latest_for_session(session_id)
+        return {
+            "plan": run.model_dump(mode="json") if run is not None else None,
+        }
+
+    @app.post("/api/plan-runs/{run_id}/approve", response_model=None)
+    async def approve_plan_run(run_id: str) -> dict[str, object] | JSONResponse:
+        from coding_agent_app.planning.store import (
+            PlanConflictError,
+            PlanNotFoundError,
+        )
+
+        if state.plan_store is None:
+            return JSONResponse(status_code=404, content={"detail": "Plan mode is disabled"})
+        try:
+            pending = await state.plan_store.get_run(run_id)
+            owner = state.active_requests.get(pending.request_id)
+            if owner is None or owner.status != "running":
+                return JSONResponse(
+                    status_code=409,
+                    content={"detail": "Plan run no longer has an active request"},
+                )
+            run, idempotent = await state.plan_store.approve(run_id)
+        except PlanNotFoundError:
+            return JSONResponse(status_code=404, content={"detail": "Plan run not found"})
+        except PlanConflictError as exc:
+            return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+        approval_events = cast(dict[str, asyncio.Event], container["plan_approval_events"])
+        event = approval_events.get(run_id)
+        if event is not None:
+            event.set()
+        await _emit_web_payload(
+            {"type": "plan_approved", "plan": run.model_dump(mode="json")},
+            run.request_id,
+            run.session_id,
+        )
+        return {
+            "ok": True,
+            "idempotent": idempotent,
+            "plan": run.model_dump(mode="json"),
+        }
+
+    # ========================================================================
     # Actions: prompt / abort / reset
     # ========================================================================
 
@@ -8102,6 +8468,11 @@ def create_app(
         让 _web_event_hook 给 envelope 注入 request_id / session_id，
         与 /api/prompt/async 路径行为一致。sync 路径不创建 WebRunRequest record。
         """
+        if (payload or {}).get("execution_mode", "direct") == "plan":
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "Plan mode requires the asynchronous prompt endpoint"},
+            )
         try:
             validated = await _validate_prompt_payload(payload)
             # set request context（sync 路径用临时 request_id，不进 active_requests）
@@ -8129,6 +8500,7 @@ def create_app(
             "continuity": result.continuity,
             "workspace_context": result.workspace_context,
             "intent": result.intent,
+            "plan_run": result.plan_run,
         }
 
     # ========================================================================
@@ -8190,6 +8562,7 @@ def create_app(
                 # Resolved value is private request state used by abort while
                 # Coding preflight/finalization runs with the Harness idle.
                 "coding_mode": validated.coding_mode,
+                "execution_mode": validated.execution_mode,
             },
         )
         state.active_requests[request_id] = web_request
@@ -8218,6 +8591,7 @@ def create_app(
                 "intent": (
                     validated.intent.public() if validated.intent is not None else None
                 ),
+                "execution_mode": validated.execution_mode,
             },
         )
 

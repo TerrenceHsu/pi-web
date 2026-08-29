@@ -9,6 +9,7 @@
 
 import type { FileRef } from "./files"
 import type { ToolApprovalStatus } from "./approvals"
+import type { PlanRun } from "./plans"
 import type {
   GenerationMetrics,
   IntentAudit,
@@ -231,6 +232,14 @@ export interface ToolApprovalItem {
   error?: string | null
 }
 
+export interface PlanRunItem {
+  kind: "plan_run"
+  id: string
+  plan: PlanRun
+  submitting?: boolean
+  error?: string | null
+}
+
 export type ChatStreamItem =
   | UserMessageItem
   | AssistantMessageItem
@@ -242,6 +251,7 @@ export type ChatStreamItem =
   | SkillUsedItem
   | MCPToolCallItem
   | ToolApprovalItem
+  | PlanRunItem
   | ErrorItem
 
 /** AssistantMessageItem 或 TurnInfoItem 等可以被 history 模式复用。 */

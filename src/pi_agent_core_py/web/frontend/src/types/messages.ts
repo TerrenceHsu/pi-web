@@ -153,6 +153,7 @@ export function isPersistedMessageDto(
 
 export type IntentRoute = "read_only" | "coding" | "knowledge"
 export type IntentMode = "auto" | IntentRoute
+export type ExecutionMode = "direct" | "plan"
 
 export interface IntentAudit {
   route: IntentRoute
@@ -171,6 +172,8 @@ export interface PromptRequest {
   coding_mode?: boolean
   /** 可选显式覆盖；省略或 auto 时由产品路由器判定。 */
   intent_mode?: IntentMode
+  /** direct 使用单 Agent；plan 使用 Planner–Executor–Verifier 状态机。 */
+  execution_mode?: ExecutionMode
   /** 顶层快捷字段——等价于 skill_selection.names；后端会合并去重。 */
   skill_names?: string[]
   skill_selection?: {
@@ -269,6 +272,7 @@ export interface PromptAsyncResponse {
   request_url: string
   abort_url: string
   intent: IntentAudit | null
+  execution_mode: ExecutionMode
 }
 
 /**

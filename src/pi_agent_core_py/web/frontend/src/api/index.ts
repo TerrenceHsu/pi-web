@@ -38,6 +38,7 @@ export * from "./contextBudget"
 export * from "./codingSandbox"
 export * from "./about"
 export * from "./wiki"
+export * from "./plans"
 
 // ----- 旧 api.ts 兼容签名（让 9 个 .vue 不改一行） -----
 // 注意：旧 .vue 直接 import * as api 然后 api.getState() / api.sendPrompt(text, sel)

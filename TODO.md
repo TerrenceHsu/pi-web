@@ -24,6 +24,19 @@
 - [x] **阶段 4：已发布代码的流程总结**（完成）：新增独立 `CodeContinuityService`，从 revision-bound、逐文件校验的 `scripts/**` 物化树确定性生成只读 `docs/architecture.md`、`docs/code-flow.md`、`docs/validation.md`；用户代码上传/删除和已批准 `WorkspacePublished` 触发，启动恢复 stale/failed 及功能上线前已有代码。Workspace mutation 原子标记 stale，三份文档全部持久后才发布 current，代码并发变化 CAS fail closed；失败不回滚用户代码。Validation 只记录真实 Sandbox evidence/check/output SHA，普通上传明确未验证，不接受模型自述。产品入口默认启用、低层组合显式 opt-in，API 与右栏显示 revision/hash/current/stale/failed。只修改 1 个既有测试文件并新增 2 项：主路径及 renderer 失败保留上传并标记 stale；Backend 文件 API 30 passed、Workspace/Sandbox 邻接 85 passed，Frontend Workspace/Sandbox 6/6，Ruff、strict Mypy、typecheck/lint PASS
 - [x] **阶段 5：无聊天上下文续作验收**（完成，提交 `c9ed330`）：顶层 `agent_workspace.WorkspaceContextAssembler` 在稳定 revision 上以 strict UTF-8、普通文件/stat/SHA-256 复验和 96,000 字符总预算，统一装配 `AGENT.md`、可选 current task/HANDOFF、Pending Memory、`Memory.md`、current 代码摘要、Workspace 树与非终态 Sandbox 投影；stale/failed 代码摘要正文不进入 Prompt，待批准 Artifact 明确标记未发布，必需文件不可验证时在 Provider 调用前 409 fail closed。普通 Prompt、Regenerate 与 Context Budget 复用该路径，Knowledge/Checkpointer 隔离并清理跨模式 metadata；Prompt/request/budget 公开 secret-free revision/hash/included/omitted 审计。只修改 1 个既有 Backend 测试文件并新增 2 项，覆盖零聊天历史进程重启续作，以及 Pending Memory + 待批准 Artifact + stale code 的组合风险；相关 Backend 128 passed、Frontend Context Budget 6/6，Ruff、strict Mypy、Frontend typecheck/lint 通过
 
+## P0 — Plan Mode / Planner–Executor–Verifier
+
+中心编排、持久化通信信封、任务状态机、角色权限与 Sandbox 复用设计见
+[`docs/design/plan-mode-multi-agent.md`](docs/design/plan-mode-multi-agent.md)。Plan Mode 是 Coding
+路由的执行方式，不新增第四类意图。
+
+- [x] **阶段 1：PlanStore 与通信协议**：共享 Session SQLite 实现 PlanRun/PlanVersion/Task/Event、严格 DTO、事件幂等键、单调 sequence 与启动 `interrupted` 收敛；角色通信固定携带 run/version/task/attempt/causation 投影
+- [x] **阶段 2：Planner**：独立 Agent/Harness 仅以 `plan_submit` 提交有向无环 Plan；前端生成可恢复任务列表卡并停在“批准并执行”
+- [x] **阶段 3：Executor**：批准后创建/复用单一 Session Sandbox，按依赖顺序执行；每个任务只允许结构化 complete/blocked 终态，不把内部角色 transcript 写入 Session
+- [x] **阶段 4：Verifier**：独立只读 Agent 按实际 Sandbox diff 和验收标准审核；通过打勾，失败持久显示原因、建议和固定分类；`retry_executor` 最多两次
+- [x] **阶段 5：最终验证与审批**：全部任务通过后复用服务器 Validation→Freeze TOCTOU 屏障并停在 Artifact 待批准；发布/放弃后 Plan 收敛到 completed/cancelled
+- [x] **阶段 6：前端与恢复验收**：实现 Plan 可用状态/开关、任务卡、批准、角色阶段、刷新恢复与 Stop；仅在 1 个既有测试文件增加 2 项，成功 P→E→V→Freeze 与 Verifier 拒绝不冻结均通过；邻接 Backend 27 passed，Ruff、strict Mypy、Frontend typecheck/lint 通过
+
 ## P0 — Session Workspace 一体化（既有基线）
 
 完整架构、所有权边界、Sandbox 发布流和富文档转换约定见

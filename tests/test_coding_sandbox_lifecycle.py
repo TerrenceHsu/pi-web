@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from coding_agent_app.planning.orchestrator import PlanOrchestrator
+from coding_agent_app.planning.store import PlanStore
 from coding_sandbox import (
     HMACSHA256ArtifactSigner,
     ManagedSandboxLifecycle,
@@ -22,6 +24,8 @@ from coding_sandbox import (
 from coding_sandbox.admin import SandboxAdminConfig, SandboxConfigRecord
 from coding_sandbox.fake import FakeSandboxBackend
 from coding_sandbox.lifecycle import DEFAULT_VALIDATION_CONFIG
+from pi_agent_core_py import DoneEvent, FakeClient, ToolCall, ToolCallEvent
+from pi_agent_core_py.session_sqlite import SQLiteSessionStore
 from pi_agent_core_py.web.coding_sandbox.automation import (
     CodingSandboxAutomation,
     CodingSandboxAutomationError,
@@ -176,6 +180,195 @@ async def test_automated_coding_validation_failure_never_freezes() -> None:
     assert raised.value.code == "coding_validation_failed"
     assert lifecycle.record is not None and lifecycle.record.status == "validation_failed"
     assert lifecycle.calls == ["start", "validate"]
+
+
+def _plan_role_call(call_id: str, name: str, arguments: dict[str, object]) -> list[object]:
+    return [
+        ToolCallEvent(
+            tool_call=ToolCall(id=call_id, name=name, arguments=arguments),
+        ),
+        DoneEvent(stop_reason="tool_use"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_runs_planner_executor_verifier_then_freezes(
+    tmp_path: Path,
+) -> None:
+    session_store = SQLiteSessionStore(tmp_path / "plan-success.db")
+    await session_store.init()
+    session = await session_store.create_session(title="Plan success")
+    assert session_store.connection is not None
+    plan_store = PlanStore(session_store.connection)
+    await plan_store.init()
+    lifecycle = _AutomationLifecycle()
+    client = FakeClient(
+        [
+            _plan_role_call(
+                "planner",
+                "plan_submit",
+                {
+                    "goal": "add greeting",
+                    "summary": "Implement and verify a greeting.",
+                    "tasks": [
+                        {
+                            "id": "implement",
+                            "title": "Implement greeting",
+                            "objective": "Add the requested greeting.",
+                            "dependencies": [],
+                            "acceptance_criteria": ["Greeting is present."],
+                            "allowed_paths": ["scripts/greet.py"],
+                        }
+                    ],
+                },
+            ),
+            _plan_role_call(
+                "executor",
+                "plan_task_complete",
+                {
+                    "summary": "Greeting implemented.",
+                    "changed_paths": ["scripts/greet.py"],
+                    "validation_summary": "Direct check passed.",
+                },
+            ),
+            _plan_role_call(
+                "verifier",
+                "plan_verdict",
+                {
+                    "passed": True,
+                    "reason": "The greeting meets the acceptance criterion.",
+                    "suggestions": [],
+                    "classification": None,
+                },
+            ),
+        ]
+    )
+
+    async def approve(run_id: str) -> None:
+        await plan_store.approve(run_id)
+
+    observed: list[str] = []
+
+    async def notify(event_type: str, _run: object) -> None:
+        observed.append(event_type)
+
+    orchestrator = PlanOrchestrator(
+        store=plan_store,
+        client=client,
+        automation=CodingSandboxAutomation(
+            lifecycle,  # type: ignore[arg-type]
+            wait_timeout_seconds=1,
+            poll_interval_seconds=0,
+        ),
+        read_tools=[],
+        coding_tools=[],
+        wait_for_approval=approve,
+        notify=notify,
+        cancelled=lambda: False,
+    )
+    try:
+        result = await orchestrator.run(
+            session_id=session.id,
+            request_id="request-success",
+            goal="add greeting",
+        )
+        assert result.run.status == "awaiting_artifact_approval"
+        assert result.run.tasks[0].status == "passed"
+        assert result.run.tasks[0].verification is not None
+        assert result.run.tasks[0].verification.passed is True
+        assert result.sandbox is not None and result.sandbox["approval_required"] is True
+        assert lifecycle.calls == ["start", "validate", "prepare_publish"]
+        assert "plan_task_verified" in observed
+    finally:
+        await session_store.close()
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_verifier_rejection_exposes_feedback_and_never_freezes(
+    tmp_path: Path,
+) -> None:
+    session_store = SQLiteSessionStore(tmp_path / "plan-rejected.db")
+    await session_store.init()
+    session = await session_store.create_session(title="Plan rejected")
+    assert session_store.connection is not None
+    plan_store = PlanStore(session_store.connection)
+    await plan_store.init()
+    lifecycle = _AutomationLifecycle()
+    client = FakeClient(
+        [
+            _plan_role_call(
+                "planner",
+                "plan_submit",
+                {
+                    "goal": "fix output",
+                    "summary": "Fix and verify output.",
+                    "tasks": [
+                        {
+                            "id": "fix",
+                            "title": "Fix output",
+                            "objective": "Produce the required output.",
+                            "acceptance_criteria": ["Output equals expected value."],
+                        }
+                    ],
+                },
+            ),
+            _plan_role_call(
+                "executor",
+                "plan_task_complete",
+                {
+                    "summary": "Output changed.",
+                    "changed_paths": ["scripts/main.py"],
+                    "validation_summary": "No authoritative expected value was available.",
+                },
+            ),
+            _plan_role_call(
+                "verifier",
+                "plan_verdict",
+                {
+                    "passed": False,
+                    "reason": "The expected value is not specified.",
+                    "suggestions": ["Ask the user for the expected value."],
+                    "classification": "user_input_required",
+                },
+            ),
+        ]
+    )
+
+    async def approve(run_id: str) -> None:
+        await plan_store.approve(run_id)
+
+    async def notify(_event_type: str, _run: object) -> None:
+        return None
+
+    orchestrator = PlanOrchestrator(
+        store=plan_store,
+        client=client,
+        automation=CodingSandboxAutomation(
+            lifecycle,  # type: ignore[arg-type]
+            wait_timeout_seconds=1,
+            poll_interval_seconds=0,
+        ),
+        read_tools=[],
+        coding_tools=[],
+        wait_for_approval=approve,
+        notify=notify,
+        cancelled=lambda: False,
+    )
+    try:
+        result = await orchestrator.run(
+            session_id=session.id,
+            request_id="request-rejected",
+            goal="fix output",
+        )
+        task = result.run.tasks[0]
+        assert result.run.status == "blocked"
+        assert task.status == "failed"
+        assert task.verification is not None
+        assert task.verification.reason == "The expected value is not specified."
+        assert task.verification.suggestions == ("Ask the user for the expected value.",)
+        assert lifecycle.calls == ["start"]
+    finally:
+        await session_store.close()
 
 
 async def _wait_for_status(

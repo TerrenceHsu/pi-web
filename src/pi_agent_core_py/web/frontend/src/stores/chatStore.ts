@@ -19,6 +19,7 @@ import * as eventsApi from "../api/events"
 import * as regenerateApi from "../api/regenerate"
 import * as slashCommandsApi from "../api/slashCommands"
 import * as approvalsApi from "../api/approvals"
+import * as plansApi from "../api/plans"
 import { ApiError } from "../api/client"
 import { createEventSocket, type EventSocket } from "../api/websocket"
 import { useContextBudgetStore } from "./contextBudgetStore"
@@ -35,6 +36,9 @@ import type {
   ToolApprovalItem,
   ToolApprovalRecord,
   FileReadItem,
+  ExecutionMode,
+  PlanRun,
+  PlanRunItem,
   WebEvent,
   WebEventEnvelope,
 } from "../types"
@@ -291,6 +295,10 @@ export const useChatStore = defineStore("chat", () => {
     "context_budget_updated",
     "turn_end", "turn_start", "agent_start",
     "request_start", "request_queued",
+    "plan_run_started", "plan_created", "plan_approved", "plan_sandbox_ready",
+    "plan_task_started", "plan_task_execution_submitted", "plan_task_verified",
+    "plan_task_rejected", "plan_task_blocked", "plan_blocked", "plan_failed",
+    "plan_cancelled", "plan_artifact_ready", "plan_completed",
   ])
 
   // P1-B3-2: reconnect replay state
@@ -328,6 +336,24 @@ export const useChatStore = defineStore("chat", () => {
   // ----------------------------------------------------------------------
   // 历史消息加载
   // ----------------------------------------------------------------------
+
+  function upsertPlanRun(plan: PlanRun): void {
+    const id = `plan:${plan.id}`
+    const index = streamItems.value.findIndex((item) => item.id === id)
+    const previous = index >= 0 ? (streamItems.value[index] as PlanRunItem) : null
+    const item: PlanRunItem = {
+      kind: "plan_run",
+      id,
+      plan,
+      submitting: previous?.submitting ?? false,
+      error: previous?.error ?? null,
+    }
+    if (index >= 0) {
+      streamItems.value[index] = item
+    } else {
+      streamItems.value.push(item)
+    }
+  }
 
   function toolResultMessageToItem(msg: AgentMessage, id: string): ChatStreamItem {
     const toolName = msg.name || "unknown_tool"
@@ -492,6 +518,28 @@ export const useChatStore = defineStore("chat", () => {
           if (item) items.push(item)
         }
       })
+      if (sessionId) {
+        try {
+          const latest = await plansApi.getLatestPlanRun(sessionId)
+          if (latest.plan) {
+            const planItem: PlanRunItem = {
+              kind: "plan_run",
+              id: `plan:${latest.plan.id}`,
+              plan: latest.plan,
+            }
+            let insertAt = items.length
+            for (let index = items.length - 1; index >= 0; index -= 1) {
+              if (items[index].kind === "assistant_message") {
+                insertAt = index
+                break
+              }
+            }
+            items.splice(insertAt, 0, planItem)
+          }
+        } catch {
+          // Message history remains usable if the optional Plan control plane is disabled.
+        }
+      }
       if (sessionId && activeSessionId.value !== sessionId) return
       streamItems.value = items
       // reset turn-tracking 状态
@@ -952,6 +1000,7 @@ export const useChatStore = defineStore("chat", () => {
     files?: FileRef[]
     skillNames?: string[]
     codingMode?: boolean
+    executionMode?: ExecutionMode
   }) {
     if (sending.value) return
     if (!input.text.trim()) return
@@ -1027,6 +1076,7 @@ export const useChatStore = defineStore("chat", () => {
         file_ids: input.fileIds,
         skill_names: input.skillNames,
         coding_mode: input.codingMode,
+        execution_mode: input.executionMode,
       })
 
       currentRequestId.value = resp.request_id
@@ -1537,6 +1587,28 @@ export const useChatStore = defineStore("chat", () => {
     }
   }
 
+  async function approvePlan(runId: string): Promise<void> {
+    const itemId = `plan:${runId}`
+    updateItem(itemId, (item: PlanRunItem) => {
+      item.submitting = true
+      item.error = null
+    })
+    try {
+      const response = await plansApi.approvePlanRun(runId)
+      upsertPlanRun(response.plan)
+      updateItem(itemId, (item: PlanRunItem) => {
+        item.submitting = false
+      })
+    } catch (cause) {
+      const message = cause instanceof ApiError ? cause.detail : String(cause)
+      updateItem(itemId, (item: PlanRunItem) => {
+        item.submitting = false
+        item.error = message
+      })
+      throw cause
+    }
+  }
+
   // ----------------------------------------------------------------------
   // handleEvent —— WS event → ChatStreamItem 完整映射
   // ----------------------------------------------------------------------
@@ -1669,6 +1741,11 @@ export const useChatStore = defineStore("chat", () => {
     currentTurnEvents.value.push(event)
 
     const t = event.type
+
+    if (typeof t === "string" && t.startsWith("plan_") && event.plan) {
+      upsertPlanRun(event.plan as PlanRun)
+      return
+    }
 
     if (t === "context_budget_updated") {
       useContextBudgetStore().applyEvent(activeSessionId.value, event)
@@ -2343,6 +2420,7 @@ export const useChatStore = defineStore("chat", () => {
     recoverActiveRequestEvents,
     loadPendingApprovals,
     resolveToolApproval,
+    approvePlan,
     resetWorkspace,
   }
 })

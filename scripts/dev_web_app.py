@@ -138,6 +138,7 @@ def main() -> None:
             enable_auto_memory=True,
             enable_code_continuity=True,
             enable_intent_routing=True,
+            enable_plan_mode=True,
         )
 
     app = create_authenticated_app(

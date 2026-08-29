@@ -21,6 +21,8 @@ const props = withDefaults(
     knowledgeMode?: boolean
     codingMode?: boolean
     codingModeAvailable?: boolean
+    planMode?: boolean
+    planModeAvailable?: boolean
   }>(),
   {
     uploading: false,
@@ -34,6 +36,8 @@ const props = withDefaults(
     knowledgeMode: false,
     codingMode: false,
     codingModeAvailable: true,
+    planMode: false,
+    planModeAvailable: false,
   },
 )
 
@@ -43,6 +47,7 @@ const emit = defineEmits<{
   (e: "upload-files", files: FileList | File[]): void
   (e: "remove-attachment", fileId: string): void
   (e: "update:codingMode", enabled: boolean): void
+  (e: "update:planMode", enabled: boolean): void
 }>()
 
 const text = ref("")
@@ -185,6 +190,24 @@ function onDragOver(e: DragEvent) {
         &lt;/&gt; Code
       </button>
 
+      <button
+        v-if="!knowledgeMode"
+        type="button"
+        class="coding-mode-btn plan-mode-btn"
+        :class="{ active: planMode }"
+        data-testid="plan-mode-toggle"
+        :aria-pressed="planMode"
+        :disabled="sending || !planModeAvailable"
+        :title="
+          planModeAvailable
+            ? 'Use Planner, Executor, and Verifier for this Coding request'
+            : 'Plan mode is unavailable'
+        "
+        @click="emit('update:planMode', !planMode)"
+      >
+        ☷ Plan
+      </button>
+
       <input
         v-if="attachmentsEnabled"
         ref="fileInput"
@@ -254,6 +277,9 @@ function onDragOver(e: DragEvent) {
       <span v-else-if="knowledgeMode" class="muted"
         >Knowledge mode · approved Wiki pages and read-only Raw evidence · edits require
         approval</span
+      >
+      <span v-else-if="planMode" class="coding-hint"
+        >Plan mode · approve tasks before Sandbox execution · Verifier checks each task</span
       >
       <span v-else-if="codingMode" class="coding-hint"
         >Coding mode · Sandbox starts automatically · validated changes require approval</span

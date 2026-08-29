@@ -206,6 +206,9 @@ class WebAppState(BaseModel):
     auto_memory_enabled: bool = False
     # Product-level deterministic routing; low-level embedders opt in.
     intent_routing_enabled: bool = False
+    # Planner–Executor–Verifier is a Coding execution mode, not an intent route.
+    plan_mode_enabled: bool = False
+    plan_store: Any = None
     continuity_recovery_summary: dict[str, int] = Field(default_factory=dict)
     # P0-4 Step 2: MCP server 配置（name → WebMCPServerConfig）
     mcp_server_configs: dict[str, WebMCPServerConfig] = Field(default_factory=dict)

@@ -49,6 +49,10 @@ export interface AgentStateSummary {
     enabled: boolean
     routes: ["read_only", "coding", "knowledge"]
   }
+  plan_mode: {
+    enabled: boolean
+    execution_modes: ["direct", "plan"]
+  }
 }
 
 export interface EventsResponse {

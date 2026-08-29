@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue"
 
-import { abortRun, listSlashCommands } from "../../api"
+import { abortRun, getState, listSlashCommands } from "../../api"
 import type { SlashCommandDefinition } from "../../types"
 import { useChatStore } from "../../stores/chatStore"
 import { useCodingSandboxStore } from "../../stores/codingSandboxStore"
@@ -30,6 +30,11 @@ const skillStore = useSkillStore()
 const providerStore = useProviderStore()
 const knowledgeMode = computed(() => props.mode === "knowledge")
 const codingMode = ref(false)
+const planMode = ref(false)
+const planModeEnabled = ref(false)
+const planModeAvailable = computed(
+  () => planModeEnabled.value && codingSandboxStore.available,
+)
 
 const activeSessionId = computed(() => sessionStore.activeSessionId)
 const hasSession = computed(() => !!activeSessionId.value)
@@ -51,9 +56,22 @@ const slashCommands = ref<SlashCommandDefinition[]>([
 watch(
   () => codingSandboxStore.available,
   (available) => {
-    if (!available) codingMode.value = false
+    if (!available) {
+      codingMode.value = false
+      planMode.value = false
+    }
   },
 )
+
+function setCodingMode(enabled: boolean) {
+  codingMode.value = enabled
+  if (!enabled) planMode.value = false
+}
+
+function setPlanMode(enabled: boolean) {
+  planMode.value = enabled
+  if (enabled) codingMode.value = true
+}
 
 /** 保留最后一次失败的输入文本——失败时还原，避免用户重新打字。 */
 const lastFailedText = ref<string>("")
@@ -63,6 +81,13 @@ onMounted(async () => {
   if (knowledgeMode.value) {
     slashCommands.value = []
     return
+  }
+  try {
+    const state = await getState()
+    planModeEnabled.value = state.plan_mode?.enabled === true
+  } catch (e) {
+    console.error("load Plan mode state failed", e)
+    planModeEnabled.value = false
   }
   try {
     const catalog = await listSlashCommands()
@@ -132,14 +157,15 @@ async function onSubmit(text: string) {
 
   const fileIds = knowledgeMode.value ? [] : pendingAttachments.value.map((f) => f.id)
   const files = knowledgeMode.value ? [] : pendingAttachments.value.slice()
-  const skillNames = knowledgeMode.value ? [] : [...skillStore.selectedSkillNames]
+  const skillNames =
+    knowledgeMode.value || planMode.value ? [] : [...skillStore.selectedSkillNames]
 
   try {
     const preview = await contextBudgetStore.preview(activeSessionId.value!, {
       text,
       file_ids: fileIds,
       skill_names: skillNames,
-      coding_mode: codingMode.value,
+      coding_mode: codingMode.value || planMode.value,
     })
     if (preview?.estimate.level === "blocked") {
       contextBudgetStore.error =
@@ -153,7 +179,8 @@ async function onSubmit(text: string) {
       fileIds,
       files,
       skillNames,
-      codingMode: codingMode.value,
+      codingMode: codingMode.value || planMode.value,
+      executionMode: planMode.value ? "plan" : "direct",
     })
     // 成功：清空 pending；reload session files（让侧栏其它视图也同步）
     fileStore.clearPendingAttachments()
@@ -259,7 +286,10 @@ function dismissError() {
       :knowledge-mode="knowledgeMode"
       :coding-mode="codingMode"
       :coding-mode-available="codingSandboxStore.available"
-      @update:coding-mode="codingMode = $event"
+      :plan-mode="planMode"
+      :plan-mode-available="planModeAvailable"
+      @update:coding-mode="setCodingMode"
+      @update:plan-mode="setPlanMode"
       @submit="onSubmit"
       @abort="onAbort"
       @upload-files="onUploadFiles"
