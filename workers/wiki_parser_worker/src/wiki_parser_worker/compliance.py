@@ -28,10 +28,10 @@ def compliance_identity() -> WorkerComplianceIdentity:
 
     return WorkerComplianceIdentity(
         component_id="wiki-parser-worker",
-        version="0.0.28",
+        version="0.0.29",
         license_expression="AGPL-3.0-only",
         runtime_ready=True,
-        source_offer_archive="wiki-parser-worker-0.0.28-source.tar.gz",
+        source_offer_archive="wiki-parser-worker-0.0.29-source.tar.gz",
     )
 
 

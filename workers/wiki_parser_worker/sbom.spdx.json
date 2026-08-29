@@ -2,18 +2,18 @@
   "SPDXID": "SPDXRef-DOCUMENT",
   "spdxVersion": "SPDX-2.3",
   "dataLicense": "CC0-1.0",
-  "name": "pi-wiki-parser-worker-0.0.28-adapter-gate",
-  "documentNamespace": "https://pi-agent.invalid/spdx/wiki-parser-worker/0.0.28/adapter-gate",
+  "name": "pi-wiki-parser-worker-0.0.29-adapter-gate",
+  "documentNamespace": "https://pi-agent.invalid/spdx/wiki-parser-worker/0.0.29/adapter-gate",
   "creationInfo": {
     "created": "2026-08-24T00:00:00Z",
-    "creators": ["Tool: pi-agent-compliance-gate-0.0.28"]
+    "creators": ["Tool: pi-agent-compliance-gate-0.0.29"]
   },
   "documentDescribes": ["SPDXRef-Package-WikiParserWorker"],
   "packages": [
     {
       "SPDXID": "SPDXRef-Package-WikiParserWorker",
       "name": "pi-wiki-parser-worker",
-      "versionInfo": "0.0.28",
+      "versionInfo": "0.0.29",
       "downloadLocation": "NOASSERTION",
       "filesAnalyzed": false,
       "licenseConcluded": "AGPL-3.0-only",

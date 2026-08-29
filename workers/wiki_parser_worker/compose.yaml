@@ -7,7 +7,7 @@ services:
       dockerfile: Dockerfile
       platforms:
         - linux/amd64
-    image: pi-wiki-parser-worker:0.0.28
+    image: pi-wiki-parser-worker:0.0.29
     restart: unless-stopped
     network_mode: none
     read_only: true

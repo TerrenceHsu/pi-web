@@ -6,17 +6,17 @@
 
 | 项 | 当前事实 |
 |---|---|
-| 代码基线 | `0.0.28` 发布基线之上已完成 Coding Sandbox 阶段 4A–4C、Session Workspace 阶段 5–7；Coding Agent Workspace 连续性阶段 1–5 已提交，阶段 5 实现提交为 `c9ed330` |
+| 代码基线 | `0.0.29` 发布基线；包含 Coding Sandbox 阶段 4A–4C、Session Workspace 阶段 5–7，以及 Coding Agent Workspace 连续性阶段 1–5 |
 | 分支 | `master` |
-| 最新 release tag | `0.0.28`；annotated tag 指向发布基线，不包含其后的阶段 4A–6 提交 |
-| Python / API 版本 | `0.0.28`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
-| 前端包版本 | `0.0.28`（`package.json` 与 lockfile 一致） |
+| 最新 release tag | `0.0.29`；annotated tag 指向本次统一版本与发布验证提交 |
+| Python / API 版本 | `0.0.29`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
+| 前端与 Worker 版本 | `0.0.29`（Web package/lock 与 Wiki Parser Worker package/lock/OCI/compliance metadata 一致） |
 | 许可证 | MIT；根 `LICENSE` 为标准正文，`pyproject.toml` 与 wheel 均直接引用/携带该文件 |
 | Git remote | 当前仓库**未配置 remote**，因此尚无可执行的 push 目标 |
 | Python | 声明支持 `>=3.11`；本机验证使用 Python 3.12.13（conda `pipy`） |
 | 产品边界 | localhost-only 本地 Agent 工作台；不是公网 SaaS |
 
-> `0.0.28` 是当前 Python、API、前端 package 与 release tag 的统一发布基线。
+> `0.0.29` 是当前 Python、API、前端、Wiki Parser Worker 与 release tag 的统一发布基线。
 
 ## 当前交付状态
 
@@ -52,7 +52,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 | Durable operation / recovery | ✅ 完成 | `8a5c569`；append-only operation records、Checkpointer restart recovery、原子文件 generation、JSON journal |
 | Complete-turn Compaction semantics | ✅ 完成 | `0c72679`；完整 turn、token/window 审计、previous-summary envelope、瞬时错误重试 |
 | 全仓 Ruff / strict Mypy / CI 收敛 | ✅ 完成 | Ruff 0；strict Mypy 170 source files / 0 issues；Python CI timeout 30 分钟 |
-| Release metadata 与 MIT License | ✅ 完成 | `8a6ff2e`；Python/API/前端统一 `0.0.28`，wheel 携带根许可证 |
+| `0.0.29` Release metadata 与许可证 | ✅ 完成 | Python/API/前端/Worker 统一版本；主 wheel 携带 MIT，Worker wheel 携带 AGPL 与合规资产；最小发布门禁通过 |
 | 当前发布前浏览器/联网门禁 | ✅ 完成 | 精简 Playwright 19/19、0 retry/flaky；真实 E2B Managed Sandbox/审批/WorkspaceStore 回写 PASS；此前 DDGS + GLM 真实 smoke 3/3 |
 | Managed Coding Sandbox P0 0–10 | ✅ 完成 | 独立包、快照、E2B、代码工具、固定验证、签名制品、本机事务 Publisher、Web 生命周期/状态恢复/审批发布 UI，以及真实 E2B、完整 CI、攻击矩阵和 Browser E2E 验收 |
 | 自动 Coding 请求编排 | ✅ 完成 | Chat `Code` 模式自动创建/复用 Sandbox，本轮仅暴露 9 个 `coding_*` 工具；Agent 结束后 Backend 独立重验并冻结到 `awaiting_approval`，绝不自动发布；验证失败保留可修复状态 |
@@ -174,7 +174,8 @@ Frontend 与 Browser E2E 均实际复跑；真实 E2B 也重新执行 Managed Sa
 | Frontend ESLint | **PASS** | `eslint . --max-warnings=0` |
 | Frontend production build | **PASS** | `vite build`；0 mixed dynamic/static import warning |
 | 版本/许可证一致性回归 | **3 passed** | Python、两个 FastAPI、前端 package/lockfile 与根 LICENSE 元数据一致 |
-| Python wheel 构建 | **PASS** | `pi_agent_core_py-0.0.28-py3-none-any.whl`；METADATA 与归档内 LICENSE 均已核验 |
+| `0.0.29` wheel 构建 | **PASS** | `pi_agent_core_py-0.0.29-py3-none-any.whl` 与 `pi_wiki_parser_worker-0.0.29-py3-none-any.whl`；METADATA、MIT/AGPL LICENSE、Worker 合规资产和临时目录排除均已核验 |
+| `0.0.29` 最小发布回归 | **PASS** | Ruff；strict Mypy 179 source files；Backend 51；Frontend 11、typecheck/lint/build；不触发真实网络、E2B 或完整 Playwright |
 | B7 定向回归 | **248/248 passed** | SQLite Store lifecycle/open failure |
 | Keyring 定向回归 | **94/94 passed** | Runtime、launcher 与 restart 范围 |
 | 真实 Windows Keyring 探针 | **write/read = true；cleanup = true** | 随机非用户值，执行后删除；同账号/同解释器复验与安全取证步骤已形成 Windows smoke 文档 |
@@ -225,11 +226,11 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 ## 当前阻塞项
 
-LLM Wiki 阶段 0–10、Session Workspace 阶段 1–7 与 Coding Agent Workspace 连续性阶段 1–5 已完成，没有功能阻塞。真实 OCI Worker 为 `runtime_ready=true`；release tag 仍为 `0.0.28`；若需发布后续提交或 push，仍需先决定新版本并配置 Git remote。
+LLM Wiki 阶段 0–10、Session Workspace 阶段 1–7 与 Coding Agent Workspace 连续性阶段 1–5 已完成，没有功能阻塞。真实 OCI Worker 为 `runtime_ready=true`；当前 release tag 为 `0.0.29`。仓库仍未配置 Git remote，因此本次发布只包含本地提交与 tag。
 
 ## 建议下一步
 
-1. 若准备新发布，统一提升版本并创建下一 annotated tag（建议从 `0.0.28` 提升到 `0.0.29`）。
-2. 若继续功能开发，下一项可进入 P2-D Session organization；Modal 与图片能力继续按既有决定暂缓。
+1. 若继续功能开发，下一项可进入 P2-D Session organization。
+2. 如需发布到远端，先配置 Git remote 再单独授权 push；Modal 与图片能力继续按既有决定暂缓。
 
 未完成事项的唯一清单见 [`TODO.md`](TODO.md)。使用与架构说明见 [`README.md`](README.md)。

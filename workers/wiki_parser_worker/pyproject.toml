@@ -1,6 +1,6 @@
 [project]
 name = "pi-wiki-parser-worker"
-version = "0.0.28"
+version = "0.0.29"
 description = "Isolated PDF parser worker for the pi-agent LLM Wiki"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

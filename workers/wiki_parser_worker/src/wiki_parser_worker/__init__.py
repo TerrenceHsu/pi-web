@@ -16,7 +16,7 @@ from .parsers import DoclingAccurateParser, PyMuPdf4LlmFastParser
 from .preflight import inspect_pdf, route_pdf
 from .quality import QualityEvaluator
 
-__version__ = "0.0.28"
+__version__ = "0.0.29"
 
 __all__ = [
     "DoclingAccurateParser",

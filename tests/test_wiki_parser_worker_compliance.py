@@ -69,7 +69,7 @@ def test_worker_package_has_exact_agpl_identity_and_complete_gate_assets() -> No
     license_bytes = (_WORKER_ROOT / "LICENSE").read_bytes()
 
     assert manifest["component_id"] == "wiki-parser-worker"
-    assert manifest["version"] == "0.0.28"
+    assert manifest["version"] == "0.0.29"
     assert manifest["license_expression"] == "AGPL-3.0-only"
     assert manifest["runtime_ready"] is True
     assert project["project"]["license"] == {"file": "LICENSE"}
@@ -340,7 +340,7 @@ def test_about_api_exposes_manifest_assets_and_deterministic_source_archive() ->
             archive.content
         ).hexdigest()
         assert archive.headers["x-source-tree-sha256"] == worker["source_tree_sha256"]
-        assert "wiki-parser-worker-0.0.28-source.tar.gz" in archive.headers[
+        assert "wiki-parser-worker-0.0.29-source.tar.gz" in archive.headers[
             "content-disposition"
         ]
 

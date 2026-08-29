@@ -5,7 +5,7 @@ declared by `component-manifest.json`, including its Python source, build metada
 license, SBOM and this offer.
 
 Users of the pi-agent web application can open **About & Source** and download the deterministic
-archive named `wiki-parser-worker-0.0.28-source.tar.gz` at no charge. The equivalent API is:
+archive named `wiki-parser-worker-0.0.29-source.tar.gz` at no charge. The equivalent API is:
 
 ```text
 GET /api/about/wiki-parser-worker/source-offer

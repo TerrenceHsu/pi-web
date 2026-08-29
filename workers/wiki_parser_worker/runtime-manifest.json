@@ -13,7 +13,7 @@
     "compose_file": "compose.yaml",
     "uv_lock": {
       "path": "uv.lock",
-      "sha256": "7a6ffbe55db298480931ed576886501d637f0c1e32f7206818624be0b4036040",
+      "sha256": "4ab8ff1f8fc7bfb08802d879c59293299ad1674b19e6d66be5d30f1965bdf496",
       "package_count": 88
     },
     "requirements_lock": {

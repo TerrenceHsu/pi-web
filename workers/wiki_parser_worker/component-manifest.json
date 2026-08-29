@@ -2,10 +2,10 @@
   "schema_version": 1,
   "component_id": "wiki-parser-worker",
   "name": "pi Wiki Parser Worker",
-  "version": "0.0.28",
+  "version": "0.0.29",
   "license_expression": "AGPL-3.0-only",
   "runtime_ready": true,
-  "source_archive_name": "wiki-parser-worker-0.0.28-source.tar.gz",
+  "source_archive_name": "wiki-parser-worker-0.0.29-source.tar.gz",
   "files": [
     {"path": ".dockerignore", "role": "build"},
     {"path": "LICENSE", "role": "license"},

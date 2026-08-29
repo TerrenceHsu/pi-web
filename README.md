@@ -310,7 +310,7 @@ FakeClient，不访问真实 Provider。
 - Wiki 支持 Docling OCR preset，但不做通用图片理解、向量检索、Multi-Agent、RBAC/OAuth 或公网部署
 - MCP HTTP transport 未实现；只支持 stdio
 - 历史数据中已经存在的 `U+FFFD` 无法自动恢复原字符
-- 当前 package baseline 为 `0.0.28`，Python、FastAPI/Auth 与前端版本已统一；Git remote 仍待配置
+- 当前 package baseline 为 `0.0.29`，Python、FastAPI/Auth、前端与 Wiki Parser Worker 版本已统一；Git remote 仍待配置
 
 ## 项目结构
 

@@ -35,7 +35,7 @@ def _download(url: str, destination: Path, expected_sha256: str) -> int:
         raise ValueError("source archive URL must use HTTPS")
     request = urllib.request.Request(
         url,
-        headers={"User-Agent": "pi-wiki-parser-source-build/0.0.28"},
+        headers={"User-Agent": "pi-wiki-parser-source-build/0.0.29"},
     )
     digest = hashlib.sha256()
     size = 0

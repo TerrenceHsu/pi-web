@@ -188,7 +188,7 @@ class PersistentOciParserProvider:
             return ParserProbeV2(
                 provider="dual_pdf",
                 available=False,
-                worker_version="0.0.28",
+                worker_version="0.0.29",
                 license_mode="agpl_3_0",
                 routing_config=self._routing,
                 observed_at_ms=self._clock_ms(),

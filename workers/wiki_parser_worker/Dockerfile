@@ -26,7 +26,7 @@ RUN chmod -R a-w /opt/runtime /opt/models /opt/upstream-sources
 
 FROM ${PYTHON_IMAGE} AS runtime
 LABEL org.opencontainers.image.title="pi Wiki Parser Worker" \
-      org.opencontainers.image.version="0.0.28" \
+      org.opencontainers.image.version="0.0.29" \
       org.opencontainers.image.licenses="AGPL-3.0-only" \
       org.opencontainers.image.source="/usr/share/pi-wiki-parser-worker/source"
 ENV HF_HUB_DISABLE_TELEMETRY=1 \

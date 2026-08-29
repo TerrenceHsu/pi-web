@@ -1,7 +1,7 @@
 # Notices — pi Wiki Parser Worker
 
 Component: `pi-wiki-parser-worker`
-Version: `0.0.28`
+Version: `0.0.29`
 License expression: `AGPL-3.0-only`
 Copyright: Copyright (C) 2026 Pi Python Port
 

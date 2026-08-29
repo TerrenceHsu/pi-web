@@ -26,7 +26,7 @@ _PREFIXES = {
 
 
 def _download(url: str, destination: Path, expected_size: int, expected_sha: str) -> None:
-    request = urllib.request.Request(url, headers={"User-Agent": "pi-wiki-parser-build/0.0.28"})
+    request = urllib.request.Request(url, headers={"User-Agent": "pi-wiki-parser-build/0.0.29"})
     digest = hashlib.sha256()
     size = 0
     temporary = destination.with_name(f".{destination.name}.download")

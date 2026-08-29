@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.0.29] — 2026-08-29
+
+### Coding Agent Workspace continuity completion（2026-08-29）
+
+- 统一 Workspace 路径所有权与默认路由：用户输入进入 `inputs/**`、代码进入 `scripts/**`、Agent 交付物进入 `artifacts/**`，固定 continuity 文档不可由普通文件入口或 Sandbox 伪造
+- 已发布代码 revision 确定性生成只读 `docs/architecture.md`、`docs/code-flow.md` 与 `docs/validation.md`；代码 mutation 先标 stale，全套摘要持久化后才转 current，验证结论只接受真实 Sandbox evidence
+- 新增 provider-neutral `WorkspaceContextAssembler`，在稳定 revision 上向普通 Prompt、Regenerate 与 Context Budget 注入有界、可审计的 AGENT/Memory/current code/tree/Pending Memory/Sandbox 状态；stale 摘要和待批准 Artifact 不冒充当前代码
+- 完成零聊天历史进程重启续作，以及 Pending Memory、待批准 Artifact、stale code summary 组合场景验收；同步/异步 Prompt 和 Context Budget 公开 secret-free revision/context SHA/included/omitted 审计
+
 ### Automatic per-turn Session Memory（2026-08-29）
 
 - 普通 Session Prompt 与 Regenerate 成功提交后自动生成有界 turn evidence，并通过每 Session 串行、append-only `auto_memory` operation 使用当前 Provider 累计更新 `Memory.md`；模型调用不启用 Tools、Skills 或 MCP，聊天消息不会被清空
@@ -64,6 +73,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - 生命周期持久化从 blind update 改为完整旧记录 compare-and-swap；并发 validate/freeze/cancel/discard 只有一个转换可提交，旧请求固定返回 `operation_conflict`
 - 明确 Validation→Freeze 屏障：屏障前 `validation_stale` 回到可重验状态，屏障后远端归档或最终指纹变化保留 `artifact_stale` 并终态销毁，不在 fail-closed operation 内重试
 - 修改 1 个既有测试验证公开状态动作和 stale CAS；Backend 定向 9 passed，Ruff、strict Mypy、Frontend typecheck/lint 与 CodingSandbox Vitest 均通过
+
+### Release validation（2026-08-29）
+
+- Python/API、Web 前端与独立 Wiki Parser Worker 的发布版本统一为 `0.0.29`；Worker OCI label、compose image、lock、SBOM、source offer 和合规身份同步更新
+- 最小发布门禁：全量 Ruff PASS；strict Mypy 179 source files / 0 issues；Backend 51 passed；Frontend 11 passed，typecheck/lint/production build PASS
+- 构建并核验 `pi_agent_core_py-0.0.29-py3-none-any.whl` 与 `pi_wiki_parser_worker-0.0.29-py3-none-any.whl`：METADATA 版本一致，MIT/AGPL 许可证与 Worker 合规资产完整，未包含工作区临时缓存
+
+## [0.0.28] — 2026-08-28
 
 ### Complete-turn compaction semantics（2026-08-20）
 

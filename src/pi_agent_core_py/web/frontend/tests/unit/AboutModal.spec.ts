@@ -18,14 +18,14 @@ import SessionSidebar from "../../src/components/layout/SessionSidebar.vue"
 const response = {
   application: {
     name: "pi-agent-core-py",
-    version: "0.0.28",
+    version: "0.0.29",
     license_expression: "MIT",
   },
   components: [
     {
       component_id: "wiki-parser-worker",
       name: "pi Wiki Parser Worker",
-      version: "0.0.28",
+      version: "0.0.29",
       license_expression: "AGPL-3.0-only",
       runtime_ready: true,
       source_offer_available: true,
@@ -81,7 +81,7 @@ describe("AboutModal", () => {
 
     expect(aboutApi.downloadWorkerSource).toHaveBeenCalledWith(
       "/api/about/wiki-parser-worker/source",
-      "wiki-parser-worker-0.0.28-source.tar.gz",
+      "wiki-parser-worker-0.0.29-source.tar.gz",
     )
   })
 
