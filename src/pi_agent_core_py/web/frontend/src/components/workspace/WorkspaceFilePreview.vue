@@ -25,8 +25,10 @@ const editing = ref(false)
 
 const format = computed(() => refFormat(props.file))
 const isMarkdown = computed(() => format.value === "markdown")
-const isDocumentOutput = computed(() => props.file.purpose === "document_conversion")
-const canEditMarkdown = computed(() => isMarkdown.value && !isDocumentOutput.value)
+const isReadOnly = computed(
+  () => props.file.content_editable === false || props.file.purpose === "document_conversion",
+)
+const canEditMarkdown = computed(() => isMarkdown.value && !isReadOnly.value)
 const canRead = computed(() => isSupported(format.value))
 const renderedMarkdown = computed(() => renderMarkdown(content.value))
 const dirty = computed(() => content.value !== baseline.value)
@@ -123,8 +125,8 @@ watch(() => [props.file.id, props.file.sha256], load, { immediate: true })
     <div v-else-if="error" class="preview-error" role="alert">{{ error }}</div>
     <template v-else-if="canRead">
       <template v-if="isMarkdown">
-        <div v-if="isDocumentOutput" class="preview-readonly">
-          Generated document output is read-only.
+        <div v-if="isReadOnly" class="preview-readonly">
+          This Workspace file is read-only.
         </div>
         <div v-if="!editing" class="markdown-preview markdown-body">
           <!-- markdown-it disables raw HTML; only parser output is rendered. -->

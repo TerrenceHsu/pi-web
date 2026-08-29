@@ -123,6 +123,9 @@ class ListFilesTool(AgentTool):
 
 def _ref_to_summary(ref: FileRef) -> dict[str, Any]:
     """FileRef → 给 LLM 看的摘要 dict（不含 path / content）。"""
+    from agent_workspace.store import workspace_path_policy
+
+    path_policy = workspace_path_policy(ref.logical_path, purpose=ref.purpose)
     return {
         "id": ref.id,
         "name": ref.name,
@@ -133,6 +136,14 @@ def _ref_to_summary(ref: FileRef) -> dict[str, Any]:
         "format": _classify_format(ref.name, ref.mime),
         "size": ref.size,
         "sha256": ref.sha256,
+        "category": path_policy.category,
+        "owner": path_policy.owner,
+        "content_editable": path_policy.user_content_editable,
+        "movable": path_policy.user_movable,
+        "deletable": path_policy.user_deletable,
+        "agent_writable": path_policy.agent_creatable,
+        "sandbox_publishable": path_policy.sandbox_publishable,
+        "immutable": path_policy.immutable_content,
     }
 
 

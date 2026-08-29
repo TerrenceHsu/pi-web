@@ -2,6 +2,7 @@
 import { ref } from "vue"
 
 import { downloadFileUrl } from "../../api/files"
+import type { FileRef } from "../../types"
 import type { SessionFileTreeNode } from "../../utils/fileTree"
 
 defineOptions({ name: "FileTreeNode" })
@@ -24,6 +25,11 @@ const expanded = ref(true)
 function editFile(fileId: string): void {
   emit("select-file", fileId)
   emit("edit-file", fileId)
+}
+
+function canDelete(file: FileRef): boolean {
+  if (file.deletable !== undefined) return file.deletable
+  return file.purpose === "file" || file.purpose === "input" || file.purpose === "memory"
 }
 </script>
 
@@ -85,7 +91,7 @@ function editFile(fileId: string): void {
           >↓</a
         >
         <button
-          v-if="node.file.purpose === 'file' || node.file.purpose === 'memory'"
+          v-if="canDelete(node.file)"
           type="button"
           class="tree-action"
           :aria-label="`Remove ${node.name}`"

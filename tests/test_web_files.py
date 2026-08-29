@@ -111,6 +111,14 @@ def test_upload_single_file(web_client):
     assert ref["mime"] == "text/plain"
     assert ref["sha256"]
     assert ref["id"].startswith("file-")
+    assert ref["logical_path"] == "inputs/test.txt"
+    assert ref["purpose"] == "input"
+    assert ref["category"] == "input"
+    assert ref["owner"] == "user"
+    assert ref["content_editable"] is False
+    assert ref["deletable"] is True
+    assert ref["sandbox_publishable"] is False
+    assert ref["immutable"] is True
 
 
 def test_default_and_new_sessions_have_eager_folders(web_client):
@@ -295,11 +303,22 @@ def test_agent_can_create_file_in_active_session_and_user_can_download(tmp_path)
         assert listed["count"] == 3
         generated = _ordinary_files(listed)[0]
         assert generated["name"] == "agent-result.md"
+        assert generated["logical_path"] == "artifacts/agent-result.md"
+        assert generated["category"] == "artifact"
+        assert generated["owner"] == "agent"
+        assert generated["agent_writable"] is True
+        assert generated["sandbox_publishable"] is True
         downloaded = client.get(
             f"/api/sessions/{sid}/files/{generated['id']}"
         )
         assert downloaded.status_code == 200
         assert b"Created inside this Session" in downloaded.content
+
+        protected = client.post(
+            f"/api/sessions/{sid}/workspace/markdown",
+            json={"logical_path": "HANDOFF.md", "content": "spoofed"},
+        )
+        assert protected.status_code == 400
     dispose_app(app)
 
 

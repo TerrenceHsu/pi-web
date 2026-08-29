@@ -24,7 +24,9 @@ class WriteFileTool(AgentTool):
         "The file is isolated to the current session and becomes available to "
         "list_files, view_file, download, and the user interface. This tool always "
         "creates a new managed file and never overwrites an existing file. Code "
-        "files are automatically placed below the logical scripts/ directory."
+        "files are placed below scripts/; other deliverables go below artifacts/. "
+        "Shared Markdown notes may explicitly use docs/notes/. System continuity "
+        "and user input paths are read-only to this tool."
     )
     parameters = {
         "type": "object",
@@ -43,8 +45,9 @@ class WriteFileTool(AgentTool):
                 "type": "string",
                 "description": (
                     "Optional relative folder in the Session tree, for example "
-                    "outputs or reports/2026. For code this folder is below scripts/. "
-                    "Absolute paths and .. are forbidden."
+                    "reports/2026. Ordinary output folders are below artifacts/; "
+                    "code folders are below scripts/. The explicit docs/notes/ "
+                    "namespace is also allowed. Absolute paths and .. are forbidden."
                 ),
                 "maxLength": 512,
             },
@@ -106,17 +109,21 @@ class WriteFileTool(AgentTool):
             FileTooLargeError,
             SessionStorageLimitError,
             UnsafeFilenameError,
+            agent_workspace_folder,
+            workspace_path_policy,
         )
 
         try:
+            destination_folder = agent_workspace_folder(filename, folder)
             ref = await self._file_store.write_text(
                 session_id,
                 filename,
                 content,
-                folder=folder,
+                folder=destination_folder,
                 origin="agent",
             )
             workspace = await self._file_store.get_workspace_state(session_id)
+            path_policy = workspace_path_policy(ref.logical_path, purpose=ref.purpose)
         except FileTooLargeError as exc:
             return _error(
                 tool_call_id,
@@ -161,6 +168,14 @@ class WriteFileTool(AgentTool):
             "sha256": ref.sha256,
             "session_id": session_id,
             "workspace_revision": workspace.revision,
+            "category": path_policy.category,
+            "owner": path_policy.owner,
+            "content_editable": path_policy.user_content_editable,
+            "movable": path_policy.user_movable,
+            "deletable": path_policy.user_deletable,
+            "agent_writable": path_policy.agent_creatable,
+            "sandbox_publishable": path_policy.sandbox_publishable,
+            "immutable": path_policy.immutable_content,
         }
         return ToolResult(
             tool_call_id=tool_call_id,

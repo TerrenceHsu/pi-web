@@ -5623,8 +5623,11 @@ def create_app(
 
     def _serialize_managed_file(ref: Any) -> dict[str, Any]:
         """返回逻辑文件 metadata，绝不暴露物理磁盘路径。"""
+        from agent_workspace.store import workspace_path_policy
+
         from ..tools.view_file import _classify_format
 
+        path_policy = workspace_path_policy(ref.logical_path, purpose=ref.purpose)
         return {
             "id": ref.id,
             "session_id": ref.session_id,
@@ -5638,6 +5641,14 @@ def create_app(
             "sha256": ref.sha256,
             "created_at": ref.created_at,
             "updated_at": ref.updated_at,
+            "category": path_policy.category,
+            "owner": path_policy.owner,
+            "content_editable": path_policy.user_content_editable,
+            "movable": path_policy.user_movable,
+            "deletable": path_policy.user_deletable,
+            "agent_writable": path_policy.agent_creatable,
+            "sandbox_publishable": path_policy.sandbox_publishable,
+            "immutable": path_policy.immutable_content,
         }
 
     def _serialize_workspace_state(workspace: Any) -> dict[str, Any]:
@@ -5935,6 +5946,7 @@ def create_app(
             WorkspaceVersionConflictError,
             is_markdown_filename,
             normalize_workspace_logical_path,
+            workspace_path_policy,
         )
 
         store = state.session_store
@@ -5978,6 +5990,11 @@ def create_app(
             if not is_markdown_filename(path.name):
                 raise UnsafeFilenameError(
                     "Workspace Markdown files must use .md, .markdown, or .mdx"
+                )
+            path_policy = workspace_path_policy(normalized)
+            if not path_policy.user_creatable:
+                raise UnsafeFilenameError(
+                    "Workspace path is reserved or cannot be created manually"
                 )
             parent = "" if str(path.parent) == "." else str(path.parent)
             created = await file_store.write_text(
@@ -6073,7 +6090,7 @@ def create_app(
             SessionStorageLimitError,
             VirtualFileNotFoundError,
             WorkspaceVersionConflictError,
-            is_markdown_filename,
+            workspace_path_policy,
         )
 
         store = state.session_store
@@ -6113,14 +6130,11 @@ def create_app(
         file_store = _require_file_store()
         try:
             current = await file_store.get_for_session(sid, fid)
-            if current.purpose in {"document_original", "document_conversion"}:
-                return JSONResponse(
-                    status_code=403,
-                    content={"detail": "Workspace document files are read-only"},
-                )
-            if current.purpose not in {"agent_instructions", "memory"} and not is_markdown_filename(
-                current.name
-            ):
+            path_policy = workspace_path_policy(
+                current.logical_path,
+                purpose=current.purpose,
+            )
+            if not path_policy.user_content_editable:
                 return JSONResponse(
                     status_code=403,
                     content={"detail": "only Workspace Markdown files are editable here"},
@@ -6275,6 +6289,7 @@ def create_app(
             UnsafeFilenameError,
             VirtualFileNotFoundError,
             WorkspaceVersionConflictError,
+            workspace_path_policy,
         )
 
         store = state.session_store
@@ -6297,22 +6312,15 @@ def create_app(
         file_store = _require_file_store()
         try:
             current = await file_store.get_for_session(sid, fid)
-            if current.purpose in {"agent_instructions", "memory"}:
+            path_policy = workspace_path_policy(
+                current.logical_path,
+                purpose=current.purpose,
+            )
+            if not path_policy.user_deletable:
                 return JSONResponse(
                     status_code=409,
                     content={
-                        "detail": (
-                            "AGENT.md and Memory.md are required; edit their content instead"
-                        )
-                    },
-                )
-            if current.purpose in {"document_original", "document_conversion"}:
-                return JSONResponse(
-                    status_code=409,
-                    content={
-                        "detail": (
-                            "Workspace document originals and conversion outputs are immutable"
-                        )
+                        "detail": "Workspace file is required or system-owned and cannot be deleted"
                     },
                 )
             await file_store.delete_for_session(

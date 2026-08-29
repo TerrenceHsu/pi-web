@@ -28,7 +28,7 @@ const sandboxStore = useCodingSandboxStore()
 const activeTab = ref<WorkspaceTab>("files")
 const sandboxModalOpen = ref(false)
 const createOpen = ref(false)
-const markdownPath = ref("notes/new-note.md")
+const markdownPath = ref("docs/notes/new-note.md")
 const markdownContent = ref("# New note\n")
 const fileInput = ref<HTMLInputElement | null>(null)
 const handledArtifactSignals = new Set<string>()
@@ -187,7 +187,7 @@ async function createMarkdown(): Promise<void> {
   if (!sessionId.value) return
   await fileStore.createMarkdownFile(sessionId.value, markdownPath.value, markdownContent.value)
   createOpen.value = false
-  markdownPath.value = "notes/new-note.md"
+  markdownPath.value = "docs/notes/new-note.md"
   markdownContent.value = "# New note\n"
 }
 

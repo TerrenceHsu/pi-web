@@ -22,6 +22,27 @@ export type FileFormat =
   | "unsupported"
   | string
 
+export type WorkspaceCategory =
+  | "instructions"
+  | "memory"
+  | "handoff"
+  | "task"
+  | "documentation"
+  | "note"
+  | "code"
+  | "input"
+  | "artifact"
+  | "document"
+  | "legacy"
+
+export type WorkspaceOwner =
+  | "user"
+  | "agent"
+  | "continuity"
+  | "shared"
+  | "sandbox"
+  | "document_converter"
+
 /** 单文件 metadata——后端 VirtualFileStore.FileRef。 */
 export interface FileRef {
   id: string
@@ -32,7 +53,24 @@ export interface FileRef {
   /** Session 文件树中的逻辑路径；不会暴露后端物理路径。 */
   logical_path?: string
   origin?: "system" | "upload" | "agent" | "user" | "legacy"
-  purpose?: "file" | "agent_instructions" | "memory" | "document_original" | "document_conversion"
+  purpose?:
+    | "file"
+    | "agent_instructions"
+    | "memory"
+    | "input"
+    | "handoff"
+    | "task"
+    | "workspace_documentation"
+    | "document_original"
+    | "document_conversion"
+  category?: WorkspaceCategory
+  owner?: WorkspaceOwner
+  content_editable?: boolean
+  movable?: boolean
+  deletable?: boolean
+  agent_writable?: boolean
+  sandbox_publishable?: boolean
+  immutable?: boolean
   /** 后端通过 _classify_format 推断——前端 FileChip 据此显示是否支持。 */
   format: FileFormat
   /** 上传时间（ms） */

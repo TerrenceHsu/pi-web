@@ -64,8 +64,30 @@ AGENT_INSTRUCTIONS_PATH = "AGENT.md"
 #: Session 根目录中的持久记忆文件。
 MEMORY_PATH = "Memory.md"
 
+#: 每轮连续性更新的最小续作入口；由 continuity 流程拥有。
+HANDOFF_PATH = "HANDOFF.md"
+
+#: 当前任务与历史任务的逻辑根。
+TASKS_PATH = "tasks"
+CURRENT_TASK_PATH = f"{TASKS_PATH}/current.md"
+TASK_ARCHIVE_PATH = f"{TASKS_PATH}/archive"
+
+#: Agent 可读的工程说明；固定摘要由 continuity 流程维护，notes 为共享笔记。
+DOCS_PATH = "docs"
+ARCHITECTURE_PATH = f"{DOCS_PATH}/architecture.md"
+CODE_FLOW_PATH = f"{DOCS_PATH}/code-flow.md"
+DECISIONS_PATH = f"{DOCS_PATH}/decisions.md"
+VALIDATION_PATH = f"{DOCS_PATH}/validation.md"
+NOTES_PATH = f"{DOCS_PATH}/notes"
+
 #: Agent 与用户代码的唯一逻辑根。目录在第一份代码出现时自然进入文件树。
 SCRIPTS_PATH = "scripts"
+
+#: 用户上传的普通输入；内容不可原地改写，但用户可以删除后重新上传。
+INPUTS_PATH = "inputs"
+
+#: Agent 生成的非代码交付物；目录在第一份产物出现时自然进入文件树。
+ARTIFACTS_PATH = "artifacts"
 
 #: 富文档原件与固定转换产物的逻辑根。Sandbox 永远不能发布到这里。
 DOCUMENTS_PATH = "documents"
@@ -77,8 +99,33 @@ FilePurpose: TypeAlias = Literal[
     "file",
     "agent_instructions",
     "memory",
+    "input",
+    "handoff",
+    "task",
+    "workspace_documentation",
     "document_original",
     "document_conversion",
+]
+WorkspaceCategory: TypeAlias = Literal[
+    "instructions",
+    "memory",
+    "handoff",
+    "task",
+    "documentation",
+    "note",
+    "code",
+    "input",
+    "artifact",
+    "document",
+    "legacy",
+]
+WorkspaceOwner: TypeAlias = Literal[
+    "user",
+    "agent",
+    "continuity",
+    "shared",
+    "sandbox",
+    "document_converter",
 ]
 WorkspacePublishKind: TypeAlias = Literal["sandbox", "document_conversion"]
 
@@ -245,8 +292,24 @@ class WorkspacePublishPolicyError(FileStoreError):
 
 
 # ============================================================================
-# FileRef
+# Workspace path policy / FileRef
 # ============================================================================
+
+
+class WorkspacePathPolicy(BaseModel):
+    """Public, provider-neutral ownership and mutation policy for one logical path."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    category: WorkspaceCategory
+    owner: WorkspaceOwner
+    user_creatable: bool
+    user_content_editable: bool
+    user_movable: bool
+    user_deletable: bool
+    agent_creatable: bool
+    sandbox_publishable: bool
+    immutable_content: bool
 
 
 class FileRef(BaseModel):
@@ -489,6 +552,173 @@ def is_markdown_filename(filename: str) -> bool:
     return PurePosixPath(filename.casefold()).suffix in MARKDOWN_EXTENSIONS
 
 
+def _is_below(parts: tuple[str, ...], root: str) -> bool:
+    root_parts = PurePosixPath(root).parts
+    return len(parts) > len(root_parts) and tuple(
+        part.casefold() for part in parts[: len(root_parts)]
+    ) == tuple(part.casefold() for part in root_parts)
+
+
+def workspace_path_policy(
+    logical_path: str,
+    *,
+    purpose: FilePurpose = "file",
+) -> WorkspacePathPolicy:
+    """Classify one canonical Workspace path and expose its mutation boundaries."""
+    normalized = normalize_workspace_logical_path(logical_path)
+    parts = PurePosixPath(normalized).parts
+    folded = normalized.casefold()
+
+    def policy(
+        category: WorkspaceCategory,
+        owner: WorkspaceOwner,
+        *,
+        create: bool = False,
+        edit: bool = False,
+        move: bool = False,
+        delete: bool = False,
+        agent: bool = False,
+        sandbox: bool = False,
+        immutable: bool = False,
+    ) -> WorkspacePathPolicy:
+        return WorkspacePathPolicy(
+            category=category,
+            owner=owner,
+            user_creatable=create,
+            user_content_editable=edit,
+            user_movable=move,
+            user_deletable=delete,
+            agent_creatable=agent,
+            sandbox_publishable=sandbox,
+            immutable_content=immutable,
+        )
+
+    if purpose in {"document_original", "document_conversion"} or _is_below(
+        parts, DOCUMENTS_PATH
+    ):
+        return policy("document", "document_converter", immutable=True)
+    if folded == AGENT_INSTRUCTIONS_PATH.casefold():
+        return policy("instructions", "user", edit=True)
+    if folded == MEMORY_PATH.casefold():
+        return policy("memory", "continuity", edit=True)
+    if folded == HANDOFF_PATH.casefold() or purpose == "handoff":
+        return policy("handoff", "continuity")
+    if _is_below(parts, TASKS_PATH) or purpose == "task":
+        return policy("task", "continuity")
+    if _is_below(parts, INPUTS_PATH) or purpose == "input":
+        return policy("input", "user", delete=True, immutable=True)
+    if _is_below(parts, SCRIPTS_PATH):
+        return policy(
+            "code",
+            "shared",
+            delete=True,
+            agent=True,
+            sandbox=True,
+        )
+    if _is_below(parts, ARTIFACTS_PATH):
+        editable = is_markdown_filename(parts[-1])
+        return policy(
+            "artifact",
+            "agent",
+            create=editable,
+            edit=editable,
+            move=editable,
+            delete=True,
+            agent=True,
+            sandbox=True,
+        )
+    if folded in {
+        ARCHITECTURE_PATH.casefold(),
+        CODE_FLOW_PATH.casefold(),
+        DECISIONS_PATH.casefold(),
+        VALIDATION_PATH.casefold(),
+    } or purpose == "workspace_documentation":
+        return policy("documentation", "continuity")
+    if _is_below(parts, NOTES_PATH):
+        editable = is_markdown_filename(parts[-1])
+        return policy(
+            "note",
+            "shared",
+            create=editable,
+            edit=editable,
+            move=editable,
+            delete=True,
+            agent=True,
+            sandbox=editable,
+        )
+    if _is_below(parts, DOCS_PATH):
+        editable = is_markdown_filename(parts[-1])
+        return policy(
+            "documentation",
+            "shared",
+            create=editable,
+            edit=editable,
+            move=editable,
+            delete=True,
+            sandbox=editable,
+        )
+
+    editable = is_markdown_filename(parts[-1])
+    return policy(
+        "legacy",
+        "shared",
+        create=editable,
+        edit=editable,
+        move=editable,
+        delete=True,
+        sandbox=editable,
+    )
+
+
+def workspace_upload_logical_path(
+    filename: str,
+    folder: str | None = None,
+) -> str:
+    """Route user uploads to ``scripts/**`` or immutable ``inputs/**``."""
+    safe_name = sanitize_filename(filename)
+    if is_code_filename(safe_name):
+        return workspace_logical_path(safe_name, folder)
+
+    normalized_folder = INPUTS_PATH
+    if folder is not None and folder.strip():
+        requested = normalize_workspace_logical_path(folder)
+        if requested.casefold() == INPUTS_PATH or requested.casefold().startswith(
+            f"{INPUTS_PATH}/"
+        ):
+            normalized_folder = requested
+        else:
+            normalized_folder = f"{INPUTS_PATH}/{requested}"
+    return workspace_logical_path(safe_name, normalized_folder)
+
+
+def agent_workspace_folder(filename: str, folder: str | None = None) -> str | None:
+    """Resolve the bounded destination accepted by the generic Agent file tool."""
+    safe_name = sanitize_filename(filename)
+    if is_code_filename(safe_name):
+        return folder
+
+    if folder is None or not folder.strip():
+        return ARTIFACTS_PATH
+    requested = normalize_workspace_logical_path(folder)
+    parts = PurePosixPath(requested).parts
+    if requested.casefold() == ARTIFACTS_PATH or _is_below(parts, ARTIFACTS_PATH):
+        return requested
+    if requested.casefold() == SCRIPTS_PATH or _is_below(parts, SCRIPTS_PATH):
+        return requested
+    if requested.casefold() == NOTES_PATH.casefold() or _is_below(parts, NOTES_PATH):
+        return requested
+    if parts[0].casefold() in {
+        INPUTS_PATH,
+        TASKS_PATH,
+        DOCUMENTS_PATH,
+        DOCS_PATH,
+    }:
+        raise UnsafeFilenameError(
+            "Agent files may only use artifacts/, scripts/, or docs/notes/"
+        )
+    return f"{ARTIFACTS_PATH}/{requested}"
+
+
 def workspace_logical_path(
     filename: str,
     folder: str | None = None,
@@ -611,22 +841,10 @@ def is_sandbox_publishable_workspace_path(logical_path: str) -> bool:
     """Return whether Sandbox output may replace this logical Workspace path."""
     try:
         normalized = normalize_workspace_logical_path(logical_path)
+        path_policy = workspace_path_policy(normalized)
     except FileStoreError:
         return False
-    if normalized != logical_path:
-        return False
-    parts = PurePosixPath(normalized).parts
-    folded = tuple(part.casefold() for part in parts)
-    if normalized.casefold() in {
-        AGENT_INSTRUCTIONS_PATH.casefold(),
-        MEMORY_PATH.casefold(),
-    }:
-        return False
-    if folded[0] == "documents":
-        return False
-    if folded[0] == SCRIPTS_PATH and len(parts) > 1:
-        return True
-    return is_markdown_filename(parts[-1])
+    return normalized == logical_path and path_policy.sandbox_publishable
 
 
 def _write_model_atomic(path: Path, model: BaseModel) -> None:
@@ -1904,10 +2122,10 @@ class WorkspaceStore:
         else:
             logical_path = await self._unique_logical_path(
                 session_id,
-                workspace_logical_path(safe_name, relative_folder),
+                workspace_upload_logical_path(safe_name, relative_folder),
             )
             stored_name = safe_name
-            purpose = "file"
+            purpose = "file" if is_code_filename(safe_name) else "input"
 
         # 预检 session 总量
         current_size = await self.session_total_size(session_id)
@@ -2359,17 +2577,16 @@ class WorkspaceStore:
         target_name = PurePosixPath(target_path).name
         if not is_markdown_filename(target_name):
             raise UnsafeFilenameError("Markdown files must keep a Markdown extension")
-        if target_path.casefold() in {
-            AGENT_INSTRUCTIONS_PATH.casefold(),
-            MEMORY_PATH.casefold(),
-        }:
-            raise UnsafeFilenameError("fixed Workspace root files cannot be moved")
+        target_policy = workspace_path_policy(target_path)
+        if not target_policy.user_creatable or not target_policy.user_movable:
+            raise UnsafeFilenameError("target Workspace path is reserved or read-only")
 
         async with self._session_lock(session_id):
             state = await self._ensure_workspace_state_unlocked(session_id)
             self._check_workspace_revision(state, expected_workspace_revision)
             ref = await self.get_for_session(session_id, file_id)
-            if ref.purpose != "file" or not is_markdown_filename(ref.name):
+            source_policy = workspace_path_policy(ref.logical_path, purpose=ref.purpose)
+            if not source_policy.user_movable or not is_markdown_filename(ref.name):
                 raise UnsafeFilenameError("only ordinary Markdown files can be moved")
             if expected_sha256 is not None and expected_sha256 != ref.sha256:
                 raise FileVersionConflictError("file changed since it was opened")
@@ -2548,9 +2765,10 @@ class WorkspaceStore:
             state = await self._ensure_workspace_state_unlocked(session_id)
             self._check_workspace_revision(state, expected_workspace_revision)
             ref = await self.get_for_session(session_id, file_id)
-            if ref.purpose in {"document_original", "document_conversion"}:
+            path_policy = workspace_path_policy(ref.logical_path, purpose=ref.purpose)
+            if not path_policy.user_deletable:
                 raise WorkspacePublishPolicyError(
-                    "Workspace document originals and conversion outputs are immutable"
+                    "Workspace file is required or system-owned and cannot be deleted"
                 )
             if expected_sha256 is not None and expected_sha256 != ref.sha256:
                 raise FileVersionConflictError("file changed since it was opened")
@@ -2644,7 +2862,19 @@ __all__ = [
     "DEFAULT_MAX_SESSION_SIZE",
     "AGENT_INSTRUCTIONS_PATH",
     "MEMORY_PATH",
+    "HANDOFF_PATH",
+    "TASKS_PATH",
+    "CURRENT_TASK_PATH",
+    "TASK_ARCHIVE_PATH",
+    "DOCS_PATH",
+    "ARCHITECTURE_PATH",
+    "CODE_FLOW_PATH",
+    "DECISIONS_PATH",
+    "VALIDATION_PATH",
+    "NOTES_PATH",
     "SCRIPTS_PATH",
+    "INPUTS_PATH",
+    "ARTIFACTS_PATH",
     "DOCUMENTS_PATH",
     "WORKSPACE_DOCUMENT_EXTENSIONS",
     "WORKSPACE_STATE_FILENAME",
@@ -2656,6 +2886,8 @@ __all__ = [
     "DEFAULT_AGENT_INSTRUCTIONS",
     "DEFAULT_MEMORY",
     "FilePurpose",
+    "WorkspaceCategory",
+    "WorkspaceOwner",
     "WorkspacePublishKind",
     # 异常
     "FileStoreError",
@@ -2671,6 +2903,7 @@ __all__ = [
     "WorkspacePublishPolicyError",
     # 数据模型
     "FileRef",
+    "WorkspacePathPolicy",
     "WorkspaceState",
     "WorkspaceMaterialization",
     "WorkspaceMaterializationEntry",
@@ -2687,6 +2920,9 @@ __all__ = [
     "workspace_document_root",
     "is_document_conversion_workspace_path",
     "is_sandbox_publishable_workspace_path",
+    "workspace_path_policy",
+    "workspace_upload_logical_path",
+    "agent_workspace_folder",
     "workspace_logical_path",
     # 主类
     "WorkspaceStore",

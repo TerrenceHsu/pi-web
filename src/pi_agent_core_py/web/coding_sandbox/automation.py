@@ -15,11 +15,13 @@ from coding_sandbox.lifecycle import (
 AUTOMATED_CODING_PROMPT = """Automated Coding mode is active for this request.
 
 Work only through the available coding_* tools. Inspect the Sandbox workspace, implement
-the user's request in scripts/** or ordinary Markdown files, run the relevant program or
-checks, and use coding_validate before finishing. If validation fails, diagnose the output,
-repair the files, and validate again. Do not write directly to the Session Workspace and do
-not claim that changes were published. After your turn, the server will run an independent
-fixed validation and freeze the exact artifact for the user's explicit approval.
+the user's request in scripts/**, and put non-code deliverables in artifacts/** or shared
+notes in docs/notes/**. Treat inputs/**, HANDOFF.md, tasks/**, fixed docs summaries, and
+documents/** as read-only. Run the relevant program or checks and use coding_validate before
+finishing. If validation fails, diagnose the output, repair the files, and validate again.
+Do not write directly to the Session Workspace and do not claim that changes were published.
+After your turn, the server will run an independent fixed validation and freeze the exact
+artifact for the user's explicit approval.
 """
 
 _USABLE_STATUSES = frozenset({"ready", "validation_failed", "validated"})

@@ -1,6 +1,6 @@
 # Coding Agent Workspace 与 Session 连续性设计
 
-> 状态：阶段 1–2 已完成；阶段 3–5 待实施。校准日期：2026-08-29。
+> 状态：阶段 1–3 已完成；阶段 4–5 待实施。校准日期：2026-08-29。
 
 ## 1. 产品目标
 
@@ -60,6 +60,28 @@ documents/**
 
 目录无内容时保持逻辑惰性，不用 `.keep` 伪造用户文件。
 
+阶段 3 已将以上路径固化为 `WorkspacePathPolicy`。文件 API、Agent 文件工具和前端右栏返回同一组
+`category`、`owner`、`content_editable`、`movable`、`deletable`、`agent_writable`、
+`sandbox_publishable`、`immutable` 字段，不允许各层自行猜测权限。
+
+| 路径 | 所有者 | 创建/更新规则 | Sandbox 发布 |
+|---|---|---|---|
+| `AGENT.md` | user | 初始化创建；用户可编辑，不可移动/删除 | 禁止 |
+| `Memory.md` | continuity | 自动流程更新；用户可纠正，不可移动/删除 | 禁止 |
+| `HANDOFF.md` | continuity | 后续 continuity renderer 惰性创建/更新 | 禁止 |
+| `tasks/**` | continuity | 后续 task renderer 惰性创建/更新 | 禁止 |
+| 固定 `docs/*.md` | continuity | 仅已批准代码事件的固定 renderer 更新 | 禁止 |
+| `docs/notes/**` | shared | 用户和 Agent 可创建 Markdown | 允许 UTF-8 Markdown |
+| `scripts/**` | shared | 用户上传；Coding 模式通过 Sandbox 修改 | 允许 |
+| `inputs/**` | user | 普通上传自动进入；正文不可原地改写，可删除重传 | 禁止 |
+| `artifacts/**` | agent | `write_file` 非代码产物默认进入；Markdown 可人工修订 | 允许 |
+| `documents/**` | document converter | 原件和固定转换产物均不可变 | 禁止 |
+
+为兼容既有 Workspace，历史普通 Markdown 路径仍可读写并保持既有 Sandbox 发布语义，但所有新入口
+默认使用上述命名空间。上传代码仍自动进入 `scripts/**`，其余普通上传进入 `inputs/**`；Agent 的
+非代码文本产物进入 `artifacts/**`。`HANDOFF.md`、`tasks/**` 和固定工程摘要在阶段 4–5 的可信
+renderer 首次产出内容前不创建空文件。
+
 ## 4. 每轮自动连续性更新
 
 成功持久化的普通 Session Assistant turn（含 Regenerate 后的新 active answer）产生有界、可校验的
@@ -72,8 +94,9 @@ turn_persisted -> evidence_committed -> extracting -> applying -> current
 
 阶段 2 只更新 `Memory.md`：LLM 直接返回固定章节的 managed Markdown，服务器负责长度限制、secret
 redaction、source hash/audit marker、逐文件 SHA 乐观锁与 immutable generation 发布；该调用直接使用
-当前 Session Provider，但不进入 Agent loop，也不启用 Tools、Skills 或 MCP。Phase 3 引入其它分类文件时，
-再把输出升级为受 schema 约束的 `ContinuityDelta`，由服务器按字段渲染，模型仍不获得任意文件写权限。
+当前 Session Provider，但不进入 Agent loop，也不启用 Tools、Skills 或 MCP。阶段 3 先固定了
+`ContinuityDelta` 将使用的目标命名空间和写入权限；阶段 4–5 接入字段 renderer 时，模型仍不获得
+任意文件写权限。
 
 Assistant 正文先作为主结果持久化，自动记忆不得反向把成功回答改成失败。随后创建 append-only
 `auto_memory` intent/effect/finish records；若进程恰好在消息提交后、intent 落库前退出，下一轮会从
@@ -106,7 +129,8 @@ Workspace 工具按需查看文件。
 
 1. **模块分离**：行为和持久格式不变；建立独立包、兼容层和单向依赖。
 2. **每轮 Memory**：Turn evidence、durable operation、结构化自动提炼、失败恢复。
-3. **内容分类**：`HANDOFF.md`、`tasks/**`、`docs/**`、`inputs/**`、`artifacts/**` 及权限策略。
+3. **内容分类**（完成）：固定 `HANDOFF.md`、`tasks/**`、`docs/**`、`inputs/**`、
+   `artifacts/**` 的所有权、默认路由、API metadata 与写入/发布策略；空目录继续惰性。
 4. **代码连续性**：批准发布事件驱动 code-flow/architecture/validation 更新和 stale 检测。
 5. **无上下文验收**：统一 ContextAssembler、重启续作、Pending Memory 与待批准 Artifact 场景。
 

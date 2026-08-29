@@ -6,7 +6,7 @@
 
 | 项 | 当前事实 |
 |---|---|
-| 代码基线 | `0.0.28` 发布基线之上已完成 Coding Sandbox 阶段 4A–4C、Session Workspace 阶段 5–7；当前工作树又完成 Coding Agent Workspace 连续性阶段 1 模块分离与阶段 2 自动 Session Memory，均已通过对应定向验收，尚未提交 |
+| 代码基线 | `0.0.28` 发布基线之上已完成 Coding Sandbox 阶段 4A–4C、Session Workspace 阶段 5–7；Coding Agent Workspace 连续性阶段 1–2 已提交为 `2743229`，当前工作树完成阶段 3 内容分类与权限策略 |
 | 分支 | `master` |
 | 最新 release tag | `0.0.28`；annotated tag 指向发布基线，不包含其后的阶段 4A–6 提交 |
 | Python / API 版本 | `0.0.28`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
@@ -34,6 +34,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 | Session Workspace、`AGENT.md`、`Memory.md`、`/checkpointer` | ✅ 完成 | `WorkspaceStore` 为唯一规范事实源；新旧 Session 幂等初始化两个固定根文件，保留旧正文/file id；设计见 `docs/design/workspace-sandbox-integration.md` |
 | Workspace 模块分离 | ✅ 阶段 1 完成 | 规范 Store、固定文档转换和 provider-neutral continuity 已迁移到顶层 `agent_workspace`；Workspace/Sandbox adapter 位于 `coding_agent_app`，旧 Core 路径只保留兼容层；独立 import boundary 与 wheel 内容验证通过，Ruff、strict Mypy 177 files、既有定向 133 passed |
 | 每轮自动 Session Memory | ✅ 阶段 2 完成 | Prompt/Regenerate 以有界 turn evidence 和串行 durable operation 累计更新 `Memory.md`；失败不影响主回答并在下一轮 preflight 恢复，Coding 待审批期间按 Sandbox blocker 延迟以保护 Workspace revision，Knowledge 模式跳过；产品入口默认启用 |
+| Coding Workspace 内容分类 | ✅ 阶段 3 完成 | `WorkspacePathPolicy` 统一 HANDOFF/tasks/docs/scripts/inputs/artifacts/documents 所有权与写入/发布边界；普通上传进入只读 `inputs/**`，Agent 非代码产物进入 `artifacts/**`，空目录保持惰性；Backend 定向 124 passed，strict Mypy 177 files、Frontend typecheck PASS |
 | Workspace 代码/Markdown 规则与 revision | ✅ 完成 | 代码统一映射到逻辑 `scripts/**`；Markdown CRUD、逐文件 SHA 与持久 Workspace revision 冲突契约已接入 Store/Web/Agent/Frontend API |
 | 右侧 Workspace 成果面板 | ✅ 完成 | 桌面三栏/窄屏 drawer；Agent `write_file` 完成后按 file id/revision 自动聚焦成果，支持 Markdown 预览编辑、代码查看、上传下载及 Sandbox/Changes |
 | P0 Runtime 上游契约对齐 | ✅ 完成 | `b529bbc` |
@@ -74,7 +75,8 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 - 每个账号拥有独立的 Session、消息、文件、Skills、MCP、Wiki Space/Conversation、Provider/Credential 配置
 - Session 路由为 `/chat/{session_id}`；刷新恢复准确 Session、历史、文件树、`AGENT.md`、`Memory.md` 及当前请求状态
 - 每个 Session 由唯一 `WorkspaceStore` 初始化独立文件夹和唯一根 `AGENT.md`、`Memory.md`；启动时幂等补齐旧 Session，保留已有正文/file id，两个根文件不可删除；`VirtualFileStore` 仅为同一实现的兼容别名
-- Agent 写入或用户上传的代码按扩展名自动进入逻辑 `scripts/**`；普通 Markdown 支持安全路径创建、编辑、移动/重命名和删除，`AGENT.md`/`Memory.md` 继续使用专用权限
+- Agent 写入或用户上传的代码按扩展名自动进入逻辑 `scripts/**`；普通上传进入不可原地改写的 `inputs/**`，Agent 非代码交付物默认进入 `artifacts/**`，共享笔记使用 `docs/notes/**`
+- 文件 API 和右侧 Workspace 面板直接消费 `WorkspacePathPolicy` 的分类、所有者、可编辑/移动/删除、Agent 写入、Sandbox 发布及不可变标记；系统连续性文件不能由普通用户/Agent 文件入口伪造
 - Workspace revision 以隐藏状态持久化；上传、创建、更新、移动和删除可同时校验 revision 与逐文件 SHA，过期客户端收到 409 而不会静默覆盖
 - PDF、DOCX、XLSX 上传会归档不可变原件并生成可审计只读制品；右栏优先打开 `content.md`，XLSX 公式不会在转换阶段执行，失败不会暴露半套输出
 - 桌面右栏是 Agent 成果交付面：成功生成 `.md`、`.py` 等文件后立即刷新、选中并展示，整页刷新后仍从持久 ToolResult 恢复；窄屏使用带新成果提示的 drawer
@@ -156,6 +158,7 @@ Frontend 与 Browser E2E 均实际复跑；真实 E2B 也重新执行 Managed Sa
 | Complete-turn Compaction 定向回归 | **50 passed** | 完整 turn/token target、超预算最新 turn、token/window、previous summary、retry lifecycle、失败不改源消息、Web API 与 durable-operation 邻接回归 |
 | Durable recovery 定向回归 | **PASS** | operation intent/effect/finish、同进程无模型重试、启动前滚、source-leaf conflict 保留消息、文件 pointer rollback、JSON torn-tail / legacy migration |
 | 自动 Session Memory 阶段 2 | **11 passed** | 1 个既有测试文件新增 2 项：成功更新且不清空消息、Provider 失败保留回答并在下一轮恢复；另复用 2 条 Regenerate 主路径。Ruff、strict Mypy、Frontend typecheck/lint PASS |
+| Coding Workspace 内容分类阶段 3 | **124 Backend + 8 Frontend passed** | 只修改 1 个既有 Backend 测试文件中的 2 项；覆盖 `inputs/**`/`artifacts/**` 默认路由、公开 ownership/mutation metadata 与系统路径拒绝，并复用 Workspace/文件工具/Sandbox lifecycle 和右栏现有回归。全量 Ruff、strict Mypy 177 files、Frontend typecheck/lint PASS |
 | Session tree 定向回归 | **69 passed** | immutable entry/lane、旧库迁移、branch/fork/label/active leaf、重启、Web API、revision sibling 与 trailing suffix |
 | ToolResult metadata 定向回归 | **173 passed** | usage / added names、hook 边界、消息/事件、provider context、Snapshot、Session/SQLite、Web serializer 与旧数据默认值 |
 | Agent 公开状态定向回归 | **137 passed** | Agent、Harness、stream、Provider runtime 与 Web state；系统 temp ACL 阻断项改用工作区 `basetemp` 后通过 |

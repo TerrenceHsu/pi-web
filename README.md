@@ -36,8 +36,8 @@
 - lane operation 使用 append-only intent/effect/finish records；Checkpointer 可在进程退出后凭 source leaf/hash 幂等前滚
 - 当前 active lane 会物化为兼容消息视图，因此现有聊天、Regenerate、Export 与 Context 工具无需理解树结构
 - 每个 Session 通过唯一 `WorkspaceStore` 初始化独立目录和唯一根 `AGENT.md`、`Memory.md`；旧 `VirtualFileStore` 名称仅为兼容别名
-- 用户上传文件保存在当前 Session；Agent 可调用 `list_files`、`view_file`、`write_file`
-- 文件树可查看、下载、删除和刷新；`AGENT.md`、`Memory.md` 可用 SHA-256 乐观锁编辑
+- 用户上传的普通输入归入只读 `inputs/**`，代码归入 `scripts/**`；Agent 的非代码交付物默认归入 `artifacts/**`
+- 文件树可查看、下载、删除和刷新；API/右栏共享路径的 category、owner 与编辑/发布权限，`AGENT.md`、`Memory.md` 可用 SHA-256 乐观锁编辑
 - `/checkpointer` 使用当前 Session 绑定的 LLM 总结对话到累计 `Memory.md`；文件以 immutable generation 原子发布，成功后在同一 SQLite 事务清空原 lane 并完成 operation
 - 重新登录或重启后恢复同账号的 Session、历史消息、受管文件和配置
 
@@ -199,7 +199,13 @@ D:\miniconda\envs\pipy\python.exe scripts/dev_web_app.py
         │   └── {session_id}/
         │       ├── AGENT.md
         │       ├── Memory.md        # Session 初始化时创建，checkpointer 累计更新
-        │       └── ...
+        │       ├── HANDOFF.md       # continuity renderer 首次写入时惰性出现
+        │       ├── tasks/           # current + archive；系统拥有
+        │       ├── docs/            # 固定工程摘要 + shared notes
+        │       ├── scripts/         # 用户代码和已批准 Sandbox 代码
+        │       ├── inputs/          # 普通上传，只读正文
+        │       ├── artifacts/       # Agent/Sandbox 非代码交付物
+        │       └── documents/       # 不可变原件与固定转换产物
         └── knowledge/
             ├── wiki.db
             ├── spaces/
