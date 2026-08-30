@@ -172,6 +172,8 @@ export const useCodingSandboxStore = defineStore("codingSandbox", () => {
   const validate = () => runAction(sandboxApi.validateSandboxOperation)
   const preparePublish = () => runAction(sandboxApi.prepareSandboxPublish)
   const publish = () => runAction(sandboxApi.publishSandboxOperation)
+  const refreeze = () => runAction(sandboxApi.refreezeSandboxOperation)
+  const retryPublish = () => runAction(sandboxApi.retrySandboxPublish)
   const cancel = () => runAction(sandboxApi.cancelSandboxOperation)
   const discard = () => runAction(sandboxApi.discardSandboxOperation)
 
@@ -279,6 +281,8 @@ export const useCodingSandboxStore = defineStore("codingSandbox", () => {
     validate,
     preparePublish,
     publish,
+    refreeze,
+    retryPublish,
     cancel,
     discard,
     refreshDiff,

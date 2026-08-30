@@ -1,12 +1,12 @@
 # Project Status
 
-> 当前事实快照，校准日期：**2026-08-29**。本页只描述当前代码基线；阶段性测试数字和历史决策保留在 `docs/validation/`、`CHANGELOG.md` 与归档计划中。
+> 当前事实快照，校准日期：**2026-08-30**。本页只描述当前代码基线；阶段性测试数字和历史决策保留在 `docs/validation/`、`CHANGELOG.md` 与归档计划中。
 
 ## 基线身份
 
 | 项 | 当前事实 |
 |---|---|
-| 代码基线 | `0.0.29` 发布基线；包含 Coding Sandbox 阶段 4A–4C、Session Workspace 阶段 5–7，以及 Coding Agent Workspace 连续性阶段 1–5 |
+| 代码基线 | `0.0.29` 发布基线之后的 `master`；新增三类意图路由、Planner–Executor–Verifier Plan Mode，以及当前 Sandbox 审阅/冲突恢复与 Workspace 交互收敛 |
 | 分支 | `master` |
 | 最新 release tag | `0.0.29`；annotated tag 指向本次统一版本与发布验证提交 |
 | Python / API 版本 | `0.0.29`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
@@ -57,6 +57,9 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 | Managed Coding Sandbox P0 0–10 | ✅ 完成 | 独立包、快照、E2B、代码工具、固定验证、签名制品、本机事务 Publisher、Web 生命周期/状态恢复/审批发布 UI，以及真实 E2B、完整 CI、攻击矩阵和 Browser E2E 验收 |
 | 自动 Coding 请求编排 | ✅ 完成 | Chat `Code` 模式自动创建/复用 Sandbox，本轮仅暴露 9 个 `coding_*` 工具；Agent 结束后 Backend 独立重验并冻结到 `awaiting_approval`，绝不自动发布；验证失败保留可修复状态 |
 | 三类意图路由 | ✅ 完成 | 产品入口确定性路由 `read_only/coding/knowledge`；Knowledge 由 Conversation binding 强制决定，Coding 复用 Sandbox 状态机，只读路线裁剪 mutation/execute 工具；API/Context Budget/Turn 卡公开决策审计并支持显式覆盖 |
+| Planner–Executor–Verifier Plan Mode | ✅ 完成 | Plan 是 Coding 路由的执行方式；PlanStore 持久化 DAG/版本/任务/事件，Planner 只提交结构化计划，Executor 复用单一 Session Sandbox，Verifier 按真实 diff 验收；最终仍停在签名 Artifact 用户审批门禁 |
+| Sandbox 审阅与发布冲突恢复 | ✅ 完成 | 冻结文件可在发布前逐项预览/下载；`publish_conflict` 保留签名制品并支持重新冻结或在冲突解除后重试发布；空变更不再生成可批准 Artifact，自动 Coding 可执行一次修复重试 |
+| Workspace / Chat 交互收敛 | ✅ 完成 | 聊天区直接显示 Sandbox 审批条；Workspace 文件树合并待发布冻结文件并支持 Python 安全高亮；桌面三栏和 Workspace 上下分区可拖拽并持久化；Thinking 在首段正文前也能流式展示 |
 | Coding Sandbox 阶段 4A 状态机/TOCTOU | ✅ 完成 | Backend 单一转换表与公开 actions/transitions、SQLite 完整记录 CAS、UI 动作投影；Validation→Freeze 屏障前 stale 可重验，屏障后 `artifact_stale` fail-closed 终止 |
 | Coding Sandbox 阶段 4B Workspace baseline | ✅ 完成 | WorkspaceStore mutation lock 内按 logical path 物化 revision-bound 树，逐文件稳定 stat/SHA 校验；operation 记录源 revision/tree SHA，主应用不再以独立项目目录作为输入事实源；4C 前发布 fail closed |
 | Coding Sandbox 阶段 4C Workspace 发布 | ✅ 完成 | 签名 Artifact 在隔离镜像复验后，通过 WorkspaceStore journaled multi-file transaction 发布；路径白名单、目标端 revision/tree/content TOCTOU、rollback/recovery、单次 revision 和 `workspace_changed` 右栏刷新均已接通 |
@@ -105,10 +108,12 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 - Web 消息序列化会递归检测 `U+FFFD` 并附加 `content_warnings`，`/api/messages` 同时返回 Session 汇总；前端在对应消息/工具卡标记疑似编码损坏和 JSON 字段路径，检测过程只读且明确不可自动恢复
 - Managed Coding Sandbox 使用顶层独立 `coding_sandbox` 包；主应用从 Session WorkspaceStore revision 物化不含存储 metadata 的逻辑树，再由 Agent 通过 provider-neutral 工具修改云端副本，固定验证通过后冻结并签名不可变制品
 - Chat 输入区可显式启用 `Code`：请求开始前自动准备 Session Sandbox，并把本轮工具/权限收窄为 9 个隔离 `coding_*` 工具；模型结束后服务端独立重跑固定验证并自动冻结，右栏切到完整 Changes，等待用户批准，不会自动发布
+- Chat 输入区可显式启用 `Plan`：Planner 提交结构化 DAG 后停在批准点；批准后 Executor/Verifier 以受限角色复用同一 Sandbox，失败原因与重试次数持久化，全部任务通过后复用 Validation→Freeze 屏障
+- 待批准或发布冲突的冻结 Artifact 可直接在 Workspace 树中预览/下载；目标 Workspace 冲突不会丢弃制品，用户可按冲突类型选择重新冻结或重试发布
 - 本机 Publisher 在项目级跨进程锁内复核完整 baseline 和签名制品，以备份、原子替换、hash-chained journal、失败回滚和启动恢复发布；Sandbox 永不挂载真实工作区
 - 每个 Session 最多一个活跃 Managed Sandbox operation；创建、验证、冻结、审批发布、取消和丢弃均由 Backend 单一转换表驱动，REST 返回版本化 `allowed_actions`/`allowed_transitions`，SQLite 完整旧记录 CAS 防止并发状态覆盖，并保存有界事件日志通过统一 WS 实时推送
 - Validation 与 Freeze 共用 operation 互斥锁；冻结前重验 validation/config/workspace SHA，冻结后远端归档前后、下载归档和签名前再次校验。屏障前 stale 可重验，屏障后 `artifact_stale` 终态销毁，发布只读取已签名不可变制品
-- Sandbox Modal 可恢复当前 Session 的最新状态、日志、Diff 与验证证据；刷新和后端重启都不会重放模型/命令，启动时未完成操作统一标记 `interrupted`，发布必须由用户重新勾选显式确认
+- Sandbox Modal 可恢复当前 Session 的最新状态、日志、Diff 与验证证据；刷新和后端重启都不会重放模型/命令，启动时未完成操作统一标记 `interrupted`，发布必须由用户重新勾选显式确认；删除 Session 前会先停止活跃请求并释放 Harness
 
 ## 数据与生命周期
 
@@ -126,19 +131,19 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 | API Key | OS Keyring、显式 session-only memory 或显式 env；不写入 SQLite 明文 |
 | Active request / pending approval / event subscribers | 当前后端进程内存；后端重启不恢复执行 |
 
-## 2026-08-29 当前验证基线
+## 2026-08-30 当前验证基线
 
-当前代码按快速开发阶段的“最小可观察行为”边界完成阶段 6 发布验收：全量离线 Backend、
-Frontend 与 Browser E2E 均实际复跑；真实 E2B 也重新执行 Managed Sandbox 写入、失败验证、
-重验、冻结、审批和 WorkspaceStore 回写。历史 Parser、DDGS/GLM 证据继续保留：
+当前 `0.0.29` 后续代码已实际复跑全量离线 Backend、Frontend 与 Browser E2E；本轮修复
+Plan Mode 绕过单一 Provider binding 入口的安全门禁、旧前端测试 mock 的 stderr warning，以及
+生成文档只读提示的 Browser 回归。真实 E2B、Parser OCI 与 DDGS/GLM 继续沿用最近一次保留证据：
 
 | 验证 | 结果 | 备注 |
 |---|---|---|
-| Ruff 全量 | **PASS** | `ruff check .`；0 errors；包含 OCI Provider、Worker service 与 smoke CLI |
-| strict Mypy 全量 | **PASS** | `mypy --strict src`：177 source files / 0 issues；覆盖 Wiki、独立 Workspace 包、Workspace 文档转换、Managed Sandbox 与产品组合边界 |
+| Ruff 全量 | **PASS** | CI 口径 `ruff check src/ tests/`；0 errors |
+| strict Mypy 全量 | **PASS** | `mypy src`：185 source files / 0 issues；覆盖 Wiki、独立 Workspace/Plan 包、Workspace 文档转换、Managed Sandbox 与产品组合边界 |
 | Backend 全量离线（第二轮前基线） | **3143 passed, 7 skipped, 9 deselected** | 当时为 3159 collected；`pytest tests --tb=short -q`；1053.41s；coverage 81.91% |
-| Backend 当前精简套件 | **2095 passed, 7 skipped, 9 deselected** | `pytest tests --tb=short -q --no-cov`；647.44s；默认排除真实外网、LLM 与 Docker marker |
-| Frontend 当前精简套件 | **180/180 passed** | 26 files；删除重复 Provider API/Store/表单/选择器矩阵，保留 Provider 设置弹窗和跨层集成行为 |
+| Backend 当前精简套件 | **2110 passed, 7 skipped, 9 deselected** | `pytest tests --tb=short -q`；359.95s；coverage 77.17%；默认排除真实外网、LLM 与 Docker marker |
+| Frontend 当前精简套件 | **183/183 passed** | 26 files；Vitest 0 failure / 0 stderr warning；同时通过 typecheck、ESLint 与 production build |
 | LLM Wiki 发布候选定向回归 | **Backend 67 passed, 1 skipped；Frontend 16/16；Browser 1/1** | 覆盖 Store/API/Summary/Fake Parser、五个 Wiki 前端视图与 source→approval→page→graph→conversation 浏览器主链路 |
 | Workspace 阶段 1 定向回归 | **125 passed** | `VirtualFileStore` 兼容别名、双根初始化、并发幂等、旧路径/purpose 迁移、固定根删除保护、Checkpointer/Auth/重启；`-W error` 下 0 warning |
 | Workspace 阶段 2 定向回归 | **116 passed** | 代码 `scripts/**` 映射、安全逻辑路径、revision 持久/冲突、Markdown CRUD、Agent 工具与 Web API；使用 `--no-cov` 定向运行 |
@@ -181,7 +186,7 @@ Frontend 与 Browser E2E 均实际复跑；真实 E2B 也重新执行 Managed Sa
 | Keyring 定向回归 | **94/94 passed** | Runtime、launcher 与 restart 范围 |
 | 真实 Windows Keyring 探针 | **write/read = true；cleanup = true** | 随机非用户值，执行后删除；同账号/同解释器复验与安全取证步骤已形成 Windows smoke 文档 |
 | MCP/DDGS UTF-8 定向回归 | **34 passed, 1 deselected** | 含真实 Python 子进程中文 round-trip |
-| Browser E2E | **19/19 passed** | Chromium；8 个规格、单 worker、`CI=1`；1.3m；覆盖基础聊天、Session 恢复、MCP、Approval、Compaction、Workspace 文档转换、Sandbox 与 LLM Wiki；0 retry / 0 flaky / 0 failure |
+| Browser E2E | **19/19 passed** | Chromium；8 个规格、单 worker、`CI=1`；1.1m；覆盖基础聊天、Session 恢复、MCP、Approval、Compaction、Workspace 文档转换、Sandbox 与 LLM Wiki；最终复跑 0 retry / 0 flaky / 0 failure |
 | Context Compaction Browser E2E | **1/1 passed** | 修复逐轮 Prompt 未等待 202 导致的测试自身竞态；沙箱外真实启动浏览器；production build 由 posttest 恢复 |
 
 默认 pytest marker 排除真实 LLM、真实外网 integration 和 Docker；额外门禁还要求

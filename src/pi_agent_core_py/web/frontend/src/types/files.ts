@@ -54,12 +54,7 @@ export type WorkspaceCategory =
   | "legacy"
 
 export type WorkspaceOwner =
-  | "user"
-  | "agent"
-  | "continuity"
-  | "shared"
-  | "sandbox"
-  | "document_converter"
+  "user" | "agent" | "continuity" | "shared" | "sandbox" | "document_converter"
 
 /** 单文件 metadata——后端 VirtualFileStore.FileRef。 */
 export interface FileRef {
@@ -70,7 +65,7 @@ export interface FileRef {
   sha256: string
   /** Session 文件树中的逻辑路径；不会暴露后端物理路径。 */
   logical_path?: string
-  origin?: "system" | "upload" | "agent" | "user" | "legacy"
+  origin?: "system" | "upload" | "agent" | "user" | "legacy" | "sandbox"
   purpose?:
     | "file"
     | "agent_instructions"

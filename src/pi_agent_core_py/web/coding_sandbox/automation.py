@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any, TypeVar
 
 from coding_sandbox.lifecycle import (
     ManagedSandboxLifecycle,
@@ -12,17 +13,37 @@ from coding_sandbox.lifecycle import (
     SandboxLifecycleError,
 )
 
+from ...llm_messages import LLMMessage
+from ...model_client import ModelClient
+from ...stream_events import StreamEvent, ToolCallEndEvent, ToolCallEvent
+from ...tools import ToolDef
+
 AUTOMATED_CODING_PROMPT = """Automated Coding mode is active for this request.
 
-Work only through the available coding_* tools. Inspect the Sandbox workspace, implement
-the user's request in scripts/**, and put non-code deliverables in artifacts/** or shared
-notes in docs/notes/**. Treat inputs/**, HANDOFF.md, tasks/**, fixed docs summaries, and
-documents/** as read-only. Run the relevant program or checks and use coding_validate before
-finishing. If validation fails, diagnose the output, repair the files, and validate again.
-Do not write directly to the Session Workspace and do not claim that changes were published.
-After your turn, the server will run an independent fixed validation and freeze the exact
-artifact for the user's explicit approval.
+Work only through the available coding_* tools. First call coding_list_files once. Your next
+action MUST be coding_write_file or coding_apply_patch on scripts/**; create the requested
+file before any coding_run, package inspection, dependency installation, or coding_validate.
+Do not install dependencies unless the user explicitly asks for installation. Dependency-heavy
+source can be syntax-checked without importing optional packages. Do not draft the requested
+source code only in reasoning or chat. Put non-code deliverables in artifacts/** or shared notes
+in docs/notes/**. Treat inputs/**, HANDOFF.md, tasks/**, fixed docs summaries, and documents/**
+as read-only. After a file exists, run the relevant checks and use coding_validate. If validation
+fails, diagnose the output, repair the files, and validate again. A Coding turn with no file diff
+is a failure. Do not write directly to the Session Workspace and do not claim that changes were
+published. After your turn, the server will run an independent fixed validation and freeze the
+exact artifact for the user's explicit approval.
 """
+
+AUTOMATED_CODING_REPAIR_PROMPT = """# Automatic no-change repair
+
+The preceding attempt ended without changing any Sandbox file. This is the only automatic
+repair attempt. Do not inspect packages, install dependencies, call coding_run, or explain the
+failure first. Immediately call coding_write_file or coding_apply_patch to implement the user's
+original request under scripts/**. Keep the first written file concise and valid; add more files
+or details with later tool calls. Then validate the written files.
+"""
+
+_AttemptResult = TypeVar("_AttemptResult")
 
 _USABLE_STATUSES = frozenset({"ready", "validation_failed", "validated"})
 _CREATE_PENDING_STATUSES = frozenset({"creating"})
@@ -62,6 +83,67 @@ class AutomatedCodingResult:
         }
 
 
+class CodingToolBootstrapModelClient(ModelClient):
+    """Force a bounded list-then-mutate bootstrap for code-generation requests."""
+
+    _MUTATION_TOOL_NAMES = frozenset({"coding_write_file", "coding_apply_patch"})
+
+    def __init__(self, delegate: ModelClient, *, list_first: bool) -> None:
+        super().__init__(delegate.adapter)
+        self._delegate = delegate
+        self._stage = "list" if list_first else "mutation"
+
+    async def stream(
+        self,
+        *,
+        system_prompt: str,
+        messages: list[LLMMessage],
+        tools: list[ToolDef] | None = None,
+        signal: asyncio.Event | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        selected_tools = tools
+        request_metadata = dict(metadata or {})
+        if self._stage == "list":
+            selected_tools = [
+                tool for tool in (tools or []) if tool.name == "coding_list_files"
+            ]
+        elif self._stage == "mutation":
+            selected_tools = [
+                tool for tool in (tools or []) if tool.name in self._MUTATION_TOOL_NAMES
+            ]
+        if self._stage != "open" and selected_tools:
+            if self._delegate.provider_id == "glm":
+                # Zhipu currently documents tool_choice=auto as the only
+                # supported mode. Disable its default dynamic thinking for
+                # these two mechanical bootstrap calls so it reaches the
+                # sole visible action before exhausting the output budget.
+                request_metadata["pi_agent_thinking"] = "disabled"
+            else:
+                request_metadata["pi_agent_tool_choice"] = "required"
+
+        async for event in self._delegate.stream(
+            system_prompt=system_prompt,
+            messages=messages,
+            tools=selected_tools,
+            signal=signal,
+            metadata=request_metadata,
+        ):
+            if isinstance(event, (ToolCallEvent, ToolCallEndEvent)):
+                if self._stage == "list" and event.tool_call.name == "coding_list_files":
+                    self._stage = "mutation"
+                elif (
+                    self._stage == "mutation"
+                    and event.tool_call.name in self._MUTATION_TOOL_NAMES
+                ):
+                    self._stage = "open"
+            yield event
+
+    async def close(self) -> None:
+        """The request runtime owns and closes the delegated client."""
+        return None
+
+
 class CodingSandboxAutomation:
     """Create/reuse, validate and freeze one Session-owned Sandbox operation."""
 
@@ -86,6 +168,18 @@ class CodingSandboxAutomation:
         self._raise_if_cancelled(cancelled)
         try:
             record = await self._lifecycle.latest_for_session(session_id)
+            if (
+                record is not None
+                and record.status == "awaiting_approval"
+                and not record.changed_paths
+                and not record.deleted_paths
+            ):
+                # Older versions could freeze an empty diff because a syntax
+                # check over an empty scripts directory exits successfully.
+                # Such an artifact has nothing the user can approve; discard
+                # it automatically so the Coding request gets a writable
+                # operation instead of remaining permanently blocked.
+                record = await self._lifecycle.discard(record.operation_id)
             if record is None or record.terminal:
                 record = await self._lifecycle.start(session_id)
             if record.status in _CREATE_PENDING_STATUSES:
@@ -152,6 +246,17 @@ class CodingSandboxAutomation:
                     operation_id=operation_id,
                 )
 
+            diff = record.diff
+            if diff is None:
+                diff = await self._lifecycle.diff(operation_id)
+            if not diff.entries:
+                raise CodingSandboxAutomationError(
+                    "coding_no_changes",
+                    "The Coding request produced no file changes. The Sandbox remains "
+                    "writable for a repair request.",
+                    operation_id=operation_id,
+                )
+
             self._raise_if_cancelled(cancelled, operation_id=operation_id)
             record = await self._lifecycle.prepare_publish(operation_id)
             record = await self._wait_while(
@@ -172,6 +277,31 @@ class CodingSandboxAutomation:
                 operation_id=operation_id,
             )
         return self._result(record)
+
+    async def run_with_no_change_retry(
+        self,
+        operation_id: str,
+        run_attempt: Callable[[bool], Awaitable[_AttemptResult]],
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> _AttemptResult:
+        """Run once normally, then make one strict repair attempt for an empty diff."""
+        for repair in (False, True):
+            self._raise_if_cancelled(cancelled, operation_id=operation_id)
+            result = await run_attempt(repair)
+            self._raise_if_cancelled(cancelled, operation_id=operation_id)
+            try:
+                diff = await self._lifecycle.diff(operation_id)
+            except SandboxLifecycleError as exc:
+                raise self._lifecycle_error(exc, "coding_diff_failed") from None
+            if diff.entries:
+                return result
+        raise CodingSandboxAutomationError(
+            "coding_no_changes",
+            "The Coding request produced no file changes after one automatic repair "
+            "attempt. The Sandbox remains writable.",
+            operation_id=operation_id,
+        )
 
     async def cancel_if_possible(self, operation_id: str | None) -> None:
         if operation_id is None:
@@ -230,6 +360,7 @@ class CodingSandboxAutomation:
             "project_invalid": "The Workspace cannot be prepared for Coding Sandbox execution.",
             "provider_error": "The managed Coding provider could not complete the request.",
             "validation_required": "A fresh successful validation is required before freezing.",
+            "no_changes": "A Coding artifact must contain at least one file change.",
         }
         return CodingSandboxAutomationError(
             f"coding_{exc.code}" if exc.code in messages else fallback_code,
@@ -249,7 +380,9 @@ class CodingSandboxAutomation:
 
 __all__ = [
     "AUTOMATED_CODING_PROMPT",
+    "AUTOMATED_CODING_REPAIR_PROMPT",
     "AutomatedCodingResult",
+    "CodingToolBootstrapModelClient",
     "CodingSandboxAutomation",
     "CodingSandboxAutomationError",
 ]

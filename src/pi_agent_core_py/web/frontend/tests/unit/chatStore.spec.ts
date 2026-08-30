@@ -550,6 +550,66 @@ describe("full reload active request recovery", () => {
   })
 })
 
+describe("assistant reasoning stream", () => {
+  it("exposes thinking deltas before the first text delta", () => {
+    const store = useChatStore()
+    store.setActiveSession("sess-1")
+    store.resumeActiveRequest("req-thinking")
+
+    const emit = (sequence: number, type: string, payload: Record<string, unknown>) => {
+      store.handleEvent({
+        event_id: `evt-thinking-${sequence}`,
+        request_id: "req-thinking",
+        session_id: "sess-1",
+        sequence,
+        type,
+        timestamp: "2026-08-30T00:00:00Z",
+        payload,
+      } as any)
+    }
+
+    emit(1, "message_start", {
+      message: { role: "assistant", content: [] },
+    })
+    emit(2, "message_update", {
+      message: {
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "checking the stream" }],
+      },
+      assistant_message_event: {
+        type: "thinking_delta",
+        content_index: 0,
+        delta: "checking the stream",
+      },
+    })
+
+    expect(store.streamItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "assistant_message",
+          content: "",
+          thinking: "checking the stream",
+          thinkingStreaming: true,
+        }),
+      ]),
+    )
+
+    emit(3, "message_update", {
+      message: {
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "checking the stream" }],
+      },
+      assistant_message_event: {
+        type: "thinking_end",
+        content_index: 0,
+        content: "checking the stream",
+      },
+    })
+    expect((store.streamItems.find((item) => item.kind === "assistant_message") as any)
+      .thinkingStreaming).toBe(false)
+  })
+})
+
 describe("P2-B tool approvals", () => {
   it("renders a request-scoped approval event and resolves it once", async () => {
     vi.mocked(approvalsApi.resolveToolApproval).mockResolvedValue({

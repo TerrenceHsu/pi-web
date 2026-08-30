@@ -1,5 +1,15 @@
 # Roadmap
 
+> 校准日期：**2026-08-30**。`0.0.29` 之后已完成三类意图路由和
+> Planner–Executor–Verifier Plan Mode；Session Workspace、Managed Coding Sandbox 与 LLM Wiki
+> 已取代下文部分早期规划。历史阶段细节保留用于追溯，当前事实与验证数字以 `STATUS.md` 为准。
+
+## P0 — Intent Routing + Plan Mode（✅ COMPLETE）
+
+- `read_only | coding | knowledge` 在产品入口确定性路由，支持显式覆盖并公开 secret-free 审计
+- Plan Mode 是 Coding 路由的执行方式：Planner 提交 DAG，Executor/Verifier 复用单一 Session Sandbox，最终仍由用户批准签名 Artifact
+- PlanRun/PlanVersion/Task/Event、角色通信、重试与启动恢复均持久化；实现提交为 `46c8b3e`、`698b7d4`
+
 > 未来阶段。当前状态见 [STATUS.md](STATUS.md)；已发布版本见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
@@ -160,7 +170,10 @@ P1-E M1 之前的配置后端已 frozen，不再扩展。
 
 ---
 
-## P1-F — Markdown Workspace Panel（⚪ PLANNED）
+## P1-F — Markdown Workspace Panel（✅ COMPLETE / ABSORBED BY SESSION WORKSPACE）
+
+> 本节早期规划已由 Session Workspace 阶段 1–7 扩展完成：右侧三栏 Workspace、Markdown
+> CRUD/预览、代码与文档制品、revision/CAS、Sandbox Changes 与窄屏 drawer 均已交付。
 
 让用户点击 Markdown FileChip → workspace 内临时打开右侧预览面板（不是 Drawer），支持预览 / 源码 / 标题目录 / 代码高亮 / 下载，但不自动注入 LLM 上下文。
 
@@ -203,7 +216,10 @@ P1-E M1 之前的配置后端已 frozen，不再扩展。
 
 ---
 
-## P2-R — Knowledge / RAG Subsystem（🟡 IN PROGRESS）
+## P2-R — Knowledge / RAG Subsystem（🗄️ SUPERSEDED BY LLM WIKI）
+
+> 以下 Chunk-RAG 计划仅作为历史记录。当前产品使用页面中心型 LLM Wiki：原始 PDF/HTML、
+> 双 Parser、Change Set 审批、页面 FTS5、图谱与每 Space 多对话；默认产品不启动旧 Chunk DB/Worker/Tool/UI。
 
 本地知识库 RAG 系统：PDF → Canonical Markdown → heading-aware chunk → SQLite FTS5 → Session-scoped Library ACL → `search_knowledge` AgentTool。
 
@@ -359,7 +375,7 @@ AssistantMessage 记录 provider input/output usage、总延迟与首 token 延�
 - Multi-session 并行执行
 - Request registry 持久化
 - 自动 provider fallback / 模型负载均衡
-- 多 Agent 编排
+- 多 Session 并行执行
 
 ---
 
@@ -391,8 +407,7 @@ PDF / Vector RAG 已在 P2-R 系列正式重启——见上方 §P2-R 章节。�
 
 - OCR / Image understanding / 视觉理解（marker 配置 `force_ocr=False`；扫描 PDF 进 `status=needs_ocr` 终态，不自动重试）
 - PDF 表单 / 注释 / 嵌入对象
-- Long-term user memory / 跨 Session 用户偏好 / 用户画像（区别于 RAG——RAG 已在 P2-R 系列重启）
-- Multi-Agent 编排
+- Long-term user memory / 跨 Session 用户偏好 / 用户画像（区别于当前每 Session `Memory.md`）
 - CLI / RPC mode
 - OAuth / RBAC / 企业级多租户 / 企业 secret vault（本地登录与账号工作区隔离已完成）
 - 公网部署 / 横向扩展
@@ -400,5 +415,5 @@ PDF / Vector RAG 已在 P2-R 系列正式重启——见上方 §P2-R 章节。�
 - Skill 在线编辑 / 跨项目共享 / 热加载
 - 本地文件系统操作工具（bash / read / write / edit / grep / find / ls）
 - 自动 provider fallback / 模型负载均衡
-- Markdown 在线编辑 / 保存 / diff / 协同
+- Markdown 实时多人协同编辑
 - 长期后台任务调度

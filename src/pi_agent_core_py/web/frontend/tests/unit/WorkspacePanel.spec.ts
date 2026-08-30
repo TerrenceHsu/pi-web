@@ -17,10 +17,20 @@ const filesApi = vi.hoisted(() => ({
   ),
 }))
 
+const sandboxApi = vi.hoisted(() => ({
+  readSandboxArtifactFile: vi.fn(),
+  downloadSandboxArtifactFile: vi.fn(),
+  publishSandboxOperation: vi.fn(),
+  getSandboxEvents: vi.fn(),
+}))
+
 vi.mock("../../src/api/files", () => filesApi)
+vi.mock("../../src/api/codingSandbox", () => sandboxApi)
 
 import WorkspacePanel from "../../src/components/workspace/WorkspacePanel.vue"
+import SandboxApprovalBar from "../../src/components/coding-sandbox/SandboxApprovalBar.vue"
 import { useChatStore } from "../../src/stores/chatStore"
+import { useCodingSandboxStore } from "../../src/stores/codingSandboxStore"
 import { useFileStore } from "../../src/stores/fileStore"
 import { useSessionStore } from "../../src/stores/sessionStore"
 
@@ -93,14 +103,111 @@ function mountPanel() {
 
 beforeEach(() => {
   setActivePinia(createPinia())
+  localStorage.removeItem("pi-agent-workspace-files-pane-height")
   Object.values(filesApi).forEach((mock) => mock.mockReset())
+  Object.values(sandboxApi).forEach((mock) => mock.mockReset())
   filesApi.downloadFileUrl.mockImplementation(
     (sessionId: string, fileId: string) => `/api/sessions/${sessionId}/files/${fileId}`,
   )
   filesApi.readTextFile.mockResolvedValue("print('delivered')\n")
+  sandboxApi.readSandboxArtifactFile.mockResolvedValue(
+    "def train(value=1):\n    print('pending')\n",
+  )
+  sandboxApi.downloadSandboxArtifactFile.mockResolvedValue(undefined)
+  sandboxApi.getSandboxEvents.mockResolvedValue({ events: [], gap: false, has_more: false })
 })
 
 describe("Workspace result panel", () => {
+  it("publishes an awaiting artifact directly from the chat approval bar", async () => {
+    setup()
+    const sandboxStore = useCodingSandboxStore()
+    const awaiting = {
+      operation_id: "sandbox-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      session_id: "sess-1",
+      status: "awaiting_approval",
+      changed_paths: ["scripts/ppo.py"],
+      diff: {
+        entries: [{ path: "scripts/ppo.py", status: "added" }],
+        patch: "+print('pending')\n",
+        patch_truncated: false,
+      },
+    } as any
+    sandboxStore.operation = awaiting
+    sandboxApi.publishSandboxOperation.mockResolvedValue({ ...awaiting, status: "published" })
+    const wrapper = mount(SandboxApprovalBar)
+
+    expect(wrapper.get("[data-testid='sandbox-chat-approval']").text()).toContain(
+      "代码已验证，等待批准发布",
+    )
+    await wrapper.get("[data-testid='sandbox-chat-review']").trigger("click")
+    expect(wrapper.emitted("open-workspace")).toHaveLength(1)
+    await wrapper.get("[data-testid='sandbox-chat-publish']").trigger("click")
+    await flushPromises()
+
+    expect(sandboxApi.publishSandboxOperation).toHaveBeenCalledWith(awaiting.operation_id)
+  })
+
+  it("previews and downloads a frozen Sandbox file before approval", async () => {
+    const { fileStore } = setup()
+    fileStore.filesBySession["sess-1"] = [agentMd]
+    const sandboxStore = useCodingSandboxStore()
+    sandboxStore.operation = {
+      operation_id: "sandbox-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      session_id: "sess-1",
+      status: "awaiting_approval",
+      diff: {
+        entries: [
+          {
+            path: "scripts/ppo.py",
+            status: "added",
+            before_sha256: null,
+            after_sha256: "a".repeat(64),
+          },
+        ],
+        patch: "+print('pending')\n",
+        patch_truncated: false,
+      },
+    } as any
+    const wrapper = mountPanel()
+    await flushPromises()
+
+    expect(wrapper.getComponent({ name: "CodingSandboxModal" }).props("open")).toBe(false)
+    await wrapper.get("[data-testid='workspace-row-resizer']").trigger("keydown", {
+      key: "ArrowDown",
+    })
+    expect(wrapper.get("[data-testid='workspace-files-pane']").attributes("style")).toContain(
+      "height: 276px",
+    )
+    await wrapper.get("[data-testid='workspace-tab-files']").trigger("click")
+    expect(wrapper.get("[data-testid='workspace-pending-sandbox']").text()).toContain(
+      "1 file(s) pending approval",
+    )
+    await wrapper.get("[aria-label='Open ppo.py']").trigger("click")
+    await flushPromises()
+
+    expect(sandboxApi.readSandboxArtifactFile).toHaveBeenCalledWith(
+      "sandbox-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scripts/ppo.py",
+    )
+    expect(wrapper.get("[aria-label='ppo.py code']").text()).toContain("print('pending')")
+    expect(wrapper.get("[data-testid='python-syntax-preview']").exists()).toBe(true)
+    expect(wrapper.get(".python-keyword").text()).toBe("def")
+    expect(wrapper.get(".python-function").text()).toBe("train")
+    expect(wrapper.get(".python-builtin").text()).toBe("print")
+    expect(wrapper.get(".python-string").text()).toBe("'pending'")
+    expect(wrapper.get("[data-testid='workspace-file-preview']").text()).toContain(
+      "Pending approval",
+    )
+    await wrapper
+      .get("[data-testid='workspace-file-preview'] [aria-label='Download ppo.py']")
+      .trigger("click")
+    await flushPromises()
+    expect(sandboxApi.downloadSandboxArtifactFile).toHaveBeenCalledWith(
+      "sandbox-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scripts/ppo.py",
+    )
+  })
+
   it("focuses and previews a completed Agent write_file result", async () => {
     const { chatStore, fileStore } = setup()
     const wrapper = mountPanel()

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import mimetypes
 from collections.abc import Callable, Coroutine
 from typing import Annotated, Any, cast
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -101,6 +103,9 @@ class SandboxAPIRoute(APIRoute):
                     "publisher_error": status.HTTP_500_INTERNAL_SERVER_ERROR,
                     "publisher_unavailable": status.HTTP_409_CONFLICT,
                     "operation_failed": status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    "no_changes": status.HTTP_409_CONFLICT,
+                    "artifact_unavailable": status.HTTP_409_CONFLICT,
+                    "artifact_file_not_found": status.HTTP_404_NOT_FOUND,
                 }[exc.code]
                 return _error(status_code, exc.code, str(exc))
             except SandboxOperationStoreError:
@@ -277,6 +282,28 @@ def build_coding_sandbox_router(config: WebSecurityConfig) -> APIRouter:
         result = await lifecycle.diff(operation_id)
         return JSONResponse(content=result.model_dump(mode="json"))
 
+    @router.get(f"{_API_PREFIX}/operations/{{operation_id}}/artifact-file")
+    async def get_operation_artifact_file(
+        operation_id: str,
+        path: Annotated[str, Query(min_length=1, max_length=1024)],
+        lifecycle: Annotated[
+            ManagedSandboxLifecycle,
+            Depends(get_sandbox_lifecycle),
+        ],
+    ) -> Response:
+        """Read or download one frozen file without publishing the artifact."""
+        item = await lifecycle.read_frozen_file(operation_id, path)
+        media_type = mimetypes.guess_type(item.name)[0] or "application/octet-stream"
+        return Response(
+            content=item.content,
+            media_type=media_type,
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Disposition": f"attachment; filename*=UTF-8''{quote(item.name)}",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
     async def _accepted_action(
         operation_id: str,
         lifecycle: ManagedSandboxLifecycle,
@@ -286,6 +313,8 @@ def build_coding_sandbox_router(config: WebSecurityConfig) -> APIRouter:
             "validate": lifecycle.validate,
             "prepare-publish": lifecycle.prepare_publish,
             "publish": lifecycle.publish,
+            "refreeze": lifecycle.refreeze,
+            "retry-publish": lifecycle.retry_publish,
         }[action]
         record = await handler(operation_id)
         return JSONResponse(
@@ -322,6 +351,26 @@ def build_coding_sandbox_router(config: WebSecurityConfig) -> APIRouter:
         ],
     ) -> JSONResponse:
         return await _accepted_action(operation_id, lifecycle, "publish")
+
+    @router.post(f"{_API_PREFIX}/operations/{{operation_id}}/refreeze")
+    async def refreeze_operation(
+        operation_id: str,
+        lifecycle: Annotated[
+            ManagedSandboxLifecycle,
+            Depends(get_sandbox_lifecycle),
+        ],
+    ) -> JSONResponse:
+        return await _accepted_action(operation_id, lifecycle, "refreeze")
+
+    @router.post(f"{_API_PREFIX}/operations/{{operation_id}}/retry-publish")
+    async def retry_operation_publish(
+        operation_id: str,
+        lifecycle: Annotated[
+            ManagedSandboxLifecycle,
+            Depends(get_sandbox_lifecycle),
+        ],
+    ) -> JSONResponse:
+        return await _accepted_action(operation_id, lifecycle, "retry-publish")
 
     @router.post(f"{_API_PREFIX}/operations/{{operation_id}}/cancel")
     async def cancel_operation(

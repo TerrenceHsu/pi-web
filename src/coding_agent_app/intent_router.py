@@ -33,6 +33,12 @@ _QUESTION_OR_PLAN = re.compile(
     r"|\b(?:how|what|why|can|could|should|explain|describe|review|inspect)\b",
     re.IGNORECASE,
 )
+_CODING_ARTIFACT_REQUEST = re.compile(
+    r"(?:写|生成|产出|编写|创建)"
+    r"[^。！？\n]{0,80}"
+    r"(?:源代码|源码|代码|程序|脚本|代码文件|(?:python|py|js|ts)\s*文件)",
+    re.IGNORECASE,
+)
 _CODING_ACTION = re.compile(
     r"(?:开始|继续|进行|执行|完成|直接)?(?:实现|修复|修改|改造|新增|添加|删除|移除|"
     r"重构|编写|创建|接入|更新|迁移|补齐|开发|编码|提交|发布|部署|运行测试|复跑)"
@@ -176,6 +182,13 @@ def route_intent(
             confidence=0.9,
             source="rule",
             reason_code="analysis_or_plan_request",
+        )
+    if _CODING_ARTIFACT_REQUEST.search(normalized):
+        return IntentDecision(
+            route="coding",
+            confidence=0.94,
+            source="rule",
+            reason_code="coding_artifact_request",
         )
     if _CODING_ACTION.search(normalized):
         return IntentDecision(

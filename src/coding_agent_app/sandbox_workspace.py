@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from agent_workspace.store import (
     FileStoreError,
+    WorkspaceMaterializationEntry,
     WorkspacePublishChange,
     WorkspacePublishPolicyError,
     WorkspaceStore,
@@ -130,23 +131,25 @@ class WorkspaceSandboxArtifactPublisher:
         run_root = self._staging_root / (f"wp-{artifact.manifest.artifact_id[9:17]}-{run_key}")
         publisher_state_root = self._staging_root / f"ps-{run_key}"
         project_root = run_root / "project"
+        current_root = run_root / "current"
         try:
             try:
-                materialization = await self._store.materialize_workspace_revision(
+                run_root.mkdir(parents=True, exist_ok=False)
+                _restore_snapshot_tree(baseline, project_root)
+                current = await self._store.materialize_workspace_revision(
                     session_id,
-                    project_root,
-                    expected_workspace_revision=expected_workspace_revision,
+                    current_root,
                 )
             except FileStoreError as exc:
                 raise PublisherError("publish_conflict") from exc
-            if materialization.tree_sha256 != expected_workspace_sha256:
-                raise PublisherError("publish_conflict")
-            validation_config = read_snapshot_file(baseline, _VALIDATION_CONFIG_PATH)
-            if validation_config is None:
+            if _snapshot_workspace_digest(baseline) != expected_workspace_sha256:
                 raise PublisherError("baseline_invalid")
-            config_path = project_root / _VALIDATION_CONFIG_PATH
-            config_path.parent.mkdir(parents=True, exist_ok=False)
-            _write_new_file(config_path, validation_config)
+            if current.revision < expected_workspace_revision or (
+                current.revision == expected_workspace_revision
+                and current.tree_sha256 != expected_workspace_sha256
+            ):
+                raise PublisherError("publish_conflict")
+            _validate_touched_paths_are_current(artifact, baseline, current.entries)
 
             local_publisher = LocalTransactionalPublisher(
                 project_root=project_root,
@@ -157,9 +160,7 @@ class WorkspaceSandboxArtifactPublisher:
                 baseline=baseline,
                 signer=signer,
             )
-            changed_by_path = {
-                entry.path: entry for entry in artifact.manifest.changed_files
-            }
+            changed_by_path = {entry.path: entry for entry in artifact.manifest.changed_files}
             changes = tuple(
                 WorkspacePublishChange(
                     logical_path=path,
@@ -172,14 +173,16 @@ class WorkspaceSandboxArtifactPublisher:
             store_result = await self._store.publish_workspace_changes(
                 session_id,
                 transaction_id=local_result.transaction_id,
-                expected_workspace_revision=expected_workspace_revision,
-                expected_workspace_sha256=expected_workspace_sha256,
+                expected_workspace_revision=current.revision,
+                expected_workspace_sha256=current.tree_sha256,
                 changes=changes,
                 deleted_paths=local_result.deleted_paths,
             )
-            return local_result.model_copy(update={
-                "workspace_revision": store_result.revision,
-            })
+            return local_result.model_copy(
+                update={
+                    "workspace_revision": store_result.revision,
+                }
+            )
         except PublisherError:
             raise
         except (WorkspaceVersionConflictError, WorkspaceTreeConflictError) as exc:
@@ -212,6 +215,72 @@ def _write_new_file(path: Path, value: bytes) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _restore_snapshot_tree(snapshot: ProjectSnapshot, destination: Path) -> None:
+    destination.mkdir(mode=0o700)
+    for entry in snapshot.manifest.entries:
+        content = read_snapshot_file(snapshot, entry.path)
+        if content is None:
+            raise SnapshotError("archive_invalid", relative_path=entry.path)
+        target = destination.joinpath(*PurePosixPath(entry.path).parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _write_new_file(target, content)
+        os.chmod(target, entry.mode)
+
+
+def _snapshot_workspace_digest(snapshot: ProjectSnapshot) -> str:
+    digest = hashlib.sha256()
+    entries = sorted(
+        (entry for entry in snapshot.manifest.entries if entry.path != _VALIDATION_CONFIG_PATH),
+        key=lambda entry: entry.path,
+    )
+    for entry in entries:
+        digest.update(entry.path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(entry.size).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(entry.sha256.encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _validate_touched_paths_are_current(
+    artifact: SandboxOutputArtifact,
+    baseline: ProjectSnapshot,
+    current_entries: tuple[WorkspaceMaterializationEntry, ...],
+) -> None:
+    baseline_by_path = {
+        entry.path: entry
+        for entry in baseline.manifest.entries
+        if entry.path != _VALIDATION_CONFIG_PATH
+    }
+    current_by_path = {entry.logical_path: entry for entry in current_entries}
+    current_folded = {path.casefold() for path in current_by_path}
+    for changed_entry in artifact.manifest.changed_files:
+        before = baseline_by_path.get(changed_entry.path)
+        current = current_by_path.get(changed_entry.path)
+        if changed_entry.status == "added":
+            if before is not None or changed_entry.path.casefold() in current_folded:
+                raise PublisherError("publish_conflict", relative_path=changed_entry.path)
+            continue
+        if (
+            before is None
+            or current is None
+            or current.size != changed_entry.before_size
+            or current.sha256 != changed_entry.before_sha256
+        ):
+            raise PublisherError("publish_conflict", relative_path=changed_entry.path)
+    for deleted_entry in artifact.manifest.deleted_files:
+        before = baseline_by_path.get(deleted_entry.path)
+        current = current_by_path.get(deleted_entry.path)
+        if (
+            before is None
+            or current is None
+            or current.size != deleted_entry.before_size
+            or current.sha256 != deleted_entry.before_sha256
+        ):
+            raise PublisherError("publish_conflict", relative_path=deleted_entry.path)
 
 
 __all__ = [

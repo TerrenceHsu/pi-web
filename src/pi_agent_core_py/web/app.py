@@ -33,7 +33,7 @@ import logging
 import math
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -121,6 +121,7 @@ if TYPE_CHECKING:
     )
     from agent_workspace.documents import WorkspaceDocumentConverterRegistry
     from agent_workspace.store import WorkspaceStore
+    from coding_agent_app.planning.models import PlanRunResult
     from coding_sandbox import ArtifactSigner
     from coding_sandbox.admin import SandboxBackendFactory
     from wiki_parser import ParserProvider, ParserProviderV2
@@ -163,6 +164,10 @@ npm run build</pre>
 
 #: heartbeat 间隔（秒）。SSE 在 idle 时定期发空注释行，保持连接不被代理超时关闭。
 _SSE_HEARTBEAT_SECONDS: float = 15.0
+
+#: 删除 Session 前等待其活动请求安全退出的最长时间。超时必须保留 Session，
+#: 避免后台任务继续读写已经删除的数据，或留下占用全局 Harness 的幽灵请求。
+_SESSION_DELETE_REQUEST_STOP_TIMEOUT_SECONDS: float = 10.0
 
 
 # ============================================================================
@@ -1495,6 +1500,7 @@ def create_app(
     )
     checkpointer_locks: dict[str, asyncio.Lock] = {}
     continuity_locks: dict[str, asyncio.Lock] = {}
+    deleting_session_ids: set[str] = set()
     # 用入参覆盖默认 maxlen
     state.event_buffer = type(state.event_buffer)(max_size=event_buffer_max_size)
     # P1-B1: request_history deque 的 maxlen 也用入参覆盖
@@ -2373,6 +2379,12 @@ def create_app(
             session_id = (payload or {}).get("session_id") or state.current_session_id
             store = state.session_store
 
+            if session_id is not None and session_id in deleting_session_ids:
+                raise PromptValidationError(
+                    409,
+                    f"session {session_id!r} is being deleted",
+                )
+
             if store is not None and session_id is not None:
                 from ..session_sqlite import SessionNotFoundError
 
@@ -2491,6 +2503,8 @@ def create_app(
 
     async def _run_prompt_core(
         validated: _PromptValidated,
+        *,
+        coding_repair: bool = False,
     ) -> PromptRunOutcome:
         """D2-4 thin wrapper——执行 + 普通 persist。
 
@@ -2512,6 +2526,7 @@ def create_app(
             PromptExecutionResult,
             await _execute_prompt(
                 validated,
+                coding_repair=coding_repair,
                 manage_running_state=False,
             ),
         )
@@ -3010,20 +3025,10 @@ def create_app(
                 "workspace_context_unavailable",
             ) from None
 
-        provider_runtime = app.state.request_provider_runtime
-        selection: RequestProviderSelection | None = None
         result_client = harness.agent.client
-        try:
-            if provider_runtime is not None:
-                selection = await provider_runtime.resolve_selection(session_id)
-            async with AsyncExitStack() as stack:
-                if provider_runtime is not None and selection is not None:
-                    await stack.enter_async_context(
-                        provider_runtime.bind_to_harness(
-                            harness=harness,
-                            selection=selection,
-                        )
-                    )
+        async def run_bound_plan() -> PlanRunResult:
+            nonlocal result_client
+            try:
                 registered_names: set[str] = container["coding_sandbox_tool_names"]
                 coding_tools = [
                     tool
@@ -3052,41 +3057,26 @@ def create_app(
                     cancelled=cancelled,
                 )
                 result_client = harness.agent.client
-                plan_result = await orchestrator.run(
+                return await orchestrator.run(
                     session_id=session_id,
                     request_id=request_id,
                     goal=validated.text,
                     planning_context=workspace_context,
                 )
-        except ProviderSelectionNotFoundError:
-            raise PromptRuntimeError(
-                500,
-                "Selected provider profile is unavailable.",
-                "provider_profile_unavailable",
-            ) from None
-        except ProviderSelectionDisabledError:
-            raise PromptRuntimeError(
-                500,
-                "Selected provider profile is disabled.",
-                "provider_profile_disabled",
-            ) from None
-        except ProviderSelectionUnavailableError:
-            raise PromptRuntimeError(
-                500,
-                "Selected provider credential is unavailable.",
-                "provider_credential_unavailable",
-            ) from None
-        except ProviderInitializationError:
-            raise PromptRuntimeError(
-                500,
-                "Selected provider could not be initialized.",
-                "provider_initialization_failed",
-            ) from None
-        except CodingSandboxAutomationError as exc:
-            raise PromptRuntimeError(409, str(exc), exc.code) from None
-        except PlanOrchestrationError as exc:
-            status_code = 409 if exc.code == "plan_cancelled" else 500
-            raise PromptRuntimeError(status_code, str(exc), exc.code) from None
+            except CodingSandboxAutomationError as exc:
+                raise PromptRuntimeError(409, str(exc), exc.code) from None
+            except PlanOrchestrationError as exc:
+                status_code = 409 if exc.code == "plan_cancelled" else 500
+                raise PromptRuntimeError(status_code, str(exc), exc.code) from None
+
+        plan_result = cast(
+            "PlanRunResult",
+            await _execute_prompt(
+                validated,
+                manage_running_state=False,
+                provider_bound_operation=run_bound_plan,
+            ),
+        )
 
         history = list(await session_store.list_messages(session_id))
         user_message = UserMessage(
@@ -3202,8 +3192,21 @@ def create_app(
                 cancelled=abort_requested,
             )
             operation_id = operation.operation_id
-            result = await _run_prompt_core(validated)
-            model_persisted = result.session_persisted
+
+            async def _run_coding_attempt(repair: bool) -> PromptRunOutcome:
+                nonlocal model_persisted
+                attempt_result = await _run_prompt_core(
+                    validated,
+                    coding_repair=repair,
+                )
+                model_persisted = attempt_result.session_persisted
+                return attempt_result
+
+            result = await automation.run_with_no_change_retry(
+                operation_id,
+                _run_coding_attempt,
+                cancelled=abort_requested,
+            )
             if abort_requested is not None and abort_requested():
                 await automation.cancel_if_possible(operation_id)
                 return result
@@ -3235,6 +3238,7 @@ def create_app(
                     "coding_sandbox_not_ready",
                     "coding_validation_failed",
                     "coding_validation_required",
+                    "coding_no_changes",
                     "coding_request_aborted",
                 } else 500,
                 str(exc),
@@ -3776,7 +3780,9 @@ def create_app(
         checkpoint_prior_memory: str | None = None,
         checkpoint_operation: str = "checkpointer",
         manage_running_state: bool = True,
-    ) -> PromptExecutionResult | str:
+        coding_repair: bool = False,
+        provider_bound_operation: Callable[[], Awaitable[PlanRunResult]] | None = None,
+    ) -> PromptExecutionResult | PlanRunResult | str:
         """D2-4：纯执行——只跑模型/Agent，**不**碰 DB。
 
         三种模式（由参数决定）：
@@ -3817,10 +3823,13 @@ def create_app(
         # selection 为 None（Session 无 Binding）→ 同样走 legacy client.
         runtime = app.state.request_provider_runtime
         selection: RequestProviderSelection | None = None
-        for metadata_key in ("workspace_context", "agent_md", "memory_md"):
-            harness.context.metadata.pop(metadata_key, None)
+        if provider_bound_operation is None:
+            for metadata_key in ("workspace_context", "agent_md", "memory_md"):
+                harness.context.metadata.pop(metadata_key, None)
         workspace_context_metadata: dict[str, Any] | None = None
-        if checkpoint_source is None and validated.knowledge_conversation is None:
+        if provider_bound_operation is not None:
+            prompt_suffix = None
+        elif checkpoint_source is None and validated.knowledge_conversation is None:
             try:
                 workspace_context = await _assemble_workspace_context(
                     validated.session_id,
@@ -3840,9 +3849,16 @@ def create_app(
                 ) from None
             route_instructions = None
             if validated.coding_mode:
-                from .coding_sandbox.automation import AUTOMATED_CODING_PROMPT
+                from .coding_sandbox.automation import (
+                    AUTOMATED_CODING_PROMPT,
+                    AUTOMATED_CODING_REPAIR_PROMPT,
+                )
 
                 route_instructions = AUTOMATED_CODING_PROMPT
+                if coding_repair:
+                    route_instructions = (
+                        f"{route_instructions}\n\n{AUTOMATED_CODING_REPAIR_PROMPT}"
+                    )
             elif validated.intent is not None and validated.intent.route == "read_only":
                 route_instructions = READ_ONLY_SYSTEM_PROMPT
             prompt_suffix = (
@@ -3895,7 +3911,11 @@ def create_app(
             # M1-5: bind_to_harness 在 active-request ownership 内部；
             # AsyncExitStack 让 selection=None 时跳过绑定（legacy path）.
             async with AsyncExitStack() as stack:
-                if validated.intent is not None and validated.intent.route == "read_only":
+                if (
+                    provider_bound_operation is None
+                    and validated.intent is not None
+                    and validated.intent.route == "read_only"
+                ):
                     from ..tools import ToolRegistry
 
                     original_tools = harness.agent.tools
@@ -3910,7 +3930,7 @@ def create_app(
                         harness.agent.tools = original_tools
 
                     stack.callback(_restore_read_only_mode)
-                if validated.coding_mode:
+                if provider_bound_operation is None and validated.coding_mode:
                     from ..policy import AllowAllToolPermissionPolicy
                     from ..tools import ToolRegistry
 
@@ -3930,7 +3950,10 @@ def create_app(
                         harness.set_permission_policy(original_permission_policy)
 
                     stack.callback(_restore_coding_mode)
-                if validated.knowledge_conversation is not None:
+                if (
+                    provider_bound_operation is None
+                    and validated.knowledge_conversation is not None
+                ):
                     from .wiki.knowledge_agent import (
                         KnowledgeAgentBinding,
                         knowledge_agent_binding,
@@ -3958,7 +3981,31 @@ def create_app(
                     await stack.enter_async_context(
                         runtime.bind_to_harness(harness=harness, selection=selection)
                     )
+                force_coding_bootstrap = bool(
+                    validated.coding_mode
+                    and validated.intent is not None
+                    and validated.intent.reason_code == "coding_artifact_request"
+                )
+                if (
+                    provider_bound_operation is None
+                    and validated.coding_mode
+                    and (coding_repair or force_coding_bootstrap)
+                ):
+                    from .coding_sandbox.automation import CodingToolBootstrapModelClient
 
+                    repair_delegate = harness.agent.client
+                    harness.agent.client = CodingToolBootstrapModelClient(
+                        repair_delegate,
+                        list_first=force_coding_bootstrap and not coding_repair,
+                    )
+
+                    def _restore_coding_repair_client() -> None:
+                        harness.agent.client = repair_delegate
+
+                    stack.callback(_restore_coding_repair_client)
+
+                if provider_bound_operation is not None:
+                    return await provider_bound_operation()
                 if checkpoint_source is not None:
                     return await generate_checkpoint_memory(
                         harness.agent.client,
@@ -4010,7 +4057,7 @@ def create_app(
             raise PromptRuntimeError(
                 500, state.last_error, "provider_initialization_failed"
             ) from None
-        except CheckpointerError:
+        except (CheckpointerError, PromptRuntimeError):
             raise
         except RuntimeError as e:
             msg = str(e)
@@ -4321,6 +4368,22 @@ def create_app(
         # 占位 sequence 起点——下一个分配的 sequence 将是此值
         web_request.event_start_sequence = state.next_event_sequence
 
+        async def _emit_terminal_error(message: str, error_type: str) -> None:
+            try:
+                await _emit_web_payload(
+                    {
+                        "type": "error",
+                        "message": message,
+                        "error_type": error_type,
+                    },
+                    web_request.id,
+                    web_request.session_id,
+                )
+            except Exception:
+                # The durable request status remains authoritative when a
+                # disconnected client cannot receive the terminal event.
+                return
+
         try:
             result = await _run_prompt_request(
                 validated,
@@ -4340,17 +4403,20 @@ def create_app(
             web_request.ended_at = _now_utc()
             web_request.error = e.message
             web_request.error_type = e.error_type
+            await _emit_terminal_error(e.message, e.error_type)
         except HTTPException as e:
             # _run_prompt_core 内部不应抛 HTTPException，但兜底
             web_request.status = "error"
             web_request.ended_at = _now_utc()
             web_request.error = _safe_error(e)
             web_request.error_type = "HTTPException"
+            await _emit_terminal_error(web_request.error, web_request.error_type)
         except Exception as e:
             web_request.status = "error"
             web_request.ended_at = _now_utc()
             web_request.error = _safe_error(e)
             web_request.error_type = type(e).__name__
+            await _emit_terminal_error(web_request.error, web_request.error_type)
         else:
             # 成功——但检查是否被 abort 过（abort 不 cancel task，走 run_prompt 收敛路径）
             if web_request.abort_reason is not None:
@@ -4661,6 +4727,130 @@ def create_app(
             "status": req.status,
             "abort_reason": req.abort_reason,
         }
+
+    def _harness_is_idle() -> bool:
+        phase: str
+        try:
+            phase = harness.context.phase
+        except Exception:
+            phase = "unknown"
+        agent_status: str
+        try:
+            agent_status = harness.agent.state.status
+        except Exception:
+            agent_status = "unknown"
+        return phase == "idle" and agent_status not in ("running", "aborting")
+
+    async def _stop_session_request_before_delete(
+        session_id: str,
+    ) -> JSONResponse | None:
+        """Stop one Session's request before deleting any of its durable state.
+
+        Session deletion is a destructive boundary. Returning before the owned
+        background task has finished creates a TOCTOU race: the task can append
+        messages after SQLite/files have been removed and keeps the single
+        Harness busy for every other Session. A bounded wait keeps failure
+        recoverable—the Session remains intact when termination cannot be
+        confirmed.
+        """
+        request_id = state.active_request_by_session.get(session_id)
+        if request_id is None:
+            return None
+
+        raw_request = state.active_requests.get(request_id)
+        if raw_request is None:
+            if _harness_is_idle():
+                state.active_request_by_session.pop(session_id, None)
+                if not state.active_requests:
+                    state.running = False
+                return None
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": {
+                        "code": "active_request_state_inconsistent",
+                        "message": (
+                            "Session request state cannot be stopped safely; "
+                            "Session was not deleted"
+                        ),
+                        "request_id": request_id,
+                    }
+                },
+            )
+
+        web_request = cast(WebRunRequest, raw_request)
+        abort_result = await _abort_request_internal(web_request, "session_deleted")
+        if not abort_result.get("ok", False):
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": {
+                        "code": "active_request_abort_failed",
+                        "message": "Active request could not be aborted; Session was not deleted",
+                        "request_id": request_id,
+                    }
+                },
+            )
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _SESSION_DELETE_REQUEST_STOP_TIMEOUT_SECONDS
+        task = web_request.task
+        if task is not None and not task.done():
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(task),
+                    timeout=max(0.0, deadline - loop.time()),
+                )
+            except asyncio.CancelledError:
+                # A cancelled owned task is an expected abort outcome. Do not
+                # let it cancel the HTTP request that is completing deletion.
+                if not task.cancelled():
+                    raise
+            except TimeoutError:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "detail": {
+                            "code": "active_request_stop_timeout",
+                            "message": (
+                                "Timed out stopping the active request; "
+                                "Session was not deleted"
+                            ),
+                            "request_id": request_id,
+                        }
+                    },
+                )
+
+        try:
+            await asyncio.wait_for(
+                harness.wait_for_idle(),
+                timeout=max(0.0, deadline - loop.time()),
+            )
+        except TimeoutError:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": {
+                        "code": "harness_stop_timeout",
+                        "message": "Harness did not become idle; Session was not deleted",
+                        "request_id": request_id,
+                    }
+                },
+            )
+
+        # Cancelling a queued asyncio task before its coroutine starts means
+        # the runner's finally block never executes. Recover the Web reservation
+        # only after both the task and Harness are confirmed idle.
+        if state.active_request_by_session.get(session_id) == request_id:
+            _remove_from_active(web_request)
+            if web_request.status not in ("completed", "error", "aborted"):
+                web_request.status = "aborted"
+                web_request.abort_reason = web_request.abort_reason or "session_deleted"
+                web_request.ended_at = _now_utc()
+                state.request_history.append(web_request)
+        if not state.active_requests and _harness_is_idle():
+            state.running = False
+        return None
 
     # ========================================================================
     # P1-D2-5: Regenerate validation + background runner
@@ -5730,7 +5920,8 @@ def create_app(
     ) -> dict[str, Any] | JSONResponse:
         """删除 session（spec endpoint，P0-1）。级联删除 messages / snapshots / 上传文件。
 
-        P0-2：先删 uploads/{sid}/，再删 sqlite session——避免孤儿目录。
+        活动请求必须先 abort 并确认 Harness idle；停止失败时保留 Session。
+        P0-2：确认停稳后先删 uploads/{sid}/，再删 sqlite session——避免孤儿目录。
         文件删除失败不阻塞 sqlite 删除（记 warning 到 metadata）。
         """
         from ..session_sqlite import SessionNotFoundError
@@ -5742,56 +5933,80 @@ def create_app(
                 content={"ok": False, "error": "session store not initialized"},
             )
 
-        # 先校验 session 存在（不存在直接 404，不动文件）
-        existing = await store.get_session(sid)
-        if existing is None:
+        # check + add 之间没有 await，因此同一 event loop 内是原子的。删除屏障
+        # 同时阻止活动请求退出后、持久化数据删除前的新 prompt 抢入。
+        if sid in deleting_session_ids:
             return JSONResponse(
-                status_code=404,
-                content={"detail": f"session {sid!r} not found"},
+                status_code=409,
+                content={"detail": f"session {sid!r} is already being deleted"},
             )
-
-        # P0-2：先删 uploads/{sid}/
-        deleted_files = 0
-        if state.file_store is not None:
-            try:
-                deleted_files = await state.file_store.delete_session_files(sid)
-            except Exception as e:
-                # 文件删除失败不阻塞 sqlite 删除；记 warning
-                state.last_error = f"delete_session_files({sid}) failed: {type(e).__name__}: {e}"
+        deleting_session_ids.add(sid)
 
         try:
-            await store.delete_session(sid)
-        except SessionNotFoundError:
-            # 二次防御——理论上前面 get_session 已校验
-            return JSONResponse(
-                status_code=404,
-                content={"detail": f"session {sid!r} not found"},
+            # 先校验 session 存在（不存在直接 404，不动文件）
+            existing = await store.get_session(sid)
+            if existing is None:
+                return JSONResponse(
+                    status_code=404,
+                    content={"detail": f"session {sid!r} not found"},
+                )
+
+            stop_error = await _stop_session_request_before_delete(sid)
+            if stop_error is not None:
+                return stop_error
+
+            # P0-2：先删 uploads/{sid}/
+            deleted_files = 0
+            if state.file_store is not None:
+                try:
+                    deleted_files = await state.file_store.delete_session_files(sid)
+                except Exception as e:
+                    # 文件删除失败不阻塞 sqlite 删除；记 warning
+                    state.last_error = (
+                        f"delete_session_files({sid}) failed: {type(e).__name__}: {e}"
+                    )
+
+            try:
+                await store.delete_session(sid)
+            except SessionNotFoundError:
+                # 二次防御——理论上前面 get_session 已校验
+                return JSONResponse(
+                    status_code=404,
+                    content={"detail": f"session {sid!r} not found"},
+                )
+            # P2-R1: 删除 session 后清理 knowledge library bindings（P2-R0 §7.2 不变量 7）
+            # 只清 binding，不删 library 本身。失败不阻塞 session 删除（记 warning）。
+            k_service = (
+                state.knowledge_service if hasattr(state, "knowledge_service") else None
             )
-        # P2-R1: 删除 session 后清理 knowledge library bindings（P2-R0 §7.2 不变量 7）
-        # 只清 binding，不删 library 本身。失败不阻塞 session 删除（记 warning）。
-        k_service = state.knowledge_service if hasattr(state, "knowledge_service") else None
-        if k_service is not None:
-            try:
-                await k_service.on_session_deleted(sid)
-            except Exception as e:
-                state.last_error = f"knowledge.on_session_deleted({sid}) failed: {type(e).__name__}"
-        wiki_store = state.wiki_store
-        if wiki_store is not None:
-            try:
-                await wiki_store.on_session_deleted(sid)
-            except Exception as e:
-                state.last_error = f"wiki.on_session_deleted({sid}) failed: {type(e).__name__}"
-        # 删的是 current session → 自动切到 default（或新建一个）
-        if state.current_session_id == sid:
-            state.current_session_id = None
-            try:
-                default_session = await store.ensure_default_session()
-                state.current_session_id = default_session.id
-                if state.file_store is not None:
-                    await state.file_store.ensure_session_workspace(default_session.id)
-            except Exception:
-                pass
-        return {"ok": True, "deleted_files": deleted_files}
+            if k_service is not None:
+                try:
+                    await k_service.on_session_deleted(sid)
+                except Exception as e:
+                    state.last_error = (
+                        f"knowledge.on_session_deleted({sid}) failed: {type(e).__name__}"
+                    )
+            wiki_store = state.wiki_store
+            if wiki_store is not None:
+                try:
+                    await wiki_store.on_session_deleted(sid)
+                except Exception as e:
+                    state.last_error = (
+                        f"wiki.on_session_deleted({sid}) failed: {type(e).__name__}"
+                    )
+            # 删的是 current session → 自动切到 default（或新建一个）
+            if state.current_session_id == sid:
+                state.current_session_id = None
+                try:
+                    default_session = await store.ensure_default_session()
+                    state.current_session_id = default_session.id
+                    if state.file_store is not None:
+                        await state.file_store.ensure_session_workspace(default_session.id)
+                except Exception:
+                    pass
+            return {"ok": True, "deleted_files": deleted_files}
+        finally:
+            deleting_session_ids.discard(sid)
 
     # ========================================================================
     # P1-D2-5: Regenerate + Revision history

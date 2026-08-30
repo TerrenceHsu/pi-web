@@ -105,6 +105,12 @@ export interface AssistantMessageItem extends ContentWarningAwareItem {
   kind: "assistant_message"
   id: string
   content: string
+  /** Provider reasoning/thinking content, kept separate from the final answer. */
+  thinking?: string
+  /** True between thinking_start and thinking_end so the UI can expose live progress. */
+  thinkingStreaming?: boolean
+  /** A provider may signal that some reasoning content is intentionally redacted. */
+  thinkingRedacted?: boolean
   /** 流式进行中——true 时显示 stream cursor */
   streaming?: boolean
   /** D2-7：来自 SQLite persisted message 的稳定 row id（regenerate 后不变）。

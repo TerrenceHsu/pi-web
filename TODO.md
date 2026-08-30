@@ -37,6 +37,14 @@
 - [x] **阶段 5：最终验证与审批**：全部任务通过后复用服务器 Validation→Freeze TOCTOU 屏障并停在 Artifact 待批准；发布/放弃后 Plan 收敛到 completed/cancelled
 - [x] **阶段 6：前端与恢复验收**：实现 Plan 可用状态/开关、任务卡、批准、角色阶段、刷新恢复与 Stop；仅在 1 个既有测试文件增加 2 项，成功 P→E→V→Freeze 与 Verifier 拒绝不冻结均通过；邻接 Backend 27 passed，Ruff、strict Mypy、Frontend typecheck/lint 通过
 
+## P0 — Sandbox 审阅、冲突恢复与工作区交互
+
+- [x] **冻结制品审阅**：新增只读 Artifact 文件 API，待批准与发布冲突状态下可从 Workspace 文件树逐项预览/下载冻结内容；Python 预览使用依赖无关的安全词法高亮，不执行文件
+- [x] **发布冲突恢复**：`publish_conflict` 保留签名 Artifact 与审计状态；源基线已改变时可重新冻结，冲突解除时可重试同一发布；状态机、公开 actions/transitions、事件和前端操作保持一致
+- [x] **自动 Coding 空变更修复**：空 diff 不再冻结为可批准 Artifact；自动 Coding 首次无改动时以受控修复提示重试一次，仍无改动则返回稳定 `coding_no_changes`
+- [x] **交互与生命周期收敛**：Chat 直接显示待批准/冲突操作条，Thinking 支持首段正文前实时展示，桌面三栏与 Workspace 上下分区可拖拽并持久化；删除 Session 前先停止活跃请求并等待 Harness 释放
+- [x] **完整门禁与回归收敛**：修复 Plan Mode 绕过单一 Provider binding 入口的安全 AST 回归、两组旧前端 mock 的 Plan state stderr warning，以及生成文档专用只读提示；全量 Ruff PASS、strict Mypy 185 files / 0 issues、Backend 2110 passed / 7 skipped / 9 deselected / coverage 77.17%、Frontend 183/183 + typecheck/lint/build、Playwright 19/19 且最终无 retry/failure
+
 ## P0 — Session Workspace 一体化（既有基线）
 
 完整架构、所有权边界、Sandbox 发布流和富文档转换约定见
@@ -185,7 +193,7 @@ Modal 与 Local Docker 作为后续兼容后端，最终用户不需要安装 Py
 ## 明确延期 / Out of scope
 
 - [ ] 扩展图片理解与富版面 enrichment：Docling OCR preset 基线已通过双 Parser Gate；更多 OCR 语言/语料质量、公式、代码与 VLM enrichment 仍默认关闭，启用前需独立版本/hash/许可证/资源 Gate
-- [ ] Multi-Agent、Plan Mode；托管 Coding Sandbox 已提升到 P0，Local Docker/Git provider integration 仍按其独立阶段实施
+- [ ] Local Docker/Git Sandbox provider integration；当前 Plan Mode 已复用 Managed Sandbox 完成，新的本地 Provider 仍需独立安全与隔离设计
 - [ ] RBAC、OAuth、企业级多租户、TLS 公网部署、横向扩展
 - [ ] 向量数据库、embedding、hybrid retrieval 与 Chunk RAG；LLM Wiki 仅保留已批准页面的 SQLite FTS5
 - [ ] 自动 provider fallback、模型负载均衡、长期后台任务调度
@@ -198,6 +206,8 @@ Modal 与 Local Docker 作为后续兼容后端，最终用户不需要安装 Py
 | Auth + Session Folder + Checkpointer + P0 Runtime | ✅ `b529bbc` |
 | P2-A Session reload recovery | ✅ `f30da56` |
 | P2-B Approval + P2-C Context Budget/Compaction | ✅ `924b047` |
+| 三类意图路由 | ✅ `46c8b3e` |
+| Planner–Executor–Verifier Plan Mode | ✅ `698b7d4` |
 | B7 SQLite cleanup | ✅ `688cf08` |
 | Persistent Keyring preflight | ✅ `ada31fc` |
 | ToolResult ordering + MCP UTF-8 | ✅ `e7bf8f3` |

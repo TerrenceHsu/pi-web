@@ -42,6 +42,17 @@ const text = computed(() => {
   }
   return ""
 })
+const thinking = computed(() => {
+  if (kind.value !== "assistant_message") return ""
+  const value = (props.item as any).thinking
+  return typeof value === "string" ? value : ""
+})
+const thinkingStreaming = computed(
+  () => kind.value === "assistant_message" && (props.item as any).thinkingStreaming === true,
+)
+const thinkingRedacted = computed(
+  () => kind.value === "assistant_message" && (props.item as any).thinkingRedacted === true,
+)
 
 const assistantMarkdown = computed(() => {
   if (kind.value !== "assistant_message" || !text.value) return ""
@@ -194,6 +205,24 @@ _watch(
   >
     <div class="avatar">AI</div>
     <div class="body">
+      <details
+        v-if="thinking || thinkingStreaming || thinkingRedacted"
+        class="thinking-block"
+        :open="thinkingStreaming"
+      >
+        <summary>
+          Reasoning
+          <span v-if="thinkingStreaming" class="thinking-live">generating…</span>
+        </summary>
+        <div
+          v-if="thinking"
+          class="thinking-content"
+          data-testid="assistant-thinking"
+        >{{ thinking }}<span v-if="thinkingStreaming" class="stream-cursor">▋</span></div>
+        <div v-else-if="thinkingRedacted" class="thinking-redacted">
+          Reasoning content was redacted by the provider.
+        </div>
+      </details>
       <div v-if="text" class="text">
         <!-- markdown-it 已关闭原始 HTML；此处只渲染解析后的安全 HTML。 -->
         <!-- eslint-disable vue/no-v-html -->
@@ -343,6 +372,38 @@ _watch(
   flex-direction: column;
   gap: 4px;
   align-items: flex-start;
+}
+.thinking-block {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--code-bg);
+  color: var(--muted);
+  font-size: 12px;
+}
+.thinking-block summary {
+  cursor: pointer;
+  color: var(--muted-fg, #8b8fa3);
+  font-weight: 600;
+  user-select: none;
+}
+.thinking-live {
+  margin-left: 6px;
+  color: var(--accent);
+  font-weight: 500;
+}
+.thinking-content {
+  margin-top: 7px;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+.thinking-redacted {
+  margin-top: 7px;
+  font-style: italic;
 }
 .avatar {
   width: 24px;

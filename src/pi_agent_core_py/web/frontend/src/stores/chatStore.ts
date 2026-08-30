@@ -136,6 +136,23 @@ function assistantTextOf(message: any): string {
     .join("")
 }
 
+function assistantThinkingOf(message: any): { content: string; redacted: boolean } {
+  if (!message || !Array.isArray(message.content)) {
+    return { content: "", redacted: false }
+  }
+  const parts: string[] = []
+  let redacted = false
+  for (const block of message.content) {
+    if (!block || block.type !== "thinking") continue
+    if (block.redacted === true) {
+      redacted = true
+      continue
+    }
+    if (typeof block.thinking === "string") parts.push(block.thinking)
+  }
+  return { content: parts.join(""), redacted }
+}
+
 /** 判断 toolName 是否是文件工具。 */
 function isFileTool(name: string | undefined): boolean {
   return name === "view_file" || name === "list_files" || name === "write_file"
@@ -410,10 +427,13 @@ export const useChatStore = defineStore("chat", () => {
       }
     }
     if (msg.role === "assistant") {
+      const thinking = assistantThinkingOf(msg)
       return {
         kind: "assistant_message",
         id,
         content: textOf(msg),
+        thinking: thinking.content || undefined,
+        thinkingRedacted: thinking.redacted || undefined,
         usage: msg.usage ?? undefined,
         generationMetrics: msg.generation_metrics,
         contentWarnings: contentWarningsOf(msg),
@@ -467,6 +487,7 @@ export const useChatStore = defineStore("chat", () => {
       }
     }
     if (msg.role === "assistant") {
+      const thinking = assistantThinkingOf(msg)
       return {
         kind: "assistant_message",
         id: dto.message_id,
@@ -474,6 +495,8 @@ export const useChatStore = defineStore("chat", () => {
         messageIndex: dto.idx,
         persisted: true,
         content: textOf(msg),
+        thinking: thinking.content || undefined,
+        thinkingRedacted: thinking.redacted || undefined,
         usage: msg.usage ?? undefined,
         generationMetrics: msg.generation_metrics,
         contentWarnings: contentWarningsOf(msg),
@@ -765,6 +788,16 @@ export const useChatStore = defineStore("chat", () => {
             // 普通 prompt 路径——reconcile messages
             if (r.session_id) {
               await reconcileMessagesFromServer(r.session_id)
+            }
+            if (r.status === "error" || r.status === "aborted") {
+              const message =
+                r.error ||
+                (r.status === "aborted"
+                  ? "Request aborted"
+                  : "Request finalization failed")
+              error.value = message
+              finalizeTurnInfo("error")
+              appendError(message, r)
             }
           }
 
@@ -1822,16 +1855,18 @@ export const useChatStore = defineStore("chat", () => {
       const msg = (event as any).message
       if (msg && currentAssistantItemId !== null) {
         const finalText = assistantTextOf(msg)
-        if (finalText) {
-          updateItem(currentAssistantItemId, (it: any) => {
-            if (it.kind === "assistant_message") {
-              it.content = finalText
-              it.streaming = false
-              it.usage = msg.usage ?? undefined
-              it.generationMetrics = msg.generation_metrics
-            }
-          })
-        }
+        const finalThinking = assistantThinkingOf(msg)
+        updateItem(currentAssistantItemId, (it: any) => {
+          if (it.kind === "assistant_message") {
+            if (finalText) it.content = finalText
+            if (finalThinking.content) it.thinking = finalThinking.content
+            it.thinkingRedacted = finalThinking.redacted || undefined
+            it.thinkingStreaming = false
+            it.streaming = false
+            it.usage = msg.usage ?? undefined
+            it.generationMetrics = msg.generation_metrics
+          }
+        })
       }
       currentAssistantItemId = null
       streaming.value = false
@@ -1842,6 +1877,7 @@ export const useChatStore = defineStore("chat", () => {
     if (t === "message_start") {
       const msg = (event as any).message
       if (msg?.role === "assistant") {
+        const thinking = assistantThinkingOf(msg)
         // 创建 streaming draft
         if (currentAssistantItemId === null) {
           const id = genId("a")
@@ -1849,6 +1885,8 @@ export const useChatStore = defineStore("chat", () => {
             kind: "assistant_message",
             id,
             content: assistantTextOf(msg),
+            thinking: thinking.content || undefined,
+            thinkingRedacted: thinking.redacted || undefined,
             streaming: true,
           })
           currentAssistantItemId = id
@@ -1860,6 +1898,8 @@ export const useChatStore = defineStore("chat", () => {
               if (seg && !it.content.endsWith(seg)) {
                 it.content = it.content + seg
               }
+              if (thinking.content) it.thinking = thinking.content
+              it.thinkingRedacted = thinking.redacted || undefined
             }
           })
         }
@@ -1874,6 +1914,8 @@ export const useChatStore = defineStore("chat", () => {
       if (streamEvent?.type === "text_delta" && typeof streamEvent.delta === "string") {
         // 优先用 delta
         appendAssistantDelta(streamEvent.delta)
+      } else if (typeof streamEvent?.type === "string" && streamEvent.type.startsWith("thinking_")) {
+        updateAssistantThinking(msg, streamEvent)
       } else if (msg?.role === "assistant") {
         // 兜底：用整条 message.content diff
         const full = assistantTextOf(msg)
@@ -1885,12 +1927,16 @@ export const useChatStore = defineStore("chat", () => {
       const msg = (event as any).message
       if (msg?.role === "assistant") {
         const full = assistantTextOf(msg)
+        const thinking = assistantThinkingOf(msg)
         if (currentAssistantItemId !== null) {
           updateItem(currentAssistantItemId, (it: any) => {
             if (it.kind === "assistant_message") {
               if (full && (!it.content || it.content.length < full.length)) {
                 it.content = full
               }
+              if (thinking.content) it.thinking = thinking.content
+              it.thinkingRedacted = thinking.redacted || undefined
+              it.thinkingStreaming = false
               it.streaming = false
               it.usage = msg.usage
               it.generationMetrics = msg.generation_metrics
@@ -1903,6 +1949,9 @@ export const useChatStore = defineStore("chat", () => {
             kind: "assistant_message",
             id,
             content: full,
+            thinking: thinking.content || undefined,
+            thinkingRedacted: thinking.redacted || undefined,
+            thinkingStreaming: false,
             usage: msg.usage ?? undefined,
             generationMetrics: msg.generation_metrics,
           })
@@ -1938,6 +1987,54 @@ export const useChatStore = defineStore("chat", () => {
   // ----------------------------------------------------------------------
   // upsert helpers
   // ----------------------------------------------------------------------
+
+  function updateAssistantThinking(message: any, streamEvent: any) {
+    const full = assistantThinkingOf(message)
+    const delta =
+      streamEvent?.type === "thinking_delta" && typeof streamEvent.delta === "string"
+        ? streamEvent.delta
+        : ""
+    const isEnd = streamEvent?.type === "thinking_end"
+
+    let targetId: string | null = currentAssistantItemId
+    if (targetId === null) {
+      for (let i = streamItems.value.length - 1; i >= 0; i--) {
+        if (streamItems.value[i].kind === "assistant_message") {
+          targetId = streamItems.value[i].id
+          break
+        }
+      }
+      if (targetId !== null) currentAssistantItemId = targetId
+    }
+
+    if (targetId === null) {
+      const id = genId("a")
+      streamItems.value.push({
+        kind: "assistant_message",
+        id,
+        content: assistantTextOf(message),
+        thinking: full.content || delta || undefined,
+        thinkingStreaming: !isEnd,
+        thinkingRedacted: full.redacted || streamEvent?.redacted === true || undefined,
+        streaming: true,
+      })
+      currentAssistantItemId = id
+      return
+    }
+
+    updateItem(targetId, (it: any) => {
+      if (it.kind !== "assistant_message") return
+      if (full.content) {
+        it.thinking = full.content
+      } else if (delta) {
+        it.thinking = `${it.thinking || ""}${delta}`
+      }
+      it.thinkingStreaming = !isEnd
+      it.thinkingRedacted =
+        full.redacted || streamEvent?.redacted === true || it.thinkingRedacted || undefined
+      it.streaming = true
+    })
+  }
 
   function ensureTurnInfo(status: "queued" | "running"): string {
     if (currentTurnInfoId) {

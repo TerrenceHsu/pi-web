@@ -31,6 +31,7 @@ const mcpStore = useMcpStore()
 const providerStore = useProviderStore()
 const wikiStore = useWikiStore()
 const activeView = ref<AppView>(readAppView())
+const appShellRef = ref<InstanceType<typeof AppShell> | null>(null)
 const workspaceStarted = ref(false)
 const workspaceLoading = ref(false)
 const sessionCoordinatorReady = ref(false)
@@ -40,13 +41,19 @@ const workspaceAttention = computed(() => {
   const sid = sessionStore.activeSessionId
   return sid
     ? !!fileStore.latestArtifactBySession[sid]?.unseen ||
-        codingSandboxStore.operation?.status === "awaiting_approval"
+        ["awaiting_approval", "publish_conflict"].includes(
+          codingSandboxStore.operation?.status ?? "",
+        )
     : false
 })
 
 function acknowledgeWorkspace(): void {
   const sid = sessionStore.activeSessionId
   if (sid) fileStore.acknowledgeArtifact(sid)
+}
+
+function openWorkspaceResults(): void {
+  appShellRef.value?.openWorkspace()
 }
 
 // Provider Binding 跟随 active session 切换——协调只发生在 App.vue。
@@ -239,6 +246,7 @@ onBeforeUnmount(() => {
   <WikiWorkspace v-else-if="activeView === 'knowledge'" @close="closeKnowledge" />
   <AppShell
     v-else
+    ref="appShellRef"
     :workspace-attention="workspaceAttention"
     @workspace-opened="acknowledgeWorkspace"
   >
@@ -246,7 +254,7 @@ onBeforeUnmount(() => {
       <SessionSidebar @open-knowledge="openKnowledge" />
     </template>
     <template #main>
-      <ChatPanel />
+      <ChatPanel @open-workspace="openWorkspaceResults" />
     </template>
     <template #workspace>
       <WorkspacePanel />

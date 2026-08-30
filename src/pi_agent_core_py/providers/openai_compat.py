@@ -766,8 +766,10 @@ class OpenAICompatibleProvider(ProviderAdapter):
           - tools（空省略）
 
         不发送：
-          - extra_body / extra_headers / reasoning_effort / parallel_tool_calls /
+          - extra_headers / reasoning_effort / parallel_tool_calls /
             response_format / 旧版 functions / function_call
+
+        `extra_body` 仅用于内部、Provider 已知支持的 GLM thinking 开关。
         """
         kwargs: dict[str, Any] = {
             "model": self.config.model,
@@ -786,6 +788,11 @@ class OpenAICompatibleProvider(ProviderAdapter):
 
         if request.tools:
             kwargs["tools"] = to_openai_tools(request.tools)
+            if request.metadata.get("pi_agent_tool_choice") == "required":
+                kwargs["tool_choice"] = "required"
+
+        if request.metadata.get("pi_agent_thinking") == "disabled":
+            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
 
         return kwargs
 

@@ -8,6 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Sandbox artifact review and recovery（2026-08-30）
+
+- 待批准与 `publish_conflict` 的冻结 Artifact 可通过只读 API 在 Workspace 树逐项预览、下载；Python 源码预览增加不执行内容的轻量词法高亮
+- 发布冲突不再立即丢失签名制品：目标冲突解除后可重试发布，Workspace 基线变化后可重新冻结；Backend 状态机、事件、公开 actions/transitions 和前端操作保持一致
+- 空 diff 不再产生可批准 Artifact；自动 Coding 第一次无改动时执行一次受控修复重试，仍无改动则返回稳定 `coding_no_changes`
+- Chat 新增紧邻回答区的 Sandbox 审批条；Workspace 与 Session/Chat 三栏、文件树/预览上下分区支持键盘可访问的拖拽调整和本地尺寸恢复
+- Thinking stream 在首段正文前即可展示并在 `thinking_end` 后稳定收敛；删除 Session 前先停止活跃请求并释放 Harness，避免后台任务继续写入已删除状态
+- 完整门禁修复 Plan Mode 直接绑定 Provider 的安全 AST 回归、旧前端 API mock 的 stderr warning 与生成文档只读提示；最终 Ruff、strict Mypy 185 files、Backend 2110 passed / coverage 77.17%、Frontend 183/183 + lint/typecheck/build、Playwright 19/19 全部通过
+
+### Intent routing and Planner–Executor–Verifier Plan Mode（2026-08-29）
+
+- 产品入口新增 `read_only | coding | knowledge` 确定性路由；Knowledge 由持久 Conversation binding 决定，Coding 复用 Sandbox，只读路线裁剪 mutation/execute 工具，并公开显式覆盖与决策审计
+- 新增持久 PlanStore、Planner 结构化 DAG 提交、依赖顺序 Executor、基于真实 Sandbox diff 的只读 Verifier，以及失败分类与最多两次 Executor 重试
+- Plan 全部通过后复用服务器 Validation→Freeze TOCTOU 屏障并停在用户审批；Plan 卡、批准、Stop、刷新/启动恢复和终态收敛已接入 Web
+
 ## [0.0.29] — 2026-08-29
 
 ### Coding Agent Workspace continuity completion（2026-08-29）

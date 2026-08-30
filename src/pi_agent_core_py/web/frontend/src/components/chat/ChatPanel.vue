@@ -16,10 +16,12 @@ import ProviderSelector from "../providers/ProviderSelector.vue"
 import EmptyState from "../common/EmptyState.vue"
 import ErrorBanner from "../common/ErrorBanner.vue"
 import ContextBudgetBadge from "./ContextBudgetBadge.vue"
+import SandboxApprovalBar from "../coding-sandbox/SandboxApprovalBar.vue"
 
 const props = withDefaults(defineProps<{ mode?: "default" | "knowledge" }>(), {
   mode: "default",
 })
+const emit = defineEmits<{ (event: "open-workspace"): void }>()
 
 const sessionStore = useSessionStore()
 const chatStore = useChatStore()
@@ -32,14 +34,14 @@ const knowledgeMode = computed(() => props.mode === "knowledge")
 const codingMode = ref(false)
 const planMode = ref(false)
 const planModeEnabled = ref(false)
-const planModeAvailable = computed(
-  () => planModeEnabled.value && codingSandboxStore.available,
-)
+const planModeAvailable = computed(() => planModeEnabled.value && codingSandboxStore.available)
 
 const activeSessionId = computed(() => sessionStore.activeSessionId)
 const hasSession = computed(() => !!activeSessionId.value)
 const items = computed(() => chatStore.streamItems)
-const errorMessage = computed(() => chatStore.error || fileStore.error || contextBudgetStore.error)
+const errorMessage = computed(
+  () => chatStore.error || codingSandboxStore.error || fileStore.error || contextBudgetStore.error,
+)
 const contextBudget = computed(() => contextBudgetStore.getBudget(activeSessionId.value))
 const contextBlocked = computed(() => contextBudget.value?.estimate.level === "blocked")
 const pendingAttachments = computed(() => fileStore.pendingAttachments)
@@ -157,8 +159,7 @@ async function onSubmit(text: string) {
 
   const fileIds = knowledgeMode.value ? [] : pendingAttachments.value.map((f) => f.id)
   const files = knowledgeMode.value ? [] : pendingAttachments.value.slice()
-  const skillNames =
-    knowledgeMode.value || planMode.value ? [] : [...skillStore.selectedSkillNames]
+  const skillNames = knowledgeMode.value || planMode.value ? [] : [...skillStore.selectedSkillNames]
 
   try {
     const preview = await contextBudgetStore.preview(activeSessionId.value!, {
@@ -213,6 +214,7 @@ async function onAbort() {
 
 function dismissError() {
   chatStore.error = null
+  codingSandboxStore.error = null
   fileStore.error = null
   contextBudgetStore.error = null
 }
@@ -234,10 +236,18 @@ function dismissError() {
       />
       <span v-if="chatStore.checkpointing" class="header-status running">checkpointing</span>
       <span
-        v-else-if="codingSandboxStore.operation?.status === 'awaiting_approval'"
+        v-else-if="
+          ['awaiting_approval', 'publish_conflict'].includes(
+            codingSandboxStore.operation?.status ?? '',
+          )
+        "
         class="header-status approval"
       >
-        code approval required
+        {{
+          codingSandboxStore.operation?.status === "publish_conflict"
+            ? "code publish needs attention"
+            : "code approval required"
+        }}
       </span>
       <span v-else-if="chatStore.pendingApprovalCount" class="header-status approval">
         approval required
@@ -270,6 +280,8 @@ function dismissError() {
       :session-id="activeSessionId"
     />
     <EmptyState v-else title="No session" hint="Click 'New chat' in the sidebar to start." />
+
+    <SandboxApprovalBar v-if="!knowledgeMode" @open-workspace="emit('open-workspace')" />
 
     <ChatInput
       v-if="hasSession"

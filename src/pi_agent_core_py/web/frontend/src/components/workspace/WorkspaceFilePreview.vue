@@ -5,12 +5,14 @@ import { downloadFileUrl } from "../../api/files"
 import type { FileRef } from "../../types"
 import { formatFileSize, isSupported, refFormat } from "../../utils/files"
 import { renderMarkdown } from "../../utils/markdown"
+import { highlightPython } from "../../utils/pythonHighlight"
 
 const props = defineProps<{
   file: FileRef
   sessionId: string
   loadContent: (fileId: string) => Promise<string>
   saveContent: (fileId: string, content: string, expectedSha256: string) => Promise<FileRef>
+  downloadFile?: () => Promise<void>
 }>()
 
 const emit = defineEmits<{
@@ -22,20 +24,36 @@ const baseline = ref("")
 const busy = ref(false)
 const error = ref("")
 const editing = ref(false)
+const downloading = ref(false)
 
 const format = computed(() => refFormat(props.file))
+const logicalPath = computed(() => props.file.logical_path || props.file.name)
 const isMarkdown = computed(() => format.value === "markdown")
+const isPython = computed(() => /\.py(?:i|w)?$/i.test(logicalPath.value))
 const isReadOnly = computed(
-  () => props.file.content_editable === false || props.file.purpose === "document_conversion",
+  () =>
+    props.file.content_editable === false ||
+    props.file.purpose === "document_conversion" ||
+    props.file.origin === "sandbox",
 )
+const readOnlyMessage = computed(() => {
+  if (props.file.purpose === "document_conversion") {
+    return "Generated document output is read-only."
+  }
+  if (props.file.origin === "sandbox") {
+    return "Pending Sandbox output is read-only until published."
+  }
+  return "This Workspace file is read-only."
+})
 const canEditMarkdown = computed(() => isMarkdown.value && !isReadOnly.value)
 const canRead = computed(() => isSupported(format.value))
 const renderedMarkdown = computed(() => renderMarkdown(content.value))
+const pythonTokens = computed(() => (isPython.value ? highlightPython(content.value) : []))
 const dirty = computed(() => content.value !== baseline.value)
-const logicalPath = computed(() => props.file.logical_path || props.file.name)
 const originLabel = computed(() => {
   if (props.file.purpose === "document_conversion") return "Generated document"
   if (props.file.purpose === "document_original") return "Immutable original"
+  if (props.file.origin === "sandbox") return "Pending approval"
   if (props.file.origin === "agent") return "Agent result"
   if (props.file.origin === "upload") return "Uploaded"
   if (props.file.purpose === "memory") return "Session memory"
@@ -77,6 +95,19 @@ async function save(): Promise<void> {
   }
 }
 
+async function download(): Promise<void> {
+  if (!props.downloadFile || downloading.value) return
+  downloading.value = true
+  error.value = ""
+  try {
+    await props.downloadFile()
+  } catch (cause: any) {
+    error.value = String(cause?.message || `Unable to download ${props.file.name}`)
+  } finally {
+    downloading.value = false
+  }
+}
+
 watch(() => [props.file.id, props.file.sha256], load, { immediate: true })
 </script>
 
@@ -91,7 +122,18 @@ watch(() => [props.file.id, props.file.sha256], load, { immediate: true })
           }}<template v-if="formatFileSize(file.size)"> · {{ formatFileSize(file.size) }}</template>
         </span>
       </div>
+      <button
+        v-if="downloadFile"
+        type="button"
+        class="preview-download preview-download-button"
+        :disabled="downloading"
+        :aria-label="`Download ${file.name}`"
+        @click="download"
+      >
+        {{ downloading ? "Downloading…" : "Download" }}
+      </button>
       <a
+        v-else
         :href="downloadFileUrl(sessionId, file.id)"
         :download="file.name"
         class="preview-download"
@@ -125,9 +167,7 @@ watch(() => [props.file.id, props.file.sha256], load, { immediate: true })
     <div v-else-if="error" class="preview-error" role="alert">{{ error }}</div>
     <template v-else-if="canRead">
       <template v-if="isMarkdown">
-        <div v-if="isReadOnly" class="preview-readonly">
-          This Workspace file is read-only.
-        </div>
+        <div v-if="isReadOnly" class="preview-readonly">{{ readOnlyMessage }}</div>
         <div v-if="!editing" class="markdown-preview markdown-body">
           <!-- markdown-it disables raw HTML; only parser output is rendered. -->
           <!-- eslint-disable-next-line vue/no-v-html -->
@@ -148,6 +188,16 @@ watch(() => [props.file.id, props.file.sha256], load, { immediate: true })
           </div>
         </div>
       </template>
+      <pre
+        v-else-if="isPython"
+        class="code-preview python-preview"
+        :aria-label="`${file.name} code`"
+        data-testid="python-syntax-preview"
+      ><code><span
+        v-for="(token, index) in pythonTokens"
+        :key="index"
+        :class="`python-${token.kind}`"
+      >{{ token.text }}</span></code></pre>
       <pre
         v-else
         class="code-preview"
@@ -206,6 +256,16 @@ watch(() => [props.file.id, props.file.sha256], load, { immediate: true })
   color: var(--accent);
   font-size: 11px;
   text-decoration: none;
+}
+.preview-download-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.preview-download-button:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 .preview-mode {
   display: flex;
@@ -291,6 +351,46 @@ watch(() => [props.file.id, props.file.sha256], load, { immediate: true })
 .code-preview code {
   padding: 0;
   background: transparent;
+}
+.python-preview {
+  border-color: #d0d7de;
+  background: #fff;
+  color: #24292f;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  tab-size: 4;
+}
+.python-keyword {
+  color: #0000ff;
+}
+.python-literal {
+  color: #0000ff;
+}
+.python-builtin,
+.python-class {
+  color: #267f99;
+}
+.python-function {
+  color: #795e26;
+}
+.python-self {
+  color: #001080;
+}
+.python-number {
+  color: #098658;
+}
+.python-string {
+  color: #a31515;
+}
+.python-comment {
+  color: #008000;
+}
+.python-decorator {
+  color: #795e26;
+}
+.python-operator {
+  color: #24292f;
 }
 .markdown-editor {
   display: flex;

@@ -501,6 +501,17 @@ def _matches_glob(value: str, patterns: Iterable[str]) -> bool:
     return any(fnmatch.fnmatchcase(folded, pattern.casefold()) for pattern in patterns)
 
 
+def is_snapshot_path_excluded(relative_path: str, policy: SnapshotPolicy) -> bool:
+    """Return whether one canonical file path is outside ``policy``'s snapshot."""
+    validate_workspace_relative_path(relative_path)
+    path = PurePosixPath(relative_path)
+    for index, part in enumerate(path.parts[:-1], start=1):
+        directory_path = PurePosixPath(*path.parts[:index]).as_posix()
+        if _excluded_directory(part, directory_path, policy):
+            return True
+    return _excluded_file(path.name, path.as_posix(), policy)
+
+
 def _hash_stable_file(
     path: Path,
     initial_stat: os.stat_result,

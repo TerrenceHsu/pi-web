@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue"
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 
+import { downloadSandboxArtifactFile, readSandboxArtifactFile } from "../../api/codingSandbox"
 import type { FileReadItem, FileRef } from "../../types"
 import { buildSessionFileTree } from "../../utils/fileTree"
+import { inferFileFormat } from "../../utils/files"
 import { useChatStore } from "../../stores/chatStore"
 import { useCodingSandboxStore } from "../../stores/codingSandboxStore"
 import { useFileStore } from "../../stores/fileStore"
@@ -33,6 +35,29 @@ const markdownContent = ref("# New note\n")
 const fileInput = ref<HTMLInputElement | null>(null)
 const handledArtifactSignals = new Set<string>()
 const handledPublishSignals = new Set<string>()
+const selectedSandboxFileId = ref<string | null>(null)
+const workspacePanel = ref<HTMLElement | null>(null)
+const filesPane = ref<HTMLElement | null>(null)
+
+const FILES_PANE_MIN = 120
+const FILES_PANE_MAX = 700
+const PREVIEW_MIN = 180
+const FILES_RESIZER_HEIGHT = 7
+const FILES_PANE_HEIGHT_KEY = "pi-agent-workspace-files-pane-height"
+
+function storedFilesPaneHeight(): number {
+  try {
+    const value = Number.parseInt(window.localStorage.getItem(FILES_PANE_HEIGHT_KEY) ?? "", 10)
+    return Number.isFinite(value) ? Math.min(Math.max(value, FILES_PANE_MIN), FILES_PANE_MAX) : 260
+  } catch {
+    return 260
+  }
+}
+
+const filesPaneHeight = ref(storedFilesPaneHeight())
+const filesResizing = ref(false)
+let filesResizeStartY = 0
+let filesResizeStartHeight = 0
 
 const sessionId = computed(() => sessionStore.activeSessionId)
 const files = computed(() => {
@@ -51,17 +76,66 @@ const codeContinuityLabel = computed(() => {
   if (status === "stale") return "Code docs stale"
   return "Code docs pending"
 })
+const pendingSandboxFiles = computed<FileRef[]>(() => {
+  const current = operation.value
+  if (
+    !current ||
+    !["awaiting_approval", "publish_conflict"].includes(current.status) ||
+    !current.diff
+  )
+    return []
+  return current.diff.entries
+    .filter((entry) => entry.status !== "deleted")
+    .map((entry) => {
+      const name = entry.path.split("/").at(-1) || entry.path
+      return {
+        id: `sandbox:${current.operation_id}:${entry.path}`,
+        session_id: current.session_id,
+        name,
+        logical_path: entry.path,
+        origin: "sandbox",
+        purpose: "file",
+        mime: "application/octet-stream",
+        format: inferFileFormat(name),
+        size: 0,
+        sha256: entry.after_sha256 || "",
+        category: "code",
+        owner: "sandbox",
+        content_editable: false,
+        movable: false,
+        deletable: false,
+        agent_writable: false,
+        sandbox_publishable: true,
+        immutable: true,
+      }
+    })
+})
+const displayedFiles = computed(() => {
+  const pendingPaths = new Set(
+    pendingSandboxFiles.value.map((file) => file.logical_path?.toLocaleLowerCase()),
+  )
+  return [
+    ...files.value.filter((file) => !pendingPaths.has(file.logical_path?.toLocaleLowerCase())),
+    ...pendingSandboxFiles.value,
+  ]
+})
 const selectedFileId = computed(() => {
   const sid = sessionId.value
-  return sid ? fileStore.selectedFileIdBySession[sid] : null
+  return selectedSandboxFileId.value || (sid ? fileStore.selectedFileIdBySession[sid] : null)
 })
-const selectedFile = computed(() => files.value.find((file) => file.id === selectedFileId.value))
+const selectedFile = computed(() =>
+  displayedFiles.value.find((file) => file.id === selectedFileId.value),
+)
 const latestArtifact = computed(() => {
   const sid = sessionId.value
   return sid ? fileStore.latestArtifactBySession[sid] : null
 })
-const tree = computed(() => buildSessionFileTree(files.value))
+const tree = computed(() => buildSessionFileTree(displayedFiles.value))
 const operation = computed(() => sandboxStore.operation)
+const selectedSandboxPath = computed(() => {
+  if (selectedFile.value?.origin !== "sandbox") return null
+  return selectedFile.value.logical_path || null
+})
 
 function recordOf(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : null
@@ -111,6 +185,7 @@ watch(
 watch(sessionId, () => {
   activeTab.value = "files"
   createOpen.value = false
+  selectedSandboxFileId.value = null
 })
 
 watch(
@@ -141,7 +216,11 @@ watch(
 watch(
   () => operation.value?.status,
   (status) => {
-    if (status === "awaiting_approval") activeTab.value = "changes"
+    if (status === "awaiting_approval" || status === "publish_conflict") {
+      activeTab.value = "files"
+    } else if (status !== "publishing" && status !== "freezing") {
+      selectedSandboxFileId.value = null
+    }
   },
   { immediate: true },
 )
@@ -152,6 +231,11 @@ async function refresh(): Promise<void> {
 
 function selectFile(fileId: string): void {
   if (!sessionId.value) return
+  if (pendingSandboxFiles.value.some((file) => file.id === fileId)) {
+    selectedSandboxFileId.value = fileId
+    return
+  }
+  selectedSandboxFileId.value = null
   fileStore.selectFile(sessionId.value, fileId)
 }
 
@@ -163,6 +247,10 @@ async function deleteFile(fileId: string): Promise<void> {
 
 async function loadContent(fileId: string): Promise<string> {
   if (!sessionId.value) throw new Error("No active session")
+  const pending = pendingSandboxFiles.value.find((file) => file.id === fileId)
+  if (pending?.logical_path && operation.value) {
+    return readSandboxArtifactFile(operation.value.operation_id, pending.logical_path)
+  }
   return fileStore.readTextFile(sessionId.value, fileId)
 }
 
@@ -173,6 +261,13 @@ async function saveContent(
 ): Promise<FileRef> {
   if (!sessionId.value) throw new Error("No active session")
   return fileStore.updateTextFile(sessionId.value, fileId, content, expectedSha256)
+}
+
+async function downloadSelectedSandboxFile(): Promise<void> {
+  const current = operation.value
+  const path = selectedSandboxPath.value
+  if (!current || !path) throw new Error("Frozen Sandbox file is unavailable")
+  await downloadSandboxArtifactFile(current.operation_id, path)
 }
 
 function openUpload(): void {
@@ -202,10 +297,87 @@ async function createMarkdown(): Promise<void> {
 function statusLabel(status: string): string {
   return status.replaceAll("_", " ")
 }
+
+function filesPaneMaximum(): number {
+  const panelRect = workspacePanel.value?.getBoundingClientRect()
+  const paneRect = filesPane.value?.getBoundingClientRect()
+  const panelHeight = panelRect?.height || window.innerHeight
+  const paneOffset = panelRect && paneRect ? Math.max(paneRect.top - panelRect.top, 0) : 0
+  return Math.max(
+    FILES_PANE_MIN,
+    Math.min(FILES_PANE_MAX, panelHeight - paneOffset - PREVIEW_MIN - FILES_RESIZER_HEIGHT),
+  )
+}
+
+function setFilesPaneHeight(nextHeight: number): void {
+  filesPaneHeight.value = Math.min(Math.max(nextHeight, FILES_PANE_MIN), filesPaneMaximum())
+}
+
+function persistFilesPaneHeight(): void {
+  try {
+    window.localStorage.setItem(FILES_PANE_HEIGHT_KEY, String(filesPaneHeight.value))
+  } catch {
+    // Layout persistence is optional.
+  }
+}
+
+function onFilesResizeMove(event: PointerEvent): void {
+  if (!filesResizing.value) return
+  setFilesPaneHeight(filesResizeStartHeight + event.clientY - filesResizeStartY)
+}
+
+function stopFilesResize(): void {
+  if (!filesResizing.value) return
+  filesResizing.value = false
+  persistFilesPaneHeight()
+  window.removeEventListener("pointermove", onFilesResizeMove)
+  window.removeEventListener("pointerup", stopFilesResize)
+  window.removeEventListener("pointercancel", stopFilesResize)
+}
+
+function beginFilesResize(event: PointerEvent): void {
+  event.preventDefault()
+  filesResizing.value = true
+  filesResizeStartY = event.clientY
+  filesResizeStartHeight = filesPane.value?.getBoundingClientRect().height || filesPaneHeight.value
+  window.addEventListener("pointermove", onFilesResizeMove)
+  window.addEventListener("pointerup", stopFilesResize)
+  window.addEventListener("pointercancel", stopFilesResize)
+}
+
+function resizeFilesWithKeyboard(event: KeyboardEvent): void {
+  if (!["ArrowUp", "ArrowDown"].includes(event.key)) return
+  event.preventDefault()
+  setFilesPaneHeight(filesPaneHeight.value + (event.key === "ArrowDown" ? 16 : -16))
+  persistFilesPaneHeight()
+}
+
+function resetFilesPaneHeight(): void {
+  setFilesPaneHeight(260)
+  persistFilesPaneHeight()
+}
+
+function normalizeFilesPaneHeight(): void {
+  setFilesPaneHeight(filesPaneHeight.value)
+}
+
+onMounted(() => {
+  normalizeFilesPaneHeight()
+  window.addEventListener("resize", normalizeFilesPaneHeight)
+})
+onBeforeUnmount(() => {
+  stopFilesResize()
+  window.removeEventListener("resize", normalizeFilesPaneHeight)
+})
 </script>
 
 <template>
-  <section class="workspace-panel" data-testid="workspace-panel">
+  <section
+    ref="workspacePanel"
+    class="workspace-panel"
+    :class="{ 'resizing-files': filesResizing }"
+    data-testid="workspace-panel"
+  >
     <header class="workspace-header">
       <div>
         <span class="workspace-eyebrow">Agent deliverables</span>
@@ -239,61 +411,100 @@ function statusLabel(status: string): string {
     </nav>
 
     <template v-if="activeTab === 'files'">
-      <div class="workspace-toolbar">
-        <button type="button" :disabled="fileStore.loading" @click="refresh">
-          {{ fileStore.loading ? "Refreshing…" : "Refresh" }}
-        </button>
-        <button type="button" @click="createOpen = !createOpen">New Markdown</button>
-        <button type="button" :disabled="fileStore.uploading" @click="openUpload">
-          {{ fileStore.uploading ? "Uploading…" : "Upload" }}
-        </button>
-        <input
-          ref="fileInput"
-          class="visually-hidden"
-          type="file"
-          multiple
-          data-testid="workspace-upload-input"
-          @change="uploadSelected"
-        />
-      </div>
-
-      <form v-if="createOpen" class="create-markdown" @submit.prevent="createMarkdown">
-        <label>
-          Path
-          <input v-model="markdownPath" type="text" aria-label="Markdown logical path" />
-        </label>
-        <label>
-          Initial content
-          <textarea v-model="markdownContent" aria-label="Initial Markdown content" />
-        </label>
-        <div>
-          <button type="button" @click="createOpen = false">Cancel</button>
-          <button type="submit" class="primary">Create</button>
-        </div>
-      </form>
-
-      <div v-if="latestArtifact" class="artifact-notice" data-testid="workspace-latest-artifact">
-        <span>Latest Agent result</span>
-        <button type="button" @click="selectFile(latestArtifact.fileId)">
-          {{ latestArtifact.logicalPath || "Open result" }}
-        </button>
-      </div>
-
-      <div class="workspace-files" data-testid="session-folder">
-        <ul v-if="tree.length" class="workspace-tree" role="tree" aria-label="Workspace files">
-          <FileTreeNode
-            v-for="node in tree"
-            :key="node.kind === 'file' ? node.file?.id : node.path"
-            :node="node"
-            :session-id="sessionId || ''"
-            :selected-file-id="selectedFileId"
-            :latest-artifact-id="latestArtifact?.fileId"
-            @select-file="selectFile"
-            @delete="deleteFile"
+      <div
+        ref="filesPane"
+        class="workspace-files-pane"
+        :style="{ height: `${filesPaneHeight}px` }"
+        data-testid="workspace-files-pane"
+      >
+        <div class="workspace-toolbar">
+          <button type="button" :disabled="fileStore.loading" @click="refresh">
+            {{ fileStore.loading ? "Refreshing…" : "Refresh" }}
+          </button>
+          <button type="button" @click="createOpen = !createOpen">New Markdown</button>
+          <button type="button" :disabled="fileStore.uploading" @click="openUpload">
+            {{ fileStore.uploading ? "Uploading…" : "Upload" }}
+          </button>
+          <input
+            ref="fileInput"
+            class="visually-hidden"
+            type="file"
+            multiple
+            data-testid="workspace-upload-input"
+            @change="uploadSelected"
           />
-        </ul>
-        <div v-else class="workspace-empty">Initializing Workspace…</div>
+        </div>
+
+        <form v-if="createOpen" class="create-markdown" @submit.prevent="createMarkdown">
+          <label>
+            Path
+            <input v-model="markdownPath" type="text" aria-label="Markdown logical path" />
+          </label>
+          <label>
+            Initial content
+            <textarea v-model="markdownContent" aria-label="Initial Markdown content" />
+          </label>
+          <div>
+            <button type="button" @click="createOpen = false">Cancel</button>
+            <button type="submit" class="primary">Create</button>
+          </div>
+        </form>
+
+        <div v-if="latestArtifact" class="artifact-notice" data-testid="workspace-latest-artifact">
+          <span>Latest Agent result</span>
+          <button type="button" @click="selectFile(latestArtifact.fileId)">
+            {{ latestArtifact.logicalPath || "Open result" }}
+          </button>
+        </div>
+
+        <div
+          v-if="pendingSandboxFiles.length"
+          class="pending-sandbox-notice"
+          data-testid="workspace-pending-sandbox"
+        >
+          <span>
+            {{ pendingSandboxFiles.length }}
+            {{
+              operation?.status === "publish_conflict"
+                ? "frozen file(s) retained after conflict"
+                : "file(s) pending approval"
+            }}
+          </span>
+          <button type="button" @click="activeTab = 'changes'">Review changes</button>
+        </div>
+
+        <div class="workspace-files" data-testid="session-folder">
+          <ul v-if="tree.length" class="workspace-tree" role="tree" aria-label="Workspace files">
+            <FileTreeNode
+              v-for="node in tree"
+              :key="node.kind === 'file' ? node.file?.id : node.path"
+              :node="node"
+              :session-id="sessionId || ''"
+              :selected-file-id="selectedFileId"
+              :latest-artifact-id="latestArtifact?.fileId"
+              @select-file="selectFile"
+              @delete="deleteFile"
+            />
+          </ul>
+          <div v-else class="workspace-empty">Initializing Workspace…</div>
+        </div>
       </div>
+
+      <div
+        class="workspace-row-resizer"
+        role="separator"
+        aria-label="Resize Workspace file list and preview"
+        aria-orientation="horizontal"
+        :aria-valuemin="FILES_PANE_MIN"
+        :aria-valuemax="Math.round(filesPaneMaximum())"
+        :aria-valuenow="Math.round(filesPaneHeight)"
+        tabindex="0"
+        data-testid="workspace-row-resizer"
+        title="Drag to resize; double-click to reset"
+        @pointerdown="beginFilesResize"
+        @keydown="resizeFilesWithKeyboard"
+        @dblclick="resetFilesPaneHeight"
+      ></div>
 
       <WorkspaceFilePreview
         v-if="selectedFile && sessionId"
@@ -301,6 +512,7 @@ function statusLabel(status: string): string {
         :session-id="sessionId"
         :load-content="loadContent"
         :save-content="saveContent"
+        :download-file="selectedFile.origin === 'sandbox' ? downloadSelectedSandboxFile : undefined"
       />
       <div v-else class="workspace-placeholder">
         <span>⌘</span>
@@ -442,6 +654,11 @@ function statusLabel(status: string): string {
   border-bottom-color: var(--accent);
   color: var(--fg);
 }
+.workspace-files-pane {
+  min-height: 0;
+  flex: 0 0 auto;
+  overflow: auto;
+}
 .workspace-toolbar {
   display: flex;
   gap: 5px;
@@ -506,6 +723,27 @@ function statusLabel(status: string): string {
   color: #1e40af;
   font-size: 10px;
 }
+.pending-sandbox-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+  margin: 0 10px 8px;
+  padding: 7px 9px;
+  border: 1px solid #fde68a;
+  border-radius: 7px;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 10px;
+}
+.pending-sandbox-notice button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: inherit;
+  font-weight: 700;
+}
 .artifact-notice span {
   flex: 0 0 auto;
   font-weight: 700;
@@ -523,11 +761,41 @@ function statusLabel(status: string): string {
   white-space: nowrap;
 }
 .workspace-files {
-  max-height: 34%;
-  flex: 0 1 auto;
-  overflow: auto;
+  overflow: visible;
   padding: 0 9px 9px;
+}
+.workspace-row-resizer {
+  position: relative;
+  z-index: 3;
+  height: 7px;
+  flex: 0 0 7px;
+  border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
+  background: #f8fafc;
+  cursor: row-resize;
+  touch-action: none;
+  transition: background 120ms ease;
+}
+.workspace-row-resizer::after {
+  position: absolute;
+  top: 2px;
+  left: 50%;
+  width: 28px;
+  height: 2px;
+  border-radius: 999px;
+  background: #94a3b8;
+  content: "";
+  transform: translateX(-50%);
+}
+.workspace-row-resizer:hover,
+.workspace-row-resizer:focus-visible,
+.workspace-panel.resizing-files .workspace-row-resizer {
+  background: #dbeafe;
+  outline: none;
+}
+.workspace-panel.resizing-files {
+  cursor: row-resize;
+  user-select: none;
 }
 .workspace-tree {
   margin: 0;

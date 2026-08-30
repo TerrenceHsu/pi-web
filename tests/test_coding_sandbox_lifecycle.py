@@ -16,6 +16,8 @@ from coding_sandbox import (
     ManagedSandboxLifecycle,
     ManagedSandboxOperationRecord,
     SandboxCommandResult,
+    SandboxDiffEntry,
+    SandboxDiffResult,
     SandboxFileEntry,
     SandboxLifecycleError,
     SandboxOperationStoreConflictError,
@@ -24,11 +26,12 @@ from coding_sandbox import (
 from coding_sandbox.admin import SandboxAdminConfig, SandboxConfigRecord
 from coding_sandbox.fake import FakeSandboxBackend
 from coding_sandbox.lifecycle import DEFAULT_VALIDATION_CONFIG
-from pi_agent_core_py import DoneEvent, FakeClient, ToolCall, ToolCallEvent
+from pi_agent_core_py import DoneEvent, FakeClient, ToolCall, ToolCallEvent, ToolDef
 from pi_agent_core_py.session_sqlite import SQLiteSessionStore
 from pi_agent_core_py.web.coding_sandbox.automation import (
     CodingSandboxAutomation,
     CodingSandboxAutomationError,
+    CodingToolBootstrapModelClient,
 )
 from pi_agent_core_py.web.coding_sandbox.workspace import (
     WorkspaceSandboxArtifactPublisher,
@@ -86,8 +89,14 @@ def _workspace_bytes(root: Path) -> dict[str, bytes]:
 
 
 class _AutomationLifecycle:
-    def __init__(self, *, validation_passes: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        validation_passes: bool = True,
+        has_changes: bool = True,
+    ) -> None:
         self.validation_passes = validation_passes
+        self.has_changes = has_changes
         self.record: ManagedSandboxOperationRecord | None = None
         self.calls: list[str] = []
 
@@ -101,7 +110,21 @@ class _AutomationLifecycle:
             "freezing",
             "awaiting_approval",
             "cancelled",
+            "discarded",
         }
+        diff = SandboxDiffResult(
+            entries=(
+                (
+                    SandboxDiffEntry(
+                        path="scripts/main.py",
+                        status="added",
+                        after_sha256="a" * 64,
+                    ),
+                )
+                if self.has_changes
+                else ()
+            ),
+        )
         self.record = ManagedSandboxOperationRecord.model_construct(
             operation_id="sandbox-" + "c" * 32,
             session_id="session-one",
@@ -111,7 +134,13 @@ class _AutomationLifecycle:
             updated_at_ms=101,
             workspace_revision=1,
             validation=(object() if status in {"validated", "validation_failed"} else None),
+            diff=(diff if status in {"validated", "validation_failed"} else None),
             artifact_id=("artifact-" + "d" * 32 if status == "awaiting_approval" else None),
+            changed_paths=(
+                ("scripts/main.py",)
+                if status == "awaiting_approval" and self.has_changes
+                else ()
+            ),
         )
         return self.record
 
@@ -142,9 +171,28 @@ class _AutomationLifecycle:
         self.calls.append("prepare_publish")
         return self._set("freezing")
 
+    async def diff(self, _operation_id: str) -> SandboxDiffResult:
+        return SandboxDiffResult(
+            entries=(
+                (
+                    SandboxDiffEntry(
+                        path="scripts/main.py",
+                        status="added",
+                        after_sha256="a" * 64,
+                    ),
+                )
+                if self.has_changes
+                else ()
+            )
+        )
+
     async def cancel(self, _operation_id: str) -> ManagedSandboxOperationRecord:
         self.calls.append("cancel")
         return self._set("cancelled")
+
+    async def discard(self, _operation_id: str) -> ManagedSandboxOperationRecord:
+        self.calls.append("discard")
+        return self._set("discarded")
 
 
 @pytest.mark.asyncio
@@ -180,6 +228,126 @@ async def test_automated_coding_validation_failure_never_freezes() -> None:
     assert raised.value.code == "coding_validation_failed"
     assert lifecycle.record is not None and lifecycle.record.status == "validation_failed"
     assert lifecycle.calls == ["start", "validate"]
+
+
+@pytest.mark.asyncio
+async def test_automated_coding_replaces_legacy_empty_artifact_and_rejects_no_changes() -> None:
+    lifecycle = _AutomationLifecycle(has_changes=False)
+    lifecycle._set("awaiting_approval")
+    automation = CodingSandboxAutomation(
+        lifecycle,  # type: ignore[arg-type]
+        wait_timeout_seconds=1,
+        poll_interval_seconds=0,
+    )
+
+    ready = await automation.prepare("session-one")
+    with pytest.raises(CodingSandboxAutomationError) as raised:
+        await automation.validate_and_freeze(ready.operation_id)
+
+    assert raised.value.code == "coding_no_changes"
+    assert lifecycle.record is not None and lifecycle.record.status == "validated"
+    assert lifecycle.calls == ["discard", "start", "validate"]
+
+
+@pytest.mark.asyncio
+async def test_automated_coding_retries_once_when_first_attempt_has_no_changes() -> None:
+    lifecycle = _AutomationLifecycle(has_changes=False)
+    automation = CodingSandboxAutomation(
+        lifecycle,  # type: ignore[arg-type]
+        wait_timeout_seconds=1,
+        poll_interval_seconds=0,
+    )
+
+    ready = await automation.prepare("session-one")
+    attempts: list[bool] = []
+
+    async def run_attempt(repair: bool) -> str:
+        attempts.append(repair)
+        if repair:
+            lifecycle.has_changes = True
+        return "repaired" if repair else "empty"
+
+    result = await automation.run_with_no_change_retry(
+        ready.operation_id,
+        run_attempt,
+    )
+
+    assert result == "repaired"
+    assert attempts == [False, True]
+
+    delegate = FakeClient(
+        [
+            [
+                ToolCallEvent(
+                    tool_call=ToolCall(
+                        id="repair-list",
+                        name="coding_list_files",
+                        arguments={},
+                    )
+                ),
+                DoneEvent(stop_reason="tool_use"),
+            ],
+            [
+                ToolCallEvent(
+                    tool_call=ToolCall(
+                        id="repair-write",
+                        name="coding_write_file",
+                        arguments={"path": "scripts/main.py", "content": "pass\n"},
+                    )
+                ),
+                DoneEvent(stop_reason="tool_use"),
+            ],
+            [DoneEvent(stop_reason="stop")],
+        ]
+    )
+    repair_client = CodingToolBootstrapModelClient(delegate, list_first=True)
+    tool_defs = [
+        ToolDef(name=name, label=name, description=name)
+        for name in (
+            "coding_list_files",
+            "coding_write_file",
+            "coding_apply_patch",
+            "coding_run",
+        )
+    ]
+    _ = [
+        event
+        async for event in repair_client.stream(
+            system_prompt="list",
+            messages=[],
+            tools=tool_defs,
+        )
+    ]
+    _ = [
+        event
+        async for event in repair_client.stream(
+            system_prompt="repair",
+            messages=[],
+            tools=tool_defs,
+        )
+    ]
+    _ = [
+        event
+        async for event in repair_client.stream(
+            system_prompt="continue",
+            messages=[],
+            tools=tool_defs,
+        )
+    ]
+
+    assert delegate.all_tools_calls[0] is not None
+    assert [tool.name for tool in delegate.all_tools_calls[0]] == [
+        "coding_list_files",
+    ]
+    assert delegate.all_tools_calls[1] is not None
+    assert [tool.name for tool in delegate.all_tools_calls[1]] == [
+        "coding_write_file",
+        "coding_apply_patch",
+    ]
+    assert delegate.all_tools_calls[2] is not None
+    assert [tool.name for tool in delegate.all_tools_calls[2]] == [
+        tool.name for tool in tool_defs
+    ]
 
 
 def _plan_role_call(call_id: str, name: str, arguments: dict[str, object]) -> list[object]:

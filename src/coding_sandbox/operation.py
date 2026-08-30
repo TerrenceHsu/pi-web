@@ -44,7 +44,14 @@ from .models import (
 )
 from .remote_artifact_helper import REMOTE_ARTIFACT_HELPER
 from .remote_workspace_helper import REMOTE_WORKSPACE_HELPER
-from .snapshot import ProjectSnapshot, SnapshotError, read_snapshot_file, validate_snapshot_archive
+from .snapshot import (
+    ProjectSnapshot,
+    SnapshotError,
+    SnapshotPolicy,
+    is_snapshot_path_excluded,
+    read_snapshot_file,
+    validate_snapshot_archive,
+)
 from .unified_patch import apply_file_patch, parse_unified_diff
 from .validation import (
     MAX_VALIDATION_CONFIG_BYTES,
@@ -108,6 +115,7 @@ class SandboxOperation(CodingWorkspace):
         baseline_reader: BaselineReader | None = None,
         validation_plan: SandboxValidationPlan | None = None,
         artifact_signer: ArtifactSigner | None = None,
+        snapshot_policy: SnapshotPolicy | None = None,
         clock_ms: Callable[[], int] | None = None,
     ) -> None:
         resolved_staging = staging_root.resolve(strict=False)
@@ -119,7 +127,12 @@ class SandboxOperation(CodingWorkspace):
         self._workdir = workdir
         self._limits = limits
         self._staging_root = resolved_staging
-        baseline = tuple(baseline_entries)
+        self._snapshot_policy = snapshot_policy or SnapshotPolicy.from_limits(limits)
+        baseline = tuple(
+            entry
+            for entry in baseline_entries
+            if not is_snapshot_path_excluded(entry.path, self._snapshot_policy)
+        )
         self._baseline = {entry.path: entry for entry in baseline}
         if (
             len(self._baseline) != len(baseline)
@@ -385,6 +398,20 @@ class SandboxOperation(CodingWorkspace):
                 return self._output_artifact
             return await self._freeze_output_artifact_unlocked()
 
+    async def refreeze_output_artifact(self) -> SandboxOutputArtifact:
+        """Create a fresh signed artifact from the same immutable Sandbox files."""
+        async with self._lock:
+            self._ensure_open()
+            previous = self._output_artifact
+            if not self._frozen or previous is None:
+                raise SandboxWorkspaceError("artifact_invalid")
+            self._output_artifact = None
+            try:
+                return await self._freeze_output_artifact_unlocked()
+            except BaseException:
+                self._output_artifact = previous
+                raise
+
     async def close(self) -> None:
         if self._closed:
             return
@@ -560,7 +587,11 @@ class SandboxOperation(CodingWorkspace):
         )
         if current_list.truncated:
             raise SandboxWorkspaceError("resource_limit")
-        current = {entry.path: entry for entry in current_list.files}
+        current = {
+            entry.path: entry
+            for entry in current_list.files
+            if not is_snapshot_path_excluded(entry.path, self._snapshot_policy)
+        }
         baseline_entries = tuple(sorted(self._baseline.values(), key=lambda entry: entry.path))
         baseline_binary: dict[str, bool] = {}
         request_baseline: list[dict[str, object]] = []
@@ -609,6 +640,9 @@ class SandboxOperation(CodingWorkspace):
             "baseline_sha256": baseline_manifest_digest(baseline_entries),
             "baseline": request_baseline,
             "validation_evidence": evidence.model_dump(mode="json"),
+            "excluded_directory_names": list(self._snapshot_policy.excluded_directory_names),
+            "excluded_file_names": list(self._snapshot_policy.excluded_file_names),
+            "excluded_globs": list(self._snapshot_policy.excluded_globs),
             "max_file_count": self._limits.max_file_count,
             "max_file_bytes": self._limits.max_file_bytes,
             "max_total_bytes": self._limits.max_upload_bytes,
@@ -1167,7 +1201,11 @@ class SandboxOperation(CodingWorkspace):
         )
         if current_list.truncated:
             raise SandboxWorkspaceError("resource_limit")
-        current = {entry.path: entry for entry in current_list.files}
+        current = {
+            entry.path: entry
+            for entry in current_list.files
+            if not is_snapshot_path_excluded(entry.path, self._snapshot_policy)
+        }
         paths = sorted(set(self._baseline) | set(current))
         entries: list[SandboxDiffEntry] = []
         patch_parts: list[str] = []

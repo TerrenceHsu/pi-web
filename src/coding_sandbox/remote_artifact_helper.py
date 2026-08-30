@@ -4,6 +4,7 @@ from __future__ import annotations
 
 REMOTE_ARTIFACT_HELPER = r"""
 import codecs
+import fnmatch
 import hashlib
 import io
 import json
@@ -238,6 +239,49 @@ def hex_digest(value):
     )
 
 
+def validate_exclusions(value, name):
+    values = value.get(name)
+    if not isinstance(values, list) or len(values) > 1024:
+        fail("artifact_invalid")
+    normalized = []
+    folded = set()
+    for item in values:
+        if (
+            not isinstance(item, str)
+            or not item
+            or len(item) > 1024
+            or "\x00" in item
+            or item.casefold() in folded
+        ):
+            fail("artifact_invalid")
+        folded.add(item.casefold())
+        normalized.append(item)
+    return normalized
+
+
+def matches(value, patterns):
+    folded = value.casefold()
+    return any(fnmatch.fnmatchcase(folded, pattern.casefold()) for pattern in patterns)
+
+
+def excluded(path, request):
+    parts = PurePosixPath(path).parts
+    directory_names = {
+        item.casefold() for item in request["excluded_directory_names"]
+    }
+    file_names = {item.casefold() for item in request["excluded_file_names"]}
+    patterns = request["excluded_globs"]
+    for index, part in enumerate(parts[:-1], start=1):
+        directory_path = PurePosixPath(*parts[:index]).as_posix()
+        if part.casefold() in directory_names or matches(directory_path, patterns):
+            return True
+    return (
+        parts[-1].casefold() in file_names
+        or matches(path, patterns)
+        or matches(parts[-1], patterns)
+    )
+
+
 def validate_request(value):
     expected = {
         "schema_version",
@@ -249,6 +293,9 @@ def validate_request(value):
         "baseline_sha256",
         "baseline",
         "validation_evidence",
+        "excluded_directory_names",
+        "excluded_file_names",
+        "excluded_globs",
         "max_file_count",
         "max_file_bytes",
         "max_total_bytes",
@@ -277,6 +324,9 @@ def validate_request(value):
         value["baseline_sha256"]
     ):
         fail("artifact_invalid")
+    validate_exclusions(value, "excluded_directory_names")
+    validate_exclusions(value, "excluded_file_names")
+    validate_exclusions(value, "excluded_globs")
     baseline = value["baseline"]
     if not isinstance(baseline, list) or len(baseline) > value["max_file_count"]:
         fail("resource_limit")
@@ -457,17 +507,21 @@ def hash_file(path, maximum):
 def export(root, request, output_path):
     output_path = absolute_temp_path(output_path)
     baseline_list = validate_request(request)
-    current_list = scan(
+    all_current = scan(
         root,
         request["max_file_count"],
         request["max_file_bytes"],
         request["max_total_bytes"],
     )
-    current_sha = workspace_digest(current_list)
+    current_sha = workspace_digest(all_current)
     if current_sha != request["expected_workspace_sha256"]:
         fail("workspace_changed")
     baseline = {item["path"]: item for item in baseline_list}
-    current = {item["path"]: item for item in current_list}
+    current = {
+        item["path"]: item
+        for item in all_current
+        if not excluded(item["path"], request)
+    }
     changed = []
     deleted = []
     for path in sorted(set(baseline) | set(current)):

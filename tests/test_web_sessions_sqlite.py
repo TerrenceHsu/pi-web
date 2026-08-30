@@ -14,12 +14,17 @@
 """
 from __future__ import annotations
 
+import threading
+from collections.abc import AsyncIterator
+
 import pytest
 from fastapi.testclient import TestClient
 
 from pi_agent_core_py.agent import Agent
 from pi_agent_core_py.harness import AgentHarness
-from pi_agent_core_py.model_client import DoneEvent, FakeClient, TextDeltaEvent
+from pi_agent_core_py.model_client import DoneEvent, FakeClient, ModelClient, TextDeltaEvent
+from pi_agent_core_py.providers.base import ProviderAdapter, ProviderRequest
+from pi_agent_core_py.stream_events import StreamEvent
 from pi_agent_core_py.web.app import create_app, dispose_app
 
 
@@ -197,6 +202,63 @@ def test_delete_session_removes_session(web_client):
     # 再 GET messages 应 404
     msgs_resp = client.get(f"/api/messages?session_id={sid}")
     assert msgs_resp.status_code == 404
+
+
+def test_delete_session_stops_active_request_and_releases_harness() -> None:
+    """关闭运行中的 Session 后，请求终止且下一 Session 可立即使用。"""
+
+    class _WaitForAbortAdapter(ProviderAdapter):
+        provider_id = "test"
+        model = "test-1"
+
+        def __init__(self) -> None:
+            self.started = threading.Event()
+
+        async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamEvent]:
+            self.started.set()
+            assert request.signal is not None
+            await request.signal.wait()
+            yield DoneEvent(stop_reason="aborted")
+
+    adapter = _WaitForAbortAdapter()
+    harness = AgentHarness(
+        Agent(system_prompt="custom sys", client=ModelClient(adapter)),
+    )
+    app = create_app(harness, db_path=None)
+    with TestClient(app) as client:
+        session_id = client.post(
+            "/api/sessions",
+            json={"title": "active"},
+        ).json()["id"]
+        started = client.post(
+            "/api/prompt/async",
+            json={"text": "keep running", "session_id": session_id},
+        )
+        assert started.status_code == 202
+        request_id = started.json()["request_id"]
+        assert adapter.started.wait(timeout=2.0)
+
+        deleted = client.delete(f"/api/sessions/{session_id}")
+
+        assert deleted.status_code == 200
+        assert client.get(f"/api/messages?session_id={session_id}").status_code == 404
+        assert client.get(f"/api/requests/{request_id}").json()["status"] == "aborted"
+        assert harness.context.phase == "idle"
+        assert harness.agent.state.status == "idle"
+
+        harness.agent.client = FakeClient(
+            [[TextDeltaEvent(delta="ready"), DoneEvent(stop_reason="stop")]],
+        )
+        next_session_id = client.post(
+            "/api/sessions",
+            json={"title": "next"},
+        ).json()["id"]
+        retry = client.post(
+            "/api/prompt",
+            json={"text": "retry", "session_id": next_session_id},
+        )
+        assert retry.status_code == 200
+    dispose_app(app)
 
 
 # ============================================================================

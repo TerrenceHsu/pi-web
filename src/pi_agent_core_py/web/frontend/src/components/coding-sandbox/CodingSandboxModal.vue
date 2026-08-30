@@ -35,7 +35,7 @@ function hasAction(action: ManagedSandboxAction): boolean {
 
 const canValidate = computed(() => hasAction("validate"))
 const canDiff = computed(() =>
-  ["ready", "validation_failed", "validated", "awaiting_approval"].includes(
+  ["ready", "validation_failed", "validated", "awaiting_approval", "publish_conflict"].includes(
     operation.value?.status ?? "",
   ),
 )
@@ -99,8 +99,8 @@ function eventDetail(event: ManagedSandboxEvent): string {
     </div>
 
     <div v-else-if="!sandboxStore.available" class="empty-card">
-      Managed Sandbox is unavailable. Enable it and configure an E2B credential in the
-      local server configuration.
+      Managed Sandbox is unavailable. Enable it and configure an E2B credential in the local server
+      configuration.
     </div>
 
     <div v-else-if="!operation" class="empty-card">
@@ -234,6 +234,10 @@ function eventDetail(event: ManagedSandboxEvent): string {
           transactional Workspace publisher is available; you can review or discard it safely.
         </p>
         <template v-else>
+          <p class="muted">
+            The primary approval action is available above the chat input. This manual Sandbox view
+            remains available as a fallback.
+          </p>
           <label>
             <input v-model="approvalConfirmed" type="checkbox" />
             I reviewed the validation result and complete diff.
@@ -248,6 +252,15 @@ function eventDetail(event: ManagedSandboxEvent): string {
             Publish to workspace
           </button>
         </template>
+      </section>
+
+      <section v-if="operation.status === 'publish_conflict'" class="conflict-panel">
+        <h3>Publish conflict</h3>
+        <p>
+          The signed files are still frozen and available in Files for preview or download. No code
+          has been lost and neither recovery action calls the Agent again.
+        </p>
+        <p class="muted">Retry or re-freeze directly from the recovery bar above the chat input.</p>
       </section>
 
       <section v-if="operation.status === 'published'" class="published-panel">
@@ -297,6 +310,7 @@ function eventDetail(event: ManagedSandboxEvent): string {
 .status-card,
 .panel,
 .approval-panel,
+.conflict-panel,
 .published-panel {
   margin-bottom: 12px;
   padding: 12px;
@@ -427,6 +441,9 @@ pre {
   display: block;
   margin: 10px 0;
   font-size: 13px;
+}
+.conflict-panel {
+  border-color: var(--warning, #b7791f);
 }
 .muted {
   color: var(--muted);

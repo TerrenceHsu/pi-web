@@ -77,12 +77,14 @@ vi.mock("../../src/api/client", () => ({
 
 vi.mock("../../src/api", () => ({
   abortRun: vi.fn().mockResolvedValue(undefined),
+  getState: vi.fn().mockResolvedValue({ plan_mode: { enabled: true } }),
   listSlashCommands: vi.fn().mockResolvedValue({ count: 0, commands: [] }),
 }))
 
 import ChatPanel from "../../src/components/chat/ChatPanel.vue"
 import SessionSidebar from "../../src/components/layout/SessionSidebar.vue"
 import ProviderSettingsModal from "../../src/components/providers/ProviderSettingsModal.vue"
+import { getState } from "../../src/api"
 import { useProviderStore } from "../../src/stores/providerStore"
 import { useSessionStore } from "../../src/stores/sessionStore"
 import { useChatStore } from "../../src/stores/chatStore"
@@ -183,6 +185,7 @@ function makeBindingResponse(binding: SessionModelBindingView | null): SessionMo
 beforeEach(() => {
   setActivePinia(createPinia())
   Object.values(api).forEach((fn) => fn.mockReset())
+  vi.mocked(getState).mockResolvedValue({ plan_mode: { enabled: true } } as never)
   // 清理 Teleport 残留
   document.body.innerHTML = ""
 })

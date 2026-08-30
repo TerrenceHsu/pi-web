@@ -84,7 +84,7 @@ def _config_read() -> SandboxCommandResult:
 
 def _fingerprint(value: str = "a") -> SandboxCommandResult:
     return _helper_result(
-        {"file_count": 3, "total_bytes": 20, "sha256": value * 64}
+        {"file_count": 4, "total_bytes": 23, "sha256": value * 64}
     )
 
 
@@ -133,6 +133,11 @@ def _current_files() -> tuple[SandboxFileEntry, ...]:
             sha256=_sha(CONFIG),
         ),
         SandboxFileEntry(path="added.bin", size=4, sha256=_sha(b"\x00new")),
+        SandboxFileEntry(
+            path="scripts/__pycache__/main.cpython-312.pyc",
+            size=3,
+            sha256=_sha(b"pyc"),
+        ),
         SandboxFileEntry(path="text.txt", size=4, sha256=_sha(b"new\n")),
     )
 
@@ -390,6 +395,10 @@ async def test_freeze_downloads_rehashes_signs_and_blocks_all_mutations(
     assert operation.output_artifact is artifact
     assert artifact.archive_path.name == f"{artifact.archive_sha256}.tar"
     assert artifact.manifest.changed_file_count == 2
+    assert {entry.path for entry in artifact.manifest.changed_files} == {
+        "added.bin",
+        "text.txt",
+    }
     assert artifact.manifest.deleted_file_count == 1
     assert artifact.manifest.binary_diff_count == 2
     assert verify_artifact_signature(signer, artifact.signature)

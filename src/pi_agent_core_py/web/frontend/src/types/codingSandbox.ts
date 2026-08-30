@@ -7,6 +7,7 @@ export type ManagedSandboxStatus =
   | "freezing"
   | "awaiting_approval"
   | "publishing"
+  | "publish_conflict"
   | "published"
   | "cancelling"
   | "cancelled"
@@ -15,7 +16,8 @@ export type ManagedSandboxStatus =
   | "failed"
   | "interrupted"
 
-export type ManagedSandboxAction = "validate" | "prepare_publish" | "publish" | "cancel" | "discard"
+export type ManagedSandboxAction =
+  "validate" | "prepare_publish" | "publish" | "refreeze" | "retry_publish" | "cancel" | "discard"
 
 export interface SandboxDiffEntry {
   path: string
@@ -76,7 +78,7 @@ export interface ManagedSandboxOperation {
   changed_paths: string[]
   deleted_paths: string[]
   error_code: string | null
-  state_machine_version?: "pi-agent-managed-sandbox-state/v1"
+  state_machine_version?: "pi-agent-managed-sandbox-state/v2"
   allowed_actions?: ManagedSandboxAction[]
   allowed_transitions?: ManagedSandboxStatus[]
   terminal: boolean

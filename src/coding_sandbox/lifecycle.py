@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import os
 import stat
+import tarfile
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -18,7 +19,12 @@ import aiosqlite
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from .admin.models import SandboxAdminConfig, SandboxConfigRecord
-from .artifact import ArtifactSigner, SandboxOutputArtifact
+from .artifact import (
+    ArtifactSigner,
+    SandboxOutputArtifact,
+    hash_regular_file,
+    verify_artifact_signature,
+)
 from .backend import SandboxBackend
 from .models import SandboxCreateSpec, SandboxHandle, SandboxOutputChunk
 from .operation import SandboxOperation
@@ -40,6 +46,7 @@ from .workspace_models import (
     SandboxDiffResult,
     SandboxFileEntry,
     SandboxWorkspaceError,
+    validate_workspace_relative_path,
 )
 
 MANAGED_OPERATION_SCHEMA: Literal["pi-agent-managed-sandbox-operation/v1"] = (
@@ -48,8 +55,8 @@ MANAGED_OPERATION_SCHEMA: Literal["pi-agent-managed-sandbox-operation/v1"] = (
 MANAGED_EVENT_SCHEMA: Literal["pi-agent-managed-sandbox-event/v1"] = (
     "pi-agent-managed-sandbox-event/v1"
 )
-SANDBOX_STATE_MACHINE_VERSION: Literal["pi-agent-managed-sandbox-state/v1"] = (
-    "pi-agent-managed-sandbox-state/v1"
+SANDBOX_STATE_MACHINE_VERSION: Literal["pi-agent-managed-sandbox-state/v2"] = (
+    "pi-agent-managed-sandbox-state/v2"
 )
 _STORE_SCHEMA_VERSION = 2
 _MAX_RECORD_BYTES = 8 * 1024 * 1024
@@ -77,6 +84,7 @@ ManagedOperationStatus = Literal[
     "freezing",
     "awaiting_approval",
     "publishing",
+    "publish_conflict",
     "published",
     "cancelling",
     "cancelled",
@@ -89,6 +97,8 @@ SandboxOperationAction = Literal[
     "validate",
     "prepare_publish",
     "publish",
+    "refreeze",
+    "retry_publish",
     "cancel",
     "discard",
 ]
@@ -122,6 +132,7 @@ _ALLOWED_STATUS_TRANSITIONS: dict[
     "freezing": frozenset(
         {
             "awaiting_approval",
+            "publish_conflict",
             "validation_failed",
             "cancelling",
             "discarding",
@@ -132,7 +143,10 @@ _ALLOWED_STATUS_TRANSITIONS: dict[
     "awaiting_approval": frozenset(
         {"publishing", "cancelling", "discarding", "failed", "interrupted"}
     ),
-    "publishing": frozenset({"published", "failed", "interrupted"}),
+    "publishing": frozenset({"published", "publish_conflict", "failed", "interrupted"}),
+    "publish_conflict": frozenset(
+        {"freezing", "publishing", "cancelling", "discarding", "failed", "interrupted"}
+    ),
     "published": frozenset(),
     "cancelling": frozenset({"cancelled", "failed", "interrupted"}),
     "cancelled": frozenset(),
@@ -151,6 +165,7 @@ _ALLOWED_ACTIONS: dict[ManagedOperationStatus, tuple[SandboxOperationAction, ...
     "freezing": ("cancel", "discard"),
     "awaiting_approval": ("publish", "cancel", "discard"),
     "publishing": (),
+    "publish_conflict": ("refreeze", "retry_publish", "cancel", "discard"),
     "published": (),
     "cancelling": (),
     "cancelled": (),
@@ -188,6 +203,9 @@ LifecycleErrorCode = Literal[
     "publisher_error",
     "publisher_unavailable",
     "operation_failed",
+    "no_changes",
+    "artifact_unavailable",
+    "artifact_file_not_found",
 ]
 
 _ERROR_MESSAGES: dict[LifecycleErrorCode, str] = {
@@ -203,6 +221,9 @@ _ERROR_MESSAGES: dict[LifecycleErrorCode, str] = {
     "publisher_error": "The local Publisher operation failed.",
     "publisher_unavailable": "Workspace publishing is not available for this operation.",
     "operation_failed": "Managed Sandbox operation failed.",
+    "no_changes": "A managed Sandbox artifact must contain at least one file change.",
+    "artifact_unavailable": "The frozen Sandbox artifact is unavailable.",
+    "artifact_file_not_found": "The frozen Sandbox file was not found.",
 }
 
 
@@ -270,8 +291,8 @@ class ManagedSandboxOperationRecord(BaseModel):
     def _validate_times(self) -> ManagedSandboxOperationRecord:
         if self.updated_at_ms < self.created_at_ms:
             raise ValueError("operation update time precedes creation")
-        if self.status == "awaiting_approval" and self.artifact_id is None:
-            raise ValueError("approval state requires a frozen artifact")
+        if self.status in {"awaiting_approval", "publish_conflict"} and self.artifact_id is None:
+            raise ValueError("reviewable state requires a frozen artifact")
         if self.status == "published" and self.publish_transaction_id is None:
             raise ValueError("published state requires a Publisher transaction")
         if (self.baseline_workspace_revision is None) != (self.baseline_workspace_sha256 is None):
@@ -291,7 +312,7 @@ class ManagedSandboxOperationRecord(BaseModel):
         actions = allowed_sandbox_actions(self.status)
         if self.publish_available:
             return actions
-        return tuple(action for action in actions if action != "publish")
+        return tuple(action for action in actions if action not in {"publish", "retry_publish"})
 
     @property
     def allowed_transitions(self) -> tuple[ManagedOperationStatus, ...]:
@@ -675,6 +696,18 @@ class _LiveOperation:
     cancel_event: asyncio.Event
 
 
+@dataclass(frozen=True)
+class FrozenSandboxFile:
+    """One exact file read from the signed artifact awaiting approval."""
+
+    path: str
+    name: str
+    content: bytes
+    size: int
+    sha256: str
+    binary: bool
+
+
 class ManagedSandboxLifecycle:
     """Coordinates one live cloud Sandbox per local application session."""
 
@@ -804,6 +837,49 @@ class ManagedSandboxLifecycle:
             return None
         return await self.get(record.operation_id)
 
+    async def read_frozen_file(
+        self,
+        operation_id: str,
+        logical_path: str,
+    ) -> FrozenSandboxFile:
+        """Read one signed, immutable changed file without publishing it."""
+        record = await self.get(operation_id)
+        if record.status not in {"awaiting_approval", "publish_conflict"}:
+            raise SandboxLifecycleError(
+                "artifact_unavailable",
+                operation_id=operation_id,
+            )
+        live = self._live.get(operation_id)
+        artifact = None if live is None else live.operation.output_artifact
+        if (
+            live is None
+            or artifact is None
+            or record.artifact_id != artifact.manifest.artifact_id
+            or record.artifact_sha256 != artifact.archive_sha256
+        ):
+            raise SandboxLifecycleError(
+                "artifact_unavailable",
+                operation_id=operation_id,
+            )
+        try:
+            normalized = validate_workspace_relative_path(logical_path)
+            return await asyncio.to_thread(
+                _read_frozen_artifact_file,
+                artifact,
+                live.artifact_signer,
+                normalized,
+            )
+        except KeyError as exc:
+            raise SandboxLifecycleError(
+                "artifact_file_not_found",
+                operation_id=operation_id,
+            ) from exc
+        except (OSError, tarfile.TarError, ValueError) as exc:
+            raise SandboxLifecycleError(
+                "artifact_unavailable",
+                operation_id=operation_id,
+            ) from exc
+
     def workspace_for_session(self, session_id: str | None) -> CodingWorkspace:
         if session_id is None:
             raise SandboxWorkspaceError("no_active_operation")
@@ -839,6 +915,20 @@ class ManagedSandboxLifecycle:
                 "validation_required",
                 operation_id=operation_id,
             )
+        diff = await self.diff(operation_id)
+        if not diff.entries:
+            raise SandboxLifecycleError(
+                "no_changes",
+                operation_id=operation_id,
+            )
+        # diff() refreshes the durable record. Re-read it so _launch_action's
+        # optimistic update cannot use the pre-diff revision.
+        record = await self.get(operation_id)
+        if "prepare_publish" not in record.allowed_actions:
+            raise SandboxLifecycleError(
+                "validation_required",
+                operation_id=operation_id,
+            )
         return await self._launch_action(
             record,
             status="freezing",
@@ -862,6 +952,41 @@ class ManagedSandboxLifecycle:
             record,
             status="publishing",
             event_type="sandbox_publish_started",
+            action=self._run_publish,
+        )
+
+    async def refreeze(self, operation_id: str) -> ManagedSandboxOperationRecord:
+        """Rebuild the signed artifact from the existing frozen Sandbox."""
+        record = await self.get(operation_id)
+        if "refreeze" not in record.allowed_actions:
+            raise SandboxLifecycleError(
+                "operation_not_ready",
+                operation_id=operation_id,
+            )
+        return await self._launch_action(
+            record,
+            status="freezing",
+            event_type="sandbox_refreeze_started",
+            action=self._run_refreeze,
+        )
+
+    async def retry_publish(self, operation_id: str) -> ManagedSandboxOperationRecord:
+        """Retry the exact retained artifact without invoking the coding Agent."""
+        record = await self.get(operation_id)
+        if not record.publish_available:
+            raise SandboxLifecycleError(
+                "publisher_unavailable",
+                operation_id=operation_id,
+            )
+        if "retry_publish" not in record.allowed_actions:
+            raise SandboxLifecycleError(
+                "operation_not_ready",
+                operation_id=operation_id,
+            )
+        return await self._launch_action(
+            record,
+            status="publishing",
+            event_type="sandbox_publish_retry_started",
             action=self._run_publish,
         )
 
@@ -1039,6 +1164,7 @@ class ManagedSandboxLifecycle:
                 baseline_reader=baseline_reader,
                 validation_plan=validation_plan,
                 artifact_signer=self._artifact_signer,
+                snapshot_policy=policy,
             )
             await operation.seed_from_snapshot(snapshot)
             self._live[record.operation_id] = _LiveOperation(
@@ -1256,12 +1382,86 @@ class ManagedSandboxLifecycle:
             await self._close_live(record.operation_id)
             self._release_session(updated)
         except PublisherError as exc:
-            await self._fail(record, exc.code, type(exc).__name__)
+            if exc.code == "publish_conflict":
+                await self._retain_publish_conflict(record)
+            else:
+                await self._fail(record, exc.code, type(exc).__name__)
         except SandboxLifecycleError as exc:
             if exc.code != "operation_conflict":
                 await self._fail(record, "operation_failed", type(exc).__name__)
         except Exception as exc:
             await self._fail(record, "publisher_error", type(exc).__name__)
+
+    async def _run_refreeze(
+        self,
+        record: ManagedSandboxOperationRecord,
+        live: _LiveOperation,
+    ) -> None:
+        try:
+            artifact = await live.operation.refreeze_output_artifact()
+            diff = await live.operation.diff()
+            self._detach_current_action(record.operation_id)
+            updated = await self._update(
+                record,
+                status="awaiting_approval",
+                workspace_revision=live.operation.workspace_revision,
+                validation=live.operation.last_validation_evidence,
+                diff=diff,
+                artifact_id=artifact.manifest.artifact_id,
+                artifact_sha256=artifact.archive_sha256,
+                changed_paths=tuple(entry.path for entry in artifact.manifest.changed_files),
+                deleted_paths=tuple(entry.path for entry in artifact.manifest.deleted_files),
+                error_code=None,
+            )
+            await self._emit(
+                updated,
+                "sandbox_approval_required",
+                {
+                    "refrozen": True,
+                    "changed_paths": list(updated.changed_paths),
+                    "deleted_paths": list(updated.deleted_paths),
+                },
+            )
+        except (SandboxWorkspaceError, SandboxLifecycleError) as exc:
+            await self._retain_publish_conflict(
+                record,
+                error_code=getattr(exc, "code", "artifact_export_failed"),
+                event_type="sandbox_refreeze_failed",
+            )
+        except Exception:
+            await self._retain_publish_conflict(
+                record,
+                error_code="artifact_export_failed",
+                event_type="sandbox_refreeze_failed",
+            )
+
+    async def _retain_publish_conflict(
+        self,
+        record: ManagedSandboxOperationRecord,
+        *,
+        error_code: str = "publish_conflict",
+        event_type: str = "sandbox_publish_conflict",
+    ) -> None:
+        """Keep the live Sandbox and signed artifact available for recovery."""
+        self._detach_current_action(record.operation_id)
+        current = await self._store.get(record.operation_id) or record
+        if current.status not in {"publishing", "freezing"}:
+            return
+        try:
+            updated = await self._update(
+                current,
+                status="publish_conflict",
+                error_code=error_code[:128],
+            )
+        except SandboxLifecycleError as exc:
+            if exc.code == "operation_conflict":
+                return
+            raise
+        await self._emit(
+            updated,
+            event_type,
+            {"error_code": updated.error_code},
+        )
 
     async def _launch_action(
         self,
@@ -1510,6 +1710,62 @@ def _default_validation_config(command_timeout_seconds: int) -> bytes:
     )
 
 
+def _read_frozen_artifact_file(
+    artifact: SandboxOutputArtifact,
+    signer: ArtifactSigner,
+    logical_path: str,
+) -> FrozenSandboxFile:
+    """Revalidate the signed archive receipt, then read one manifest member."""
+    size, digest = hash_regular_file(
+        artifact.archive_path,
+        max_bytes=max(artifact.archive_size, 1),
+    )
+    if (
+        size != artifact.archive_size
+        or digest != artifact.archive_sha256
+        or not verify_artifact_signature(signer, artifact.signature)
+    ):
+        raise ValueError("artifact receipt is invalid")
+    entry = next(
+        (
+            candidate
+            for candidate in artifact.manifest.changed_files
+            if candidate.path == logical_path
+        ),
+        None,
+    )
+    if entry is None:
+        raise KeyError(logical_path)
+    with tarfile.open(artifact.archive_path, mode="r:") as archive:
+        try:
+            member = archive.getmember(entry.member_path)
+        except KeyError as exc:
+            raise ValueError("artifact payload member is missing") from exc
+        if (
+            not member.isfile()
+            or member.name != entry.member_path
+            or member.size != entry.after_size
+        ):
+            raise ValueError("artifact payload member is invalid")
+        stream = archive.extractfile(member)
+        if stream is None:
+            raise ValueError("artifact payload member cannot be read")
+        content = stream.read(entry.after_size + 1)
+    if (
+        len(content) != entry.after_size
+        or hashlib.sha256(content).hexdigest() != entry.after_sha256
+    ):
+        raise ValueError("artifact payload does not match its signed manifest")
+    return FrozenSandboxFile(
+        path=entry.path,
+        name=Path(entry.path).name,
+        content=content,
+        size=entry.after_size,
+        sha256=entry.after_sha256,
+        binary=entry.after_binary,
+    )
+
+
 async def _close_quietly(operation: SandboxOperation) -> None:
     try:
         await operation.close()
@@ -1529,6 +1785,7 @@ async def _destroy_quietly(
 
 __all__ = [
     "DEFAULT_VALIDATION_CONFIG",
+    "FrozenSandboxFile",
     "LifecycleErrorCode",
     "MANAGED_EVENT_SCHEMA",
     "MANAGED_OPERATION_SCHEMA",

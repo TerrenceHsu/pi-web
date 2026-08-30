@@ -52,6 +52,7 @@ vi.mock("../../src/api/client", () => ({
 // mock abortRun——ChatPanel 用它做 stop
 vi.mock("../../src/api", () => ({
   abortRun: vi.fn().mockResolvedValue(undefined),
+  getState: vi.fn().mockResolvedValue({ plan_mode: { enabled: true } }),
   listSlashCommands: vi.fn().mockResolvedValue({
     count: 1,
     commands: [
@@ -66,6 +67,7 @@ vi.mock("../../src/api", () => ({
 }))
 
 import ChatPanel from "../../src/components/chat/ChatPanel.vue"
+import { getState } from "../../src/api"
 import { useProviderStore } from "../../src/stores/providerStore"
 import { useSessionStore } from "../../src/stores/sessionStore"
 import { useChatStore } from "../../src/stores/chatStore"
@@ -93,6 +95,7 @@ function makeBinding(overrides: Partial<SessionModelBindingView> = {}): SessionM
 beforeEach(() => {
   setActivePinia(createPinia())
   Object.values(api).forEach((fn) => fn.mockReset())
+  vi.mocked(getState).mockResolvedValue({ plan_mode: { enabled: true } } as never)
 })
 
 async function flushAll() {
