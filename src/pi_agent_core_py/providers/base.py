@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import abc
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -42,6 +42,9 @@ class ProviderRequest(BaseModel):
     messages: list[LLMMessage]
     tools: list[ToolDef] = Field(default_factory=list)
     signal: Any | None = None
+    thinking_level: Literal[
+        "off", "minimal", "low", "medium", "high", "xhigh", "max"
+    ] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

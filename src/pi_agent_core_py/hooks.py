@@ -23,7 +23,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .messages import AgentMessage, ToolCall
+from .messages import AgentMessage, ContentBlock, ToolCall, Usage
 from .tools import AgentTool, ToolResult
 
 # ============================================================================
@@ -37,7 +37,7 @@ BeforeToolCallFn = Callable[
 ]
 AfterToolCallFn = Callable[
     ["AfterToolCallContext", asyncio.Event | None],
-    Awaitable[ToolResult],
+    Awaitable["AfterToolCallResult | ToolResult | None"],
 ]
 
 
@@ -71,6 +71,7 @@ class BeforeToolCallResult(BaseModel):
     tool_call: ToolCall | None = None
     reason: str | None = None
     details: dict[str, Any] = Field(default_factory=dict)
+    terminate: bool = False
 
 
 # ============================================================================
@@ -91,6 +92,20 @@ class AfterToolCallContext(BaseModel):
     tool: AgentTool | None
     result: ToolResult
     messages: list[AgentMessage] = Field(default_factory=list)
+
+
+class AfterToolCallResult(BaseModel):
+    """Field-wise overrides for an executed tool result.
+
+    Omitted fields keep their original values. ``added_tool_names`` and the
+    tool-call identity remain owned by the actual execution result.
+    """
+
+    content: list[ContentBlock] | None = None
+    details: dict[str, Any] | None = None
+    is_error: bool | None = None
+    usage: Usage | None = None
+    terminate: bool | None = None
 
 
 # ============================================================================
@@ -117,6 +132,6 @@ async def default_after_tool_call(
 __all__ = [
     "BeforeToolCallFn", "AfterToolCallFn",
     "BeforeToolCallContext", "BeforeToolCallResult",
-    "AfterToolCallContext",
+    "AfterToolCallContext", "AfterToolCallResult",
     "default_before_tool_call", "default_after_tool_call",
 ]

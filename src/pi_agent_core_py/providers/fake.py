@@ -57,6 +57,8 @@ class FakeProviderAdapter(ProviderAdapter):
         self.all_tools_calls: list[list[ToolDef] | None] = []
         self.last_system_prompt: str = ""
         self.all_system_prompt_calls: list[str] = []
+        self.last_thinking_level: str | None = None
+        self.all_thinking_level_calls: list[str | None] = []
 
     async def stream(
         self,
@@ -77,6 +79,8 @@ class FakeProviderAdapter(ProviderAdapter):
         self.all_tools_calls.append(list(tools) if tools else None)
         self.last_system_prompt = request.system_prompt
         self.all_system_prompt_calls.append(request.system_prompt)
+        self.last_thinking_level = request.thinking_level
+        self.all_thinking_level_calls.append(request.thinking_level)
 
         if self._cursor >= len(self._turns):
             yield ErrorEvent(message="FakeClient: no more scripts")

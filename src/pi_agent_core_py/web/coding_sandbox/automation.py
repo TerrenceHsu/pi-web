@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from coding_sandbox.lifecycle import (
     ManagedSandboxLifecycle,
@@ -100,6 +100,9 @@ class CodingToolBootstrapModelClient(ModelClient):
         messages: list[LLMMessage],
         tools: list[ToolDef] | None = None,
         signal: asyncio.Event | None = None,
+        thinking_level: Literal[
+            "off", "minimal", "low", "medium", "high", "xhigh", "max"
+        ] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         selected_tools = tools
@@ -127,6 +130,7 @@ class CodingToolBootstrapModelClient(ModelClient):
             messages=messages,
             tools=selected_tools,
             signal=signal,
+            thinking_level=thinking_level,
             metadata=request_metadata,
         ):
             if isinstance(event, (ToolCallEvent, ToolCallEndEvent)):

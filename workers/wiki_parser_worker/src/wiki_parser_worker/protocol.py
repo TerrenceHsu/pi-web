@@ -11,6 +11,7 @@ import json
 import os
 import re
 import stat
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,8 @@ DESTROY_NAME: Final = "destroy.request"
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _WINDOWS_REPARSE_POINT = 0x400
+_ATOMIC_REPLACE_ATTEMPTS = 20 if os.name == "nt" else 1
+_ATOMIC_REPLACE_RETRY_SECONDS = 0.002
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,7 +165,17 @@ def atomic_write_bytes(path: Path, content: bytes, *, mode: int = 0o644) -> None
             metadata = path.lstat()
             if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
                 raise WorkerRuntimeError("invalid_source")
-        os.replace(temporary, path)
+        for attempt in range(_ATOMIC_REPLACE_ATTEMPTS):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                # A host reader can briefly hold a non-delete-sharing handle
+                # on Windows. Keep the replacement atomic and bound the wait;
+                # persistent ACL/permission failures still surface unchanged.
+                if attempt + 1 == _ATOMIC_REPLACE_ATTEMPTS:
+                    raise
+                time.sleep(_ATOMIC_REPLACE_RETRY_SECONDS)
     except WorkerRuntimeError:
         raise
     except OSError as error:

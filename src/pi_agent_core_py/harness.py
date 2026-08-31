@@ -112,7 +112,7 @@ from .mcp.prompts import (
     MCPPromptInfo,
     MCPPromptSkillAdapter,
 )
-from .messages import Message
+from .messages import AgentMessage
 from .policy import (
     InMemoryToolPermissionAuditLog,
     ToolApprovalHandler,
@@ -176,8 +176,8 @@ class HarnessContext(BaseModel):
     agent: Agent
     request_type: AgentRequestType | None = None
     user_text: str | None = None
-    messages_before: list[Message] = Field(default_factory=list)
-    messages_after: list[Message] = Field(default_factory=list)
+    messages_before: list[AgentMessage] = Field(default_factory=list)
+    messages_after: list[AgentMessage] = Field(default_factory=list)
     last_event: AgentEvent | None = None
     last_error: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -322,7 +322,7 @@ class AgentHarness:
         *,
         skill_selection: SkillSelection | None = None,
         system_prompt_suffix: str | None = None,
-    ) -> list[Message]:
+    ) -> list[AgentMessage]:
         """包装 agent.prompt(user_text)，前后跑 hooks。
 
         Step 14：可选传 skill_selection——单次请求级 skill 选择 + 渲染变量。
@@ -340,7 +340,7 @@ class AgentHarness:
         *,
         skill_selection: SkillSelection | None = None,
         system_prompt_suffix: str | None = None,
-    ) -> list[Message]:
+    ) -> list[AgentMessage]:
         """包装 agent.continue_()，前后跑 hooks。
 
         Agent 无 messages 时沿用 Agent.continue_ 的 ValueError（before_request hook 仍会跑）。
@@ -358,10 +358,10 @@ class AgentHarness:
         *,
         request_type: AgentRequestType,
         user_text: str | None,
-        agent_call: Callable[[], Awaitable[list[Message]]],
+        agent_call: Callable[[], Awaitable[list[AgentMessage]]],
         skill_selection: SkillSelection | None = None,
         system_prompt_suffix: str | None = None,
-    ) -> list[Message]:
+    ) -> list[AgentMessage]:
         """run_prompt / run_continue 共用主流程。"""
         if self.context.phase != "idle":
             raise RuntimeError(
@@ -1597,7 +1597,7 @@ class AgentHarness:
         self.last_compaction_result = result
 
         if result.applied:
-            # 用 session.deserialize_messages 把 dict 还原为 Message 对象
+            # 用 session.deserialize_messages 把 dict 还原为 AgentMessage 对象
             from .session import deserialize_messages  # 局部 import 避免循环
             self.agent.state.messages = deserialize_messages(result.new_messages)
 
@@ -1734,7 +1734,7 @@ class AgentHarness:
         self,
         *,
         status: SnapshotStatus,
-        messages_after: list[Message],
+        messages_after: list[AgentMessage],
         error: str | None = None,
     ) -> RequestSnapshot | None:
         """ finalize 当前 builder 的 snapshot，存入 last_snapshot / snapshots。

@@ -36,7 +36,7 @@ import json
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -44,7 +44,6 @@ from .context import convert_to_llm
 from .context_budget import ContextEstimate, estimate_message_tokens
 from .messages import (
     AgentMessage,
-    Message,
     SummaryMessage,
     TextContent,
 )
@@ -349,19 +348,18 @@ def default_summary_generator(input: CompactionInput) -> str:
 # ============================================================================
 
 
-def _turn_count(messages: list[Message]) -> int:
+def _turn_count(messages: list[AgentMessage]) -> int:
     return sum(1 for message in messages if getattr(message, "role", None) == "user")
 
 
-def _message_token_count(messages: list[Message]) -> int:
-    agent_messages = cast(list[AgentMessage], list(messages))
-    return estimate_message_tokens(convert_to_llm(agent_messages))
+def _message_token_count(messages: list[AgentMessage]) -> int:
+    return estimate_message_tokens(convert_to_llm(list(messages)))
 
 
 def _split_at_complete_turn(
-    messages: list[Message],
+    messages: list[AgentMessage],
     config: CompactionConfig,
-) -> tuple[list[Message], list[Message]]:
+) -> tuple[list[AgentMessage], list[AgentMessage]]:
     user_boundaries = [
         index
         for index, message in enumerate(messages)
@@ -406,8 +404,8 @@ def _ratio(tokens: int, context_window: int | None) -> float | None:
 
 
 def _token_stats(
-    before: list[Message],
-    after: list[Message],
+    before: list[AgentMessage],
+    after: list[AgentMessage],
     config: CompactionConfig,
     context_estimate: ContextEstimate | None,
 ) -> CompactionTokenStats:
@@ -552,7 +550,7 @@ async def _generate_summary_with_retry(
 
 
 async def compact_messages(
-    messages: list[Message],
+    messages: list[AgentMessage],
     *,
     snapshots: list[RequestSnapshot] | None = None,
     config: CompactionConfig | None = None,
@@ -806,7 +804,7 @@ def _gen_branch_summary_id() -> str:
 async def create_branch_summary(
     *,
     session: Any | None = None,  # SessionMemory，避免硬 import 循环
-    messages: list[Message] | None = None,
+    messages: list[AgentMessage] | None = None,
     snapshots: list[RequestSnapshot] | None = None,
     config: BranchSummaryConfig | None = None,
     summary_generator: SummaryGenerator | None = None,

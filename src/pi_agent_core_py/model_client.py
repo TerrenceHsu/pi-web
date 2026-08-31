@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal
 
 from .llm_messages import LLMMessage
 from .providers.base import ProviderAdapter, ProviderRequest
@@ -108,6 +108,9 @@ class ModelClient:
         messages: list[LLMMessage],
         tools: list[ToolDef] | None = None,
         signal: asyncio.Event | None = None,
+        thinking_level: Literal[
+            "off", "minimal", "low", "medium", "high", "xhigh", "max"
+        ] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """统一入口——委托给 adapter，捕获异常转 ErrorEvent。
@@ -130,6 +133,7 @@ class ModelClient:
             messages=transformed_messages,
             tools=list(tools) if tools else [],
             signal=signal,
+            thinking_level=thinking_level,
             metadata=dict(metadata) if metadata else {},
         )
         retry_index = 0
@@ -143,6 +147,7 @@ class ModelClient:
                 messages=[message.model_copy(deep=True) for message in base_request.messages],
                 tools=[tool.model_copy(deep=True) for tool in base_request.tools],
                 signal=base_request.signal,
+                thinking_level=base_request.thinking_level,
                 metadata=request_metadata,
             )
             try:
@@ -240,6 +245,14 @@ class FakeClient(ModelClient):
     @property
     def all_system_prompt_calls(self) -> list[str]:
         return self._fake.all_system_prompt_calls
+
+    @property
+    def last_thinking_level(self) -> str | None:
+        return self._fake.last_thinking_level
+
+    @property
+    def all_thinking_level_calls(self) -> list[str | None]:
+        return self._fake.all_thinking_level_calls
 
 
 # ============================================================================

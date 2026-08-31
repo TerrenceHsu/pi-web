@@ -34,7 +34,7 @@ from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, Field, SerializeAsAny
 
-from .messages import AssistantMessage, Message, ToolCall
+from .messages import AgentMessage, AssistantMessage, ToolCall
 from .model_client import StreamEvent
 from .tools import ToolResult
 
@@ -49,7 +49,11 @@ class AgentStartEvent(BaseModel):
 
 class AgentEndEvent(BaseModel):
     type: Literal["agent_end"] = "agent_end"
-    messages: list[Message] = Field(default_factory=list)
+    # Compatibility: ``messages`` remains the complete transcript used by the
+    # current Web/session stack. ``new_messages`` makes the per-run delta
+    # explicit without silently changing the established wire contract.
+    messages: list[AgentMessage] = Field(default_factory=list)
+    new_messages: list[AgentMessage] = Field(default_factory=list)
 
 
 # ============================================================================
@@ -75,7 +79,7 @@ class TurnEndEvent(BaseModel):
 
 class MessageStartEvent(BaseModel):
     type: Literal["message_start"] = "message_start"
-    message: Message
+    message: AgentMessage
 
 
 class MessageUpdateEvent(BaseModel):
@@ -87,7 +91,7 @@ class MessageUpdateEvent(BaseModel):
 
 class MessageEndEvent(BaseModel):
     type: Literal["message_end"] = "message_end"
-    message: Message
+    message: AgentMessage
 
 
 # ============================================================================

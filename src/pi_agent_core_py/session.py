@@ -15,10 +15,10 @@ Step 12 引入：
 - `SessionStore`            ——持久化抽象（save / load / exists）
 - `InMemorySessionStore`    ——内存实现（用于测试 / 临时会话）
 - `JsonFileSessionStore`    ——append-only JSON journal（torn-tail recovery）
-- `serialize_message`       ——Message → dict
-- `serialize_messages`      ——list[Message] → list[dict]
-- `deserialize_message`     ——dict → Message
-- `deserialize_messages`    ——list[dict] → list[Message]
+- `serialize_message`       ——AgentMessage → dict
+- `serialize_messages`      ——list[AgentMessage] → list[dict]
+- `deserialize_message`     ——dict → AgentMessage
+- `deserialize_messages`    ——list[dict] → list[AgentMessage]
 - `deserialize_snapshot`    ——dict → TurnSnapshot
 
 AgentHarness 集成：
@@ -49,8 +49,9 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from .messages import (
+    AgentMessage,
     AssistantMessage,
-    Message,
+    CustomMessage,
     SummaryMessage,
     ToolResultMessage,
     UserMessage,
@@ -73,42 +74,42 @@ def _gen_session_id() -> str:
 
 
 # ============================================================================
-# Message 序列化 / 反序列化
+# AgentMessage 序列化 / 反序列化
 # ============================================================================
 
 
-#: 当前支持的 Message role → Pydantic 类映射。
-#: 不在表里的 role（如 "custom"）反序列化时抛 ValueError。
+#: 当前支持的 AgentMessage role → Pydantic 类映射。
 _MESSAGE_ROLE_MAP: dict[str, type[BaseModel]] = {
     "user": UserMessage,
     "assistant": AssistantMessage,
     "toolResult": ToolResultMessage,
     "summary": SummaryMessage,
+    "custom": CustomMessage,
 }
 
 
-def serialize_message(msg: Message) -> dict[str, Any]:
-    """Message → 可 JSON 序列化的 dict。
+def serialize_message(msg: AgentMessage) -> dict[str, Any]:
+    """AgentMessage → 可 JSON 序列化的 dict。
 
     走 Pydantic `model_dump(mode="json")`——所有嵌套对象递归 dump。
     """
     return msg.model_dump(mode="json")
 
 
-def serialize_messages(messages: list[Message]) -> list[dict[str, Any]]:
-    """list[Message] → list[dict]。"""
+def serialize_messages(messages: list[AgentMessage]) -> list[dict[str, Any]]:
+    """list[AgentMessage] → list[dict]。"""
     return [serialize_message(m) for m in messages]
 
 
-def deserialize_message(data: dict[str, Any]) -> Message:
-    """dict → Message。
+def deserialize_message(data: dict[str, Any]) -> AgentMessage:
+    """dict → AgentMessage。
 
     按 `data["role"]` 派发到对应 Pydantic 类：
     - "user"       → UserMessage
     - "assistant"  → AssistantMessage
     - "toolResult" → ToolResultMessage
 
-    其它 role（含 "custom"）抛 ValueError——CustomMessage 不在标准 Message union 内。
+    其它 role 抛 ValueError。
     """
     role = data.get("role")
     cls = _MESSAGE_ROLE_MAP.get(role) if isinstance(role, str) else None
@@ -120,8 +121,8 @@ def deserialize_message(data: dict[str, Any]) -> Message:
     return cls.model_validate(data)  # type: ignore[return-value]
 
 
-def deserialize_messages(items: list[dict[str, Any]]) -> list[Message]:
-    """list[dict] → list[Message]。"""
+def deserialize_messages(items: list[dict[str, Any]]) -> list[AgentMessage]:
+    """list[dict] → list[AgentMessage]。"""
     return [deserialize_message(d) for d in items]
 
 
@@ -200,7 +201,7 @@ class SessionMemory:
 
     - `append_snapshot(snapshot)` ——请求结束后追加；自动更新 messages / turn_count
     - `set_messages(messages)`    ——手动同步当前 messages
-    - `get_messages()`            ——返回反序列化后的 list[Message]
+    - `get_messages()`            ——返回反序列化后的 list[AgentMessage]
     - `get_snapshots()`           ——返回反序列化后的 list[RequestSnapshot]
     - `clear()`                   ——清空 messages / snapshots，保留 id / created_at / title
     - `update_metadata(values)`   ——合并写入 metadata
@@ -270,7 +271,7 @@ class SessionMemory:
             # list[dict] 拷贝——snapshot.messages_after 已经是 dict 列表
             self._state.messages = list(snapshot.messages_after)
 
-    def set_messages(self, messages: list[Message]) -> None:
+    def set_messages(self, messages: list[AgentMessage]) -> None:
         """手动把 Agent 当前 messages 同步进 session。
 
         通常用于：attach_session(restore_messages=False) 后调方希望手动同步。
@@ -282,8 +283,8 @@ class SessionMemory:
     # 读取：get_messages / get_snapshots
     # ------------------------------------------------------------------
 
-    def get_messages(self) -> list[Message]:
-        """返回反序列化后的 list[Message]。
+    def get_messages(self) -> list[AgentMessage]:
+        """返回反序列化后的 list[AgentMessage]。
 
         可用于：attach_session 时把 messages 注入新 Agent。
         """

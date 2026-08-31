@@ -3678,12 +3678,12 @@ def create_app(
         finally:
             harness.context.metadata = metadata_before
 
-        from ..context import convert_to_llm
+        from ..context import apply_transform_context, convert_to_llm
         from ..context import transform_context as default_transform_context
         from ..context_budget import estimate_context
 
         transform = harness.agent.transform_context_fn or default_transform_context
-        transformed = await transform(list(messages))
+        transformed = await apply_transform_context(transform, list(messages))
         llm_messages = convert_to_llm(transformed)
 
         provider_id = harness.agent.client.provider_id or "legacy"
@@ -5456,10 +5456,10 @@ def create_app(
     async def _sync_current_session_tree_projection(sid: str) -> None:
         if state.current_session_id != sid or state.session_store is None:
             return
-        from ..messages import Message
+        from ..messages import AgentMessage
 
         messages = await state.session_store.list_messages(sid)
-        harness.agent.state.messages = cast(list[Message], list(messages))
+        harness.agent.state.messages = cast(list[AgentMessage], list(messages))
 
     @app.get("/api/sessions/{sid}")
     async def get_session_by_id(sid: str) -> dict[str, Any]:
@@ -5710,7 +5710,7 @@ def create_app(
             from pydantic import TypeAdapter
 
             from ..compaction import CompactionConfig, compact_messages
-            from ..messages import AgentMessage, Message
+            from ..messages import AgentMessage
 
             try:
                 messages = list(await store.list_messages(sid))
@@ -5746,7 +5746,7 @@ def create_app(
             replacement = [adapter.validate_python(item) for item in result.new_messages]
             await store.replace_messages(sid, replacement)
             if state.current_session_id == sid:
-                harness.agent.state.messages = cast(list[Message], replacement)
+                harness.agent.state.messages = replacement
         finally:
             state.running = False
 

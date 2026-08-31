@@ -37,10 +37,12 @@ import inspect
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, cast
 
 from .context import (
+    ConvertToLLMFn,
     TransformContextFn,
+    apply_transform_context,
     convert_to_llm,
 )
 from .context import (
@@ -62,6 +64,7 @@ from .events import (
 from .hooks import (
     AfterToolCallContext,
     AfterToolCallFn,
+    AfterToolCallResult,
     BeforeToolCallContext,
     BeforeToolCallFn,
     BeforeToolCallResult,
@@ -73,7 +76,6 @@ from .messages import (
     AgentMessage,
     AssistantMessage,
     GenerationMetrics,
-    Message,
     TextContent,
     ThinkingContent,
     ToolCall,
@@ -177,10 +179,26 @@ class TurnControlContext:
     """传给 turn 控制回调的只读运行时视图。"""
 
     turn_index: int
-    messages: tuple[Message, ...]
+    messages: tuple[AgentMessage, ...]
+    new_messages: tuple[AgentMessage, ...]
     message: AssistantMessage
     tool_results: tuple[ToolResultMessage, ...]
     signal: asyncio.Event | None
+    system_prompt: str = ""
+    client: ModelClient | None = None
+    tools: tuple[AgentTool, ...] = ()
+    thinking_level: str = "off"
+
+
+@dataclass(frozen=True)
+class AgentLoopTurnUpdate:
+    """Runtime replacements applied immediately before an actual next turn."""
+
+    messages: Sequence[AgentMessage] | None = None
+    system_prompt: str | None = None
+    client: ModelClient | None = None
+    tools: ToolRegistry | Iterable[AgentTool] | None = None
+    thinking_level: str | None = None
 
 
 @dataclass(frozen=True)
@@ -203,7 +221,11 @@ class ModelCallDecision:
 
 ShouldStopAfterTurnFn = Callable[[TurnControlContext], bool | Awaitable[bool]]
 PrepareNextTurnFn = Callable[
-    [TurnControlContext], list[Message] | None | Awaitable[list[Message] | None]
+    [TurnControlContext],
+    AgentLoopTurnUpdate
+    | list[AgentMessage]
+    | None
+    | Awaitable[AgentLoopTurnUpdate | list[AgentMessage] | None],
 ]
 BeforeModelCallFn = Callable[
     [ModelCallContext],
@@ -211,7 +233,7 @@ BeforeModelCallFn = Callable[
 ]
 PendingMessagesFn = Callable[
     [],
-    Sequence[Message] | None | Awaitable[Sequence[Message] | None],
+    Sequence[AgentMessage] | None | Awaitable[Sequence[AgentMessage] | None],
 ]
 
 
@@ -238,7 +260,7 @@ async def _await_maybe(value: Any) -> Any:
 
 async def _poll_pending_messages(
     callback: PendingMessagesFn | None,
-) -> list[Message]:
+) -> list[AgentMessage]:
     """Drain one queue poll into an isolated list.
 
     Queue ownership stays with the caller (normally :class:`Agent`).  The loop
@@ -268,6 +290,16 @@ async def _call_tool_hook(
     if _accepts_parameter(hook, "signal"):
         return await _await_maybe(hook(context, signal=signal))
     return await _await_maybe(hook(context))
+
+
+ThinkingLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+_THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+
+def _validate_thinking_level(level: str) -> ThinkingLevel:
+    if level not in _THINKING_LEVELS:
+        raise ValueError(f"unsupported thinking level: {level}")
+    return cast(ThinkingLevel, level)
 
 
 async def _call_tool_execute(
@@ -378,6 +410,27 @@ async def _execute_tool_with_hooks(
     except ToolNotFoundError:
         tool = None
 
+    # Tool-owned compatibility normalization happens before hooks and schema
+    # validation. Unlike hook mutations, this has one narrow, reusable owner.
+    if tool is not None:
+        try:
+            prepared_arguments = tool.prepare_arguments(tool_call.arguments)
+            tool_call = tool_call.model_copy(
+                update={"arguments": prepared_arguments},
+            )
+        except Exception as e:
+            return ToolResult(
+                tool_call_id=tool_call.id,
+                name=tool_call.name,
+                content=[
+                    TextContent(
+                        text=f"Argument preparation failed: {type(e).__name__}: {e}",
+                    )
+                ],
+                is_error=True,
+                details={"error_type": "ToolArgumentPreparationError"},
+            )
+
     # Step 9 检查点 1：before_tool_call 之前
     if signal is not None and signal.is_set():
         return ToolResult(
@@ -423,6 +476,7 @@ async def _execute_tool_with_hooks(
             name=tool_call.name,
             content=[TextContent(text=before_result.reason or "Tool call blocked")],
             is_error=True,
+            terminate=before_result.terminate,
             details=merged_details,
         )
 
@@ -680,6 +734,21 @@ async def _execute_prepared_tool_call(
     tool_call = prepared.tool_call
     tool = prepared.tool
     signal = prepared.signal
+    accepting_updates = True
+    update_loop = asyncio.get_running_loop()
+
+    def guarded_update(partial_result: ToolResult) -> Awaitable[None]:
+        """Ignore progress reported after ``execute`` has settled.
+
+        Tools sometimes retain the callback and invoke it from detached work.
+        Such updates no longer belong to this execution and must not leak into
+        another parallel tool's still-active event queue.
+        """
+        if not accepting_updates or on_update is None:
+            completed: asyncio.Future[None] = update_loop.create_future()
+            completed.set_result(None)
+            return completed
+        return on_update(partial_result)
 
     # Step 9 检查点 2：tool.execute 之前
     if signal is not None and signal.is_set():
@@ -693,14 +762,16 @@ async def _execute_prepared_tool_call(
 
     # 6. 执行
     try:
-        result = ToolResult.model_validate(
-            await _call_tool_execute(
+        try:
+            raw_result = await _call_tool_execute(
                 tool,
                 tool_call,
                 signal=signal,
-                on_update=on_update,
+                on_update=guarded_update if on_update is not None else None,
             )
-        )
+        finally:
+            accepting_updates = False
+        result = ToolResult.model_validate(raw_result)
         # 工具实现不拥有调用身份；即使返回了错误 ID，也要绑定回原 ToolCall。
         if result.tool_call_id != tool_call.id:
             result = result.model_copy(update={"tool_call_id": tool_call.id})
@@ -731,9 +802,30 @@ async def _execute_prepared_tool_call(
             result=result,
             messages=list(prepared.messages),
         )
-        final_result = ToolResult.model_validate(
-            await _call_tool_hook(prepared.after_tool_call, after_ctx, signal)
+        hook_result = await _call_tool_hook(
+            prepared.after_tool_call,
+            after_ctx,
+            signal,
         )
+        if hook_result is None:
+            final_result = result
+        elif isinstance(hook_result, AfterToolCallResult):
+            updates: dict[str, Any] = {}
+            if hook_result.content is not None:
+                updates["content"] = hook_result.content
+            if hook_result.details is not None:
+                updates["details"] = hook_result.details
+            if hook_result.is_error is not None:
+                updates["is_error"] = hook_result.is_error
+            if hook_result.usage is not None:
+                updates["usage"] = hook_result.usage
+            if hook_result.terminate is not None:
+                updates["terminate"] = hook_result.terminate
+            final_result = ToolResult.model_validate(
+                result.model_copy(update=updates)
+            )
+        else:
+            final_result = ToolResult.model_validate(hook_result)
     except Exception as e:
         return ToolResult(
             tool_call_id=tool_call.id,
@@ -1054,10 +1146,12 @@ async def run_event_loop(
     *,
     system_prompt: str,
     user_text: str | None = None,
-    initial_messages: list[Message] | None = None,
+    prompt_messages: Sequence[AgentMessage] | None = None,
+    initial_messages: list[AgentMessage] | None = None,
     client: ModelClient,
     tools: ToolRegistry | Iterable[AgentTool] | None = None,
     transform_context_fn: TransformContextFn | None = None,
+    convert_to_llm_fn: ConvertToLLMFn | None = None,
     before_tool_call: BeforeToolCallFn | None = None,
     after_tool_call: AfterToolCallFn | None = None,
     tool_execution: ToolExecutionMode = "parallel",
@@ -1070,6 +1164,7 @@ async def run_event_loop(
     before_model_call: BeforeModelCallFn | None = None,
     get_steering_messages: PendingMessagesFn | None = None,
     get_follow_up_messages: PendingMessagesFn | None = None,
+    thinking_level: str = "off",
     max_turns: int = 50,
 ) -> AsyncIterator[AgentEvent]:
     """事件驱动的 agent loop（Step 9：abort signal；Step 8：initial_messages；Step 7：batch）。
@@ -1111,26 +1206,40 @@ async def run_event_loop(
     Step 8 / 7 / 6 / 5 / 4 / 3 / 2 / 1 行为全部保留。
     """
     tool_execution = _validate_tool_execution_mode(tool_execution)
-    if user_text is None and not initial_messages:
-        raise ValueError("run_event_loop: 必须提供 user_text 或 initial_messages 至少一项")
+    current_thinking_level = _validate_thinking_level(thinking_level)
+    if user_text is not None and prompt_messages:
+        raise ValueError("run_event_loop: user_text and prompt_messages are mutually exclusive")
+    if user_text is None and not prompt_messages and not initial_messages:
+        raise ValueError(
+            "run_event_loop: 必须提供 user_text、prompt_messages 或 initial_messages 至少一项"
+        )
     if max_turns < 1:
         raise ValueError(f"run_event_loop: max_turns 必须 >= 1，实际 {max_turns}")
 
+    current_system_prompt = system_prompt
+    current_client = client
     registry = _to_registry(tools)
     tool_defs = registry.definitions()
     before_fn = before_tool_call or default_before_tool_call
     after_fn = after_tool_call or default_after_tool_call
 
-    new_messages: list[Message] = list(initial_messages) if initial_messages else []
+    new_messages: list[AgentMessage] = (
+        list(initial_messages) if initial_messages else []
+    )
+    run_messages: list[AgentMessage] = []
+
+    prompts = list(prompt_messages) if prompt_messages else []
+    if user_text is not None:
+        prompts.append(UserMessage(content=[TextContent(text=user_text)]))
 
     yield AgentStartEvent()
     yield TurnStartEvent()
 
-    if user_text is not None:
-        user_msg = UserMessage(content=[TextContent(text=user_text)])
-        yield MessageStartEvent(message=user_msg)
-        yield MessageEndEvent(message=user_msg)
-        new_messages.append(user_msg)
+    for prompt_message in prompts:
+        yield MessageStartEvent(message=prompt_message)
+        yield MessageEndEvent(message=prompt_message)
+        new_messages.append(prompt_message)
+        run_messages.append(prompt_message)
 
     # 与 pi-agent 一致：在第一次模型调用前先检查 steering。这样在请求真正
     # 开始流式响应前到达的 steer 不会被无故延迟一个 turn。
@@ -1139,42 +1248,68 @@ async def run_event_loop(
     # P0：一个 turn 严格对应一次 LLM 调用及该调用产生的整批工具。
     turn_count = 1
 
-    async def apply_turn_controls(
+    def make_turn_control(
         message: AssistantMessage,
         tool_results: list[ToolResultMessage],
-    ) -> bool:
-        """turn_end 后依次 prepare → should_stop；返回是否应停止。"""
-        nonlocal new_messages
-        control = TurnControlContext(
+    ) -> TurnControlContext:
+        """Build the immutable snapshot seen by turn-boundary callbacks."""
+        return TurnControlContext(
             turn_index=turn_count,
             messages=tuple(new_messages),
+            new_messages=tuple(run_messages),
             message=message,
             tool_results=tuple(tool_results),
             signal=signal,
+            system_prompt=current_system_prompt,
+            client=current_client,
+            tools=tuple(registry),
+            thinking_level=current_thinking_level,
         )
-        if prepare_next_turn is not None:
-            prepared = await _await_maybe(prepare_next_turn(control))
-            if prepared is not None:
-                new_messages = list(prepared)
-                control = TurnControlContext(
-                    turn_index=turn_count,
-                    messages=tuple(new_messages),
-                    message=message,
-                    tool_results=tuple(tool_results),
-                    signal=signal,
-                )
+
+    def make_agent_end() -> AgentEndEvent:
+        return AgentEndEvent(
+            messages=list(new_messages),
+            new_messages=list(run_messages),
+        )
+
+    async def should_stop_turn(control: TurnControlContext) -> bool:
+        """Ask for graceful termination before doing next-turn preparation."""
         return bool(
             should_stop_after_turn is not None
             and await _await_maybe(should_stop_after_turn(control))
         )
+
+    async def prepare_for_next_turn(control: TurnControlContext) -> None:
+        """Apply compatible runtime replacements before an actual next turn."""
+        nonlocal new_messages, current_system_prompt, current_client
+        nonlocal registry, tool_defs, current_thinking_level
+        if prepare_next_turn is not None:
+            prepared = await _await_maybe(prepare_next_turn(control))
+            if isinstance(prepared, AgentLoopTurnUpdate):
+                if prepared.messages is not None:
+                    new_messages = list(prepared.messages)
+                if prepared.system_prompt is not None:
+                    current_system_prompt = prepared.system_prompt
+                if prepared.client is not None:
+                    current_client = prepared.client
+                if prepared.tools is not None:
+                    registry = _to_registry(prepared.tools)
+                    tool_defs = registry.definitions()
+                if prepared.thinking_level is not None:
+                    current_thinking_level = _validate_thinking_level(
+                        prepared.thinking_level
+                    )
+            elif prepared is not None:
+                new_messages = list(prepared)
 
     while True:
         current_tool_results: list[ToolResultMessage] = []
         # —— Step 9 检查点 1：while iter 开始 ——
         if signal is not None and signal.is_set():
             async for ev in _finalize_abort(
-                client=client,
+                client=current_client,
                 new_messages=new_messages,
+                run_messages=run_messages,
                 tool_results=current_tool_results,
             ):
                 yield ev
@@ -1186,13 +1321,15 @@ async def run_event_loop(
             yield MessageStartEvent(message=pending_message)
             yield MessageEndEvent(message=pending_message)
             new_messages.append(pending_message)
+            run_messages.append(pending_message)
         pending_messages = []
 
         # —— Context 转换 ——
         raw_context: list[AgentMessage] = list(new_messages)
         transform = transform_context_fn or default_transform_context
-        transformed = await transform(raw_context)
-        llm_messages = convert_to_llm(transformed)
+        transformed = await apply_transform_context(transform, raw_context, signal)
+        converter = convert_to_llm_fn or convert_to_llm
+        llm_messages = list(await _await_maybe(converter(transformed)))
 
         if before_model_call is not None:
             admission_error: str | None = None
@@ -1201,10 +1338,10 @@ async def run_event_loop(
                     before_model_call(
                         ModelCallContext(
                             turn_index=turn_count,
-                            system_prompt=system_prompt,
+                            system_prompt=current_system_prompt,
                             messages=tuple(llm_messages),
                             tools=tuple(tool_defs),
-                            client=client,
+                            client=current_client,
                             signal=signal,
                         )
                     )
@@ -1223,9 +1360,9 @@ async def run_event_loop(
             if admission_error is not None:
                 blocked = AssistantMessage(
                     content=[],
-                    api=client.api_id,
-                    provider=client.provider_id,
-                    model=getattr(client, "model", "unknown"),
+                    api=current_client.api_id,
+                    provider=current_client.provider_id,
+                    model=getattr(current_client, "model", "unknown"),
                     stop_reason="error",
                     error_message=admission_error,
                     generation_metrics=GenerationMetrics(
@@ -1236,8 +1373,9 @@ async def run_event_loop(
                 yield MessageStartEvent(message=blocked)
                 yield MessageEndEvent(message=blocked)
                 new_messages.append(blocked)
+                run_messages.append(blocked)
                 yield TurnEndEvent(message=blocked, tool_results=[])
-                yield AgentEndEvent(messages=new_messages)
+                yield make_agent_end()
                 return
 
         # —— 调 LLM ——
@@ -1277,9 +1415,9 @@ async def run_event_loop(
             ]
             return AssistantMessage(
                 content=content,
-                api=client.api_id,
-                provider=client.provider_id,
-                model=getattr(client, "model", "unknown"),
+                api=current_client.api_id,
+                provider=current_client.provider_id,
+                model=getattr(current_client, "model", "unknown"),
                 stop_reason=stop_reason,  # noqa: B023
                 error_message=error_message,  # noqa: B023
                 usage=final_usage,  # noqa: B023
@@ -1288,11 +1426,17 @@ async def run_event_loop(
 
         yield MessageStartEvent(message=make_assistant())
 
-        async for s_ev in client.stream(
-            system_prompt=system_prompt,
+        async for s_ev in current_client.stream(
+            system_prompt=current_system_prompt,
             messages=llm_messages,
             tools=tool_defs if tool_defs else None,
             signal=signal,
+            # Match pi-agent: "off" means no reasoning option at the Agent
+            # boundary. Provider adapters may still apply an explicit off
+            # value when their own capability metadata requires one.
+            thinking_level=(
+                None if current_thinking_level == "off" else current_thinking_level
+            ),
         ):
             if isinstance(s_ev, TextStartEvent):
                 if first_response_at is None:
@@ -1619,23 +1763,26 @@ async def run_event_loop(
         assistant = make_assistant()
         yield MessageEndEvent(message=assistant)
         assistant_message_index = len(new_messages)
+        assistant_run_index = len(run_messages)
         new_messages.append(assistant)
+        run_messages.append(assistant)
 
         # 错误或被中断：直接结束
         if assistant.stop_reason in ("error", "aborted"):
             yield TurnEndEvent(message=assistant, tool_results=current_tool_results)
-            yield AgentEndEvent(messages=new_messages)
+            yield make_agent_end()
             return
 
         # 没 ToolCall：本轮 turn 自然结束
         if not tool_calls:
             yield TurnEndEvent(message=assistant, tool_results=current_tool_results)
-            stop_requested = await apply_turn_controls(
+            turn_control = make_turn_control(
                 assistant,
                 current_tool_results,
             )
+            stop_requested = await should_stop_turn(turn_control)
             if stop_requested or turn_count >= max_turns:
-                yield AgentEndEvent(messages=new_messages)
+                yield make_agent_end()
                 return
 
             # steering 始终优先；只有 Agent 原本将结束时才消费 follow-up。
@@ -1647,9 +1794,10 @@ async def run_event_loop(
                     get_follow_up_messages,
                 )
             if not pending_messages:
-                yield AgentEndEvent(messages=new_messages)
+                yield make_agent_end()
                 return
 
+            await prepare_for_next_turn(turn_control)
             turn_count += 1
             yield TurnStartEvent()
             continue
@@ -1659,6 +1807,7 @@ async def run_event_loop(
         if assistant.stop_reason == "length":
             ordered = []
             for index, tc in enumerate(tool_calls):
+                yield ToolExecutionStartEvent(tool_call=tc)
                 result = ToolResult(
                     tool_call_id=tc.id,
                     name=tc.name,
@@ -1685,6 +1834,7 @@ async def run_event_loop(
                         message=message,
                     )
                 )
+                yield ToolExecutionEndEvent(tool_call=tc, result=result)
                 yield MessageStartEvent(message=message)
                 yield MessageEndEvent(message=message)
         else:
@@ -1692,8 +1842,9 @@ async def run_event_loop(
             # abort 来了：跳过 batch，发 aborted assistant + 收敛
             if signal is not None and signal.is_set():
                 async for ev in _finalize_abort(
-                    client=client,
+                    client=current_client,
                     new_messages=new_messages,
+                    run_messages=run_messages,
                     tool_results=current_tool_results,
                 ):
                     yield ev
@@ -1722,6 +1873,7 @@ async def run_event_loop(
         # 按原序追加 ToolResultMessage
         for executed in ordered:
             new_messages.append(executed.message)
+            run_messages.append(executed.message)
             current_tool_results.append(executed.message)
 
         terminate = bool(ordered) and all(ex.result.terminate for ex in ordered)
@@ -1738,16 +1890,18 @@ async def run_event_loop(
             # TurnEndEvent、AgentEndEvent 与持久化 transcript 必须引用同一个
             # 终态 assistant；不能只修改临时的 turn_message。
             new_messages[assistant_message_index] = turn_message
+            run_messages[assistant_run_index] = turn_message
 
         yield TurnEndEvent(message=turn_message, tool_results=current_tool_results)
 
-        stop_requested = await apply_turn_controls(
+        turn_control = make_turn_control(
             turn_message,
             current_tool_results,
         )
+        stop_requested = await should_stop_turn(turn_control)
 
         if stop_requested or maxed or (signal is not None and signal.is_set()):
-            yield AgentEndEvent(messages=new_messages)
+            yield make_agent_end()
             return
 
         pending_messages = await _poll_pending_messages(
@@ -1759,9 +1913,16 @@ async def run_event_loop(
                 get_follow_up_messages,
             )
             if not pending_messages:
-                yield AgentEndEvent(messages=new_messages)
+                yield make_agent_end()
                 return
 
+        await prepare_for_next_turn(turn_control)
+        if not pending_messages:
+            # Preparation may be long-running. Pick up steering that arrived
+            # while it ran without double-draining one-at-a-time queues.
+            pending_messages = await _poll_pending_messages(
+                get_steering_messages,
+            )
         turn_count += 1
         yield TurnStartEvent()
         # 继续下一次 LLM 调用。
@@ -1770,7 +1931,8 @@ async def run_event_loop(
 async def _finalize_abort(
     *,
     client: ModelClient,
-    new_messages: list[Message],
+    new_messages: list[AgentMessage],
+    run_messages: list[AgentMessage],
     tool_results: list[ToolResultMessage],
 ) -> AsyncIterator[AgentEvent]:
     """Step 9 abort 终化——生成空的 aborted assistant 并正常收敛。
@@ -1789,17 +1951,24 @@ async def _finalize_abort(
     yield MessageStartEvent(message=aborted)
     yield MessageEndEvent(message=aborted)
     new_messages.append(aborted)
+    run_messages.append(aborted)
     yield TurnEndEvent(message=aborted, tool_results=tool_results)
-    yield AgentEndEvent(messages=new_messages)
+    yield AgentEndEvent(
+        messages=list(new_messages),
+        new_messages=list(run_messages),
+    )
 
 
 async def run_min_loop(
     *,
     system_prompt: str,
     user_text: str | None = None,
-    initial_messages: list[Message] | None = None,
+    prompt_messages: Sequence[AgentMessage] | None = None,
+    initial_messages: list[AgentMessage] | None = None,
     client: ModelClient,
     tools: ToolRegistry | Iterable[AgentTool] | None = None,
+    transform_context_fn: TransformContextFn | None = None,
+    convert_to_llm_fn: ConvertToLLMFn | None = None,
     before_tool_call: BeforeToolCallFn | None = None,
     after_tool_call: AfterToolCallFn | None = None,
     tool_execution: ToolExecutionMode = "parallel",
@@ -1811,8 +1980,9 @@ async def run_min_loop(
     before_model_call: BeforeModelCallFn | None = None,
     get_steering_messages: PendingMessagesFn | None = None,
     get_follow_up_messages: PendingMessagesFn | None = None,
+    thinking_level: str = "off",
     max_turns: int = 50,
-) -> list[Message]:
+) -> list[AgentMessage]:
     """Step 1+ 便捷封装：跑 event loop，返回所有新 messages。
 
     Step 8 起支持 continue_ 用法（user_text=None + initial_messages=[...]）。
@@ -1821,9 +1991,12 @@ async def run_min_loop(
     async for ev in run_event_loop(
         system_prompt=system_prompt,
         user_text=user_text,
+        prompt_messages=prompt_messages,
         initial_messages=initial_messages,
         client=client,
         tools=tools,
+        transform_context_fn=transform_context_fn,
+        convert_to_llm_fn=convert_to_llm_fn,
         before_tool_call=before_tool_call,
         after_tool_call=after_tool_call,
         tool_execution=tool_execution,
@@ -1835,6 +2008,7 @@ async def run_min_loop(
         before_model_call=before_model_call,
         get_steering_messages=get_steering_messages,
         get_follow_up_messages=get_follow_up_messages,
+        thinking_level=thinking_level,
         max_turns=max_turns,
     ):
         if isinstance(ev, AgentEndEvent):
@@ -1847,6 +2021,7 @@ __all__ = [
     "run_min_loop",
     "ExecutedToolResult",
     "TurnControlContext",
+    "AgentLoopTurnUpdate",
     "ShouldStopAfterTurnFn",
     "PrepareNextTurnFn",
     "ModelCallContext",

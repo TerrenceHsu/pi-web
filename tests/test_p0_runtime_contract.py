@@ -163,7 +163,10 @@ async def test_length_with_tool_calls_returns_safe_results_without_execution() -
     ]
 
     assert tool.calls == 0
-    assert not any(event.type.startswith("tool_execution_") for event in events)
+    tool_events = [
+        event.type for event in events if event.type.startswith("tool_execution_")
+    ]
+    assert tool_events == ["tool_execution_start", "tool_execution_end"]
     result_messages = [
         event.message
         for event in events
@@ -218,7 +221,7 @@ async def test_signal_reaches_before_hook_tool_and_after_hook() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prepare_then_should_stop_after_turn() -> None:
+async def test_should_stop_prevents_prepare_next_turn() -> None:
     calls: list[str] = []
     client = _two_turn_client()
 
@@ -242,13 +245,13 @@ async def test_prepare_then_should_stop_after_turn() -> None:
         )
     ]
 
-    assert calls == ["prepare", "stop"]
+    assert calls == ["stop"]
     assert sum(event.type == "turn_start" for event in events) == 1
     assert [event.type for event in events[-2:]] == ["turn_end", "agent_end"]
 
 
 @pytest.mark.asyncio
-async def test_turn_controls_also_run_before_natural_agent_end() -> None:
+async def test_prepare_does_not_run_before_natural_agent_end() -> None:
     calls: list[str] = []
 
     def prepare(context):
@@ -270,7 +273,7 @@ async def test_turn_controls_also_run_before_natural_agent_end() -> None:
         )
     ]
 
-    assert calls == ["prepare", "stop"]
+    assert calls == ["stop"]
     assert [event.type for event in events[-2:]] == ["turn_end", "agent_end"]
 
 

@@ -148,6 +148,17 @@ class AgentTool(abc.ABC):
     parameters: dict[str, Any] = {}
     execution_mode: ToolExecutionMode = "parallel"
 
+    def prepare_arguments(self, args: Any) -> dict[str, Any]:
+        """Normalize compatibility argument shapes before validation.
+
+        Tools may override this for deterministic schema migrations such as a
+        legacy single edit becoming an ``edits`` array. The returned value is
+        still validated against ``parameters`` before execution.
+        """
+        if not isinstance(args, dict):
+            raise TypeError("tool arguments must be an object")
+        return dict(args)
+
     @abc.abstractmethod
     async def execute(
         self,
@@ -209,8 +220,39 @@ class ToolRegistry:
 
     def __init__(self, tools: list[AgentTool] | None = None):
         self._tools: dict[str, AgentTool] = {}
+        self._listeners: list[Callable[[tuple[str, ...]], object]] = []
         for t in tools or []:
             self.register(t)
+
+    def subscribe(
+        self,
+        callback: Callable[[tuple[str, ...]], object],
+    ) -> Callable[[], None]:
+        """Observe registry membership changes.
+
+        The callback receives an immutable name snapshot.  This keeps public
+        Agent state synchronized even when callers retain and mutate the
+        registry directly.
+        """
+        self._listeners.append(callback)
+
+        def unsubscribe() -> None:
+            try:
+                self._listeners.remove(callback)
+            except ValueError:
+                pass
+
+        return unsubscribe
+
+    def _notify(self) -> None:
+        names = tuple(self._tools)
+        for callback in list(self._listeners):
+            try:
+                callback(names)
+            except Exception:
+                # Registry mutation is authoritative; an observer must not
+                # turn a successful registration into a partial failure.
+                continue
 
     def register(self, tool: AgentTool) -> None:
         """注册工具。
@@ -233,10 +275,13 @@ class ToolRegistry:
                 f"工具 '{tool.name}' 已注册（重复注册）"
             )
         self._tools[tool.name] = tool
+        self._notify()
 
     def unregister(self, name: str) -> None:
         """注销工具。不存在则静默（不抛错）。"""
-        self._tools.pop(name, None)
+        removed = self._tools.pop(name, None)
+        if removed is not None:
+            self._notify()
 
     def get(self, name: str) -> AgentTool:
         """取工具。不存在抛 ToolNotFoundError。"""

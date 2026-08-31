@@ -82,6 +82,33 @@ def test_worker_atomic_exchange_write_never_calls_bind_mount_fsync(
     assert list(tmp_path.glob(".status.json.*.tmp")) == []
 
 
+def test_worker_atomic_exchange_retries_transient_windows_reader_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "status.json"
+    target.write_bytes(b'{"state":"queued"}')
+    real_replace = os.replace
+    attempts = 0
+
+    def transiently_locked(source: Path, destination: Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError("simulated reader lock")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(worker_protocol, "_ATOMIC_REPLACE_ATTEMPTS", 3)
+    monkeypatch.setattr(worker_protocol, "_ATOMIC_REPLACE_RETRY_SECONDS", 0)
+    monkeypatch.setattr(os, "replace", transiently_locked)
+
+    worker_protocol.atomic_write_bytes(target, b'{"state":"running"}')
+
+    assert attempts == 3
+    assert target.read_bytes() == b'{"state":"running"}'
+    assert list(tmp_path.glob(".status.json.*.tmp")) == []
+
+
 def test_smoke_case_names_accept_documented_ascii_separators(tmp_path: Path) -> None:
     source = tmp_path / "source.pdf"
     source.write_bytes(_PDF)

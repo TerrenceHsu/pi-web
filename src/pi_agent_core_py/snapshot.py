@@ -23,7 +23,7 @@ from .events import (
     TurnEndEvent,
     TurnStartEvent,
 )
-from .messages import Message, Usage
+from .messages import AgentMessage, Usage
 
 SnapshotStatus = Literal["running", "completed", "aborted", "error"]
 
@@ -123,7 +123,7 @@ class RequestSnapshot(_SnapshotBase):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-def _serialize_message(msg: Message) -> dict[str, Any]:
+def _serialize_message(msg: AgentMessage) -> dict[str, Any]:
     return msg.model_dump(mode="json")
 
 
@@ -177,7 +177,7 @@ class SnapshotBuilder:
         *,
         request_type: AgentRequestType,
         user_text: str | None,
-        messages_before: list[Message],
+        messages_before: list[AgentMessage],
         metadata: dict[str, Any],
     ) -> RequestSnapshot:
         self.snapshot.status = "running"
@@ -291,7 +291,7 @@ class SnapshotBuilder:
         self,
         *,
         status: SnapshotStatus,
-        messages_after: list[Message],
+        messages_after: list[AgentMessage],
         error: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> RequestSnapshot:

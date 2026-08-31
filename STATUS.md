@@ -6,7 +6,7 @@
 
 | 项 | 当前事实 |
 |---|---|
-| 代码基线 | `0.0.29` 发布基线之后的 `master`；新增三类意图路由、Planner–Executor–Verifier Plan Mode、Sandbox 审阅/冲突恢复，以及 pi `ai` 核心契约补齐 |
+| 代码基线 | `0.0.29` 发布基线之后的 `master`；新增三类意图路由、Planner–Executor–Verifier Plan Mode、Sandbox 审阅/冲突恢复，以及 pi `ai` / `agent` 核心契约补齐 |
 | 分支 | `master` |
 | 最新 release tag | `0.0.29`；annotated tag 指向本次统一版本与发布验证提交 |
 | Python / API 版本 | `0.0.29`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
@@ -30,6 +30,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 | Step 1–21 Core Runtime | ✅ 完成 | 归档见 `docs/archive/legacy-plans/PLAN_STEP_1_21.md` |
 | Multi-provider Runtime / UI | ✅ 完成 | GLM、Qwen、Kimi；Anthropic-compatible 后端能力 |
 | pi `ai` 核心契约对齐（第一项） | ✅ P0 差距已补齐 | provider-aware 历史转换、精确 provider/API/model 身份、跨模型 thinking 安全降级、text/image 内容块、工具调用配对修复、cache/reasoning Usage、首事件前可中止重试；详见 `docs/validation/pi-ai-parity-2026-08-31.md` |
+| pi `agent` 核心契约对齐（第二项） | ✅ P0 差距已补齐 | 生命周期终化、下一轮控制顺序、文本/图片/AgentMessage prompt、signal-aware context、自定义 LLM 转换、工具参数预处理与 hook patch、assistant-tail 队列续作、thinking/运行时替换和公开状态同步；详见 `docs/validation/pi-agent-parity-2026-08-31.md` |
 | 旧 Chunk Knowledge PDF → Chunk FTS5 → Citation | 🗄️ 历史兼容 | 实现仅保留显式兼容入口；默认套件只保留不可误启动守卫，不再进入产品组合或前端 |
 | 登录与账号工作区隔离 | ✅ 完成 | `b529bbc` |
 | Session Workspace、`AGENT.md`、`Memory.md`、`/checkpointer` | ✅ 完成 | `WorkspaceStore` 为唯一规范事实源；新旧 Session 幂等初始化两个固定根文件，保留旧正文/file id；设计见 `docs/design/workspace-sandbox-integration.md` |
@@ -99,11 +100,15 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 - Core Runtime 的一个 Turn 等于“一次 LLM 调用 + 该调用产生的当批工具”；Snapshot 分为 RequestSnapshot 与 TurnSnapshot
 - 并行工具批次先按源序串行完成 hook、权限、审批与参数校验，再并行执行已放行工具；hook 不得改写 tool-call ID
 - Agent 支持独立 steering / follow-up 队列及 `all` / `one-at-a-time` 消费模式；活跃请求期间普通 prompt/continue 明确拒绝
+- Agent prompt 支持文本+图片、单条或批量 `AgentMessage`；`CustomMessage` 可由应用自定义转换进入模型，并在 Harness、Snapshot 与 Session 中无损保留
+- assistant 尾消息若已有 steering/follow-up 可由 `continue_()` 正确消费；`should_stop_after_turn` 先于 next-turn preparation，且 preparation 只在确有下一轮时执行
 - 全局 `tool_execution` 可强制批次串行；逐工具 `execution_mode="sequential"` 可在并行全局模式下收紧执行
+- 工具可在 schema 校验前执行拥有者级 `prepare_arguments`；before hook 可终止工具链，after hook 可逐字段覆盖结果，工具 promise 完成后的迟到 update 被丢弃
 - Assistant thinking/reasoning 只有在来源 provider/API/model 与目标完全相同时才回放签名或 redacted payload；跨模型时明文 thinking 降为普通文本、密文块丢弃；text/thinking/tool-call 均有完整 start/delta/end 流事件
 - AI 核心支持 provider-neutral base64 `ImageContent`，Anthropic/OpenAI adapter 各自生成协议内容；不支持视觉的 adapter 自动降级为明确占位文本，附件上传到视觉内容块的产品接线留在 `coding-agent` 模块阶段
 - Provider 调用仅在首个流事件前对限流/网络瞬时错误做有界、可中止重试；一旦已有部分输出就不重放，避免重复文本和工具调用
-- `AgentState` 公开 secret-free model 身份、thinking level、请求流状态、当前 partial message、执行中 tool-call ID 与最近 assistant error；Web `/api/state` 使用同一事实源
+- `AgentState` 公开 secret-free model 身份、system prompt、active tool names、thinking level、请求流状态、当前 partial message、执行中 tool-call ID 与最近 assistant error；Web `/api/state` 使用同一事实源
+- thinking level 由 Agent loop 逐次传入 `ProviderRequest`，`prepare_next_turn` 可原子替换下一轮 context/system/client/tools/thinking；`AgentEndEvent` 同时公开兼容的完整 transcript 与明确的本轮 delta
 - ToolResult 可携带工具自身 usage 与 `added_tool_names`；usage 不并入主 LLM 上下文计费，added names 只标记 `Context.tools` 的 provider 加载点且不能由 after hook 伪造
 - SQLite Session 使用 append-only parent-entry tree；命名 lane 持久化 active leaf，支持 branch、fork、append-only label fact 与重启恢复；`messages` 是 active lane 的兼容投影
 - Session lane operation 使用 append-only intent/effect/finish records；`Memory.md` 更新以 immutable generation + 原子 metadata pointer 发布，旧 JSON Session save 使用可修复 torn tail 的 append-only journal
@@ -145,9 +150,10 @@ Plan Mode 绕过单一 Provider binding 入口的安全门禁、旧前端测试 
 | Ruff 全量 | **PASS** | CI 口径 `ruff check src/ tests/`；0 errors |
 | strict Mypy 全量 | **PASS** | `mypy src`：187 source files / 0 issues；覆盖 Wiki、独立 Workspace/Plan 包、Workspace 文档转换、Managed Sandbox、AI Provider 边界与产品组合边界 |
 | Backend 全量离线（第二轮前基线） | **3143 passed, 7 skipped, 9 deselected** | 当时为 3159 collected；`pytest tests --tb=short -q`；1053.41s；coverage 81.91% |
-| Backend 当前精简套件 | **2121 passed, 7 skipped, 9 deselected** | `pytest tests -q`；903.72s；coverage 77.13%；默认排除真实外网、LLM 与 Docker marker |
+| Backend 当前精简套件 | **2131 passed, 7 skipped, 9 deselected** | `pytest tests --tb=short -q`；370.94s；coverage 77.24%；默认排除真实外网、LLM 与 Docker marker |
 | Frontend 当前精简套件 | **183/183 passed** | 26 files；Vitest 0 failure / 0 stderr warning；同时通过 typecheck、ESLint 与 production build |
 | pi `ai` 对齐专项 | **159 passed** | provider history/image/usage/retry 新增回归及 Anthropic/OpenAI/Factory/Context Budget/Compaction 邻接测试；2.36s，0 failure |
+| pi `agent` 对齐专项 | **36 passed；邻接 127 passed** | Agent/P0 lifecycle/control queue/public state 36 项；再含 Session/Compaction/ToolResult/Coding Sandbox 邻接共 127 项；0 failure |
 | LLM Wiki 发布候选定向回归 | **Backend 67 passed, 1 skipped；Frontend 16/16；Browser 1/1** | 覆盖 Store/API/Summary/Fake Parser、五个 Wiki 前端视图与 source→approval→page→graph→conversation 浏览器主链路 |
 | Workspace 阶段 1 定向回归 | **125 passed** | `VirtualFileStore` 兼容别名、双根初始化、并发幂等、旧路径/purpose 迁移、固定根删除保护、Checkpointer/Auth/重启；`-W error` 下 0 warning |
 | Workspace 阶段 2 定向回归 | **116 passed** | 代码 `scripts/**` 映射、安全逻辑路径、revision 持久/冲突、Markdown CRUD、Agent 工具与 Web API；使用 `--no-cov` 定向运行 |
@@ -240,7 +246,7 @@ LLM Wiki 阶段 0–10、Session Workspace 阶段 1–7 与 Coding Agent Workspa
 
 ## 建议下一步
 
-1. 若继续功能开发，下一项可进入 P2-D Session organization。
+1. 按逐模块对齐顺序，下一项进入 `coding-agent` 产品组装审查；P2-D Session organization 仍为后续候选。
 2. 如需发布到远端，先配置 Git remote 再单独授权 push；Modal 与图片能力继续按既有决定暂缓。
 
 未完成事项的唯一清单见 [`TODO.md`](TODO.md)。使用与架构说明见 [`README.md`](README.md)。

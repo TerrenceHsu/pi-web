@@ -42,7 +42,9 @@ from .compaction import (
 
 # Context 转换
 from .context import (
+    ConvertToLLMFn,
     TransformContextFn,
+    apply_transform_context,
     convert_to_llm,
     transform_context,
 )
@@ -91,6 +93,7 @@ from .harness import (
 from .hooks import (
     AfterToolCallContext,
     AfterToolCallFn,
+    AfterToolCallResult,
     BeforeToolCallContext,
     BeforeToolCallFn,
     BeforeToolCallResult,
@@ -108,6 +111,7 @@ from .llm_messages import (
 
 # Loop
 from .loop import (
+    AgentLoopTurnUpdate,
     BeforeModelCallFn,
     ModelCallContext,
     ModelCallDecision,
@@ -411,7 +415,9 @@ __all__ = [
     "RequestEndStatus",
     "AgentEvent",
     # context
+    "ConvertToLLMFn",
     "TransformContextFn",
+    "apply_transform_context",
     "convert_to_llm",
     "transform_context",
     "ContextBudgetLevel",
@@ -426,12 +432,14 @@ __all__ = [
     "BeforeToolCallContext",
     "BeforeToolCallResult",
     "AfterToolCallContext",
+    "AfterToolCallResult",
     "default_before_tool_call",
     "default_after_tool_call",
     # loop
     "run_event_loop",
     "run_min_loop",
     "TurnControlContext",
+    "AgentLoopTurnUpdate",
     "ShouldStopAfterTurnFn",
     "PrepareNextTurnFn",
     "ModelCallContext",

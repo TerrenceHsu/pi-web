@@ -8,7 +8,7 @@
 - **新状态**：`AgentStatus` 加 `"aborting"`
 
 设计要点：
-- `AgentRequest`：内部请求对象，含 `future: asyncio.Future[list[Message]]`
+- `AgentRequest`：内部请求对象，含 `future: asyncio.Future[list[AgentMessage]]`
 - 单一 `_run_queue_worker` task 串行处理 queue
 - `prompt()` / `continue_()` 入队后 `await request.future`
 - abort 用 `asyncio.Event` 作为 signal 传入 `run_event_loop`，loop 检测后生成
@@ -29,13 +29,13 @@ import asyncio
 import inspect
 import time
 import typing
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 
-from .context import TransformContextFn
+from .context import ConvertToLLMFn, TransformContextFn
 from .events import (
     AgentAbortEvent,
     AgentEndEvent,
@@ -53,17 +53,20 @@ from .events import (
     ToolExecutionStartEvent,
     TurnEndEvent,
 )
-from .hooks import (
-    AfterToolCallFn,
-    BeforeToolCallFn,
-)
+from .hooks import AfterToolCallFn, BeforeToolCallFn
 from .loop import (
     BeforeModelCallFn,
     PrepareNextTurnFn,
     ShouldStopAfterTurnFn,
     run_event_loop,
 )
-from .messages import AssistantMessage, Message, TextContent, UserMessage
+from .messages import (
+    AgentMessage,
+    AssistantMessage,
+    ImageContent,
+    TextContent,
+    UserMessage,
+)
 from .model_client import ModelClient
 from .policy import (
     InMemoryToolPermissionAuditLog,
@@ -114,14 +117,16 @@ class AgentState(BaseModel):
 
     # pi-agent compatible public configuration/runtime projection.
     model: AgentModelState = Field(default_factory=AgentModelState)
+    system_prompt: str = ""
+    active_tool_names: tuple[str, ...] = ()
     thinking_level: ThinkingLevel = "off"
     is_streaming: bool = False
-    streaming_message: Message | None = None
+    streaming_message: AgentMessage | None = None
     pending_tool_calls: frozenset[str] = Field(default_factory=frozenset)
     error_message: str | None = None
 
     status: AgentStatus = "idle"
-    messages: list[Message] = Field(default_factory=list)
+    messages: list[AgentMessage] = Field(default_factory=list)
     last_event: AgentEvent | None = None
     last_error: str | None = None
     turn_count: int = 0
@@ -147,7 +152,9 @@ class AgentRequest:
     id: str
     type: AgentRequestType
     user_text: str | None
+    prompt_messages: list[AgentMessage] | None
     future: asyncio.Future[Any] = field(repr=False)
+    skip_initial_steering_poll: bool = False
     created_at: int = field(default_factory=lambda: int(time.time() * 1000))
 
 
@@ -156,12 +163,12 @@ class _PendingMessageQueue:
 
     def __init__(self, mode: QueueMode) -> None:
         self.mode = mode
-        self._messages: list[Message] = []
+        self._messages: list[AgentMessage] = []
 
-    def enqueue(self, message: Message) -> None:
+    def enqueue(self, message: AgentMessage) -> None:
         self._messages.append(message)
 
-    def drain(self) -> list[Message]:
+    def drain(self) -> list[AgentMessage]:
         if self.mode == "all":
             drained = self._messages
             self._messages = []
@@ -187,6 +194,9 @@ class _PendingMessageQueue:
 Subscriber = Callable[[AgentEvent, AgentState], object | Awaitable[object]]
 
 
+_AGENT_MESSAGE_ADAPTER: TypeAdapter[AgentMessage] = TypeAdapter(AgentMessage)
+
+
 # ============================================================================
 # Agent 类
 # ============================================================================
@@ -202,6 +212,7 @@ class Agent:
         client: ModelClient,
         tools: ToolRegistry | Iterable[AgentTool] | None = None,
         transform_context_fn: TransformContextFn | None = None,
+        convert_to_llm_fn: ConvertToLLMFn | None = None,
         before_tool_call: BeforeToolCallFn | None = None,
         after_tool_call: AfterToolCallFn | None = None,
         tool_execution: ToolExecutionMode = "parallel",
@@ -216,15 +227,16 @@ class Agent:
         thinking_level: ThinkingLevel = "off",
         max_turns: int = 50,
     ):
-        self.system_prompt = system_prompt
+        self._system_prompt = system_prompt
         self._client = client
         if isinstance(tools, ToolRegistry):
-            self.tools: ToolRegistry = tools
+            self._tools = tools
         elif tools is None:
-            self.tools = ToolRegistry()
+            self._tools = ToolRegistry()
         else:
-            self.tools = ToolRegistry(list(tools))
+            self._tools = ToolRegistry(list(tools))
         self.transform_context_fn = transform_context_fn
+        self.convert_to_llm_fn = convert_to_llm_fn
         self.before_tool_call = before_tool_call
         self.after_tool_call = after_tool_call
         self.tool_execution = tool_execution
@@ -247,7 +259,12 @@ class Agent:
 
         self.state: AgentState = AgentState(
             model=_model_state_from_client(client),
+            system_prompt=system_prompt,
+            active_tool_names=tuple(self.tools.names()),
             thinking_level=thinking_level,
+        )
+        self._unsubscribe_tool_registry = self.tools.subscribe(
+            self._sync_active_tool_names,
         )
         self._subscribers: list[Subscriber] = []
 
@@ -274,6 +291,46 @@ class Agent:
         if hasattr(self, "state"):
             self.state.model = _model_state_from_client(client)
 
+    @property
+    def system_prompt(self) -> str:
+        """System prompt used by future provider requests."""
+        return self._system_prompt
+
+    @system_prompt.setter
+    def system_prompt(self, value: str) -> None:
+        self._system_prompt = value
+        if hasattr(self, "state"):
+            self.state.system_prompt = value
+
+    def _sync_active_tool_names(self, names: tuple[str, ...]) -> None:
+        if hasattr(self, "state"):
+            self.state.active_tool_names = names
+
+    @property
+    def tools(self) -> ToolRegistry:
+        """Registry used by future turns."""
+        return self._tools
+
+    @tools.setter
+    def tools(
+        self,
+        tools: ToolRegistry | Iterable[AgentTool] | None,
+    ) -> None:
+        if isinstance(tools, ToolRegistry):
+            registry = tools
+        elif tools is None:
+            registry = ToolRegistry()
+        else:
+            registry = ToolRegistry(list(tools))
+        unsubscribe = getattr(self, "_unsubscribe_tool_registry", None)
+        if unsubscribe is not None:
+            unsubscribe()
+        self._tools = registry
+        self._unsubscribe_tool_registry = registry.subscribe(
+            self._sync_active_tool_names,
+        )
+        self._sync_active_tool_names(tuple(registry.names()))
+
     # ----------------------------------------------------------------------
     # 订阅
     # ----------------------------------------------------------------------
@@ -294,12 +351,21 @@ class Agent:
     # 入口：prompt / continue_ / steering / follow-up / abort
     # ----------------------------------------------------------------------
 
-    async def prompt(self, user_text: str) -> list[Message]:
-        """启动一个 prompt；活跃请求期间必须改用 steer / follow_up。"""
+    async def prompt(
+        self,
+        user_text: str | AgentMessage | Sequence[AgentMessage],
+        images: Sequence[ImageContent] | None = None,
+    ) -> list[AgentMessage]:
+        """Start from text, one AgentMessage, or an AgentMessage batch."""
         self._ensure_request_admission("prompt")
-        req = self._make_request(type_="prompt", user_text=user_text)
+        messages = self._normalize_prompt_input(user_text, images)
+        req = self._make_request(
+            type_="prompt",
+            user_text=None,
+            prompt_messages=messages,
+        )
         await self._enqueue(req)
-        return await typing.cast("asyncio.Future[list[Message]]", req.future)
+        return await typing.cast("asyncio.Future[list[AgentMessage]]", req.future)
 
     @property
     def tool_execution(self) -> ToolExecutionMode:
@@ -325,11 +391,11 @@ class Agent:
     def follow_up_mode(self, mode: QueueMode) -> None:
         self._follow_up_queue.mode = self._validate_queue_mode(mode)
 
-    def steer(self, message: Message | str) -> None:
+    def steer(self, message: AgentMessage | str) -> None:
         """Queue a message for the next assistant turn boundary."""
         self._steering_queue.enqueue(self._normalize_control_message(message))
 
-    def follow_up(self, message: Message | str) -> None:
+    def follow_up(self, message: AgentMessage | str) -> None:
         """Queue work for when the agent would otherwise stop."""
         self._follow_up_queue.enqueue(self._normalize_control_message(message))
 
@@ -346,7 +412,7 @@ class Agent:
     def has_queued_messages(self) -> bool:
         return self._steering_queue.has_items() or self._follow_up_queue.has_items()
 
-    async def continue_(self) -> list[Message]:
+    async def continue_(self) -> list[AgentMessage]:
         """启动一个 continue 请求；await 直到完成。
 
         无 messages 或最后一条是 assistant 时抛 ValueError（队列前校验）。
@@ -356,13 +422,26 @@ class Agent:
         self._ensure_request_admission("continue_")
         if not self.state.messages:
             raise ValueError("Agent.continue_(): 当前无 messages，请先 prompt(...) 建立上下文")
+        prompt_messages: list[AgentMessage] | None = None
+        skip_initial_steering_poll = False
         if isinstance(self.state.messages[-1], AssistantMessage):
-            raise ValueError(
-                "Agent.continue_(): 不能从 assistant 尾消息继续；请先追加 user/toolResult 消息"
-            )
-        req = self._make_request(type_="continue", user_text=None)
+            prompt_messages = self._steering_queue.drain()
+            if prompt_messages:
+                skip_initial_steering_poll = True
+            else:
+                prompt_messages = self._follow_up_queue.drain()
+            if not prompt_messages:
+                raise ValueError(
+                    "Agent.continue_(): 不能从 assistant 尾消息继续，且没有排队消息"
+                )
+        req = self._make_request(
+            type_="continue",
+            user_text=None,
+            prompt_messages=prompt_messages,
+            skip_initial_steering_poll=skip_initial_steering_poll,
+        )
         await self._enqueue(req)
-        return await typing.cast("asyncio.Future[list[Message]]", req.future)
+        return await typing.cast("asyncio.Future[list[AgentMessage]]", req.future)
 
     async def abort(self, reason: str | None = None) -> None:
         """中止当前 running request；idle / aborting / error 时无操作。
@@ -443,12 +522,40 @@ class Agent:
         return mode
 
     @staticmethod
-    def _normalize_control_message(message: Message | str) -> Message:
+    def _normalize_control_message(message: AgentMessage | str) -> AgentMessage:
         if isinstance(message, str):
             return UserMessage(content=[TextContent(text=message)])
-        return message
+        return _AGENT_MESSAGE_ADAPTER.validate_python(message)
 
-    def _make_request(self, *, type_: AgentRequestType, user_text: str | None) -> AgentRequest:
+    @staticmethod
+    def _normalize_prompt_input(
+        input_: str | AgentMessage | Sequence[AgentMessage],
+        images: Sequence[ImageContent] | None,
+    ) -> list[AgentMessage]:
+        if isinstance(input_, str):
+            content: list[TextContent | ImageContent] = [TextContent(text=input_)]
+            content.extend(images or ())
+            return [UserMessage(content=content)]
+        if images:
+            raise ValueError("images can only be supplied with a text prompt")
+        if isinstance(input_, BaseModel):
+            return [_AGENT_MESSAGE_ADAPTER.validate_python(input_)]
+        messages = [
+            _AGENT_MESSAGE_ADAPTER.validate_python(message)
+            for message in input_
+        ]
+        if not messages:
+            raise ValueError("Agent.prompt(): message batch must not be empty")
+        return messages
+
+    def _make_request(
+        self,
+        *,
+        type_: AgentRequestType,
+        user_text: str | None,
+        prompt_messages: list[AgentMessage] | None,
+        skip_initial_steering_poll: bool = False,
+    ) -> AgentRequest:
         self._next_id += 1
         req_id = f"req-{self._next_id}"
         loop = asyncio.get_event_loop()
@@ -457,6 +564,8 @@ class Agent:
             id=req_id,
             type=type_,
             user_text=user_text,
+            prompt_messages=prompt_messages,
+            skip_initial_steering_poll=skip_initial_steering_poll,
             future=future,
         )
 
@@ -529,6 +638,7 @@ class Agent:
         # 为本轮 request 建独立 signal
         self._abort_signal = asyncio.Event()
 
+        initial_message_count = len(self.state.messages)
         self._current_task = asyncio.ensure_future(self._run_request(req, self._abort_signal))
 
         end_status: RequestEndStatus = "completed"
@@ -540,6 +650,7 @@ class Agent:
         except Exception as e:
             end_status = "error"
             exc = e
+            await self._emit_run_failure(e, initial_message_count)
 
         # 设置 future
         if not req.future.done():
@@ -565,20 +676,67 @@ class Agent:
         if exc is not None:
             raise exc
 
+    async def _emit_run_failure(
+        self,
+        exc: Exception,
+        initial_message_count: int,
+    ) -> None:
+        """Close the public lifecycle after an unexpected loop failure.
+
+        Provider failures normally arrive as terminal stream events. This is
+        the safety net for application callbacks and other runtime failures so
+        subscribers, snapshots, and persistence never observe an open turn.
+        """
+        # A turn-boundary callback can fail after the loop has already emitted
+        # turn_end. In that case only the run lifecycle remains open; emitting
+        # another synthetic turn would create two turn_end events for one
+        # provider call.
+        if isinstance(self.state.last_event, TurnEndEvent):
+            await self._handle_event(AgentEndEvent(
+                messages=list(self.state.messages),
+                new_messages=list(self.state.messages[initial_message_count:]),
+            ))
+            return
+
+        failure = AssistantMessage(
+            content=[],
+            api=self.client.api_id,
+            provider=self.client.provider_id,
+            model=getattr(self.client, "model", "unknown"),
+            stop_reason="error",
+            error_message=str(exc),
+        )
+        if isinstance(self.state.streaming_message, AssistantMessage):
+            await self._handle_event(MessageEndEvent(message=failure))
+        else:
+            await self._handle_event(MessageStartEvent(message=failure))
+            await self._handle_event(MessageEndEvent(message=failure))
+        await self._handle_event(TurnEndEvent(message=failure, tool_results=[]))
+        await self._handle_event(AgentEndEvent(
+            messages=list(self.state.messages),
+            new_messages=list(self.state.messages[initial_message_count:]),
+        ))
+
     async def _run_request(self, req: AgentRequest, signal: asyncio.Event) -> None:
         """跑一个 request：把 run_event_loop 的事件流转发给 _handle_event。"""
-        if req.type == "prompt":
-            user_text = req.user_text
-        else:
-            user_text = None
+        skip_initial_steering_poll = req.skip_initial_steering_poll
+
+        async def get_steering_messages() -> list[AgentMessage]:
+            nonlocal skip_initial_steering_poll
+            if skip_initial_steering_poll:
+                skip_initial_steering_poll = False
+                return []
+            return self._steering_queue.drain()
 
         async for ev in run_event_loop(
             system_prompt=self.system_prompt,
-            user_text=user_text,
+            user_text=req.user_text,
+            prompt_messages=req.prompt_messages,
             initial_messages=list(self.state.messages),
             client=self.client,
             tools=self.tools,
             transform_context_fn=self.transform_context_fn,
+            convert_to_llm_fn=self.convert_to_llm_fn,
             before_tool_call=self.before_tool_call,
             after_tool_call=self.after_tool_call,
             tool_execution=self.tool_execution,
@@ -589,8 +747,9 @@ class Agent:
             should_stop_after_turn=self.should_stop_after_turn,
             prepare_next_turn=self.prepare_next_turn,
             before_model_call=self.before_model_call,
-            get_steering_messages=self._steering_queue.drain,
+            get_steering_messages=get_steering_messages,
             get_follow_up_messages=self._follow_up_queue.drain,
+            thinking_level=self.state.thinking_level,
             max_turns=self.max_turns,
         ):
             await self._handle_event(ev)

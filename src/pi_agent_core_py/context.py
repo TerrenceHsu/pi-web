@@ -22,7 +22,10 @@ P0-3：UserMessage 中的 FileBlock 不直接发给 provider——转换成一�
 """
 from __future__ import annotations
 
+import asyncio
+import inspect
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from .llm_messages import (
     LLMAssistantMessage,
@@ -46,9 +49,53 @@ from .messages import (
 
 # 钩子类型（便于 Step 15 等覆盖）
 TransformContextFn = Callable[
-    [list[AgentMessage]],
-    Awaitable[list[AgentMessage]],
+    ...,
+    list[AgentMessage] | Awaitable[list[AgentMessage]],
 ]
+ConvertToLLMFn = Callable[
+    [list[AgentMessage]],
+    list[LLMMessage] | Awaitable[list[LLMMessage]],
+]
+
+
+async def apply_transform_context(
+    transform: TransformContextFn,
+    messages: list[AgentMessage],
+    signal: asyncio.Event | None = None,
+) -> list[AgentMessage]:
+    """Invoke new signal-aware and legacy one-argument transforms."""
+    try:
+        parameters = inspect.signature(transform).parameters
+        positional = [
+            parameter
+            for parameter in parameters.values()
+            if parameter.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+        accepts_positional_signal = len(positional) >= 2 or any(
+            parameter.kind is inspect.Parameter.VAR_POSITIONAL
+            for parameter in parameters.values()
+        )
+        accepts_keyword_signal = "signal" in parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+    except (TypeError, ValueError):
+        accepts_positional_signal = True
+        accepts_keyword_signal = False
+    result: Any
+    if accepts_positional_signal:
+        result = transform(messages, signal)
+    elif accepts_keyword_signal:
+        result = transform(messages, signal=signal)
+    else:
+        result = transform(messages)
+    if inspect.isawaitable(result):
+        result = await result
+    return list(result)
 
 
 SUMMARY_CONTEXT_PREFIX = (
@@ -58,7 +105,10 @@ SUMMARY_CONTEXT_PREFIX = (
 SUMMARY_CONTEXT_SUFFIX = "\n\n</summary>"
 
 
-async def transform_context(messages: list[AgentMessage]) -> list[AgentMessage]:
+async def transform_context(
+    messages: list[AgentMessage],
+    signal: asyncio.Event | None = None,
+) -> list[AgentMessage]:
     """默认上下文转换：原样返回。
 
     应用层可覆盖此函数做：
@@ -207,6 +257,8 @@ def _render_file_block_to_text(block: FileBlock) -> str:
 
 __all__ = [
     "TransformContextFn",
+    "ConvertToLLMFn",
+    "apply_transform_context",
     "SUMMARY_CONTEXT_PREFIX",
     "SUMMARY_CONTEXT_SUFFIX",
     "transform_context",

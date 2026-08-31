@@ -332,7 +332,10 @@ class AnthropicCompatAdapter(ProviderAdapter):
             kwargs["tools"] = to_anthropic_tools(request.tools)
             if request.metadata.get("pi_agent_tool_choice") == "required":
                 kwargs["tool_choice"] = {"type": "any"}
-        if request.metadata.get("pi_agent_thinking") == "disabled":
+        if (
+            request.thinking_level == "off"
+            or request.metadata.get("pi_agent_thinking") == "disabled"
+        ):
             kwargs["thinking"] = {"type": "disabled"}
         if self.config.temperature is not None:
             # 显式传 temperature（含 0.0）——避免 SDK 默认（多数 provider 是 1.0）行为漂移。
