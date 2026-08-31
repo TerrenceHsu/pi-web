@@ -71,6 +71,9 @@ class GLMProviderAdapter(AnthropicCompatAdapter):
     """
 
     provider_id = "glm"
+    # The configured GLM Anthropic-compatible endpoint is text-only unless a
+    # concrete deployment advertises vision support.
+    supports_images = False
 
 
 # ============================================================================

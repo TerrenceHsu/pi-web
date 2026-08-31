@@ -49,11 +49,14 @@ from .registry import (
     get_provider_definition,
     list_provider_definitions,
 )
+from .retry import ProviderRetryPolicy
+from .transform import transform_messages_for_provider
 
 __all__ = [
     # base
     "ProviderAdapter",
     "ProviderRequest",
+    "ProviderRetryPolicy",
     # errors
     "ProviderError",
     "ProviderConfigError",
@@ -70,6 +73,7 @@ __all__ = [
     # conversion helpers
     "to_anthropic_messages",
     "to_anthropic_tools",
+    "transform_messages_for_provider",
     # registry (P1-E1-1 + E1-3B1)
     "ProviderAPIStyle",
     "CredentialValidationStrategyId",

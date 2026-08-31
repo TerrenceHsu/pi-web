@@ -20,11 +20,23 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json as _json
+import re
 from collections.abc import AsyncIterator
 from typing import Any, Literal
 
-from anthropic import AsyncAnthropic
+from anthropic import (
+    APIConnectionError,
+    APIError,
+    APITimeoutError,
+    AsyncAnthropic,
+    AuthenticationError,
+    BadRequestError,
+    InternalServerError,
+    PermissionDeniedError,
+    RateLimitError,
+)
 from pydantic import BaseModel, Field
 
 from ..llm_messages import (
@@ -33,7 +45,7 @@ from ..llm_messages import (
     LLMToolResultMessage,
     LLMUserMessage,
 )
-from ..messages import TextContent, ThinkingContent, ToolCall, Usage
+from ..messages import ImageContent, TextContent, ThinkingContent, ToolCall, Usage
 from ..stream_events import (
     DoneEvent,
     StreamEvent,
@@ -49,7 +61,14 @@ from ..stream_events import (
 )
 from ..tools import ToolDef
 from .base import ProviderAdapter, ProviderRequest
-from .errors import ProviderConfigError, ProviderProtocolError
+from .errors import (
+    ProviderAuthenticationError,
+    ProviderConfigError,
+    ProviderError,
+    ProviderProtocolError,
+    ProviderRateLimitError,
+    ProviderStreamError,
+)
 
 # ============================================================================
 # Config
@@ -96,38 +115,57 @@ def to_anthropic_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for m in messages:
         if isinstance(m, LLMUserMessage):
-            text = "".join(c.text for c in m.content)
-            out.append({"role": "user", "content": [{"type": "text", "text": text}]})
+            user_blocks: list[dict[str, Any]] = []
+            for user_content in m.content:
+                if isinstance(user_content, TextContent):
+                    user_blocks.append({"type": "text", "text": user_content.text})
+                elif isinstance(user_content, ImageContent):
+                    user_blocks.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": user_content.mime_type,
+                            "data": user_content.data,
+                        },
+                    })
+            out.append({
+                "role": "user",
+                "content": user_blocks or [{"type": "text", "text": ""}],
+            })
         elif isinstance(m, LLMAssistantMessage):
-            blocks: list[dict[str, Any]] = []
-            for content in m.content:
-                if isinstance(content, TextContent):
-                    if content.text:
-                        blocks.append({"type": "text", "text": content.text})
-                elif isinstance(content, ThinkingContent):
-                    if content.redacted:
-                        if content.thinking_signature:
-                            blocks.append(
+            assistant_blocks: list[dict[str, Any]] = []
+            for assistant_content in m.content:
+                if isinstance(assistant_content, TextContent):
+                    if assistant_content.text:
+                        assistant_blocks.append({
+                            "type": "text", "text": assistant_content.text,
+                        })
+                elif isinstance(assistant_content, ThinkingContent):
+                    if assistant_content.redacted:
+                        if assistant_content.thinking_signature:
+                            assistant_blocks.append(
                                 {
                                     "type": "redacted_thinking",
-                                    "data": content.thinking_signature,
+                                    "data": assistant_content.thinking_signature,
                                 }
                             )
-                    elif content.thinking_signature:
-                        blocks.append(
+                    elif assistant_content.thinking_signature:
+                        assistant_blocks.append(
                             {
                                 "type": "thinking",
-                                "thinking": content.thinking,
-                                "signature": content.thinking_signature,
+                                "thinking": assistant_content.thinking,
+                                "signature": assistant_content.thinking_signature,
                             }
                         )
-                    elif content.thinking:
+                    elif assistant_content.thinking:
                         # Anthropic requires a signature on replayed thinking blocks.
                         # Preserve unsigned reasoning as ordinary assistant text.
-                        blocks.append({"type": "text", "text": content.thinking})
+                        assistant_blocks.append({
+                            "type": "text", "text": assistant_content.thinking,
+                        })
             # Step 21 修复：保留 ToolCall → tool_use block
             for tc in m.tool_calls:
-                blocks.append(
+                assistant_blocks.append(
                     {
                         "type": "tool_use",
                         "id": tc.id,
@@ -135,16 +173,36 @@ def to_anthropic_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
                         "input": tc.arguments or {},
                     }
                 )
-            if not blocks:
+            if not assistant_blocks:
                 # Anthropic 拒绝空 content；保底塞一个空 text
-                blocks.append({"type": "text", "text": ""})
-            out.append({"role": "assistant", "content": blocks})
+                assistant_blocks.append({"type": "text", "text": ""})
+            out.append({"role": "assistant", "content": assistant_blocks})
         elif isinstance(m, LLMToolResultMessage):
-            text = "".join(c.text for c in m.content)
+            result_blocks: list[dict[str, Any]] = []
+            for content in m.content:
+                if isinstance(content, TextContent):
+                    result_blocks.append({"type": "text", "text": content.text})
+                elif isinstance(content, ImageContent):
+                    result_blocks.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": content.mime_type,
+                            "data": content.data,
+                        },
+                    })
             block: dict[str, Any] = {
                 "type": "tool_result",
                 "tool_use_id": m.tool_call_id,
-                "content": text,
+                "content": (
+                    "".join(
+                        item["text"]
+                        for item in result_blocks
+                        if item["type"] == "text"
+                    )
+                    if all(item["type"] == "text" for item in result_blocks)
+                    else result_blocks
+                ),
                 "is_error": m.is_error,
             }
             # 合并到上一个 user message，否则新建
@@ -171,6 +229,25 @@ def to_anthropic_tools(tools: list[ToolDef]) -> list[dict[str, Any]]:
     ]
 
 
+def _extract_anthropic_usage(value: Any) -> Usage:
+    input_tokens = getattr(value, "input_tokens", 0) or 0
+    output_tokens = getattr(value, "output_tokens", 0) or 0
+    cache_read = getattr(value, "cache_read_input_tokens", 0) or 0
+    cache_write = getattr(value, "cache_creation_input_tokens", 0) or 0
+    cache_creation = getattr(value, "cache_creation", None)
+    cache_write_1h = (
+        getattr(cache_creation, "ephemeral_1h_input_tokens", 0) or 0
+    )
+    return Usage(
+        input=input_tokens,
+        output=output_tokens,
+        cache_read=cache_read,
+        cache_write=cache_write,
+        cache_write_1h=cache_write_1h,
+        total_tokens=input_tokens + output_tokens + cache_read + cache_write,
+    )
+
+
 # ============================================================================
 # Adapter
 # ============================================================================
@@ -183,18 +260,34 @@ class AnthropicCompatAdapter(ProviderAdapter):
     """
 
     provider_id: str = "anthropic_compat"
+    api_id: str = "anthropic-messages"
+    supports_images: bool = True
+
+    def normalize_tool_call_id(self, tool_call_id: str) -> str:
+        if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", tool_call_id):
+            return tool_call_id
+        digest = hashlib.sha256(tool_call_id.encode("utf-8")).hexdigest()[:48]
+        return f"toolu_{digest}"
 
     def __init__(
         self,
         config: AnthropicCompatConfig,
         *,
         client: AsyncAnthropic | None = None,
+        provider_id: str | None = None,
+        supports_images: bool | None = None,
     ) -> None:
         if not config.api_key:
             raise ProviderConfigError(
                 "AnthropicCompatConfig.api_key 不能为空——请在 init 阶段校验",
             )
         self.config = config
+        if provider_id is not None:
+            if not provider_id.strip():
+                raise ProviderConfigError("provider_id must be non-empty")
+            self.provider_id = provider_id
+        if supports_images is not None:
+            self.supports_images = supports_images
         self.model = config.model
         # 允许测试注入 mock client
         self._client = client or AsyncAnthropic(
@@ -246,9 +339,26 @@ class AnthropicCompatAdapter(ProviderAdapter):
             # None = 不传，让 SDK 用其默认值。
             kwargs["temperature"] = self.config.temperature
 
-        async with self._client.messages.stream(**kwargs) as stream:
-            async for ev in self._adapt_stream(stream, request.signal):
-                yield ev
+        try:
+            async with self._client.messages.stream(**kwargs) as stream:
+                async for ev in self._adapt_stream(stream, request.signal):
+                    yield ev
+        except asyncio.CancelledError:
+            raise
+        except ProviderError:
+            raise
+        except (AuthenticationError, PermissionDeniedError):
+            raise ProviderAuthenticationError(
+                "provider authentication failed"
+            ) from None
+        except RateLimitError:
+            raise ProviderRateLimitError("provider rate limit exceeded") from None
+        except BadRequestError:
+            raise ProviderProtocolError("provider rejected request") from None
+        except (APIConnectionError, APITimeoutError, InternalServerError, APIError):
+            raise ProviderStreamError("provider connection failed") from None
+        except Exception:
+            raise ProviderStreamError("provider connection failed") from None
 
     async def _adapt_stream(
         self,
@@ -479,12 +589,7 @@ class AnthropicCompatAdapter(ProviderAdapter):
         try:
             final_msg = await stream.get_final_message()
             u = final_msg.usage
-            final_usage = Usage(
-                input=getattr(u, "input_tokens", 0) or 0,
-                output=getattr(u, "output_tokens", 0) or 0,
-                total_tokens=(getattr(u, "input_tokens", 0) or 0)
-                + (getattr(u, "output_tokens", 0) or 0),
-            )
+            final_usage = _extract_anthropic_usage(u)
         except Exception:
             pass
 

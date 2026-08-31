@@ -63,7 +63,19 @@ class ProviderAdapter(abc.ABC):
     """
 
     provider_id: str = ""
+    api_id: str = ""
     model: str = ""
+    supports_images: bool = False
+
+    def normalize_tool_call_id(self, tool_call_id: str) -> str:
+        """Return an ID accepted by this provider's wire protocol.
+
+        Most providers accept opaque IDs, so identity is the safe default.
+        Stricter adapters can override this hook; the shared history
+        transformer applies the same mapping to calls and results.
+        """
+
+        return tool_call_id
 
     @abc.abstractmethod
     def stream(

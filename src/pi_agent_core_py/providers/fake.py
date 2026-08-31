@@ -37,7 +37,9 @@ class FakeProviderAdapter(ProviderAdapter):
     """
 
     provider_id = "fake"
+    api_id = "fake"
     model = "fake-1"
+    supports_images = True
 
     def __init__(
         self,

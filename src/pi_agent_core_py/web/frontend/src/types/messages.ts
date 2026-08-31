@@ -13,6 +13,13 @@ export interface TextContent {
   text: string
 }
 
+export interface ImageContent {
+  type: "image"
+  /** Raw base64 without a data-URL prefix. */
+  data: string
+  mime_type: "image/jpeg" | "image/png" | "image/gif" | "image/webp"
+}
+
 export interface ThinkingContent {
   type: "thinking"
   thinking: string
@@ -40,6 +47,7 @@ export interface ToolResultContent {
 
 export type UserContent =
   | TextContent
+  | ImageContent
   | ThinkingContent
   | FileBlock
   | ToolCallContent
@@ -49,7 +57,18 @@ export type UserContent =
 export interface MessageUsage {
   input: number
   output: number
+  cache_read?: number
+  cache_write?: number
+  cache_write_1h?: number
+  reasoning?: number
   total_tokens: number
+  cost?: {
+    input: number
+    output: number
+    cache_read: number
+    cache_write: number
+    total: number
+  } | null
 }
 
 export interface GenerationMetrics {

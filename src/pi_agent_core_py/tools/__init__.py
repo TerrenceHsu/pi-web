@@ -27,7 +27,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from ..messages import TextContent, Usage
+from ..messages import ContentBlock, Usage
 
 # ============================================================================
 # Literal：执行模式
@@ -108,7 +108,7 @@ class ToolResult(BaseModel):
     """
     tool_call_id: str
     name: str
-    content: list[TextContent] = Field(default_factory=list)
+    content: list[ContentBlock] = Field(default_factory=list)
     is_error: bool = False
     terminate: bool = False
     details: dict[str, Any] = Field(default_factory=dict)

@@ -40,7 +40,7 @@ from ..llm_messages import (
     LLMToolResultMessage,
     LLMUserMessage,
 )
-from ..messages import TextContent, ThinkingContent, ToolCall, Usage
+from ..messages import ImageContent, TextContent, ThinkingContent, ToolCall, Usage
 from ..stream_events import (
     DoneEvent,
     StreamEvent,
@@ -184,7 +184,7 @@ class OpenAICompatConfig(BaseModel):
 # ============================================================================
 
 
-def _join_text(contents: Sequence[TextContent | ThinkingContent]) -> str:
+def _join_text(contents: Sequence[TextContent | ThinkingContent | ImageContent]) -> str:
     return "".join(c.text for c in contents if isinstance(c, TextContent))
 
 
@@ -226,10 +226,47 @@ def to_openai_messages(
     if system_prompt and system_prompt.strip():
         out.append({"role": "system", "content": system_prompt})
 
+    pending_tool_images: list[ImageContent] = []
+
+    def flush_tool_images() -> None:
+        if not pending_tool_images:
+            return
+        out.append({
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{image.mime_type};base64,{image.data}",
+                    },
+                }
+                for image in pending_tool_images
+            ],
+        })
+        pending_tool_images.clear()
+
     for m in messages:
+        if not isinstance(m, LLMToolResultMessage):
+            flush_tool_images()
         if isinstance(m, LLMUserMessage):
             text = _join_text(m.content)
-            out.append({"role": "user", "content": text})
+            images = [item for item in m.content if isinstance(item, ImageContent)]
+            if images:
+                content: list[dict[str, Any]] = []
+                if text:
+                    content.append({"type": "text", "text": text})
+                content.extend(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{image.mime_type};base64,{image.data}",
+                        },
+                    }
+                    for image in images
+                )
+                out.append({"role": "user", "content": content})
+            else:
+                out.append({"role": "user", "content": text})
         elif isinstance(m, LLMAssistantMessage):
             text = _join_text(m.content)
             thinking, thinking_signature = _join_thinking(m.content)
@@ -284,12 +321,16 @@ def to_openai_messages(
                     "content": text,
                 }
             )
+            pending_tool_images.extend(
+                item for item in m.content if isinstance(item, ImageContent)
+            )
         else:
             # 不支持的 message 类型——固定短文本（不含正文）
             raise ProviderProtocolError(
                 "unsupported message type",
             ) from None
 
+    flush_tool_images()
     return out
 
 
@@ -360,11 +401,28 @@ def _extract_usage(chunk: ChatCompletionChunk) -> Usage | None:
     prompt = getattr(u, "prompt_tokens", None) or 0
     completion = getattr(u, "completion_tokens", None) or 0
     total = getattr(u, "total_tokens", None)
+    prompt_details = getattr(u, "prompt_tokens_details", None)
+    completion_details = getattr(u, "completion_tokens_details", None)
+    cache_read = (
+        getattr(prompt_details, "cached_tokens", None)
+        or getattr(u, "prompt_cache_hit_tokens", None)
+        or getattr(u, "cached_tokens", 0)
+        or 0
+    )
+    cache_write = (
+        getattr(prompt_details, "cache_write_tokens", 0) or 0
+    )
+    raw_reasoning = getattr(completion_details, "reasoning_tokens", None)
+    reasoning = int(raw_reasoning or 0) if raw_reasoning is not None else None
+    uncached_input = max(0, prompt - cache_read - cache_write)
     if total is None or total == 0:
-        total = prompt + completion
+        total = uncached_input + completion + cache_read + cache_write
     return Usage(
-        input=int(prompt),
+        input=int(uncached_input),
         output=int(completion),
+        cache_read=int(cache_read),
+        cache_write=int(cache_write),
+        reasoning=reasoning,
         total_tokens=int(total),
     )
 
@@ -376,6 +434,10 @@ def _merge_usage(current: Usage, new: Usage | None) -> Usage:
     return Usage(
         input=max(0, new.input),
         output=max(0, new.output),
+        cache_read=max(0, new.cache_read),
+        cache_write=max(0, new.cache_write),
+        cache_write_1h=max(0, new.cache_write_1h),
+        reasoning=(max(0, new.reasoning) if new.reasoning is not None else None),
         total_tokens=max(0, new.total_tokens),
     )
 
@@ -476,12 +538,15 @@ class OpenAICompatibleProvider(ProviderAdapter):
     Qwen / Kimi 共用——provider_id 由构造参数传入。
     """
 
+    api_id = "openai-completions"
+
     def __init__(
         self,
         config: OpenAICompatConfig,
         *,
         provider_id: str,
         client: AsyncOpenAI | None = None,
+        supports_images: bool = False,
     ) -> None:
         if not config.api_key.get_secret_value():
             raise ProviderConfigError("OpenAICompatConfig.api_key is empty")
@@ -492,6 +557,7 @@ class OpenAICompatibleProvider(ProviderAdapter):
         # 实例属性覆盖类属性——区分 Qwen / Kimi
         self.provider_id = provider_id
         self.model = config.model
+        self.supports_images = supports_images
 
         self._closed: bool = False
 

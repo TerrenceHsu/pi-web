@@ -1,6 +1,6 @@
 # Current TODO
 
-> 校准日期：**2026-08-29**。本文件只保留尚未完成或明确延期的事项；已完成阶段不再复制数百行历史记录，统一由 [`STATUS.md`](STATUS.md)、[`CHANGELOG.md`](CHANGELOG.md) 和 `docs/validation/` 追溯。
+> 校准日期：**2026-08-31**。本文件只保留尚未完成或明确延期的事项；已完成阶段不再复制数百行历史记录，统一由 [`STATUS.md`](STATUS.md)、[`CHANGELOG.md`](CHANGELOG.md) 和 `docs/validation/` 追溯。
 
 ## 当前收敛执行顺序
 
@@ -12,6 +12,8 @@
 - [x] **6. 按当前开发阶段精简测试套件**：采用“最小可观察行为”预算，删除退役 Chunk-RAG、历史 Step/Smoke、Provider 内部实现与重复边界矩阵，只保留核心语义、安全/数据风险、公开 API 和关键用户旅程；Backend 从 4093 降到 2105 collected，Frontend Vitest 从 352 降到 180，Playwright 从 54 收敛为 8 个规格/18 项。第二轮仅改测试与策略文档，按开发阶段规则不复跑耗时全量门禁；当前收集、Ruff 和保留的最小定向测试通过。历史冻结证据继续归档在 `docs/validation/`
 - [x] **7. 发布 `0.0.29`**（完成）：Python/API、Web 前端与 Wiki Parser Worker 的 package/lock/OCI/compliance metadata 已统一；CHANGELOG 分隔 `0.0.28`/`0.0.29`；Ruff、strict Mypy 179 source files、Backend 51、Frontend 11、typecheck/lint/build 通过；两个 `0.0.29` wheel 的版本与许可证已核验；创建本地 annotated tag `0.0.29`，未配置 remote 因而未 push
 - [x] **8. 实现三类意图路由**（完成）：产品入口默认启用 provider-neutral 的 `read_only | coding | knowledge` 决策；Knowledge 只由 durable Conversation binding 选择，Coding 复用现有 Sandbox 自动编排，只读路线同时裁剪写入/执行工具并注入只读约束。支持 `intent_mode` 显式覆盖和旧 `coding_mode=true`；Prompt、async request、Context Budget、`/api/state` 与 Turn 卡公开 secret-free 决策审计。仅修改 1 个既有测试文件并新增 2 项，覆盖三条路线、否定约束和显式覆盖；定向 Backend 2 passed，Ruff、strict Mypy、Frontend typecheck/lint 通过。设计见 [`docs/design/coding-agent-intent-routing.md`](docs/design/coding-agent-intent-routing.md)
+- [x] **9. 对齐上游 pi 的 `ai` 模块核心契约**：统一 provider/API/model 身份与不可变历史转换；跨模型不重放签名/redacted thinking；新增 provider-neutral 图片块和视觉能力降级；修复 tool-call/result ID 与缺失结果；Usage 增加 cache/reasoning/cost 扩展位；Provider 建连失败支持首事件前有界重试。专项 159 passed；完整 Backend 2121 passed / 7 skipped / 9 deselected / coverage 77.13%；Ruff、strict Mypy 187 files、Frontend 183/183 + typecheck/lint/build 全部通过。完整差异与剩余边界见 [`docs/validation/pi-ai-parity-2026-08-31.md`](docs/validation/pi-ai-parity-2026-08-31.md)
+- [ ] **10. 继续第 2 项 `agent` 对齐**：比较 Agent loop、工具调度、控制队列和公开状态机；以当前上游实现而非旧 Step 1–21 归档为准
 
 ## P0 — Coding Agent Workspace 连续性
 

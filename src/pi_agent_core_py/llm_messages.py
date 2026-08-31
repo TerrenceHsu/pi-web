@@ -15,13 +15,13 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
-from .messages import TextContent, ThinkingContent, ToolCall, Usage
+from .messages import ContentBlock, TextContent, ThinkingContent, ToolCall, Usage
 
 
 class LLMUserMessage(BaseModel):
     """发给 LLM 的 user 消息。"""
     role: Literal["user"] = "user"
-    content: list[TextContent] = Field(default_factory=list)
+    content: list[ContentBlock] = Field(default_factory=list)
     timestamp: int = 0
 
 
@@ -54,7 +54,7 @@ class LLMToolResultMessage(BaseModel):
     role: Literal["toolResult"] = "toolResult"
     tool_call_id: str
     name: str
-    content: list[TextContent] = Field(default_factory=list)
+    content: list[ContentBlock] = Field(default_factory=list)
     is_error: bool = False
     usage: Usage | None = None
     added_tool_names: list[str] = Field(default_factory=list)

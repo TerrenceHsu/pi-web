@@ -13,7 +13,7 @@ from .llm_messages import (
     LLMToolResultMessage,
     LLMUserMessage,
 )
-from .messages import ThinkingContent
+from .messages import ImageContent, ThinkingContent
 from .tools import ToolDef
 
 ContextBudgetLevel = Literal["unknown", "normal", "warning", "compact", "blocked"]
@@ -83,10 +83,21 @@ def _compact_json_tokens(value: object) -> int:
 
 
 def _message_payload(message: LLMMessage) -> dict[str, object]:
+    def serialize_content(item: object) -> object:
+        if isinstance(item, ImageContent):
+            # Do not duplicate large base64 payloads in the estimator.  Its
+            # byte length is stable and sufficient for a conservative signal.
+            return {
+                "type": "image",
+                "mime_type": item.mime_type,
+                "base64_bytes": len(item.data),
+            }
+        return getattr(item, "text", "")
+
     if isinstance(message, LLMUserMessage):
         return {
             "role": "user",
-            "content": [item.text for item in message.content],
+            "content": [serialize_content(item) for item in message.content],
         }
     if isinstance(message, LLMAssistantMessage):
         return {
@@ -109,7 +120,7 @@ def _message_payload(message: LLMMessage) -> dict[str, object]:
             "role": "tool",
             "tool_call_id": message.tool_call_id,
             "name": message.name,
-            "content": [item.text for item in message.content],
+            "content": [serialize_content(item) for item in message.content],
             "is_error": message.is_error,
         }
     return {"role": getattr(message, "role", "unknown")}
@@ -127,6 +138,17 @@ def estimate_message_tokens(messages: Sequence[LLMMessage]) -> int:
     heuristic.
     """
     raw = sum(_compact_json_tokens(_message_payload(message)) + 4 for message in messages)
+    # Exact visual tokenization depends on provider resize/tiling rules.  Count
+    # the encoded payload conservatively instead of treating an image as a
+    # two-token metadata object; this prevents multimodal requests from
+    # bypassing context preflight merely because dimensions are unavailable.
+    raw += sum(
+        math.ceil(len(item.data) / 4)
+        for message in messages
+        if isinstance(message, (LLMUserMessage, LLMToolResultMessage))
+        for item in message.content
+        if isinstance(item, ImageContent)
+    )
     return _with_margin(raw)
 
 

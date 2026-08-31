@@ -1,8 +1,19 @@
 # Roadmap
 
-> 校准日期：**2026-08-30**。`0.0.29` 之后已完成三类意图路由和
+> 校准日期：**2026-08-31**。`0.0.29` 之后已完成三类意图路由和
 > Planner–Executor–Verifier Plan Mode；Session Workspace、Managed Coding Sandbox 与 LLM Wiki
 > 已取代下文部分早期规划。历史阶段细节保留用于追溯，当前事实与验证数字以 `STATUS.md` 为准。
+
+## P0 — pi 模块对齐（进行中；`ai` ✅ COMPLETE）
+
+- [x] `ai`：补齐 provider-aware 历史转换、多模态核心消息、精确模型身份、工具调用配对、丰富 Usage 与首事件前重试
+- [ ] `agent`：下一项；审查 Agent loop、工具调度、状态机与上游当前契约
+- [ ] `coding-agent`：核心能力产品组装
+- [ ] `session-backends/sqlite-node`：会话持久化
+- [ ] `telemetry`：运行观测
+
+`ai` 的逐项差异、实现边界和验证证据见
+[`docs/validation/pi-ai-parity-2026-08-31.md`](docs/validation/pi-ai-parity-2026-08-31.md)。
 
 ## P0 — Intent Routing + Plan Mode（✅ COMPLETE）
 

@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### pi `ai` core parity（2026-08-31）
+
+- 新增不可变、provider-aware 历史转换：只有完全相同的 provider/API/model 才回放签名或 redacted thinking；跨模型把可见思考降为普通文本、丢弃密文块，并过滤 aborted/error assistant 历史
+- 新增 provider-neutral `ImageContent`，Anthropic 使用 base64 source、OpenAI 使用 data URL；不支持视觉的 adapter 自动生成明确占位，Context Budget 同时计入图片 payload
+- 统一修复/规范化 tool-call ID 与结果配对，过滤孤儿结果并为缺失结果生成安全的 synthetic error result
+- `Usage` 增加 cache read/write、1h cache write、reasoning 与可选 cost 分解；Provider/ModelClient 公开 API identity，Anthropic/OpenAI usage 映射同步扩充
+- Provider 瞬时错误仅在首个流事件前执行有界指数退避，并支持 abort；已有部分输出时绝不重试
+- 验证：AI/Provider/Compaction 邻接 159 passed；Backend 2121 passed / 7 skipped / 9 deselected / coverage 77.13%；Ruff、strict Mypy 187 files、Frontend 183/183 + typecheck/lint/build 全部通过
+
 ### Sandbox artifact review and recovery（2026-08-30）
 
 - 待批准与 `publish_conflict` 的冻结 Artifact 可通过只读 API 在 Workspace 树逐项预览、下载；Python 源码预览增加不执行内容的轻量词法高亮

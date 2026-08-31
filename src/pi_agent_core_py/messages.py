@@ -13,7 +13,8 @@ P0-3 新增：
 - `FileBlock`：UserMessage.content 里的文件元信息块（不发全文）
 - `UserMessage.content` 扩展为 `list[TextContent | FileBlock]`，靠 `type` 判别
 - `convert_to_llm` 把 FileBlock 转成文本说明，提示 LLM 调用 view_file
-- 不引入 ImageBlock；图片统一以 FileBlock(format="image_unsupported") 注入
+- 附件默认仍以 FileBlock 注入；AI 核心同时提供 provider-neutral ImageContent，
+  供具备视觉能力的上层直接传递 base64 图片
 
 Step 5 起，run_event_loop 接入单工具执行：模型返回 ToolCall → registry 查找 →
 执行 → 包成 ToolResultMessage → 加入上下文 → 再次调用 LLM。
@@ -23,7 +24,7 @@ from __future__ import annotations
 import time
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_serializer
 
 # ============================================================================
 # 内容块
@@ -33,6 +34,35 @@ from pydantic import BaseModel, Field
 class TextContent(BaseModel):
     type: Literal["text"] = "text"
     text: str
+
+
+class ImageContent(BaseModel):
+    """Provider-neutral inline image content.
+
+    ``data`` is raw base64 without a data-URL prefix.  Keeping the MIME type
+    separate lets each provider adapter render its own wire format safely.
+    """
+
+    type: Literal["image"] = "image"
+    data: str
+    mime_type: str
+
+    @field_validator("data")
+    @classmethod
+    def _validate_data(cls, value: str) -> str:
+        if not value or value.startswith("data:"):
+            raise ValueError("image data must be non-empty raw base64")
+        return value
+
+    @field_validator("mime_type")
+    @classmethod
+    def _validate_mime_type(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {
+            "image/jpeg", "image/png", "image/gif", "image/webp",
+        }:
+            raise ValueError("unsupported image MIME type")
+        return normalized
 
 
 class ThinkingContent(BaseModel):
@@ -112,13 +142,56 @@ AssistantContent = Union[TextContent, ThinkingContent, ToolCall]  # noqa: UP007
 #: P0-3：UserMessage.content 现可包含文件元信息块 FileBlock。
 #: 通过 `type` 字段判别（"text" / "file"）——Pydantic 自动 union 解析。
 #: 旧 str 入参已被 TextContent 替代；这里保持 list 入参契约不破坏。
-UserContent = Union[TextContent, FileBlock]  # noqa: UP007
+UserContent = Union[TextContent, ImageContent, FileBlock]  # noqa: UP007
+
+#: Provider-visible content shared by user and tool-result messages.
+ContentBlock = Union[TextContent, ImageContent]  # noqa: UP007
+
+
+class UsageCost(BaseModel):
+    """Optional monetary cost breakdown in the provider/model currency."""
+
+    input: float = 0.0
+    output: float = 0.0
+    cache_read: float = 0.0
+    cache_write: float = 0.0
+    total: float = 0.0
 
 
 class Usage(BaseModel):
     input: int = 0
     output: int = 0
+    cache_read: int = 0
+    cache_write: int = 0
+    cache_write_1h: int = 0
+    # None means the provider did not expose a reasoning breakdown.  A
+    # reported zero is meaningful and is serialized.
+    reasoning: int | None = None
     total_tokens: int = 0
+    # None means pricing metadata was unavailable; zero is then not confused
+    # with a genuinely free request.
+    cost: UsageCost | None = None
+
+    @model_serializer(mode="plain")
+    def _serialize(self) -> dict[str, int | UsageCost | None]:
+        """Keep legacy payloads stable while retaining richer non-zero data."""
+
+        payload: dict[str, int | UsageCost | None] = {
+            "input": self.input,
+            "output": self.output,
+            "total_tokens": self.total_tokens,
+        }
+        if self.cache_read:
+            payload["cache_read"] = self.cache_read
+        if self.cache_write:
+            payload["cache_write"] = self.cache_write
+        if self.cache_write_1h:
+            payload["cache_write_1h"] = self.cache_write_1h
+        if self.reasoning is not None:
+            payload["reasoning"] = self.reasoning
+        if self.cost is not None:
+            payload["cost"] = self.cost
+        return payload
 
 
 class GenerationMetrics(BaseModel):
@@ -183,7 +256,7 @@ class ToolResultMessage(BaseModel):
     role: Literal["toolResult"] = "toolResult"
     tool_call_id: str
     name: str
-    content: list[TextContent] = Field(default_factory=list)
+    content: list[ContentBlock] = Field(default_factory=list)
     is_error: bool = False
     terminate: bool = False
     details: dict[str, Any] = Field(default_factory=dict)
@@ -262,10 +335,10 @@ AgentMessage = Annotated[
 
 
 __all__ = [
-    "TextContent", "ThinkingContent", "ToolCall", "AssistantContent",
+    "TextContent", "ImageContent", "ThinkingContent", "ToolCall", "AssistantContent",
     # P0-3
-    "FileFormat", "FileBlock", "UserContent",
-    "Usage", "GenerationMetrics",
+    "FileFormat", "FileBlock", "UserContent", "ContentBlock",
+    "Usage", "UsageCost", "GenerationMetrics",
     "UserMessage", "AssistantMessage", "ToolResultMessage", "Message",
     "CustomMessage", "AgentMessage",
     # Step 15

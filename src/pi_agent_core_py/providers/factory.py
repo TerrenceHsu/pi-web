@@ -98,6 +98,8 @@ def create_provider(
                     base_url=base_url,
                     model=model_id,
                 ),
+                provider_id="anthropic",
+                supports_images=True,
             )
 
         if provider_definition.api_style == "openai_compatible":

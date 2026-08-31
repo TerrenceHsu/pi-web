@@ -42,6 +42,12 @@ from .providers.base import ProviderAdapter, ProviderRequest
 from .providers.errors import ProviderError
 from .providers.fake import FakeProviderAdapter
 from .providers.glm import GLMConfig, GLMProviderAdapter, resolve_glm_credentials
+from .providers.retry import (
+    ProviderRetryPolicy,
+    is_retryable_provider_error,
+    wait_for_retry,
+)
+from .providers.transform import transform_messages_for_provider
 from .stream_events import (
     DoneEvent,
     ErrorEvent,
@@ -82,10 +88,17 @@ class ModelClient:
     api_id: str = ""
     model: str = ""
 
-    def __init__(self, adapter: ProviderAdapter) -> None:
+    def __init__(
+        self,
+        adapter: ProviderAdapter,
+        *,
+        retry_policy: ProviderRetryPolicy | None = None,
+    ) -> None:
         self.adapter = adapter
+        self.retry_policy = retry_policy or ProviderRetryPolicy()
         # 暴露 adapter 的 provider_id / model，便于上层 metadata 使用
         self.provider_id = getattr(adapter, "provider_id", "") or self.provider_id
+        self.api_id = getattr(adapter, "api_id", "") or self.api_id
         self.model = getattr(adapter, "model", "") or self.model
 
     async def stream(
@@ -104,20 +117,59 @@ class ModelClient:
 
         注意：子类**不应**覆盖此方法；如需自定义行为，覆盖 adapter 即可。
         """
-        request = ProviderRequest(
+        transformed_messages = transform_messages_for_provider(
+            messages,
+            target_provider=self.provider_id,
+            target_api=self.api_id,
+            target_model=self.model,
+            supports_images=bool(getattr(self.adapter, "supports_images", False)),
+            normalize_tool_call_id=self.adapter.normalize_tool_call_id,
+        )
+        base_request = ProviderRequest(
             system_prompt=system_prompt,
-            messages=messages,
+            messages=transformed_messages,
             tools=list(tools) if tools else [],
             signal=signal,
             metadata=dict(metadata) if metadata else {},
         )
-        try:
-            async for ev in self.adapter.stream(request):
-                yield ev
-        except ProviderError as e:
-            yield ErrorEvent(message=f"{type(e).__name__}: {e}")
-        except Exception as e:
-            yield ErrorEvent(message=f"{type(e).__name__}: {e}")
+        retry_index = 0
+        while True:
+            emitted = False
+            request_metadata = dict(base_request.metadata)
+            if retry_index:
+                request_metadata["pi_agent_retry_attempt"] = retry_index
+            request = ProviderRequest(
+                system_prompt=base_request.system_prompt,
+                messages=[message.model_copy(deep=True) for message in base_request.messages],
+                tools=[tool.model_copy(deep=True) for tool in base_request.tools],
+                signal=base_request.signal,
+                metadata=request_metadata,
+            )
+            try:
+                async for ev in self.adapter.stream(request):
+                    emitted = True
+                    yield ev
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                can_retry = (
+                    not emitted
+                    and retry_index < self.retry_policy.max_retries
+                    and is_retryable_provider_error(e)
+                )
+                if can_retry:
+                    retry_index += 1
+                    delay = self.retry_policy.delay_for_retry(retry_index, e)
+                    if await wait_for_retry(delay, signal):
+                        continue
+                    yield DoneEvent(stop_reason="aborted")
+                    return
+                if isinstance(e, ProviderError):
+                    yield ErrorEvent(message=f"{type(e).__name__}: {e}")
+                else:
+                    yield ErrorEvent(message=f"{type(e).__name__}: {e}")
+                return
 
     async def close(self) -> None:
         """关闭底层 provider adapter 释放资源（httpx client 等）。幂等。

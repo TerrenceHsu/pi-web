@@ -35,6 +35,7 @@ from .messages import (
     AssistantMessage,
     CustomMessage,
     FileBlock,
+    ImageContent,
     SummaryMessage,
     TextContent,
     ThinkingContent,
@@ -94,14 +95,14 @@ def convert_to_llm(messages: list[AgentMessage]) -> list[LLMMessage]:
         if isinstance(m, UserMessage):
             # P0-3：UserMessage.content 现含 FileBlock；统一转成 TextContent
             # FileBlock → 一段说明文本（不发全文 / 不发 path / 不区分 provider）
-            new_content: list[TextContent] = []
+            new_content: list[TextContent | ImageContent] = []
             for block in m.content:
                 if isinstance(block, FileBlock):
                     new_content.append(TextContent(
                         text=_render_file_block_to_text(block),
                     ))
                 else:
-                    # TextContent 透传（已是 TextContent 实例）
+                    # TextContent / ImageContent 透传。
                     new_content.append(block)
             out.append(LLMUserMessage(
                 content=new_content, timestamp=m.timestamp,
