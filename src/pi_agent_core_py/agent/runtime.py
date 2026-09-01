@@ -1,4 +1,4 @@
-"""Agent 状态机 + Queue / Abort（Step 9）。
+"""Agent runtime state machine, queues, and cooperative abort.
 
 在 Step 8 的单 turn 状态机之上加入：
 - **single active request**：活跃期间普通 prompt / continue 立即拒绝
@@ -35,6 +35,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, TypeAdapter
 
+from ..ai.model_client import ModelClient
+from ..policy import (
+    InMemoryToolPermissionAuditLog,
+    ToolApprovalHandler,
+    ToolPermissionPolicy,
+)
 from .context import ConvertToLLMFn, TransformContextFn
 from .events import (
     AgentAbortEvent,
@@ -67,13 +73,7 @@ from .messages import (
     TextContent,
     UserMessage,
 )
-from .model_client import ModelClient
-from .policy import (
-    InMemoryToolPermissionAuditLog,
-    ToolApprovalHandler,
-    ToolPermissionPolicy,
-)
-from .tools import (
+from .tooling import (
     AgentTool,
     ToolExecutionMode,
     ToolRegistry,

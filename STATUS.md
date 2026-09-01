@@ -1,12 +1,12 @@
 # Project Status
 
-> 当前事实快照，校准日期：**2026-08-31**。本页只描述当前代码基线；阶段性测试数字和历史决策保留在 `docs/validation/`、`CHANGELOG.md` 与归档计划中。
+> 当前事实快照，校准日期：**2026-09-01**。本页只描述当前代码基线；阶段性测试数字和历史决策保留在 `docs/validation/`、`CHANGELOG.md` 与归档计划中。
 
 ## 基线身份
 
 | 项 | 当前事实 |
 |---|---|
-| 代码基线 | `0.0.29` 发布基线之后的 `master`；新增三类意图路由、Planner–Executor–Verifier Plan Mode、Sandbox 审阅/冲突恢复，以及 pi `ai` / `agent` 核心契约补齐 |
+| 代码基线 | `0.0.29` 发布基线之后的 `master`；新增三类意图路由、Planner–Executor–Verifier Plan Mode、Sandbox 审阅/冲突恢复，以及 pi `ai` / `agent` 核心契约与 package 边界对齐 |
 | 分支 | `master` |
 | 最新 release tag | `0.0.29`；annotated tag 指向本次统一版本与发布验证提交 |
 | Python / API 版本 | `0.0.29`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
@@ -31,6 +31,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 | Multi-provider Runtime / UI | ✅ 完成 | GLM、Qwen、Kimi；Anthropic-compatible 后端能力 |
 | pi `ai` 核心契约对齐（第一项） | ✅ P0 差距已补齐 | provider-aware 历史转换、精确 provider/API/model 身份、跨模型 thinking 安全降级、text/image 内容块、工具调用配对修复、cache/reasoning Usage、首事件前可中止重试；详见 `docs/validation/pi-ai-parity-2026-08-31.md` |
 | pi `agent` 核心契约对齐（第二项） | ✅ P0 差距已补齐 | 生命周期终化、下一轮控制顺序、文本/图片/AgentMessage prompt、signal-aware context、自定义 LLM 转换、工具参数预处理与 hook patch、assistant-tail 队列续作、thinking/运行时替换和公开状态同步；详见 `docs/validation/pi-agent-parity-2026-08-31.md` |
+| pi `agent` package 结构对齐 | ✅ 完成 | canonical 实现迁入 `ai/`、`agent/`、`agent/harness/{compaction,session,tools}` 与 `session_backends/sqlite/`；旧平铺模块保留 thin facade/模块别名，兼容导入保持对象身份；AST 依赖边界、wheel 内容与隔离安装导入均通过；详见 `docs/validation/pi-agent-package-structure-2026-09-01.md` |
 | 旧 Chunk Knowledge PDF → Chunk FTS5 → Citation | 🗄️ 历史兼容 | 实现仅保留显式兼容入口；默认套件只保留不可误启动守卫，不再进入产品组合或前端 |
 | 登录与账号工作区隔离 | ✅ 完成 | `b529bbc` |
 | Session Workspace、`AGENT.md`、`Memory.md`、`/checkpointer` | ✅ 完成 | `WorkspaceStore` 为唯一规范事实源；新旧 Session 幂等初始化两个固定根文件，保留旧正文/file id；设计见 `docs/design/workspace-sandbox-integration.md` |
@@ -98,6 +99,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 - 独立 `/knowledge` 页面支持 Wiki Space、PDF/HTML Source、Raw artifacts、页面/revision、页面 FTS5、已发布图谱、统一 diff 审批与每 Space 多 Agent 对话
 - `create_app(wiki_root=...)` 运行独立 Wiki Store/API/Worker；HTML 真实离线解析，PDF 未配置 Provider 时保持 `uploaded`。旧 Chunk Knowledge 默认完全关闭且 API 为 404，不与 Wiki 共享表或业务数据
 - Core Runtime 的一个 Turn 等于“一次 LLM 调用 + 该调用产生的当批工具”；Snapshot 分为 RequestSnapshot 与 TurnSnapshot
+- Core Runtime 的 canonical package 自底向上为 `ai ← agent core ← agent.harness ← session_backends`（右侧依赖左侧）；旧 `messages.py`、`loop.py`、`harness.py`、`session_sqlite.py` 等路径只承担兼容导入，不再复制实现
 - 并行工具批次先按源序串行完成 hook、权限、审批与参数校验，再并行执行已放行工具；hook 不得改写 tool-call ID
 - Agent 支持独立 steering / follow-up 队列及 `all` / `one-at-a-time` 消费模式；活跃请求期间普通 prompt/continue 明确拒绝
 - Agent prompt 支持文本+图片、单条或批量 `AgentMessage`；`CustomMessage` 可由应用自定义转换进入模型，并在 Harness、Snapshot 与 Session 中无损保留
@@ -139,21 +141,22 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 | API Key | OS Keyring、显式 session-only memory 或显式 env；不写入 SQLite 明文 |
 | Active request / pending approval / event subscribers | 当前后端进程内存；后端重启不恢复执行 |
 
-## 2026-08-31 当前验证基线
+## 2026-09-01 当前验证基线
 
-当前 `0.0.29` 后续代码已实际复跑全量离线 Backend、Frontend 与 Browser E2E；本轮修复
-Plan Mode 绕过单一 Provider binding 入口的安全门禁、旧前端测试 mock 的 stderr warning，以及
-生成文档只读提示的 Browser 回归。真实 E2B、Parser OCI 与 DDGS/GLM 继续沿用最近一次保留证据：
+当前 `0.0.29` 后续代码已实际复跑全量离线 Backend、Frontend 与静态门禁；本轮完成 pi
+package 结构对齐并验证旧导入兼容、依赖方向与 wheel 内容。Browser E2E、真实 E2B、Parser OCI
+与 DDGS/GLM 继续沿用最近一次保留证据：
 
 | 验证 | 结果 | 备注 |
 |---|---|---|
 | Ruff 全量 | **PASS** | CI 口径 `ruff check src/ tests/`；0 errors |
-| strict Mypy 全量 | **PASS** | `mypy src`：187 source files / 0 issues；覆盖 Wiki、独立 Workspace/Plan 包、Workspace 文档转换、Managed Sandbox、AI Provider 边界与产品组合边界 |
+| strict Mypy 全量 | **PASS** | `mypy src`：232 source files / 0 issues；覆盖 Wiki、独立 Workspace/Plan 包、Workspace 文档转换、Managed Sandbox、AI/Agent/Harness/SQLite package 边界与产品组合边界 |
 | Backend 全量离线（第二轮前基线） | **3143 passed, 7 skipped, 9 deselected** | 当时为 3159 collected；`pytest tests --tb=short -q`；1053.41s；coverage 81.91% |
-| Backend 当前精简套件 | **2131 passed, 7 skipped, 9 deselected** | `pytest tests --tb=short -q`；370.94s；coverage 77.24%；默认排除真实外网、LLM 与 Docker marker |
+| Backend 当前精简套件 | **2138 passed, 7 skipped, 9 deselected** | `pytest -q`；365.58s；coverage 77.33%；默认排除真实外网、LLM 与 Docker marker |
 | Frontend 当前精简套件 | **183/183 passed** | 26 files；Vitest 0 failure / 0 stderr warning；同时通过 typecheck、ESLint 与 production build |
 | pi `ai` 对齐专项 | **159 passed** | provider history/image/usage/retry 新增回归及 Anthropic/OpenAI/Factory/Context Budget/Compaction 邻接测试；2.36s，0 failure |
 | pi `agent` 对齐专项 | **36 passed；邻接 127 passed** | Agent/P0 lifecycle/control queue/public state 36 项；再含 Session/Compaction/ToolResult/Coding Sandbox 邻接共 127 项；0 failure |
+| pi package 结构专项 | **7 passed；wheel PASS** | 旧/新导入对象身份、AI/Agent AST 依赖方向与旧 facade 约束；wheel 393 entries，隔离安装后 Agent/Harness/SQLite canonical import 通过 |
 | LLM Wiki 发布候选定向回归 | **Backend 67 passed, 1 skipped；Frontend 16/16；Browser 1/1** | 覆盖 Store/API/Summary/Fake Parser、五个 Wiki 前端视图与 source→approval→page→graph→conversation 浏览器主链路 |
 | Workspace 阶段 1 定向回归 | **125 passed** | `VirtualFileStore` 兼容别名、双根初始化、并发幂等、旧路径/purpose 迁移、固定根删除保护、Checkpointer/Auth/重启；`-W error` 下 0 warning |
 | Workspace 阶段 2 定向回归 | **116 passed** | 代码 `scripts/**` 映射、安全逻辑路径、revision 持久/冲突、Markdown CRUD、Agent 工具与 Web API；使用 `--no-cov` 定向运行 |

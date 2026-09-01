@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### pi `agent` core and package structure parity（2026-09-01）
+
+- 补齐 Agent loop/state/tool 契约：终态生命周期、下一轮控制顺序、富消息 prompt、signal-aware context、自定义转换、工具参数预处理/hook patch、assistant-tail queue、thinking 与动态运行时替换
+- 将 canonical 实现按 pi 的职责方向迁入 `ai/`、`agent/`、`agent/harness/{compaction,session,tools}` 与 `session_backends/sqlite/`；旧平铺路径保留对象身份一致的兼容 facade，`session_sqlite` 同时保留历史模块 monkeypatch 语义
+- 新增结构契约测试，固定旧/新导入身份、`ai → agent → harness → backend` 依赖方向与 facade 轻量性；wheel 构建、内容检查和隔离安装导入通过
+- 验证：Backend 2138 passed / 7 skipped / 9 deselected / coverage 77.33%；Ruff、strict Mypy 232 files、Worker Ruff/Mypy、Frontend 183/183 + typecheck/lint/build 全部通过
+
 ### pi `ai` core parity（2026-08-31）
 
 - 新增不可变、provider-aware 历史转换：只有完全相同的 provider/API/model 才回放签名或 redacted thinking；跨模型把可见思考降为普通文本、丢弃密文块，并过滤 aborted/error assistant 历史

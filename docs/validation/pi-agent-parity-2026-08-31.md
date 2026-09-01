@@ -4,8 +4,9 @@
 
 本轮只处理用户确认的第 2 项 `agent`：Agent loop、工具执行、控制队列、上下文边界与公开状态机。
 对照源为 `D:\LLMTutorial\pi\pi-main\packages\agent`；本项目主要实现位于
-`src/pi_agent_core_py/{agent,loop,hooks,tools,context,events}`，并同步修正 Harness、Snapshot、
-Session 与 Web 组合层的消息类型边界。`coding-agent`、SQLite backend 和 telemetry 留到后续阶段。
+功能实现当前位于 `src/pi_agent_core_py/agent/`，并同步修正 Harness、Snapshot、Session 与 Web
+组合层的消息类型边界；旧平铺路径保留兼容 facade。`coding-agent`、SQLite backend 的功能审查和
+telemetry 留到后续阶段；物理 package 迁移另见 `pi-agent-package-structure-2026-09-01.md`。
 
 ## 差异与处理结果
 

@@ -318,11 +318,15 @@ FakeClient，不访问真实 Provider。
 ```text
 .
 ├── src/pi_agent_core_py/
-│   ├── agent.py / loop.py / harness.py / snapshot.py
-│   ├── providers/              # GLM / Anthropic / OpenAI-compatible
+│   ├── ai/                     # messages、ModelClient、stream、Provider adapters
+│   ├── agent/                  # runtime、loop、events、hooks、context、tool contracts
+│   │   └── harness/            # lifecycle、compaction、session、skills、通用工具
+│   ├── session_backends/
+│   │   └── sqlite/             # append-only Session tree backend
+│   ├── *.py / providers/       # 旧公开路径的兼容 facade
 │   ├── mcp/                    # MCP client、transport、DDGS server
 │   ├── policy/                 # permission 与 sandbox helpers
-│   ├── tools/                  # list/view/write/web search
+│   ├── tools/                  # 兼容 facade + coding-sandbox 产品工具
 │   └── web/
 │       ├── app.py              # 工作区 FastAPI composition root
 │       ├── auth/               # 本地账号与登录网关
