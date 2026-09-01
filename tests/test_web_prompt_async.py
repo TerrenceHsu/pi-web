@@ -11,7 +11,7 @@
 8. unknown skill 返回 400，不创建 request
 9. 非本 session file 返回 404/403，不创建 request
 10. 同 session 并发返回 409
-11. 全局 single harness busy 返回 409
+11. 不同 Session 使用独立 Harness，可并行执行
 12. background 异常变 status=error
 13. abort running request → aborted
 14. abort completed 幂等
@@ -308,26 +308,35 @@ def test_10_async_concurrent_same_session_returns_409(web_client_slow):
     assert len(state.active_requests) == 1
 
 
-def test_11_async_global_busy_returns_409(web_client_slow):
-    """全局 single harness busy → 409（§5.8 #11）。
-
-    即使不同 session_id（绕过 session 级检查），_ensure_idle 仍会因 state.running
-    抛 409。"""
-    client, _, _ = web_client_slow
+def test_11_async_different_sessions_use_independent_runtimes(web_client_slow):
+    """不同 Session 可同时拥有 active request，且 Runtime/Harness 不共享。"""
+    client, _, app = web_client_slow
     # 启动第一个（slow）
     resp1 = client.post("/api/prompt/async", json={"text": "first"})
     assert resp1.status_code == 202
 
-    # 第二个用不同 session_id（绕过 session 检查）——但仍应被 _ensure_idle 拒
-    # 注意：需要先创建第二个 session
+    first_sid = resp1.json()["session_id"]
+    first_request_id = resp1.json()["request_id"]
+
+    # 第二个用不同 session_id，应进入另一个 Agent/Harness 状态机。
     new_session = client.post("/api/sessions", json={"title": "second"})
     new_sid = new_session.json()["id"]
     resp2 = client.post(
         "/api/prompt/async",
         json={"text": "second", "session_id": new_sid},
     )
-    # _ensure_idle 检查 state.running（第一个启动后变 True）
-    assert resp2.status_code == 409
+    assert resp2.status_code == 202
+    second_request_id = resp2.json()["request_id"]
+
+    first_runtime = app.state.coding_agent_runtime.get(first_sid)
+    second_runtime = app.state.coding_agent_runtime.get(new_sid)
+    assert first_runtime is not None
+    assert second_runtime is not None
+    assert first_runtime is not second_runtime
+    assert first_runtime.harness is not second_runtime.harness
+
+    assert _wait_for_status(client, first_request_id, ("completed",))["status"] == "completed"
+    assert _wait_for_status(client, second_request_id, ("completed",))["status"] == "completed"
 
 
 # ============================================================================

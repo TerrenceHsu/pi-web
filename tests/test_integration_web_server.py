@@ -258,14 +258,15 @@ def test_post_prompt_returns_409_when_harness_already_running(monkeypatch):
         dispose_app(app)
 
 
-def test_post_prompt_409_when_state_running_flag_set(web_client):
-    """WebAppState.running=True（同一 app 重复 POST）→ 409。"""
+def test_stale_global_running_projection_does_not_block_idle_session(web_client):
+    """Admission uses the target Runtime Session, not a stale global projection."""
     client, _, app = web_client
-    # 强制 set running=True，模拟并发 POST
+    # running is an aggregate UI projection; per-Session reservations and the
+    # target Harness state are authoritative for admission.
     app.state.web.running = True
     try:
         r = client.post("/api/prompt", json={"text": "x"})
-        assert r.status_code == 409
+        assert r.status_code == 200
     finally:
         app.state.web.running = False
 

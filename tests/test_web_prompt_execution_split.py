@@ -359,9 +359,10 @@ async def test_running_period_old_messages_unchanged(web_app, monkeypatch):
     client, harness, app = web_app
     sid, aid = await _seed_session(client)
     old = await _get_assistant_content_json(client, sid, aid)
+    session_harness = app.state.coding_agent_runtime.get(sid).harness
 
     # 让 run_continue 慢一点
-    real_run_continue = harness.run_continue
+    real_run_continue = session_harness.run_continue
 
     captured: dict[str, Any] = {}
 
@@ -371,7 +372,7 @@ async def test_running_period_old_messages_unchanged(web_app, monkeypatch):
         await asyncio.sleep(0.05)
         return await real_run_continue(*args, **kwargs)
 
-    monkeypatch.setattr(harness, "run_continue", slow_continue)
+    monkeypatch.setattr(session_harness, "run_continue", slow_continue)
 
     run_regen = client.app.state.d24_run_regeneration
     validate = client.app.state.d24_validated_factory
@@ -387,11 +388,12 @@ async def test_model_error_messages_unchanged(web_app, monkeypatch):
     client, harness, app = web_app
     sid, aid = await _seed_session(client)
     old = await _get_assistant_content_json(client, sid, aid)
+    session_harness = app.state.coding_agent_runtime.get(sid).harness
 
     async def failing_run_continue(*args, **kwargs):
         raise RuntimeError("model blew up")
 
-    monkeypatch.setattr(harness, "run_continue", failing_run_continue)
+    monkeypatch.setattr(session_harness, "run_continue", failing_run_continue)
 
     run_regen = client.app.state.d24_run_regeneration
     validate = client.app.state.d24_validated_factory
@@ -408,9 +410,10 @@ async def test_finalize_hash_stale_messages_unchanged(web_app, monkeypatch):
     client, harness, app = web_app
     sid, aid = await _seed_session(client)
     old = await _get_assistant_content_json(client, sid, aid)
+    session_harness = app.state.coding_agent_runtime.get(sid).harness
 
     # 篡改 create_running_revision 后的 messages.content_json，让 finalize 时 hash mismatch
-    real_run_continue = harness.run_continue
+    real_run_continue = session_harness.run_continue
     tampered = False
 
     async def tamper_then_continue(*args, **kwargs):
@@ -426,7 +429,7 @@ async def test_finalize_hash_stale_messages_unchanged(web_app, monkeypatch):
             tampered = True
         return await real_run_continue(*args, **kwargs)
 
-    monkeypatch.setattr(harness, "run_continue", tamper_then_continue)
+    monkeypatch.setattr(session_harness, "run_continue", tamper_then_continue)
 
     run_regen = client.app.state.d24_run_regeneration
     validate = client.app.state.d24_validated_factory
@@ -467,14 +470,15 @@ async def test_harness_restored_to_canonical_after_success(web_app):
     validate = client.app.state.d24_validated_factory
     validated = await validate({"text": "x", "session_id": sid})
     await run_regen(validated, assistant_message_id=aid, request_id="req-1")
+    session_harness = validated.agent_session.harness
 
     # harness state 应该 == canonical
     canonical_after = await state.session_store.list_messages(sid)
     assert len(canonical_after) == len_before
     # agent state 应该已 reset（无截断 context 残留）
-    assert len(harness.agent.state.messages) == len_before
+    assert len(session_harness.agent.state.messages) == len_before
     # 内容应该匹配
-    assert [type(m).__name__ for m in harness.agent.state.messages] == [
+    assert [type(m).__name__ for m in session_harness.agent.state.messages] == [
         type(m).__name__ for m in canonical_after
     ]
 
@@ -485,11 +489,12 @@ async def test_harness_restored_after_model_error(web_app, monkeypatch):
     sid, aid = await _seed_session(client)
     state = client.app.state.web
     canonical_before = await state.session_store.list_messages(sid)
+    session_harness = app.state.coding_agent_runtime.get(sid).harness
 
     async def failing(*args, **kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(harness, "run_continue", failing)
+    monkeypatch.setattr(session_harness, "run_continue", failing)
 
     run_regen = client.app.state.d24_run_regeneration
     validate = client.app.state.d24_validated_factory
@@ -499,7 +504,9 @@ async def test_harness_restored_after_model_error(web_app, monkeypatch):
 
     # harness state 应已恢复
     canonical_after = await state.session_store.list_messages(sid)
-    assert len(harness.agent.state.messages) == len(canonical_after) == len(canonical_before)
+    assert len(session_harness.agent.state.messages) == len(canonical_after) == len(
+        canonical_before
+    )
 
 
 async def test_no_truncated_context_residue(web_app):
@@ -512,12 +519,16 @@ async def test_no_truncated_context_residue(web_app):
     validate = client.app.state.d24_validated_factory
     validated = await validate({"text": "x", "session_id": sid})
     await run_regen(validated, assistant_message_id=aid, request_id="req-1")
+    session_harness = validated.agent_session.harness
 
     # agent state 长度应该 == canonical（2：user + assistant），不是截断后的 1
     canonical = await state.session_store.list_messages(sid)
-    assert len(harness.agent.state.messages) == len(canonical)
+    assert len(session_harness.agent.state.messages) == len(canonical)
     # 必须含 assistant（不是只 user）
-    assert any(isinstance(m, AssistantMessage) for m in harness.agent.state.messages)
+    assert any(
+        isinstance(m, AssistantMessage)
+        for m in session_harness.agent.state.messages
+    )
 
 
 async def test_no_partial_tool_turn_residue(web_app):
@@ -529,11 +540,12 @@ async def test_no_partial_tool_turn_residue(web_app):
     validate = client.app.state.d24_validated_factory
     validated = await validate({"text": "x", "session_id": sid})
     await run_regen(validated, assistant_message_id=aid, request_id="req-1")
+    session_harness = validated.agent_session.harness
 
     # agent state 应不含 ToolCall（fake backend 不调工具）
     from pi_agent_core_py.messages import ToolCall
 
-    for m in harness.agent.state.messages:
+    for m in session_harness.agent.state.messages:
         if isinstance(m, AssistantMessage):
             for c in m.content:
                 assert not isinstance(c, ToolCall)

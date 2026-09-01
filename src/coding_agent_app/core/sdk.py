@@ -1,9 +1,11 @@
 """Stable public SDK exports for coding-agent product composition."""
 
 from .application import CodingAgentApplication, create_coding_agent_application
+from .harness_template import clone_agent_harness
 from .resources import (
     CodingAgentResourceLoader,
     CodingAgentResourceSnapshot,
+    HarnessCodingAgentResourceLoader,
     ResourceDiagnostic,
     ResourceDiagnosticLevel,
     StaticCodingAgentResourceLoader,
@@ -13,9 +15,14 @@ from .runtime import (
     CodingAgentSessionFactory,
     create_coding_agent_runtime,
 )
-from .services import CodingAgentServices, create_coding_agent_services
+from .services import (
+    CodingAgentProviderRuntime,
+    CodingAgentServices,
+    create_coding_agent_services,
+)
 from .session import (
     CodingAgentRequestBinding,
+    CodingAgentRequestComposition,
     CodingAgentSession,
     create_coding_agent_session,
 )
@@ -35,9 +42,11 @@ __all__ = [
     "CodingAgentApplication",
     "CodingAgentMode",
     "CodingAgentRequestBinding",
+    "CodingAgentRequestComposition",
     "CodingAgentResourceLoader",
     "CodingAgentResourceSnapshot",
     "CodingAgentRuntime",
+    "CodingAgentProviderRuntime",
     "CodingAgentServices",
     "CodingAgentSession",
     "CodingAgentSessionFactory",
@@ -46,11 +55,13 @@ __all__ = [
     "CodingAgentToolset",
     "ResourceDiagnostic",
     "ResourceDiagnosticLevel",
+    "HarnessCodingAgentResourceLoader",
     "StaticCodingAgentResourceLoader",
     "StaticCodingAgentSettingsProvider",
     "ToolsetResolutionError",
     "ToolsetResolver",
     "create_coding_agent_application",
+    "clone_agent_harness",
     "create_coding_agent_runtime",
     "create_coding_agent_services",
     "create_coding_agent_session",

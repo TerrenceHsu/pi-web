@@ -69,6 +69,12 @@ from agent_workspace.continuity import (
 )
 from coding_agent_app.core import (
     CodingAgentMode,
+    CodingAgentResourceSnapshot,
+    CodingAgentRuntime,
+    CodingAgentSession,
+    HarnessCodingAgentResourceLoader,
+    clone_agent_harness,
+    create_coding_agent_services,
     create_coding_agent_session,
 )
 from coding_agent_app.intent_router import (
@@ -102,7 +108,6 @@ from .providers.runtime import (
     ProviderSelectionDisabledError,
     ProviderSelectionNotFoundError,
     ProviderSelectionUnavailableError,
-    RequestProviderSelection,
 )
 from .serializers import (
     serialize_event,
@@ -224,6 +229,8 @@ class _PromptValidated:
     execution_mode: Literal["direct", "plan"] = "direct"
     intent: IntentDecision | None = None
     pending_continuity_evidence: AutoMemoryOperationEvidence | None = None
+    agent_session: Any = None
+    reservation_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -241,6 +248,7 @@ class ValidatedRegenerationRequest:
     history: tuple[Any, ...]
     original_harness_messages: tuple[Any, ...]
     knowledge_conversation: Any = None
+    agent_session: Any = None
 
 
 class RegenerationValidationError(Exception):
@@ -487,6 +495,9 @@ def create_app(
         "coding_sandbox_tool_names": set(),
         "continuity_tasks": set(),
         "plan_approval_events": {},
+        "coding_agent_session_ids": {},
+        "coding_agent_request_reservations": set(),
+        "coding_agent_template_session_id": None,
     }
     # Agent file tools may run concurrently for different sessions. A task-local
     # binding prevents one request from observing another request's global web
@@ -495,13 +506,19 @@ def create_app(
         "pi_agent_web_tool_session",
         default=None,
     )
-    # Compatibility composition for the existing single-Harness Web entry.
-    # Request-scoped tools, policy and client wrappers are owned by the product
-    # Session facade instead of being mutated directly by HTTP transport code.
-    coding_agent_session = create_coding_agent_session(
-        session_id="web-shared-harness",
-        harness=harness,
-        read_only_tool=is_read_only_tool_name,
+    request_id_context: ContextVar[str | None] = ContextVar(
+        "pi_agent_web_request_id",
+        default=None,
+    )
+    # The configured Harness is the product template and owns shared extension
+    # transports.  CodingAgentRuntime maps every durable Web Session ID to an
+    # independent Agent/Harness state machine.
+    coding_agent_services = create_coding_agent_services(
+        resources=HarnessCodingAgentResourceLoader(harness),
+    )
+    coding_agent_runtime = CodingAgentRuntime(
+        services=coding_agent_services,
+        session_factory=lambda session_id: _create_web_coding_agent_session(session_id),
     )
 
     # ========================================================================
@@ -576,6 +593,19 @@ def create_app(
             default_session = await session_store.ensure_default_session()
             state.session_store = session_store
             state.current_session_id = default_session.id
+            if coding_agent_runtime.get(default_session.id) is None:
+                default_coding_session = create_coding_agent_session(
+                    session_id=default_session.id,
+                    harness=harness,
+                    read_only_tool=is_read_only_tool_name,
+                    services=coding_agent_services,
+                    close_harness=False,
+                )
+                coding_agent_runtime.register(default_coding_session)
+                _register_web_coding_agent_session(default_coding_session)
+            _app.state.coding_agent_session = coding_agent_runtime.get(
+                default_session.id
+            )
         except Exception:
             # 初始化失败不应阻塞 app 启动——session_store 仍可用 None 路径
             state.session_store = session_store
@@ -1338,12 +1368,16 @@ def create_app(
                         provider_registry=_DEFAULT_REGISTRY,
                         provider_factory=create_provider,
                     )
+                    coding_agent_services.provider_runtime = (
+                        _app.state.request_provider_runtime
+                    )
                     try:
                         async with _wiki_runtime_context():
                             yield
                     finally:
                         _app.state.provider_config_runtime = None
                         _app.state.request_provider_runtime = None
+                        coding_agent_services.provider_runtime = None
                         try:
                             await pc_runtime_cm.__aexit__(None, None, None)
                         except Exception:
@@ -1366,6 +1400,7 @@ def create_app(
                         pass
                 _app.state.credential_runtime = None
                 _app.state.request_provider_runtime = None
+                coding_agent_services.provider_runtime = None
                 try:
                     await cred_runtime_cm.__aexit__(None, None, None)
                 except Exception:
@@ -1375,6 +1410,7 @@ def create_app(
             _app.state.coding_sandbox_runtime = None
             _app.state.provider_config_runtime = None
             _app.state.request_provider_runtime = None
+            coding_agent_services.provider_runtime = None
             async with _wiki_runtime_context():
                 yield
 
@@ -1418,6 +1454,11 @@ def create_app(
             for task in pending_continuity_tasks:
                 task.cancel()
             await asyncio.gather(*pending_continuity_tasks, return_exceptions=True)
+
+        try:
+            await coding_agent_runtime.close()
+        except Exception:
+            pass
 
         # ====================================================================
         # 原清理流程
@@ -1532,7 +1573,10 @@ def create_app(
     app.state.provider_config_runtime = None
     # M1-5: request_provider_runtime placeholder——仅 cred + pc runtime 都启用时填入
     app.state.request_provider_runtime = None
-    app.state.coding_agent_session = coding_agent_session
+    app.state.coding_agent_runtime = coding_agent_runtime
+    # Backwards-compatible projection of the currently selected product
+    # Session.  New code must resolve through coding_agent_runtime by ID.
+    app.state.coding_agent_session = None
     from .source_offer import (
         SourceOfferError,
         build_about_router,
@@ -1743,11 +1787,16 @@ def create_app(
                 # 防御坏 event——不可能发生但兜底
                 payload = {}
             payload.setdefault("type", type(event).__name__)
-            await _emit_web_payload(
-                payload,
-                state.current_request_id,
-                state.current_request_session_id,
-            )
+            session_ids = cast(dict[int, str], container["coding_agent_session_ids"])
+            session_id = session_ids.get(id(getattr(_ctx, "agent", None)))
+            if session_id is None:
+                session_id = tool_session_context.get() or state.current_request_session_id
+            request_id = (
+                state.active_request_by_session.get(session_id)
+                if session_id is not None
+                else None
+            ) or request_id_context.get() or state.current_request_id
+            await _emit_web_payload(payload, request_id, session_id)
         except Exception:
             return
 
@@ -1756,7 +1805,12 @@ def create_app(
     previous_tool_approval_handler = harness.tool_approval_handler
 
     async def _web_tool_approval_handler(context: Any) -> bool:
-        request_id = state.current_request_id
+        session_id = tool_session_context.get() or state.current_request_session_id
+        request_id = (
+            state.active_request_by_session.get(session_id)
+            if session_id is not None
+            else None
+        ) or request_id_context.get() or state.current_request_id
         if request_id is None:
             return False
         request_record = state.active_requests.get(request_id)
@@ -1764,7 +1818,7 @@ def create_app(
             return False
         return await approval_manager.request_approval(
             request_id=request_id,
-            session_id=request_record.session_id,
+            session_id=session_id or request_record.session_id,
             context=context,
         )
 
@@ -1804,6 +1858,7 @@ def create_app(
             context_window=(capabilities.context_window if capabilities else None),
             reserved_output_tokens=(capabilities.max_output_tokens if capabilities else None),
         )
+        bound_session_id = tool_session_context.get()
         await _emit_web_payload(
             {
                 "type": "context_budget_updated",
@@ -1813,8 +1868,14 @@ def create_app(
                 "capability_source": capabilities.source if capabilities else "unknown",
                 "estimate": estimate.to_dict(),
             },
-            state.current_request_id,
-            state.current_request_session_id,
+            (
+                state.active_request_by_session.get(bound_session_id)
+                if bound_session_id is not None
+                else None
+            )
+            or request_id_context.get()
+            or state.current_request_id,
+            bound_session_id or state.current_request_session_id,
         )
         if not estimate.can_send:
             return ModelCallDecision(
@@ -1832,17 +1893,64 @@ def create_app(
     container["hook"] = _web_event_hook
     app.state.web_event_hook = _web_event_hook
 
+    def _register_web_coding_agent_session(
+        agent_session: CodingAgentSession,
+    ) -> None:
+        session_ids = cast(dict[int, str], container["coding_agent_session_ids"])
+        session_ids[id(agent_session.harness.agent)] = agent_session.session_id
+        if agent_session.harness is harness:
+            container["coding_agent_template_session_id"] = agent_session.session_id
+
+    def _create_web_coding_agent_session(session_id: str) -> CodingAgentSession:
+        uses_template = container["coding_agent_template_session_id"] is None
+        session_harness = harness if uses_template else clone_agent_harness(harness)
+        agent_session = create_coding_agent_session(
+            session_id=session_id,
+            harness=session_harness,
+            read_only_tool=is_read_only_tool_name,
+            services=coding_agent_services,
+            close_harness=not uses_template,
+        )
+        _register_web_coding_agent_session(agent_session)
+        return agent_session
+
+    async def _get_coding_agent_session(session_id: str) -> CodingAgentSession:
+        agent_session = await coding_agent_runtime.get_or_create(session_id)
+        if session_id == state.current_session_id:
+            app.state.coding_agent_session = agent_session
+        return agent_session
+
+    async def _get_session_harness(session_id: str) -> AgentHarness:
+        return (await _get_coding_agent_session(session_id)).harness
+
+    async def _remove_coding_agent_session(session_id: str) -> None:
+        agent_session = coding_agent_runtime.get(session_id)
+        if agent_session is None:
+            return
+        # The template Harness is claimed at most once.  If its Web Session is
+        # deleted, future Sessions clone from the now application-owned template
+        # instead of reusing state that belonged to the deleted Session.
+        cast(dict[int, str], container["coding_agent_session_ids"]).pop(
+            id(agent_session.harness.agent),
+            None,
+        )
+        await coding_agent_runtime.remove(session_id)
+
     # ========================================================================
     # Helpers
     # ========================================================================
 
-    def _agent_status() -> str:
+    def _agent_status(target_harness: AgentHarness | None = None) -> str:
         try:
-            return harness.agent.state.status
+            return (target_harness or harness).agent.state.status
         except Exception:
             return "unknown"
 
-    def _ensure_idle() -> None:
+    def _ensure_idle(
+        target_harness: AgentHarness | None = None,
+        *,
+        session_id: str | None = None,
+    ) -> None:
         """检查 harness 和 agent 都处于 idle；否则抛 409。
 
         用于 POST /api/prompt / /api/reset 等"独占式"操作。
@@ -1852,14 +1960,20 @@ def create_app(
         2. harness.context.phase（外部直接调 harness.run_prompt 时由 harness 自己 set）
         3. agent.state.status（Agent 内核 queue 状态）
         """
-        if state.running:
+        reservations = cast(set[str], container["coding_agent_request_reservations"])
+        reservation_key = session_id or "web-legacy"
+        if (
+            session_id is not None
+            and session_id in state.active_request_by_session
+        ) or reservation_key in reservations:
             raise HTTPException(
                 status_code=409,
-                detail="harness is already running a request",
+                detail="session is already running a request",
             )
+        selected_harness = target_harness or harness
         phase: str
         try:
-            phase = harness.context.phase
+            phase = selected_harness.context.phase
         except Exception:
             phase = "unknown"
         if phase != "idle":
@@ -1868,7 +1982,7 @@ def create_app(
                 detail=f"harness phase is {phase!r}",
             )
         try:
-            agent_status: str = harness.agent.state.status
+            agent_status: str = selected_harness.agent.state.status
         except Exception:
             agent_status = "unknown"
         if agent_status in ("running", "aborting"):
@@ -1876,6 +1990,12 @@ def create_app(
                 status_code=409,
                 detail=f"agent is {agent_status!r}",
             )
+
+    def _refresh_running_state() -> None:
+        """Maintain the legacy aggregate flag from per-Session ownership."""
+
+        reservations = cast(set[str], container["coding_agent_request_reservations"])
+        state.running = bool(reservations or state.active_requests)
 
     # ========================================================================
     # P1-C2: Skill persistence helpers
@@ -2318,10 +2438,27 @@ def create_app(
         while the first hadn't yet set ``state.running``. Any exception
         in the remaining validation rolls back the reservation.
         """
-        _ensure_idle()  # HTTPException(409)——HTTP 层 FastAPI 自动处理；async 层 catch
+        session_id = (payload or {}).get("session_id") or state.current_session_id
+        if session_id is not None and not isinstance(session_id, str):
+            raise PromptValidationError(400, "session_id must be a string")
+        if session_id is not None and session_id in deleting_session_ids:
+            raise PromptValidationError(
+                409,
+                f"session {session_id!r} is being deleted",
+            )
+        runtime_session_id = session_id or "web-legacy"
+        agent_session = await _get_coding_agent_session(runtime_session_id)
+        request_harness = agent_session.harness
+        # Provider profiles may be installed/replaced by the application after
+        # a Session was created.  Composition reads the current product service
+        # pointer once and freezes its selection for this request.
+        coding_agent_services.provider_runtime = app.state.request_provider_runtime
+        _ensure_idle(request_harness, session_id=session_id)
 
-        # Atomically reserve the single-active-request slot BEFORE any
-        # await. No suspension point between check and reserve.
+        # Per-Session reservation is atomic after get_or_create. Different Web
+        # Sessions may validate and execute concurrently without sharing state.
+        reservations = cast(set[str], container["coding_agent_request_reservations"])
+        reservations.add(runtime_session_id)
         state.running = True
         original_messages: list[Any] | None = None
 
@@ -2380,8 +2517,10 @@ def create_app(
                     "Plan mode uses fixed Planner, Executor, and Verifier prompts",
                 )
 
-            if merged_names and harness.skill_registry is not None:
-                missing = [n for n in merged_names if not harness.skill_registry.has(n)]
+            resource_snapshot = await coding_agent_services.resources.load(session_id)
+            available_skill_names = {skill.name for skill in resource_snapshot.skills}
+            if merged_names:
+                missing = [n for n in merged_names if n not in available_skill_names]
                 if missing:
                     raise PromptValidationError(
                         400,
@@ -2389,14 +2528,7 @@ def create_app(
                         missing_skill_names=missing,
                     )
 
-            session_id = (payload or {}).get("session_id") or state.current_session_id
             store = state.session_store
-
-            if session_id is not None and session_id in deleting_session_ids:
-                raise PromptValidationError(
-                    409,
-                    f"session {session_id!r} is being deleted",
-                )
 
             if store is not None and session_id is not None:
                 from ..session_sqlite import SessionNotFoundError
@@ -2405,8 +2537,8 @@ def create_app(
                     history = await store.list_messages(session_id)
                 except SessionNotFoundError:
                     raise PromptValidationError(404, f"session {session_id!r} not found") from None
-                original_messages = list(harness.agent.state.messages)
-                harness.agent.state.messages = list(history)
+                original_messages = list(request_harness.agent.state.messages)
+                request_harness.agent.state.messages = list(history)
 
             knowledge_conversation = None
             wiki_store = state.wiki_store
@@ -2506,12 +2638,15 @@ def create_app(
                 coding_mode=coding_mode,
                 execution_mode=execution_mode,
                 intent=intent,
+                agent_session=agent_session,
+                reservation_key=runtime_session_id,
             )
         except Exception:
             # Rollback the reservation if any validation step fails.
             if original_messages is not None:
-                harness.agent.state.messages = original_messages
-            state.running = False
+                request_harness.agent.state.messages = original_messages
+            reservations.discard(runtime_session_id)
+            state.running = bool(reservations or state.active_requests)
             raise
 
     async def _run_prompt_core(
@@ -2577,6 +2712,11 @@ def create_app(
                 "auto_memory_unavailable",
                 "Automatic Memory storage is unavailable.",
             )
+        agent_session = validated.agent_session
+        if agent_session is None:
+            agent_session = await _get_coding_agent_session(session_id)
+            validated.agent_session = agent_session
+        request_harness = agent_session.harness
         if await _auto_memory_blocked_by_sandbox(
             evidence.blocked_by_sandbox_operation_id
         ):
@@ -2614,8 +2754,9 @@ def create_app(
                 original_messages=None,
                 attached_blocks=[],
                 attached_summary=[],
+                agent_session=agent_session,
             )
-            harness.context.metadata["continuity_active"] = True
+            request_harness.context.metadata["continuity_active"] = True
             try:
                 memory_text = cast(
                     str,
@@ -2628,7 +2769,7 @@ def create_app(
                     ),
                 )
             finally:
-                harness.context.metadata.pop("continuity_active", None)
+                request_harness.context.metadata.pop("continuity_active", None)
             updated_ref = await file_store.update_text(
                 session_id,
                 memory_ref.id,
@@ -2658,7 +2799,9 @@ def create_app(
                 "changed_paths": [SESSION_MEMORY_PATH],
                 "deleted_paths": [],
             },
-            state.current_request_id,
+            request_id_context.get()
+            or state.active_request_by_session.get(session_id)
+            or state.current_request_id,
             session_id,
         )
         return {
@@ -2916,15 +3059,22 @@ def create_app(
             }
 
     async def _resume_auto_memory_after_sandbox(session_id: str) -> None:
+        reservations = cast(set[str], container["coding_agent_request_reservations"])
         if (
             not state.auto_memory_enabled
-            or state.running
             or session_id in state.active_request_by_session
+            or session_id in reservations
             or state.session_store is None
             or state.file_store is None
         ):
             return
-        state.running = True
+        agent_session = await _get_coding_agent_session(session_id)
+        try:
+            _ensure_idle(agent_session.harness, session_id=session_id)
+        except HTTPException:
+            return
+        reservations.add(session_id)
+        _refresh_running_state()
         try:
             validated = _PromptValidated(
                 text="",
@@ -2934,12 +3084,14 @@ def create_app(
                 original_messages=None,
                 attached_blocks=[],
                 attached_summary=[],
+                agent_session=agent_session,
             )
             await _resume_pending_auto_memory(validated)
         except Exception as exc:
             state.last_error = f"auto_memory_resume: {type(exc).__name__}"
         finally:
-            state.running = False
+            reservations.discard(session_id)
+            _refresh_running_state()
 
     def _schedule_auto_memory_resume(session_id: str) -> None:
         if not state.auto_memory_enabled or state.shutting_down:
@@ -2971,11 +3123,16 @@ def create_app(
         from ..messages import AssistantMessage, TextContent, Usage, UserMessage
 
         session_id = validated.session_id
+        request_harness = validated.agent_session.harness
         session_store = validated.store
         plan_store = cast(PlanStore | None, state.plan_store)
         runtime = getattr(app.state, "coding_sandbox_runtime", None)
         lifecycle = None if runtime is None else runtime.lifecycle
-        request_id = state.current_request_id
+        request_id = (
+            state.active_request_by_session.get(session_id)
+            if session_id is not None
+            else None
+        ) or state.current_request_id
         if (
             session_id is None
             or session_store is None
@@ -3027,8 +3184,9 @@ def create_app(
             workspace_context = await _assemble_workspace_context(
                 session_id,
                 pending_memory=validated.pending_continuity_evidence,
+                target_harness=request_harness,
             )
-            metadata = harness.context.metadata.get("workspace_context")
+            metadata = request_harness.context.metadata.get("workspace_context")
             if isinstance(metadata, dict):
                 workspace_context_metadata = dict(metadata)
         except Exception:
@@ -3038,14 +3196,14 @@ def create_app(
                 "workspace_context_unavailable",
             ) from None
 
-        result_client = harness.agent.client
+        result_client = request_harness.agent.client
         async def run_bound_plan() -> PlanRunResult:
             nonlocal result_client
             try:
                 registered_names: set[str] = container["coding_sandbox_tool_names"]
                 coding_tools = [
                     tool
-                    for tool in harness.agent.tools.list()
+                    for tool in request_harness.agent.tools.list()
                     if tool.name in registered_names
                 ]
                 if len(coding_tools) != len(registered_names) or not coding_tools:
@@ -3055,13 +3213,13 @@ def create_app(
                     )
                 read_tools = [
                     tool
-                    for tool in harness.agent.tools.list()
+                    for tool in request_harness.agent.tools.list()
                     if not tool.name.startswith("coding_")
                     and is_read_only_tool_name(tool.name)
                 ]
                 orchestrator = PlanOrchestrator(
                     store=plan_store,
-                    client=harness.agent.client,
+                    client=request_harness.agent.client,
                     automation=CodingSandboxAutomation(lifecycle),
                     read_tools=read_tools,
                     coding_tools=coding_tools,
@@ -3069,7 +3227,7 @@ def create_app(
                     notify=notify,
                     cancelled=cancelled,
                 )
-                result_client = harness.agent.client
+                result_client = request_harness.agent.client
                 return await orchestrator.run(
                     session_id=session_id,
                     request_id=request_id,
@@ -3125,6 +3283,7 @@ def create_app(
         abort_requested: Callable[[], bool] | None = None,
     ) -> PromptRunOutcome:
         """Own continuity finalization and the optional automated Coding lifecycle."""
+        request_harness = validated.agent_session.harness
         state.running = True
         model_persisted = False
         is_plan_request = validated.execution_mode == "plan"
@@ -3140,8 +3299,8 @@ def create_app(
             if abort_requested is not None and abort_requested():
                 if validated.coding_mode:
                     if validated.original_messages is not None:
-                        harness.agent.state.messages = validated.original_messages
-                    state.running = False
+                        request_harness.agent.state.messages = validated.original_messages
+                    _refresh_running_state()
                 raise PromptRuntimeError(
                     409,
                     "Request was aborted during continuity preflight.",
@@ -3178,8 +3337,8 @@ def create_app(
                     validated.original_messages is not None
                     and (is_plan_request or not model_persisted)
                 ):
-                    harness.agent.state.messages = validated.original_messages
-                state.running = False
+                    request_harness.agent.state.messages = validated.original_messages
+                _refresh_running_state()
 
         from coding_agent_app.sandbox.automation import (
             CodingSandboxAutomation,
@@ -3190,7 +3349,7 @@ def create_app(
         lifecycle = None if runtime is None else runtime.lifecycle
         if lifecycle is None or validated.session_id is None:
             if validated.original_messages is not None:
-                harness.agent.state.messages = validated.original_messages
+                request_harness.agent.state.messages = validated.original_messages
             raise PromptRuntimeError(
                 503,
                 "Managed Coding Sandbox is unavailable.",
@@ -3262,8 +3421,8 @@ def create_app(
             raise
         finally:
             if not model_persisted and validated.original_messages is not None:
-                harness.agent.state.messages = validated.original_messages
-            state.running = False
+                request_harness.agent.state.messages = validated.original_messages
+            _refresh_running_state()
 
     def _extract_terminal_assistant(suffix: list[Any]) -> Any | None:
         """D2-4：从执行 suffix 中提取最终 assistant candidate。
@@ -3364,7 +3523,8 @@ def create_app(
             revision_id = revision.id
 
         # 保存原 harness state 用于 fallback；读 canonical 构建 regeneration history
-        original_harness_messages = list(harness.agent.state.messages)
+        request_harness = validated.agent_session.harness
+        original_harness_messages = list(request_harness.agent.state.messages)
         canonical_before = await store.list_messages(session_id)
 
         # 截断：caller 已校验过目标是 session 最新 assistant，所以 canonical_before
@@ -3392,7 +3552,7 @@ def create_app(
         )
 
         # 2. 临时替换 harness state，执行 model
-        harness.agent.state.messages = list(regeneration_history)
+        request_harness.agent.state.messages = list(regeneration_history)
 
         # P2-R4-B2 + R4-C2: Reset turn-scoped Evidence Registry + apply
         # citation transform for regenerate path (mirrors _run_prompt_core).
@@ -3500,12 +3660,14 @@ def create_app(
         session_id: str | None,
         *,
         pending_memory: AutoMemoryOperationEvidence | None = None,
+        target_harness: AgentHarness | None = None,
     ) -> str | None:
+        context_harness = target_harness or harness
         assembler = state.workspace_context_assembler
         if assembler is None or session_id is None:
-            harness.context.metadata.pop("workspace_context", None)
-            harness.context.metadata.pop("agent_md", None)
-            harness.context.metadata.pop("memory_md", None)
+            context_harness.context.metadata.pop("workspace_context", None)
+            context_harness.context.metadata.pop("agent_md", None)
+            context_harness.context.metadata.pop("memory_md", None)
             return None
         sandbox = await _load_sandbox_continuation(session_id)
         assembly = cast(
@@ -3517,12 +3679,12 @@ def create_app(
             ),
         )
         metadata = assembly.metadata()
-        harness.context.metadata["workspace_context"] = metadata
+        context_harness.context.metadata["workspace_context"] = metadata
         included_paths = set(assembly.included_paths)
-        harness.context.metadata["agent_md"] = {
+        context_harness.context.metadata["agent_md"] = {
             "included": "AGENT.md" in included_paths,
         }
-        harness.context.metadata["memory_md"] = {
+        context_harness.context.metadata["memory_md"] = {
             "included": SESSION_MEMORY_PATH in included_paths,
         }
         return assembly.prompt_suffix
@@ -3537,7 +3699,8 @@ def create_app(
         intent_mode: str | None = None,
     ) -> tuple[dict[str, Any], ContextEstimate]:
         """Estimate the canonical Provider input without reading a secret."""
-        if state.running or harness.context.phase != "idle":
+        session_harness = await _get_session_harness(session_id)
+        if session_harness.context.phase != "idle":
             raise HTTPException(
                 status_code=409,
                 detail="context budget is unavailable while a request is running",
@@ -3628,7 +3791,13 @@ def create_app(
 
         # Rendering helpers annotate Harness metadata for snapshots. A preview is
         # observational, so restore the prior values after rendering.
-        metadata_before = dict(harness.context.metadata)
+        metadata_before = dict(session_harness.context.metadata)
+        skills_before = session_harness.skill_registry
+        resource_snapshot = await coding_agent_services.resources.load(session_id)
+        if resource_snapshot.skills:
+            session_harness.attach_skills(list(resource_snapshot.skills))
+        else:
+            session_harness.detach_skills()
         workspace_context_metadata: dict[str, Any] | None = None
         try:
             if knowledge_conversation is None:
@@ -3651,8 +3820,9 @@ def create_app(
                     workspace_context = await _assemble_workspace_context(
                         session_id,
                         pending_memory=pending_continuity,
+                        target_harness=session_harness,
                     )
-                    assembled_metadata = harness.context.metadata.get(
+                    assembled_metadata = session_harness.context.metadata.get(
                         "workspace_context"
                     )
                     if isinstance(assembled_metadata, dict):
@@ -3682,27 +3852,30 @@ def create_app(
                     )
                     or None
                 )
-                rendered_prompt, _ = harness._prepare_skill_prompt(skill_selection)
+                rendered_prompt, _ = session_harness._prepare_skill_prompt(
+                    skill_selection
+                )
             else:
                 from .wiki.knowledge_agent import render_knowledge_agent_prompt
 
                 suffix = render_knowledge_agent_prompt(knowledge_conversation)
-                rendered_prompt, _ = harness._prepare_skill_prompt(None)
+                rendered_prompt, _ = session_harness._prepare_skill_prompt(None)
             if suffix:
                 rendered_prompt = f"{rendered_prompt}\n\n{suffix.strip()}"
         finally:
-            harness.context.metadata = metadata_before
+            session_harness.context.metadata = metadata_before
+            session_harness.skill_registry = skills_before
 
         from ..context import apply_transform_context, convert_to_llm
         from ..context import transform_context as default_transform_context
         from ..context_budget import estimate_context
 
-        transform = harness.agent.transform_context_fn or default_transform_context
+        transform = session_harness.agent.transform_context_fn or default_transform_context
         transformed = await apply_transform_context(transform, list(messages))
         llm_messages = convert_to_llm(transformed)
 
-        provider_id = harness.agent.client.provider_id or "legacy"
-        model_id = getattr(harness.agent.client, "model", "unknown") or "unknown"
+        provider_id = session_harness.agent.client.provider_id or "legacy"
+        model_id = getattr(session_harness.agent.client, "model", "unknown") or "unknown"
         # Context preview is read-only and must not enter the request-scoped
         # Provider binding path.  Read only the public, non-secret config
         # projection; _execute_prompt remains the sole Harness binding site.
@@ -3732,7 +3905,7 @@ def create_app(
                 tool_registry = ToolRegistry(
                     [
                         tool
-                        for tool in harness.agent.tools.list()
+                        for tool in resource_snapshot.tools
                         if is_read_only_tool_name(tool.name)
                     ]
                 )
@@ -3741,12 +3914,12 @@ def create_app(
                 tool_registry = ToolRegistry(
                     [
                         tool
-                        for tool in harness.agent.tools.list()
+                        for tool in resource_snapshot.tools
                         if tool.name in registered_names
                     ]
                 )
             else:
-                tool_registry = harness.agent.tools
+                tool_registry = ToolRegistry(list(resource_snapshot.tools))
         if tool_registry is None:
             raise HTTPException(status_code=503, detail="Knowledge tools unavailable")
         estimate = estimate_context(
@@ -3822,6 +3995,14 @@ def create_app(
         最后一个**合格** candidate（非 tool-call-only + 无 error_message）；无合格
         candidate 时为 None（caller 决定是否转 revision error）。
         """
+        agent_session = validated.agent_session
+        if agent_session is None:
+            agent_session = await _get_coding_agent_session(
+                validated.session_id or "web-legacy"
+            )
+            validated.agent_session = agent_session
+        request_harness = agent_session.harness
+
         if manage_running_state:
             state.running = True
         state.last_error = None
@@ -3830,17 +4011,15 @@ def create_app(
         if override_initial_messages is not None:
             messages_before = list(override_initial_messages)
         else:
-            messages_before = list(harness.agent.state.messages)
+            messages_before = list(request_harness.agent.state.messages)
 
         # M1-5: 解析 Session Provider selection——一次解析，整个请求不可变快照.
         # runtime 为 None（Credential 或 Provider Config runtime 未启用）→ 走
         # legacy client 兼容路径，不读 Secret / 不调 Factory / 不替换 client.
         # selection 为 None（Session 无 Binding）→ 同样走 legacy client.
-        runtime = app.state.request_provider_runtime
-        selection: RequestProviderSelection | None = None
         if provider_bound_operation is None:
             for metadata_key in ("workspace_context", "agent_md", "memory_md"):
-                harness.context.metadata.pop(metadata_key, None)
+                request_harness.context.metadata.pop(metadata_key, None)
         workspace_context_metadata: dict[str, Any] | None = None
         if provider_bound_operation is not None:
             prompt_suffix = None
@@ -3849,14 +4028,17 @@ def create_app(
                 workspace_context = await _assemble_workspace_context(
                     validated.session_id,
                     pending_memory=validated.pending_continuity_evidence,
+                    target_harness=request_harness,
                 )
-                assembled_metadata = harness.context.metadata.get("workspace_context")
+                assembled_metadata = request_harness.context.metadata.get(
+                    "workspace_context"
+                )
                 if isinstance(assembled_metadata, dict):
                     workspace_context_metadata = dict(assembled_metadata)
             except Exception:
                 state.last_error = "Workspace continuation context is unavailable."
                 if manage_running_state:
-                    state.running = False
+                    _refresh_running_state()
                 raise PromptRuntimeError(
                     409,
                     state.last_error,
@@ -3912,7 +4094,7 @@ def create_app(
                 prompt_suffix = render_knowledge_agent_prompt(current_conversation)
             except Exception:
                 if manage_running_state:
-                    state.running = False
+                    _refresh_running_state()
                 raise PromptRuntimeError(
                     409,
                     "Knowledge conversation binding changed before execution.",
@@ -3920,11 +4102,6 @@ def create_app(
                 ) from None
 
         try:
-            if runtime is not None:
-                selection = await runtime.resolve_selection(validated.session_id)
-
-            # M1-5: bind_to_harness 在 active-request ownership 内部；
-            # AsyncExitStack 让 selection=None 时跳过绑定（legacy path）.
             async with AsyncExitStack() as stack:
                 request_mode: CodingAgentMode = "direct"
                 coding_tool_names: set[str] = set()
@@ -3970,18 +4147,31 @@ def create_app(
                     stack.callback(_restore_knowledge_mode)
                 if checkpoint_source is not None:
                     request_mode = "checkpointer"
-                await stack.enter_async_context(
-                    coding_agent_session.bind_request(
+                base_resources = await coding_agent_services.resources.load(
+                    validated.session_id
+                )
+                request_resources = CodingAgentResourceSnapshot(
+                    skills=(
+                        base_resources.skills
+                        if checkpoint_source is None
+                        and validated.knowledge_conversation is None
+                        and provider_bound_operation is None
+                        else ()
+                    ),
+                    tools=base_resources.tools,
+                    mcp_tool_names=base_resources.mcp_tool_names,
+                    context_fragments=((prompt_suffix,) if prompt_suffix else ()),
+                    diagnostics=base_resources.diagnostics,
+                )
+                composition = await stack.enter_async_context(
+                    agent_session.compose_request(
                         mode=request_mode,
+                        resources=request_resources,
                         coding_tool_names=coding_tool_names,
                         override_tools=override_tools,
                         permission_policy=request_permission_policy,
                     )
                 )
-                if runtime is not None and selection is not None:
-                    await stack.enter_async_context(
-                        runtime.bind_to_harness(harness=harness, selection=selection)
-                    )
                 force_coding_bootstrap = bool(
                     validated.coding_mode
                     and validated.intent is not None
@@ -3996,9 +4186,9 @@ def create_app(
                         CodingToolBootstrapModelClient,
                     )
 
-                    repair_delegate = harness.agent.client
+                    repair_delegate = request_harness.agent.client
                     stack.enter_context(
-                        coding_agent_session.bind_client(
+                        agent_session.bind_client(
                             CodingToolBootstrapModelClient(
                                 repair_delegate,
                                 list_first=force_coding_bootstrap and not coding_repair,
@@ -4010,16 +4200,16 @@ def create_app(
                     return await provider_bound_operation()
                 if checkpoint_source is not None:
                     return await generate_checkpoint_memory(
-                        harness.agent.client,
+                        request_harness.agent.client,
                         source=checkpoint_source,
                         prior_memory=checkpoint_prior_memory,
                         operation=checkpoint_operation,
                     )
                 if suppress_user_append:
-                    # Regenerate 路径——caller 已设置 harness.agent.state.messages
-                    messages = await harness.run_continue(
+                    # Regenerate 路径——caller 已设置 Session Harness messages
+                    messages = await request_harness.run_continue(
                         skill_selection=validated.skill_selection,
-                        system_prompt_suffix=prompt_suffix,
+                        system_prompt_suffix=composition.system_prompt_suffix,
                     )
                 elif validated.attached_blocks:
                     from ..messages import TextContent, UserMessage
@@ -4030,16 +4220,16 @@ def create_app(
                             *validated.attached_blocks,
                         ]
                     )
-                    harness.agent.state.messages.append(user_msg)
-                    messages = await harness.run_continue(
+                    request_harness.agent.state.messages.append(user_msg)
+                    messages = await request_harness.run_continue(
                         skill_selection=validated.skill_selection,
-                        system_prompt_suffix=prompt_suffix,
+                        system_prompt_suffix=composition.system_prompt_suffix,
                     )
                 else:
-                    messages = await harness.run_prompt(
+                    messages = await request_harness.run_prompt(
                         validated.text,
                         skill_selection=validated.skill_selection,
-                        system_prompt_suffix=prompt_suffix,
+                        system_prompt_suffix=composition.system_prompt_suffix,
                     )
         except ProviderSelectionNotFoundError:
             state.last_error = "Selected provider profile is unavailable."
@@ -4071,15 +4261,15 @@ def create_app(
             raise PromptRuntimeError(500, state.last_error, type(e).__name__) from None
         finally:
             if manage_running_state:
-                state.running = False
+                _refresh_running_state()
 
-        messages_after = list(harness.agent.state.messages)
+        messages_after = list(request_harness.agent.state.messages)
         # candidate 提取：从 suffix 中找最后一个合格 AssistantMessage
         assistant_candidate = _extract_terminal_assistant(messages_after[len(messages_before) :])
 
         # 终态 AssistantMessage 是 stop_reason / usage 的事实来源。RequestSnapshot
         # metadata 从未承诺包含这两个字段；usage 已随消息和 TurnSnapshot 持久化。
-        snapshot = harness.last_snapshot
+        snapshot = request_harness.last_snapshot
         snapshot_payload: dict[str, Any] | None = None
         stop_reason: str | None = (
             assistant_candidate.stop_reason if assistant_candidate is not None else None
@@ -4133,6 +4323,7 @@ def create_app(
         （保持旧行为——普通 prompt 不需要从 SQLite reload，因为 replace_messages
         已经把 final_messages 写回，agent state 与 DB 一致）。
         """
+        request_harness = validated.agent_session.harness
         session_persisted = False
         if validated.store is not None and validated.session_id is not None:
             try:
@@ -4140,15 +4331,15 @@ def create_app(
                     validated.session_id, list(execution.messages)
                 )
                 session_persisted = True
-                if harness.last_snapshot is not None:
+                if request_harness.last_snapshot is not None:
                     await validated.store.append_snapshot(
-                        validated.session_id, harness.last_snapshot
+                        validated.session_id, request_harness.last_snapshot
                     )
             except Exception as e:
                 state.last_error = f"persist: {type(e).__name__}: {e}"
             finally:
-                if validated.original_messages is not None:
-                    harness.agent.state.messages = validated.original_messages
+                if not session_persisted and validated.original_messages is not None:
+                    request_harness.agent.state.messages = validated.original_messages
 
         applied_skill_names: list[str] = (
             list(validated.skill_selection.names)
@@ -4197,6 +4388,8 @@ def create_app(
         """
         from .extension_store import RevisionBaseContentChangedError
 
+        request_harness = validated.agent_session.harness
+
         if execution.assistant_message is None:
             raise ValueError("regeneration produced no qualified assistant candidate")
 
@@ -4219,10 +4412,13 @@ def create_app(
         if (
             validated.store is not None
             and validated.session_id is not None
-            and harness.last_snapshot is not None
+            and request_harness.last_snapshot is not None
         ):
             try:
-                await validated.store.append_snapshot(validated.session_id, harness.last_snapshot)
+                await validated.store.append_snapshot(
+                    validated.session_id,
+                    request_harness.last_snapshot,
+                )
             except Exception as e:
                 # finalize 已 commit——snapshot 失败不能回滚 active answer
                 snapshot_error = f"snapshot: {type(e).__name__}: {e}"
@@ -4265,12 +4461,13 @@ def create_app(
 
         所有 regenerate 路径退出时（成功 / 错误 / 中止 / finalize 失败）都必须调用。
         """
+        request_harness = await _get_session_harness(session_id)
         try:
             canonical = await store.list_messages(session_id)
-            harness.agent.state.messages = list(canonical)
+            request_harness.agent.state.messages = list(canonical)
         except Exception as e:
             state.last_error = f"reset_harness: {type(e).__name__}: {e}"[:500]
-            harness.agent.state.messages = list(fallback_messages)
+            request_harness.agent.state.messages = list(fallback_messages)
 
     def _serialize_prompt_validation_error(
         e: PromptValidationError,
@@ -4342,6 +4539,8 @@ def create_app(
         state.active_requests.pop(req.id, None)
         if req.session_id and state.active_request_by_session.get(req.session_id) == req.id:
             state.active_request_by_session.pop(req.session_id, None)
+        reservations = cast(set[str], container["coding_agent_request_reservations"])
+        state.running = bool(state.active_requests or reservations)
 
     async def _run_prompt_background(
         web_request: WebRunRequest,
@@ -4363,10 +4562,12 @@ def create_app(
         """
         web_request.status = "running"
         web_request.started_at = _now_utc()
-        # set request context（hook 跨 task 不可靠，用 web-level state 而非 contextvar）
+        # Task-local context is authoritative for concurrent Session requests;
+        # the web-level fields remain a backwards-compatible projection.
         state.current_request_id = web_request.id
         state.current_request_session_id = web_request.session_id
         tool_session_token = tool_session_context.set(web_request.session_id)
+        request_id_token = request_id_context.set(web_request.id)
         # 占位 sequence 起点——下一个分配的 sequence 将是此值
         web_request.event_start_sequence = state.next_event_sequence
 
@@ -4443,6 +4644,7 @@ def create_app(
             # clear request context——避免非 prompt 事件误关联
             state.current_request_id = None
             state.current_request_session_id = None
+            request_id_context.reset(request_id_token)
             tool_session_context.reset(tool_session_token)
             _remove_from_active(web_request)
             state.request_history.append(web_request)
@@ -4454,6 +4656,7 @@ def create_app(
     ) -> dict[str, Any]:
         """Publish Memory.md, then atomically finish and reset its source lane."""
         store = state.session_store
+        session_harness = await _get_session_harness(session_id)
         file_store = state.file_store
         if store is None or file_store is None:
             raise CheckpointerError(
@@ -4568,8 +4771,7 @@ def create_app(
                     f"Could not clear the conversation: {type(e).__name__}",
                 ) from None
 
-            if state.current_session_id == session_id:
-                harness.agent.state.messages = []
+            session_harness.agent.state.messages = []
             return {
                 "command": CHECKPOINTER_COMMAND,
                 "memory_file_id": updated_ref.id,
@@ -4591,6 +4793,8 @@ def create_app(
         web_request.started_at = _now_utc()
         state.current_request_id = web_request.id
         state.current_request_session_id = web_request.session_id
+        tool_session_token = tool_session_context.set(web_request.session_id)
+        request_id_token = request_id_context.set(web_request.id)
         web_request.event_start_sequence = state.next_event_sequence
         try:
             result = await _run_checkpointer_core(web_request.session_id, source, operation_id)
@@ -4620,8 +4824,10 @@ def create_app(
                         "durable_operation_id": operation_id,
                         "idempotent_recovery": True,
                     }
-                    if state.current_session_id == web_request.session_id:
-                        harness.agent.state.messages = []
+                    session_harness = await _get_session_harness(
+                        web_request.session_id
+                    )
+                    session_harness.agent.state.messages = []
                     web_request.ended_at = _now_utc()
                 else:
                     web_request.status = "aborted"
@@ -4650,11 +4856,13 @@ def create_app(
             web_request.result_summary = result
             web_request.ended_at = _now_utc()
         finally:
-            state.running = False
             web_request.event_end_sequence = state.next_event_sequence - 1
             state.current_request_id = None
             state.current_request_session_id = None
+            request_id_context.reset(request_id_token)
+            tool_session_context.reset(tool_session_token)
             _remove_from_active(web_request)
+            _refresh_running_state()
             state.request_history.append(web_request)
 
     async def _abort_request_internal(
@@ -4663,6 +4871,11 @@ def create_app(
     ) -> dict[str, Any]:
         """abort 共享逻辑——POST /api/abort 别名 + POST /api/requests/{id}/abort 都走这里。"""
         reason_str = reason or "user_requested"
+        request_harness = (
+            await _get_session_harness(req.session_id)
+            if req.session_id is not None
+            else harness
+        )
         # Wake every suspended approval handler before waiting for Agent abort.
         await approval_manager.cancel_request(req.id)
 
@@ -4689,7 +4902,7 @@ def create_app(
                     "status": req.status,
                     "abort_reason": req.abort_reason,
                 }
-            if harness.context.metadata.get("continuity_active") is True:
+            if request_harness.context.metadata.get("continuity_active") is True:
                 if req.task is not None and not req.task.done():
                     req.task.cancel()
                 return {
@@ -4701,7 +4914,7 @@ def create_app(
             if (
                 req.payload is not None
                 and req.payload.get("coding_mode") is True
-                and harness.context.phase == "idle"
+                and request_harness.context.phase == "idle"
             ):
                 # Coding preflight/finalization runs outside the Agent loop. The
                 # automation polls abort_reason and cancels the owned Sandbox;
@@ -4714,7 +4927,7 @@ def create_app(
                 }
             # D2-5：regenerate request 的 abort 也调 harness.abort() 让模型 finalize
             try:
-                await harness.abort(req.abort_reason)
+                await request_harness.abort(req.abort_reason)
             except Exception as e:
                 return {
                     "ok": False,
@@ -4730,15 +4943,16 @@ def create_app(
             "abort_reason": req.abort_reason,
         }
 
-    def _harness_is_idle() -> bool:
+    def _harness_is_idle(target_harness: AgentHarness | None = None) -> bool:
+        selected_harness = target_harness or harness
         phase: str
         try:
-            phase = harness.context.phase
+            phase = selected_harness.context.phase
         except Exception:
             phase = "unknown"
         agent_status: str
         try:
-            agent_status = harness.agent.state.status
+            agent_status = selected_harness.agent.state.status
         except Exception:
             agent_status = "unknown"
         return phase == "idle" and agent_status not in ("running", "aborting")
@@ -4756,15 +4970,16 @@ def create_app(
         confirmed.
         """
         request_id = state.active_request_by_session.get(session_id)
+        session_harness = await _get_session_harness(session_id)
         if request_id is None:
             return None
 
         raw_request = state.active_requests.get(request_id)
         if raw_request is None:
-            if _harness_is_idle():
+            if _harness_is_idle(session_harness):
                 state.active_request_by_session.pop(session_id, None)
                 if not state.active_requests:
-                    state.running = False
+                    _refresh_running_state()
                 return None
             return JSONResponse(
                 status_code=409,
@@ -4825,7 +5040,7 @@ def create_app(
 
         try:
             await asyncio.wait_for(
-                harness.wait_for_idle(),
+                session_harness.wait_for_idle(),
                 timeout=max(0.0, deadline - loop.time()),
             )
         except TimeoutError:
@@ -4850,8 +5065,7 @@ def create_app(
                 web_request.abort_reason = web_request.abort_reason or "session_deleted"
                 web_request.ended_at = _now_utc()
                 state.request_history.append(web_request)
-        if not state.active_requests and _harness_is_idle():
-            state.running = False
+        _refresh_running_state()
         return None
 
     # ========================================================================
@@ -5020,13 +5234,15 @@ def create_app(
         canonical = await store.list_messages(session_id)
         history = tuple(canonical[: msg_row["idx"]])
 
+        agent_session = await _get_coding_agent_session(session_id)
         return ValidatedRegenerationRequest(
             session_id=session_id,
             assistant_message_id=assistant_message_id,
             preceding_user_message_id=preceding["id"],
             history=history,
-            original_harness_messages=tuple(harness.agent.state.messages),
+            original_harness_messages=tuple(agent_session.harness.agent.state.messages),
             knowledge_conversation=knowledge_conversation,
+            agent_session=agent_session,
         )
 
     async def _run_regeneration_background(
@@ -5060,6 +5276,7 @@ def create_app(
         state.current_request_id = request_id
         state.current_request_session_id = web_request.session_id
         tool_session_token = tool_session_context.set(web_request.session_id)
+        request_id_token = request_id_context.set(request_id)
         web_request.event_start_sequence = state.next_event_sequence
 
         # 构造 _PromptValidated 视图（_run_regeneration_core 需要 skill_selection 等）
@@ -5072,6 +5289,7 @@ def create_app(
             attached_blocks=[],
             attached_summary=[],
             knowledge_conversation=validated.knowledge_conversation,
+            agent_session=validated.agent_session,
         )
 
         try:
@@ -5144,12 +5362,13 @@ def create_app(
                 "workspace_context": result.workspace_context,
             }
         finally:
-            state.running = False
             web_request.event_end_sequence = state.next_event_sequence - 1
             state.current_request_id = None
             state.current_request_session_id = None
+            request_id_context.reset(request_id_token)
             tool_session_context.reset(tool_session_token)
             _remove_from_active(web_request)
+            _refresh_running_state()
             state.request_history.append(web_request)
 
     # ========================================================================
@@ -5197,12 +5416,17 @@ def create_app(
 
     @app.get("/api/state")
     async def get_state() -> dict[str, Any]:
-        agent = harness.agent
+        current_harness = (
+            await _get_session_harness(state.current_session_id)
+            if state.current_session_id is not None
+            else harness
+        )
+        agent = current_harness.agent
         agent_state = agent.state
         return {
             "running": state.running,
             "last_error": state.last_error,
-            "agent_status": _agent_status(),
+            "agent_status": _agent_status(current_harness),
             "queue_size": agent_state.queue_size,
             "turn_count": agent_state.turn_count,
             "message_count": len(agent_state.messages),
@@ -5216,7 +5440,7 @@ def create_app(
             ),
             "pending_tool_calls": sorted(agent_state.pending_tool_calls),
             "error_message": agent_state.error_message,
-            "snapshot_count": len(harness.snapshots),
+            "snapshot_count": len(current_harness.snapshots),
             "event_count": len(state.event_buffer),
             "durable_recovery": dict(state.durable_recovery_summary),
             "auto_memory": {
@@ -5255,7 +5479,12 @@ def create_app(
         若指定 session 不存在，返回 404。
         """
         if session_id is None:
-            msgs = list(harness.agent.state.messages)
+            current_harness = (
+                await _get_session_harness(state.current_session_id)
+                if state.current_session_id is not None
+                else harness
+            )
+            msgs = list(current_harness.agent.state.messages)
             serialized_messages = [serialize_message(m) for m in msgs]
             return {
                 "count": len(msgs),
@@ -5369,7 +5598,12 @@ def create_app(
 
     @app.get("/api/snapshots")
     async def get_snapshots() -> dict[str, Any]:
-        snaps = list(harness.snapshots)
+        current_harness = (
+            await _get_session_harness(state.current_session_id)
+            if state.current_session_id is not None
+            else harness
+        )
+        snaps = list(current_harness.snapshots)
         return {
             "count": len(snaps),
             "snapshots": [
@@ -5379,7 +5613,12 @@ def create_app(
 
     @app.get("/api/snapshots/{index}")
     async def get_snapshot(index: int) -> dict[str, Any]:
-        snaps = list(harness.snapshots)
+        current_harness = (
+            await _get_session_harness(state.current_session_id)
+            if state.current_session_id is not None
+            else harness
+        )
+        snaps = list(current_harness.snapshots)
         if not snaps:
             raise HTTPException(status_code=404, detail="no snapshots")
         try:
@@ -5398,7 +5637,12 @@ def create_app(
     @app.get("/api/session")
     async def get_session() -> dict[str, Any]:
         """单数：当前 attached session（向后兼容）。"""
-        return serialize_session(harness.session)
+        current_harness = (
+            await _get_session_harness(state.current_session_id)
+            if state.current_session_id is not None
+            else harness
+        )
+        return serialize_session(current_harness.session)
 
     @app.get("/api/sessions")
     async def get_sessions() -> dict[str, Any]:
@@ -5456,12 +5700,13 @@ def create_app(
             )
 
     async def _sync_current_session_tree_projection(sid: str) -> None:
-        if state.current_session_id != sid or state.session_store is None:
+        if state.session_store is None:
             return
         from ..messages import AgentMessage
 
         messages = await state.session_store.list_messages(sid)
-        harness.agent.state.messages = cast(list[AgentMessage], list(messages))
+        session_harness = await _get_session_harness(sid)
+        session_harness.agent.state.messages = cast(list[AgentMessage], list(messages))
 
     @app.get("/api/sessions/{sid}")
     async def get_session_by_id(sid: str) -> dict[str, Any]:
@@ -5659,8 +5904,10 @@ def create_app(
             raise HTTPException(status_code=422, detail="intent_mode must be a string")
         if len(text) > 1_000_000 or len(file_ids) > 100 or len(skill_names) > 100:
             raise HTTPException(status_code=413, detail="context estimate payload too large")
-        if skill_names and harness.skill_registry is not None:
-            missing = [name for name in skill_names if not harness.skill_registry.has(name)]
+        if skill_names:
+            resource_snapshot = await coding_agent_services.resources.load(sid)
+            available_skill_names = {skill.name for skill in resource_snapshot.skills}
+            missing = [name for name in skill_names if name not in available_skill_names]
             if missing:
                 raise HTTPException(status_code=400, detail="unknown skill")
         selection = SkillSelection(names=skill_names) if skill_names else None
@@ -5702,7 +5949,10 @@ def create_app(
         budget_before, context_estimate = await _estimate_session_context_budget_details(
             session_id=sid,
         )
-        _ensure_idle()
+        session_harness = await _get_session_harness(sid)
+        _ensure_idle(session_harness, session_id=sid)
+        reservations = cast(set[str], container["coding_agent_request_reservations"])
+        reservations.add(sid)
         state.running = True
         result = None
         try:
@@ -5747,10 +5997,10 @@ def create_app(
             adapter: TypeAdapter[AgentMessage] = TypeAdapter(AgentMessage)
             replacement = [adapter.validate_python(item) for item in result.new_messages]
             await store.replace_messages(sid, replacement)
-            if state.current_session_id == sid:
-                harness.agent.state.messages = replacement
+            session_harness.agent.state.messages = replacement
         finally:
-            state.running = False
+            reservations.discard(sid)
+            state.running = bool(reservations or state.active_requests)
 
         budget = await _estimate_session_context_budget(session_id=sid)
         assert result is not None and result.source is not None
@@ -5976,6 +6226,7 @@ def create_app(
                     status_code=404,
                     content={"detail": f"session {sid!r} not found"},
                 )
+            await _remove_coding_agent_session(sid)
             # P2-R1: 删除 session 后清理 knowledge library bindings（P2-R0 §7.2 不变量 7）
             # 只清 binding，不删 library 本身。失败不阻塞 session 删除（记 warning）。
             k_service = (
@@ -6002,6 +6253,9 @@ def create_app(
                 try:
                     default_session = await store.ensure_default_session()
                     state.current_session_id = default_session.id
+                    app.state.coding_agent_session = await _get_coding_agent_session(
+                        default_session.id
+                    )
                     if state.file_store is not None:
                         await state.file_store.ensure_session_workspace(default_session.id)
                 except Exception:
@@ -8405,11 +8659,18 @@ def create_app(
     async def get_policy_audit(limit: int = 100) -> dict[str, Any]:
         if limit <= 0 or limit > 10_000:
             limit = max(0, min(limit, 10_000))
-        records = harness.list_permission_audit_records()
+        current_harness = (
+            await _get_session_harness(state.current_session_id)
+            if state.current_session_id is not None
+            else harness
+        )
+        records = current_harness.list_permission_audit_records()
         # 取最近 limit 条（按写入顺序的尾部）
         sliced = records[-limit:] if limit else records
         policy_name = (
-            harness.permission_policy.name if harness.permission_policy is not None else None
+            current_harness.permission_policy.name
+            if current_harness.permission_policy is not None
+            else None
         )
         return {
             "policy_name": policy_name,
@@ -8452,15 +8713,18 @@ def create_app(
             )
 
         try:
-            _ensure_idle()
+            session_harness = await _get_session_harness(session_id)
+            _ensure_idle(session_harness, session_id=session_id)
         except HTTPException as e:
             return JSONResponse(
                 status_code=e.status_code,
                 content={"detail": e.detail},
             )
 
-        # Reserve the same global execution slot used by prompt/regenerate.
+        # Reserve the same per-Session execution slot used by prompt/regenerate.
         # No await is allowed between the idle check and this assignment.
+        reservations = cast(set[str], container["coding_agent_request_reservations"])
+        reservations.add(session_id)
         state.running = True
         request_id = f"req_{uuid4().hex[:16]}"
         durable_operation = None
@@ -8560,7 +8824,8 @@ def create_app(
             # Ownership transfers to the background request only after it is
             # registered below. Early response paths must release the slot.
             if session_id not in state.active_request_by_session:
-                state.running = False
+                reservations.discard(session_id)
+                state.running = bool(reservations or state.active_requests)
 
         assert durable_operation is not None
         web_request = WebRunRequest(
@@ -8576,6 +8841,7 @@ def create_app(
         )
         state.active_requests[request_id] = web_request
         state.active_request_by_session[session_id] = request_id
+        reservations.discard(session_id)
         # The validation finally block released state.running before request
         # registration; reacquire it synchronously before scheduling the task.
         state.running = True
@@ -8697,12 +8963,20 @@ def create_app(
             state.current_request_id = sync_request_id
             state.current_request_session_id = validated.session_id
             tool_session_token = tool_session_context.set(validated.session_id)
+            request_id_token = request_id_context.set(sync_request_id)
             try:
                 result = await _run_prompt_request(validated)
             finally:
                 state.current_request_id = None
                 state.current_request_session_id = None
+                request_id_context.reset(request_id_token)
                 tool_session_context.reset(tool_session_token)
+                reservations = cast(
+                    set[str], container["coding_agent_request_reservations"]
+                )
+                if validated.reservation_key is not None:
+                    reservations.discard(validated.reservation_key)
+                state.running = bool(reservations or state.active_requests)
         except PromptValidationError as e:
             return _serialize_prompt_validation_error(e)
         except PromptRuntimeError as e:
@@ -8736,9 +9010,9 @@ def create_app(
         3. 创建 request record + asyncio.create_task(_run_prompt_background)
         4. 立即返回 202 + request_id + status=queued + 各资源 URL
 
-        并发限制（用户原指令 §3.16 / §5.3）：
-        - 单 agent 实例全局单 active request（_ensure_idle 保证）
-        - session_id 字段保留为未来扩展点；当前不虚假宣称多 session 并行
+        并发限制：
+        - 同一 Web Session 只有一个 active request
+        - 不同 Web Session 映射到独立 CodingAgentRuntime Session，可并行执行
         """
         if state.shutting_down:
             return JSONResponse(
@@ -8759,6 +9033,12 @@ def create_app(
         # 2. session 级并发检查
         session_id = validated.session_id
         if session_id and session_id in state.active_request_by_session:
+            reservations = cast(
+                set[str], container["coding_agent_request_reservations"]
+            )
+            if validated.reservation_key is not None:
+                reservations.discard(validated.reservation_key)
+            state.running = bool(reservations or state.active_requests)
             return JSONResponse(
                 status_code=409,
                 content={
@@ -8785,6 +9065,10 @@ def create_app(
         state.active_requests[request_id] = web_request
         if session_id:
             state.active_request_by_session[session_id] = request_id
+        reservations = cast(set[str], container["coding_agent_request_reservations"])
+        if validated.reservation_key is not None:
+            reservations.discard(validated.reservation_key)
+        state.running = bool(reservations or state.active_requests)
 
         # 4. 启动受管理 background task
         task = asyncio.create_task(
@@ -8982,7 +9266,12 @@ def create_app(
 
         # 无 active request → 旧行为：直调 harness.abort()（兼容尚未走 async 路径的场景）
         try:
-            await harness.abort(reason_str)
+            target_harness = (
+                await _get_session_harness(state.current_session_id)
+                if state.current_session_id is not None
+                else harness
+            )
+            await target_harness.abort(reason_str)
         except Exception as e:
             return JSONResponse(
                 status_code=500,
@@ -8992,15 +9281,21 @@ def create_app(
 
     @app.post("/api/reset", response_model=None)
     async def post_reset(payload: dict[str, Any]) -> dict[str, Any] | JSONResponse:
-        _ensure_idle()
         opts = payload or {}
+        reset_session_id = opts.get("session_id") or state.current_session_id
+        target_harness = (
+            await _get_session_harness(reset_session_id)
+            if isinstance(reset_session_id, str)
+            else harness
+        )
+        _ensure_idle(target_harness, session_id=reset_session_id)
         clear_events = bool(opts.get("clear_events", True))
         clear_snapshots = bool(opts.get("clear_snapshots", False))
         clear_audit = bool(opts.get("clear_audit", False))
 
         # 1. agent.reset()——清 messages / events / turn_count
         try:
-            harness.agent.reset()
+            target_harness.agent.reset()
         except Exception as e:
             return JSONResponse(
                 status_code=500,
@@ -9010,9 +9305,9 @@ def create_app(
         if clear_events:
             state.event_buffer.clear()
         if clear_snapshots:
-            harness.clear_snapshots()
+            target_harness.clear_snapshots()
         if clear_audit:
-            harness.clear_permission_audit_records()
+            target_harness.clear_permission_audit_records()
 
         return {
             "ok": True,

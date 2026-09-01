@@ -10,7 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
+from pi_agent_core_py.harness import AgentHarness
 from pi_agent_core_py.skills import Skill
+from pi_agent_core_py.tools import AgentTool
 
 ResourceDiagnosticLevel = Literal["info", "warning", "error"]
 
@@ -28,6 +30,7 @@ class CodingAgentResourceSnapshot:
     """Resources visible to one Session after precedence and trust decisions."""
 
     skills: tuple[Skill, ...] = ()
+    tools: tuple[AgentTool, ...] = ()
     mcp_tool_names: tuple[str, ...] = ()
     context_fragments: tuple[str, ...] = ()
     diagnostics: tuple[ResourceDiagnostic, ...] = ()
@@ -50,9 +53,38 @@ class StaticCodingAgentResourceLoader:
         return self.snapshot
 
 
+@dataclass(slots=True)
+class HarnessCodingAgentResourceLoader:
+    """Project the live extension surface of a configured Harness.
+
+    The Harness remains the owner of MCP transports and application-managed
+    extension mutation.  Each product Session receives an immutable view of
+    the currently enabled Skills and registered tools for one request, so a
+    Session never needs to share another Session's mutable registries.
+    """
+
+    harness: AgentHarness
+
+    async def load(self, session_id: str | None) -> CodingAgentResourceSnapshot:
+        del session_id
+        skill_registry = self.harness.skill_registry
+        skills = (
+            tuple(skill.model_copy(deep=True) for skill in skill_registry.list())
+            if skill_registry is not None
+            else ()
+        )
+        tools = tuple(self.harness.agent.tools.list())
+        return CodingAgentResourceSnapshot(
+            skills=skills,
+            tools=tools,
+            mcp_tool_names=tuple(self.harness.list_registered_mcp_tool_names()),
+        )
+
+
 __all__ = [
     "CodingAgentResourceLoader",
     "CodingAgentResourceSnapshot",
+    "HarnessCodingAgentResourceLoader",
     "ResourceDiagnostic",
     "ResourceDiagnosticLevel",
     "StaticCodingAgentResourceLoader",

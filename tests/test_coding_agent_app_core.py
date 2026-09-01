@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -9,11 +10,13 @@ from coding_agent_app.core import (
     CodingAgentServices,
     CodingAgentSession,
     CodingAgentSettings,
+    HarnessCodingAgentResourceLoader,
     PromptContribution,
     StaticCodingAgentResourceLoader,
     StaticCodingAgentSettingsProvider,
     ToolsetResolutionError,
     ToolsetResolver,
+    clone_agent_harness,
     compose_system_prompt_suffix,
     create_coding_agent_application,
     create_coding_agent_session,
@@ -25,6 +28,7 @@ from pi_agent_core_py.policy import (
     AllowAllToolPermissionPolicy,
     DenyAllToolPermissionPolicy,
 )
+from pi_agent_core_py.skills import Skill, SkillRegistry
 from pi_agent_core_py.tools import (
     AgentTool,
     ToolRegistry,
@@ -342,3 +346,131 @@ def test_prompt_contributions_are_ordered_trimmed_and_deduplicated() -> None:
         None,
     )
     assert suffix == "read only\n\nworkspace"
+
+
+@pytest.mark.asyncio
+async def test_request_composition_binds_all_resources_and_restores_harness() -> None:
+    harness = _harness("old_tool")
+    harness.attach_skills(SkillRegistry([Skill(
+        name="old",
+        description="old skill",
+        prompt="old prompt",
+    )]))
+    provider_client = FakeClient([])
+    provider_events: list[tuple[str, str]] = []
+
+    class _ProviderRuntime:
+        async def resolve_selection(self, session_id: str) -> object:
+            provider_events.append(("resolve", session_id))
+            return {"profile": "test"}
+
+        @asynccontextmanager
+        async def bind_to_harness(self, *, harness: AgentHarness, selection: object):
+            del selection
+            original = harness.agent.client
+            harness.agent.client = provider_client
+            provider_events.append(("bind", harness.agent.client.provider_id))
+            try:
+                yield
+            finally:
+                harness.agent.client = original
+
+    original_tools = harness.agent.tools
+    original_skills = harness.skill_registry
+    original_client = harness.agent.client
+    resources = CodingAgentResourceSnapshot(
+        skills=(Skill(
+            name="request",
+            description="request skill",
+            prompt="request prompt",
+        ),),
+        tools=(_Tool("read_request"), _Tool("write_request")),
+        mcp_tool_names=("read_request",),
+        context_fragments=("workspace prompt",),
+    )
+    services = CodingAgentServices(provider_runtime=_ProviderRuntime())
+    session = create_coding_agent_session(
+        session_id="s1",
+        harness=harness,
+        read_only_tool=_read_only,
+        services=services,
+    )
+
+    async with session.compose_request(
+        mode="read_only",
+        resources=resources,
+        prompt_contributions=(PromptContribution("route", "route prompt"),),
+    ) as composition:
+        assert composition.binding.active_tool_names == ("read_request",)
+        assert composition.system_prompt_suffix == "workspace prompt\n\nroute prompt"
+        assert harness.agent.tools.names() == ["read_request"]
+        assert harness.skill_registry is not None
+        assert harness.skill_registry.names() == ["request"]
+        assert harness.agent.client is provider_client
+        with pytest.raises(RuntimeError, match="active request"):
+            async with session.compose_request(
+                mode="direct",
+                resources=CodingAgentResourceSnapshot(
+                    skills=(Skill(
+                        name="overlap",
+                        description="must never leak",
+                        prompt="overlap prompt",
+                    ),),
+                    tools=(_Tool("overlap_tool"),),
+                ),
+            ):
+                pass
+        assert harness.skill_registry.names() == ["request"]
+
+    assert harness.agent.tools is original_tools
+    assert harness.skill_registry is original_skills
+    assert harness.agent.client is original_client
+    assert provider_events == [("resolve", "s1"), ("bind", "fake")]
+
+
+@pytest.mark.asyncio
+async def test_cloned_harnesses_isolate_state_and_do_not_close_template_client() -> None:
+    class _CustomFakeClient(FakeClient):
+        pass
+
+    prototype = AgentHarness(
+        Agent(system_prompt="test", client=_CustomFakeClient([[DoneEvent()]])),
+    )
+    prototype.agent.tools.register(_Tool("read_file"))
+    first = clone_agent_harness(prototype)
+    second = clone_agent_harness(prototype)
+
+    first.agent.state.messages.append("first")  # type: ignore[arg-type]
+    first.agent.tools.register(_Tool("first_only"))
+
+    assert second.agent.state.messages == []
+    assert second.agent.tools.names() == ["read_file"]
+    assert prototype.agent.tools.names() == ["read_file"]
+    assert isinstance(first.agent.client, _CustomFakeClient)
+    assert first.agent.client.adapter is not prototype.agent.client.adapter
+
+    await first.close()
+    assert prototype.agent.client.adapter is not None
+    await second.close()
+    await prototype.close()
+
+
+@pytest.mark.asyncio
+async def test_harness_resource_loader_returns_detached_skill_and_tool_snapshot() -> None:
+    harness = _harness("read_file", "mcp__docs__search")
+    harness.attach_skills([Skill(
+        name="review",
+        description="review skill",
+        prompt="review prompt",
+    )])
+    harness._mcp_tool_names.add("mcp__docs__search")
+
+    snapshot = await HarnessCodingAgentResourceLoader(harness).load("s1")
+
+    assert tuple(tool.name for tool in snapshot.tools) == (
+        "read_file",
+        "mcp__docs__search",
+    )
+    assert snapshot.mcp_tool_names == ("mcp__docs__search",)
+    assert tuple(skill.name for skill in snapshot.skills) == ("review",)
+    assert snapshot.skills[0] is not harness.skill_registry.get("review")

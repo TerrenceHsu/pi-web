@@ -149,7 +149,7 @@ def test_post_prompt_without_session_id_uses_default(web_client):
 
 def test_different_sessions_do_not_leak_messages(web_client):
     """两个 session 各自 prompt 后 messages 不串。"""
-    client, harness, _ = web_client
+    client, harness, app = web_client
 
     # 给 FakeClient 准备 4 个 turn 的脚本
     harness.agent.client = FakeClient([
@@ -179,6 +179,17 @@ def test_different_sessions_do_not_leak_messages(web_client):
     assert all("from-s2" not in m.get("content", [{}])[0].get("text", "")
                for m in m1["messages"] if m["role"] == "assistant")
 
+    runtime_s1 = app.state.coding_agent_runtime.get(s1["id"])
+    runtime_s2 = app.state.coding_agent_runtime.get(s2["id"])
+    assert runtime_s1 is not None and runtime_s2 is not None
+    assert runtime_s1 is not runtime_s2
+    assert runtime_s1.harness is not runtime_s2.harness
+    assert runtime_s1.harness.agent.state.messages
+    assert runtime_s2.harness.agent.state.messages
+    assert runtime_s1.harness.agent.state.messages is not (
+        runtime_s2.harness.agent.state.messages
+    )
+
 
 # ============================================================================
 # 7: DELETE session
@@ -202,6 +213,30 @@ def test_delete_session_removes_session(web_client):
     # 再 GET messages 应 404
     msgs_resp = client.get(f"/api/messages?session_id={sid}")
     assert msgs_resp.status_code == 404
+
+
+def test_delete_template_session_does_not_reuse_its_agent_state(web_client):
+    """删除首个 Session 后，新默认 Session 从模板克隆但不继承消息。"""
+
+    client, harness, app = web_client
+    default_sid = client.get("/api/sessions").json()["sessions"][0]["id"]
+    prompted = client.post(
+        "/api/prompt",
+        json={"text": "template history", "session_id": default_sid},
+    )
+    assert prompted.status_code == 200
+    assert harness.agent.state.messages
+
+    deleted = client.delete(f"/api/sessions/{default_sid}")
+    assert deleted.status_code == 200
+    assert app.state.coding_agent_runtime.get(default_sid) is None
+
+    new_default_sid = client.get("/api/sessions").json()["sessions"][0]["id"]
+    assert new_default_sid != default_sid
+    replacement = app.state.coding_agent_runtime.get(new_default_sid)
+    assert replacement is not None
+    assert replacement.harness is not harness
+    assert replacement.harness.agent.state.messages == []
 
 
 def test_delete_session_stops_active_request_and_releases_harness() -> None:

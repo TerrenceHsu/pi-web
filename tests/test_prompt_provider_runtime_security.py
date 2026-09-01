@@ -297,18 +297,18 @@ def test_app_py_does_not_import_secret_store_router() -> None:
                 )
 
 
-def test_app_py_uses_runtime_only_via_request_provider_runtime() -> None:
-    """Spot-check: provider_runtime module is imported (RequestProviderRuntime)."""
+def test_app_py_delegates_provider_binding_to_coding_agent_composition() -> None:
+    """Web installs Provider runtime but never performs its binding itself."""
     import inspect
 
     from pi_agent_core_py.web import app as app_module
 
     src = inspect.getsource(app_module)
-    # M1-5 imports
     assert "RequestProviderRuntime" in src
-    assert "RequestProviderSelection" in src
-    assert "bind_to_harness" in src
-    assert "resolve_selection" in src
+    assert "coding_agent_services.provider_runtime" in src
+    assert "agent_session.compose_request" in src
+    assert ".bind_to_harness(" not in src
+    assert ".resolve_selection(" not in src
 
 
 # ============================================================================
