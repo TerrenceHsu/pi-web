@@ -67,6 +67,10 @@ from agent_workspace.continuity import (
     merge_checkpoint_sources,
     recover_auto_memory_operations,
 )
+from coding_agent_app.core import (
+    CodingAgentMode,
+    create_coding_agent_session,
+)
 from coding_agent_app.intent_router import (
     READ_ONLY_SYSTEM_PROMPT,
     IntentDecision,
@@ -490,6 +494,14 @@ def create_app(
     tool_session_context: ContextVar[str | None] = ContextVar(
         "pi_agent_web_tool_session",
         default=None,
+    )
+    # Compatibility composition for the existing single-Harness Web entry.
+    # Request-scoped tools, policy and client wrappers are owned by the product
+    # Session facade instead of being mutated directly by HTTP transport code.
+    coding_agent_session = create_coding_agent_session(
+        session_id="web-shared-harness",
+        harness=harness,
+        read_only_tool=is_read_only_tool_name,
     )
 
     # ========================================================================
@@ -1110,7 +1122,7 @@ def create_app(
 
                 sandbox_runtime_cm = None
                 if _sandbox_resolved.runtime_enabled:
-                    from coding_agent_app.sandbox_workspace import (
+                    from coding_agent_app.sandbox import (
                         WorkspaceSandboxArtifactPublisher,
                         WorkspaceSandboxBaselineProvider,
                     )
@@ -1520,6 +1532,7 @@ def create_app(
     app.state.provider_config_runtime = None
     # M1-5: request_provider_runtime placeholder——仅 cred + pc runtime 都启用时填入
     app.state.request_provider_runtime = None
+    app.state.coding_agent_session = coding_agent_session
     from .source_offer import (
         SourceOfferError,
         build_about_router,
@@ -2950,12 +2963,12 @@ def create_app(
             PlanOrchestrator,
         )
         from coding_agent_app.planning.store import PlanStore
-
-        from ..messages import AssistantMessage, TextContent, Usage, UserMessage
-        from .coding_sandbox.automation import (
+        from coding_agent_app.sandbox.automation import (
             CodingSandboxAutomation,
             CodingSandboxAutomationError,
         )
+
+        from ..messages import AssistantMessage, TextContent, Usage, UserMessage
 
         session_id = validated.session_id
         session_store = validated.store
@@ -3168,7 +3181,7 @@ def create_app(
                     harness.agent.state.messages = validated.original_messages
                 state.running = False
 
-        from .coding_sandbox.automation import (
+        from coding_agent_app.sandbox.automation import (
             CodingSandboxAutomation,
             CodingSandboxAutomationError,
         )
@@ -3651,7 +3664,9 @@ def create_app(
                     ) from None
                 route_instructions = None
                 if resolved_coding_mode:
-                    from .coding_sandbox.automation import AUTOMATED_CODING_PROMPT
+                    from coding_agent_app.sandbox.automation import (
+                        AUTOMATED_CODING_PROMPT,
+                    )
 
                     route_instructions = AUTOMATED_CODING_PROMPT
                 elif intent is not None and intent.route == "read_only":
@@ -3849,7 +3864,7 @@ def create_app(
                 ) from None
             route_instructions = None
             if validated.coding_mode:
-                from .coding_sandbox.automation import (
+                from coding_agent_app.sandbox.automation import (
                     AUTOMATED_CODING_PROMPT,
                     AUTOMATED_CODING_REPAIR_PROMPT,
                 )
@@ -3911,45 +3926,22 @@ def create_app(
             # M1-5: bind_to_harness 在 active-request ownership 内部；
             # AsyncExitStack 让 selection=None 时跳过绑定（legacy path）.
             async with AsyncExitStack() as stack:
+                request_mode: CodingAgentMode = "direct"
+                coding_tool_names: set[str] = set()
+                override_tools = None
+                request_permission_policy = None
                 if (
                     provider_bound_operation is None
                     and validated.intent is not None
                     and validated.intent.route == "read_only"
                 ):
-                    from ..tools import ToolRegistry
-
-                    original_tools = harness.agent.tools
-                    read_only_tools = [
-                        tool
-                        for tool in original_tools.list()
-                        if is_read_only_tool_name(tool.name)
-                    ]
-                    harness.agent.tools = ToolRegistry(read_only_tools)
-
-                    def _restore_read_only_mode() -> None:
-                        harness.agent.tools = original_tools
-
-                    stack.callback(_restore_read_only_mode)
+                    request_mode = "read_only"
                 if provider_bound_operation is None and validated.coding_mode:
                     from ..policy import AllowAllToolPermissionPolicy
-                    from ..tools import ToolRegistry
 
-                    original_tools = harness.agent.tools
-                    registered_names: set[str] = container["coding_sandbox_tool_names"]
-                    coding_tools = [
-                        tool for tool in original_tools.list() if tool.name in registered_names
-                    ]
-                    if len(coding_tools) != len(registered_names) or not coding_tools:
-                        raise RuntimeError("Automated Coding tools are unavailable")
-                    original_permission_policy = harness.permission_policy
-                    harness.agent.tools = ToolRegistry(coding_tools)
-                    harness.set_permission_policy(AllowAllToolPermissionPolicy())
-
-                    def _restore_coding_mode() -> None:
-                        harness.agent.tools = original_tools
-                        harness.set_permission_policy(original_permission_policy)
-
-                    stack.callback(_restore_coding_mode)
+                    request_mode = "coding"
+                    coding_tool_names = set(container["coding_sandbox_tool_names"])
+                    request_permission_policy = AllowAllToolPermissionPolicy()
                 if (
                     provider_bound_operation is None
                     and validated.knowledge_conversation is not None
@@ -3962,7 +3954,8 @@ def create_app(
                     knowledge_tools = state.wiki_knowledge_tools
                     if knowledge_tools is None:
                         raise RuntimeError("Knowledge Agent tools unavailable")
-                    original_tools = harness.agent.tools
+                    request_mode = "knowledge"
+                    override_tools = knowledge_tools.list()
                     binding_token = knowledge_agent_binding.set(
                         KnowledgeAgentBinding(
                             conversation_id=validated.knowledge_conversation.id,
@@ -3970,13 +3963,21 @@ def create_app(
                             session_id=validated.knowledge_conversation.session_id,
                         )
                     )
-                    harness.agent.tools = knowledge_tools
 
                     def _restore_knowledge_mode() -> None:
-                        harness.agent.tools = original_tools
                         knowledge_agent_binding.reset(binding_token)
 
                     stack.callback(_restore_knowledge_mode)
+                if checkpoint_source is not None:
+                    request_mode = "checkpointer"
+                await stack.enter_async_context(
+                    coding_agent_session.bind_request(
+                        mode=request_mode,
+                        coding_tool_names=coding_tool_names,
+                        override_tools=override_tools,
+                        permission_policy=request_permission_policy,
+                    )
+                )
                 if runtime is not None and selection is not None:
                     await stack.enter_async_context(
                         runtime.bind_to_harness(harness=harness, selection=selection)
@@ -3991,18 +3992,19 @@ def create_app(
                     and validated.coding_mode
                     and (coding_repair or force_coding_bootstrap)
                 ):
-                    from .coding_sandbox.automation import CodingToolBootstrapModelClient
-
-                    repair_delegate = harness.agent.client
-                    harness.agent.client = CodingToolBootstrapModelClient(
-                        repair_delegate,
-                        list_first=force_coding_bootstrap and not coding_repair,
+                    from coding_agent_app.sandbox.automation import (
+                        CodingToolBootstrapModelClient,
                     )
 
-                    def _restore_coding_repair_client() -> None:
-                        harness.agent.client = repair_delegate
-
-                    stack.callback(_restore_coding_repair_client)
+                    repair_delegate = harness.agent.client
+                    stack.enter_context(
+                        coding_agent_session.bind_client(
+                            CodingToolBootstrapModelClient(
+                                repair_delegate,
+                                list_first=force_coding_bootstrap and not coding_repair,
+                            )
+                        )
+                    )
 
                 if provider_bound_operation is not None:
                     return await provider_bound_operation()

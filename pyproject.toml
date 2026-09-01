@@ -105,6 +105,9 @@ markers = [
 addopts = [
     "--basetemp=.pytest-tmp",
     "--cov=pi_agent_core_py",
+    "--cov=agent_workspace",
+    "--cov=coding_agent_app",
+    "--cov=coding_sandbox",
     "--cov-report=term-missing",
     "--cov-report=xml:.coverage.xml",
     "--no-cov-on-fail",
@@ -112,7 +115,12 @@ addopts = [
 ]
 
 [tool.coverage.run]
-source = ["pi_agent_core_py", "agent_workspace"]
+source = [
+    "pi_agent_core_py",
+    "agent_workspace",
+    "coding_agent_app",
+    "coding_sandbox",
+]
 branch = true
 omit = [
     # demo / tutorial scripts——不在发布包范围内

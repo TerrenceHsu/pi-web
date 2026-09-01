@@ -6,7 +6,7 @@
 
 | 项 | 当前事实 |
 |---|---|
-| 代码基线 | `0.0.29` 发布基线之后的 `master`；新增三类意图路由、Planner–Executor–Verifier Plan Mode、Sandbox 审阅/冲突恢复，以及 pi `ai` / `agent` 核心契约与 package 边界对齐 |
+| 代码基线 | `0.0.29` 发布基线之后的 `master`；新增三类意图路由、Planner–Executor–Verifier Plan Mode、Sandbox 审阅/冲突恢复，以及 pi `ai` / `agent` 核心契约、package 边界与首轮 `coding-agent` 产品组合边界对齐 |
 | 分支 | `master` |
 | 最新 release tag | `0.0.29`；annotated tag 指向本次统一版本与发布验证提交 |
 | Python / API 版本 | `0.0.29`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
@@ -32,6 +32,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 | pi `ai` 核心契约对齐（第一项） | ✅ P0 差距已补齐 | provider-aware 历史转换、精确 provider/API/model 身份、跨模型 thinking 安全降级、text/image 内容块、工具调用配对修复、cache/reasoning Usage、首事件前可中止重试；详见 `docs/validation/pi-ai-parity-2026-08-31.md` |
 | pi `agent` 核心契约对齐（第二项） | ✅ P0 差距已补齐 | 生命周期终化、下一轮控制顺序、文本/图片/AgentMessage prompt、signal-aware context、自定义 LLM 转换、工具参数预处理与 hook patch、assistant-tail 队列续作、thinking/运行时替换和公开状态同步；详见 `docs/validation/pi-agent-parity-2026-08-31.md` |
 | pi `agent` package 结构对齐 | ✅ 完成 | canonical 实现迁入 `ai/`、`agent/`、`agent/harness/{compaction,session,tools}` 与 `session_backends/sqlite/`；旧平铺模块保留 thin facade/模块别名，兼容导入保持对象身份；AST 依赖边界、wheel 内容与隔离安装导入均通过；详见 `docs/validation/pi-agent-package-structure-2026-09-01.md` |
+| pi `coding-agent` 产品组合边界（第三项首轮） | ✅ 阶段 1–2 完成 | 新增 `coding_agent_app.core` 的 Application/Runtime/Session/Services/Settings/Resources/Toolset/Prompt/SDK 边界；请求模式工具集 fail closed、并发 Session 创建合并、关闭竞态收敛，Web 不再直接替换 Harness tools/client；Sandbox automation/workspace 迁入产品包并保留旧导入对象身份。详见 `docs/validation/pi-coding-agent-parity-2026-09-01.md` |
 | 旧 Chunk Knowledge PDF → Chunk FTS5 → Citation | 🗄️ 历史兼容 | 实现仅保留显式兼容入口；默认套件只保留不可误启动守卫，不再进入产品组合或前端 |
 | 登录与账号工作区隔离 | ✅ 完成 | `b529bbc` |
 | Session Workspace、`AGENT.md`、`Memory.md`、`/checkpointer` | ✅ 完成 | `WorkspaceStore` 为唯一规范事实源；新旧 Session 幂等初始化两个固定根文件，保留旧正文/file id；设计见 `docs/design/workspace-sandbox-integration.md` |
@@ -143,17 +144,20 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 
 ## 2026-09-01 当前验证基线
 
-当前 `0.0.29` 后续代码已实际复跑全量离线 Backend、Frontend 与静态门禁；本轮完成 pi
-package 结构对齐并验证旧导入兼容、依赖方向与 wheel 内容。Browser E2E、真实 E2B、Parser OCI
-与 DDGS/GLM 继续沿用最近一次保留证据：
+当前 `0.0.29` 后续代码已实际复跑全量离线 Backend、Frontend、Browser E2E 与静态门禁；本轮
+完成 pi `coding-agent` 首轮产品组合边界对齐，并验证旧导入兼容、依赖方向、覆盖率范围与 wheel
+内容。真实 E2B、Parser OCI 与 DDGS/GLM 继续沿用最近一次保留证据：
 
 | 验证 | 结果 | 备注 |
 |---|---|---|
-| Ruff 全量 | **PASS** | CI 口径 `ruff check src/ tests/`；0 errors |
-| strict Mypy 全量 | **PASS** | `mypy src`：232 source files / 0 issues；覆盖 Wiki、独立 Workspace/Plan 包、Workspace 文档转换、Managed Sandbox、AI/Agent/Harness/SQLite package 边界与产品组合边界 |
+| Ruff 全量 | **PASS** | `ruff check src tests scripts`；0 errors |
+| strict Mypy 全量 | **PASS** | `mypy src`：245 source files / 0 issues；覆盖 Wiki、独立 Workspace/Plan 包、Workspace 文档转换、Managed Sandbox、AI/Agent/Harness/SQLite 与 Coding Agent 产品组合边界 |
+| Wiki Parser Worker 静态门禁 | **PASS** | Ruff 0 errors；strict Mypy 16 source files / 0 issues |
 | Backend 全量离线（第二轮前基线） | **3143 passed, 7 skipped, 9 deselected** | 当时为 3159 collected；`pytest tests --tb=short -q`；1053.41s；coverage 81.91% |
-| Backend 当前精简套件 | **2138 passed, 7 skipped, 9 deselected** | `pytest -q`；365.58s；coverage 77.33%；默认排除真实外网、LLM 与 Docker marker |
+| Backend 当前精简套件 | **2156 passed, 7 skipped, 9 deselected** | `pytest -q`；879.96s；合并 coverage 76.03%；默认门禁现覆盖 `pi_agent_core_py`、`agent_workspace`、`coding_agent_app`、`coding_sandbox`，并排除真实外网、LLM 与 Docker marker |
 | Frontend 当前精简套件 | **183/183 passed** | 26 files；Vitest 0 failure / 0 stderr warning；同时通过 typecheck、ESLint 与 production build |
+| pi `coding-agent` 首轮专项 | **18 passed；邻接 146 passed, 1 skipped** | 覆盖工具集解析/恢复、direct 模式状态保留、Session 并发与关闭竞态、Services/Resources/Prompt、产品包不得反向依赖 Web、canonical/legacy 对象身份，以及 Sandbox/Web 请求恢复邻接回归 |
+| pi `coding-agent` wheel | **PASS** | 离线构建主 wheel；包含 16 个 `coding_agent_app/core`、`coding_agent_app/sandbox` 与 Web 兼容条目；`python -I` 隔离导入确认新旧对象身份一致 |
 | pi `ai` 对齐专项 | **159 passed** | provider history/image/usage/retry 新增回归及 Anthropic/OpenAI/Factory/Context Budget/Compaction 邻接测试；2.36s，0 failure |
 | pi `agent` 对齐专项 | **36 passed；邻接 127 passed** | Agent/P0 lifecycle/control queue/public state 36 项；再含 Session/Compaction/ToolResult/Coding Sandbox 邻接共 127 项；0 failure |
 | pi package 结构专项 | **7 passed；wheel PASS** | 旧/新导入对象身份、AI/Agent AST 依赖方向与旧 facade 约束；wheel 393 entries，隔离安装后 Agent/Harness/SQLite canonical import 通过 |
@@ -199,7 +203,7 @@ package 结构对齐并验证旧导入兼容、依赖方向与 wheel 内容。Br
 | Keyring 定向回归 | **94/94 passed** | Runtime、launcher 与 restart 范围 |
 | 真实 Windows Keyring 探针 | **write/read = true；cleanup = true** | 随机非用户值，执行后删除；同账号/同解释器复验与安全取证步骤已形成 Windows smoke 文档 |
 | MCP/DDGS UTF-8 定向回归 | **34 passed, 1 deselected** | 含真实 Python 子进程中文 round-trip |
-| Browser E2E | **19/19 passed** | Chromium；8 个规格、单 worker、`CI=1`；1.1m；覆盖基础聊天、Session 恢复、MCP、Approval、Compaction、Workspace 文档转换、Sandbox 与 LLM Wiki；最终复跑 0 retry / 0 flaky / 0 failure |
+| Browser E2E | **19/19 passed** | Chromium；8 个规格、单 worker、`CI=1`；1.4m；覆盖基础聊天、Session 恢复、MCP、Approval、Compaction、Workspace 文档转换、Sandbox 与 LLM Wiki；最终复跑 0 retry / 0 flaky / 0 failure |
 | Context Compaction Browser E2E | **1/1 passed** | 修复逐轮 Prompt 未等待 202 导致的测试自身竞态；沙箱外真实启动浏览器；production build 由 posttest 恢复 |
 
 默认 pytest marker 排除真实 LLM、真实外网 integration 和 Docker；额外门禁还要求
@@ -218,7 +222,7 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 ### Runtime / Web
 
-- 每账号单 harness、单 active request；不支持同账号多个 Session 并行生成
+- `CodingAgentRuntime` 已支持按 Session ID 独立拥有、并发创建合并和关闭竞态收敛；现有 Web 入口仍以一个共享 Harness 接入兼容 Session，因此产品 UI 尚不支持同账号多个 Session 并行生成
 - 普通 Prompt/Regenerate active request 与 pending approval 不跨后端重启恢复；浏览器刷新只恢复仍在当前进程运行的请求。Checkpointer 可对已接受 intent 前滚；Managed Sandbox 只恢复持久状态/事件并把重启前未完成操作标为 `interrupted`，不重放模型、命令或发布
 - Human Approval 只有 Approve once / Deny；没有永久授权
 - Context Budget 是带安全余量的确定性近似，不是 Provider 官方 tokenizer

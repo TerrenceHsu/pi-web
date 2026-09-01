@@ -8,15 +8,15 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from typing import Literal
 
+from coding_agent_app.sandbox.automation import (
+    CodingSandboxAutomation,
+    CodingSandboxAutomationError,
+)
 from pi_agent_core_py.agent import Agent
 from pi_agent_core_py.harness import AgentHarness
 from pi_agent_core_py.model_client import ModelClient
 from pi_agent_core_py.policy import AllowAllToolPermissionPolicy
 from pi_agent_core_py.tools import AgentTool, ToolRegistry
-from pi_agent_core_py.web.coding_sandbox.automation import (
-    CodingSandboxAutomation,
-    CodingSandboxAutomationError,
-)
 
 from .models import (
     PlanRunResult,
