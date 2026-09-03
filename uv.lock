@@ -1358,9 +1358,6 @@ dev = [
     { name = "types-jsonschema" },
     { name = "types-pyyaml" },
 ]
-rag = [
-    { name = "pypdf" },
-]
 sandbox-e2b = [
     { name = "e2b" },
 ]
@@ -1392,7 +1389,6 @@ requires-dist = [
     { name = "openpyxl", marker = "extra == 'web'", specifier = ">=3.1,<4" },
     { name = "pyarrow", specifier = ">=15" },
     { name = "pydantic", specifier = ">=2.7" },
-    { name = "pypdf", marker = "extra == 'rag'", specifier = ">=6.0,<7" },
     { name = "pypdf", marker = "extra == 'web'", specifier = ">=6.0,<7" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
@@ -1408,7 +1404,7 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'web'", specifier = ">=0.29" },
     { name = "websockets", marker = "extra == 'web'", specifier = ">=12" },
 ]
-provides-extras = ["dev", "rag", "sandbox-e2b", "web"]
+provides-extras = ["dev", "sandbox-e2b", "web"]
 
 [[package]]
 name = "pluggy"

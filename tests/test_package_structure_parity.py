@@ -13,6 +13,39 @@ from pathlib import Path
 import pi_agent_core_py as public_api
 
 PACKAGE_ROOT = Path(__file__).parents[1] / "src" / "pi_agent_core_py"
+SRC_ROOT = PACKAGE_ROOT.parent
+
+LEGACY_FACADE_MODULES = {
+    "pi_agent_core_py.compaction",
+    "pi_agent_core_py.context",
+    "pi_agent_core_py.context_budget",
+    "pi_agent_core_py.harness",
+    "pi_agent_core_py.llm_messages",
+    "pi_agent_core_py.messages",
+    "pi_agent_core_py.model_client",
+    "pi_agent_core_py.session",
+    "pi_agent_core_py.session_sqlite",
+    "pi_agent_core_py.skill_loader",
+    "pi_agent_core_py.skills",
+    "pi_agent_core_py.stream_events",
+    "pi_agent_core_py.system_prompt",
+    "pi_agent_core_py.tools.list_files",
+    "pi_agent_core_py.tools.view_file",
+    "pi_agent_core_py.tools.write_file",
+    "pi_agent_core_py.web.coding_sandbox.automation",
+    "pi_agent_core_py.web.coding_sandbox.runtime",
+    "pi_agent_core_py.web.coding_sandbox.workspace",
+    "pi_agent_core_py.web.files",
+    "pi_agent_core_py.web.workspace_documents",
+}
+LEGACY_FACADE_SOURCE_FILES = {
+    "web/coding_sandbox/__init__.py",
+    "web/coding_sandbox/automation.py",
+    "web/coding_sandbox/runtime.py",
+    "web/coding_sandbox/workspace.py",
+    "web/files.py",
+    "web/workspace_documents.py",
+}
 
 
 def _imports_banned_root(module_path: Path, banned_roots: set[str]) -> list[str]:
@@ -45,6 +78,30 @@ def _imports_banned_root(module_path: Path, banned_roots: set[str]) -> list[str]
 
 def _python_files(root: Path) -> list[Path]:
     return sorted(path for path in root.rglob("*.py") if "__pycache__" not in path.parts)
+
+
+def _legacy_facade_imports(module_path: Path) -> list[str]:
+    if module_path.is_relative_to(PACKAGE_ROOT) and (
+        module_path.relative_to(PACKAGE_ROOT).as_posix() in LEGACY_FACADE_SOURCE_FILES
+    ):
+        return []
+    tree = ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
+    current_package: tuple[str, ...] | None = None
+    if module_path.is_relative_to(PACKAGE_ROOT):
+        package_parts = module_path.relative_to(PACKAGE_ROOT).with_suffix("").parts
+        current_package = ("pi_agent_core_py", *package_parts[:-1])
+
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        imported = node.module or ""
+        if node.level and current_package is not None:
+            keep = max(0, len(current_package) - node.level + 1)
+            imported = ".".join((*current_package[:keep], *imported.split("."))).rstrip(".")
+        if imported in LEGACY_FACADE_MODULES or imported.startswith("pi_agent_core_py.providers"):
+            violations.append(f"{module_path.relative_to(SRC_ROOT)} -> {imported}")
+    return violations
 
 
 def test_old_and_new_agent_imports_share_identity() -> None:
@@ -217,7 +274,6 @@ def test_legacy_modules_are_thin_facades() -> None:
         "providers/transform.py",
         "tools/list_files.py",
         "tools/view_file.py",
-        "tools/web_search.py",
         "tools/write_file.py",
     ]
     oversized: list[str] = []
@@ -235,3 +291,22 @@ def test_legacy_modules_are_thin_facades() -> None:
         if executable:
             oversized.append(name)
     assert oversized == []
+
+
+def test_product_runtime_does_not_depend_on_legacy_facades() -> None:
+    """Compatibility paths remain public, but Web product code must use canonical owners."""
+    product_roots = [
+        SRC_ROOT / "agent_workspace",
+        SRC_ROOT / "coding_agent_app",
+        SRC_ROOT / "coding_sandbox",
+        PACKAGE_ROOT / "mcp",
+        PACKAGE_ROOT / "policy",
+        PACKAGE_ROOT / "web",
+    ]
+    violations = [
+        violation
+        for root in product_roots
+        for path in _python_files(root)
+        for violation in _legacy_facade_imports(path)
+    ]
+    assert violations == []

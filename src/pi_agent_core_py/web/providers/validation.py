@@ -39,7 +39,7 @@ from typing import Literal, Never, Protocol
 
 import httpx
 
-from ...providers.registry import CredentialValidationStrategyId
+from ...ai.providers.registry import CredentialValidationStrategyId
 
 __all__ = [
     # Types

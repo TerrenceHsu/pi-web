@@ -25,7 +25,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from ...providers.registry import _DEFAULT_REGISTRY, ProviderRegistry
+from ...ai.providers.registry import _DEFAULT_REGISTRY, ProviderRegistry
 from ..credentials.runtime import _is_file_type_db_path
 from ..credentials.service import CredentialService
 from .config_service import ProviderConfigService, SessionExistsCallback

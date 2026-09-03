@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import time
 from pathlib import Path
@@ -52,9 +53,6 @@ def _app(
         uploads_dir=str(tmp_path / "uploads"),
         enable_trusted_host=True,
         credential_extra_hosts=("testserver",),
-        # Keep passing the former Chunk-RAG root so every Wiki API test also
-        # proves that a configured legacy path cannot reactivate that product.
-        knowledge_root=str(tmp_path / "legacy-knowledge"),
         wiki_root=str(tmp_path / "knowledge"),
         enable_wiki_api=True,
         wiki_pdf_provider=provider,
@@ -82,7 +80,6 @@ def test_wiki_lifespan_starts_and_closes_independent_store(tmp_path: Path) -> No
         assert app.state.web.wiki_store is not None
         assert app.state.web.wiki_ingestion_service is not None
         assert app.state.web.wiki_ingestion_worker.running
-        assert app.state.web.knowledge_store is None
     assert app.state.web.wiki_store is None
     assert app.state.web.wiki_ingestion_worker is None
 
@@ -126,12 +123,15 @@ def test_wiki_space_archive_restore_and_safe_delete(tmp_path: Path) -> None:
 
 
 def test_legacy_chunk_knowledge_stays_retired(tmp_path: Path) -> None:
-    """A configured legacy root must not mount its DB, workers, Tool or routes."""
+    """The retired Chunk-RAG product has no runtime switch, package or route."""
+    parameters = inspect.signature(create_app).parameters
+    assert "knowledge_root" not in parameters
+    assert "enable_knowledge_api" not in parameters
+    knowledge_package = Path(create_app.__code__.co_filename).parent / "knowledge"
+    assert not any(knowledge_package.glob("*.py"))
+
     app = _app(tmp_path)
     with TestClient(app) as client:
-        assert app.state.web.knowledge_store is None
-        assert app.state.web.ingestion_worker_manager is None
-        assert app.state.web.indexing_worker_manager is None
         assert "search_knowledge" not in app.state.web.harness.agent.tools.names()
         response = client.post(
             "/api/knowledge/libraries/legacy/search",
@@ -139,7 +139,6 @@ def test_legacy_chunk_knowledge_stays_retired(tmp_path: Path) -> None:
             json={"query": "x"},
         )
         assert response.status_code == 404
-    assert not (tmp_path / "legacy-knowledge" / "knowledge.db").exists()
 
 
 def test_wiki_api_security_space_html_upload_and_raw_browse(tmp_path: Path) -> None:

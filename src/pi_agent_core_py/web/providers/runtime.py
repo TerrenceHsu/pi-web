@@ -57,12 +57,12 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Literal
 
-from ...harness import AgentHarness
-from ...model_client import ModelClient
-from ...providers.base import ProviderAdapter
-from ...providers.errors import ProviderConfigError
-from ...providers.factory import create_provider
-from ...providers.registry import ProviderRegistry
+from ...agent.harness import AgentHarness
+from ...ai.model_client import ModelClient
+from ...ai.providers.base import ProviderAdapter
+from ...ai.providers.errors import ProviderConfigError
+from ...ai.providers.factory import create_provider
+from ...ai.providers.registry import ProviderRegistry
 from ..credentials.errors import (
     CredentialRequestSecretBackendError,
     CredentialRequestSecretUnavailableError,

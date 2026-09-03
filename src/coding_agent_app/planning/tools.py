@@ -8,8 +8,8 @@ from typing import Any, Generic, Literal, TypeVar, cast
 
 from pydantic import BaseModel, ValidationError
 
-from pi_agent_core_py.messages import TextContent
-from pi_agent_core_py.tools import AgentTool, ToolResult, ToolUpdateCallback
+from pi_agent_core_py.agent.tooling import AgentTool, ToolResult, ToolUpdateCallback
+from pi_agent_core_py.ai.messages import TextContent
 
 from .models import (
     PlanSpec,

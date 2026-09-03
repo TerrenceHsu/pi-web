@@ -234,12 +234,7 @@ class WebAppState(BaseModel):
     skill_mutation_lock: Any = None  # asyncio.Lock——在 create_app 内 init
     # P1-C3: MCP mutation lock——覆盖 add/enable/disable/delete server + tool
     mcp_mutation_lock: Any = None
-    # P2-R1: Knowledge subsystem composition (None = disabled).
-    # Service / Store / FileStore 同时存在或同时为 None。
-    knowledge_service: Any = None
-    knowledge_store: Any = None
-    knowledge_file_store: Any = None
-    # Page-centric LLM Wiki subsystem. Kept separate from legacy chunk Knowledge.
+    # Page-centric LLM Wiki subsystem.
     wiki_store: Any = None
     wiki_ingestion_service: Any = None
     wiki_ingestion_worker: Any = None
@@ -249,21 +244,6 @@ class WebAppState(BaseModel):
     wiki_change_set_service: Any = None
     wiki_conversation_service: Any = None
     wiki_knowledge_tools: Any = None
-    # P2-R2-C2: Ingestion Worker Manager (None = disabled / [rag] extra missing).
-    # Holds app-scoped singleton that drives PDF→Canonical Markdown pipeline.
-    # Constructed in lifespan AFTER knowledge subsystem; started before yield;
-    # stopped in lifespan finally BEFORE knowledge_store.close().
-    ingestion_worker_manager: Any = None
-    # P2-R3-D2: Indexing Worker Manager (None = disabled / [rag] extra missing).
-    # Holds app-scoped singleton that drives normalizing → chunking →
-    # indexing → ready background execution. Constructed in lifespan AFTER
-    # Ingestion Worker Manager; started after Ingestion; stopped in lifespan
-    # finally AFTER Ingestion Worker stop, BEFORE knowledge_store.close().
-    indexing_worker_manager: Any = None
-    # P2-R4-B2: Turn-scoped Evidence Registry for search_knowledge tool.
-    # Lazily created by the tool's evidence_registry_getter closure.
-    # Reset to None at the start of each prompt request (turn boundary).
-    _evidence_registry: Any = None
 
 
 # ============================================================================

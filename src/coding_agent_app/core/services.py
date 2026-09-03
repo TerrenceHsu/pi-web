@@ -7,11 +7,11 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from pi_agent_core_py.agent.harness import AgentHarness
 from pi_agent_core_py.agent.harness.session.types import (
     SessionRepository,
     SessionSearch,
 )
-from pi_agent_core_py.harness import AgentHarness
 from pi_agent_core_py.telemetry import NOOP_TELEMETRY_CONTEXT, TelemetryContext
 
 from .resources import (

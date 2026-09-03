@@ -26,7 +26,6 @@ from .view_file import (
     ViewFileTool,
     create_view_file_tool,
 )
-from .web_search import WebSearchTool
 from .write_file import WriteFileTool, create_write_file_tool
 
 __all__ = [
@@ -38,7 +37,6 @@ __all__ = [
     "ToolUpdateCallback",
     "AgentTool",
     "ToolRegistry",
-    "WebSearchTool",
     "CodingSandboxTool",
     "create_coding_sandbox_tools",
     "create_coding_validation_tool",

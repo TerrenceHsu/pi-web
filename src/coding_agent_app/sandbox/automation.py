@@ -12,10 +12,10 @@ from coding_sandbox.lifecycle import (
     ManagedSandboxOperationRecord,
     SandboxLifecycleError,
 )
-from pi_agent_core_py.llm_messages import LLMMessage
-from pi_agent_core_py.model_client import ModelClient
-from pi_agent_core_py.stream_events import StreamEvent, ToolCallEndEvent, ToolCallEvent
-from pi_agent_core_py.tools import ToolDef
+from pi_agent_core_py.ai.llm_messages import LLMMessage
+from pi_agent_core_py.ai.model_client import ModelClient
+from pi_agent_core_py.ai.stream_events import StreamEvent, ToolCallEndEvent, ToolCallEvent
+from pi_agent_core_py.ai.tooling import ToolDef
 
 AUTOMATED_CODING_PROMPT = """Automated Coding mode is active for this request.
 

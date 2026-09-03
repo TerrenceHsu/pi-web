@@ -33,7 +33,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
-from ...providers.registry import (
+from ...ai.providers.registry import (
     ProviderRegistry,
     detect_provider_hint,
     list_provider_definitions,

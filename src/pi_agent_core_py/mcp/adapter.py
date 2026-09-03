@@ -33,8 +33,8 @@ import asyncio
 import json
 from typing import Any
 
-from ..messages import TextContent
-from ..tools import AgentTool, ToolExecutionMode, ToolResult, ToolUpdateCallback
+from ..agent.tooling import AgentTool, ToolExecutionMode, ToolResult, ToolUpdateCallback
+from ..ai.messages import TextContent
 from .client import MCPClient, MCPToolInfo
 from .naming import make_namespaced_tool_name
 

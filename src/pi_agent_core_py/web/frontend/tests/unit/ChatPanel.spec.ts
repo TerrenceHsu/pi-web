@@ -50,9 +50,11 @@ vi.mock("../../src/api/client", () => ({
 }))
 
 // mock abortRun——ChatPanel 用它做 stop
-vi.mock("../../src/api", () => ({
+vi.mock("../../src/api/state", () => ({
   abortRun: vi.fn().mockResolvedValue(undefined),
   getState: vi.fn().mockResolvedValue({ plan_mode: { enabled: true } }),
+}))
+vi.mock("../../src/api/slashCommands", () => ({
   listSlashCommands: vi.fn().mockResolvedValue({
     count: 1,
     commands: [
@@ -67,7 +69,7 @@ vi.mock("../../src/api", () => ({
 }))
 
 import ChatPanel from "../../src/components/chat/ChatPanel.vue"
-import { getState } from "../../src/api"
+import { getState } from "../../src/api/state"
 import { useProviderStore } from "../../src/stores/providerStore"
 import { useSessionStore } from "../../src/stores/sessionStore"
 import { useChatStore } from "../../src/stores/chatStore"

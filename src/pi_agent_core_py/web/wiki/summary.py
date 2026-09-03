@@ -10,8 +10,8 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict
 
 from ...agent import Agent
-from ...messages import AssistantMessage, TextContent
-from ...model_client import ModelClient
+from ...agent.messages import AssistantMessage, TextContent
+from ...ai.model_client import ModelClient
 from .errors import WikiStoreError
 from .models import (
     WikiArtifact,

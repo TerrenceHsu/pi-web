@@ -27,7 +27,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal
 
-from ...providers.registry import ProviderDefinition, ProviderRegistry
+from ...ai.providers.registry import ProviderDefinition, ProviderRegistry
 from ..credentials.service import CredentialService, CredentialView
 from ..credentials.store import CredentialNotFoundError
 from .config_store import (

@@ -8,7 +8,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, cast
 
-from ...messages import TextContent
+from ...agent.messages import TextContent
 from ...tools import AgentTool, ToolRegistry, ToolResult, ToolUpdateCallback
 from .changes import WikiChangeSetService
 from .errors import WikiStoreError

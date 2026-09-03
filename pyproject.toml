@@ -68,15 +68,6 @@ web = [
 sandbox-e2b = [
     "e2b>=2.39,<3",
 ]
-# P2-R2-0 License Gate 选定 pypdf 为 R2 MVP PDF Parser。
-# 范围 pypdf>=6.0,<7（Audited baseline 6.14.2，BSD-3-Clause）。
-# 纯 Python、0 直接依赖、无模型、无 OCR、无外部网络——满足 R2 编码不变量
-# （详见 docs/design/p2-r2-0-pdf-parser-license-gate.md §17 / §19）。
-# 不引入 [crypto] extra（encrypted PDF → 'encrypted_pdf' 错误码）。
-rag = [
-    "pypdf>=6.0,<7",
-]
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -125,9 +116,6 @@ branch = true
 omit = [
     # demo / tutorial scripts——不在发布包范围内
     "*/steps/*",
-    # Retired Chunk-RAG compatibility code is not part of the current product.
-    # One product-boundary test ensures it cannot be started accidentally.
-    "*/web/knowledge/*",
 ]
 
 [tool.coverage.report]

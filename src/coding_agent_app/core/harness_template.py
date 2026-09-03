@@ -6,9 +6,9 @@ from collections.abc import AsyncIterator
 from copy import copy
 
 from pi_agent_core_py.agent import Agent
+from pi_agent_core_py.agent.harness import AgentHarness
 from pi_agent_core_py.ai.providers.base import ProviderAdapter, ProviderRequest
-from pi_agent_core_py.harness import AgentHarness
-from pi_agent_core_py.stream_events import StreamEvent
+from pi_agent_core_py.ai.stream_events import StreamEvent
 
 
 class _BorrowedProviderAdapter(ProviderAdapter):

@@ -14,8 +14,8 @@ from coding_sandbox.workspace_models import (
     SandboxWorkspaceError,
 )
 
-from ..messages import TextContent
-from . import AgentTool, ToolResult, ToolUpdateCallback
+from ..agent.tooling import AgentTool, ToolResult, ToolUpdateCallback
+from ..ai.messages import TextContent
 
 WorkspaceGetter = Callable[[], CodingWorkspace]
 ToolHandler = Callable[

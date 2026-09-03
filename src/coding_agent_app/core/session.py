@@ -7,14 +7,14 @@ from collections.abc import AsyncIterator, Callable, Collection, Iterable, Itera
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass
 
+from pi_agent_core_py.agent.harness import AgentHarness
 from pi_agent_core_py.agent.harness.session.types import SessionStorage
-from pi_agent_core_py.harness import AgentHarness
-from pi_agent_core_py.messages import AgentMessage
-from pi_agent_core_py.model_client import ModelClient
+from pi_agent_core_py.agent.harness.skills import SkillRegistry, SkillSelection
+from pi_agent_core_py.agent.messages import AgentMessage
+from pi_agent_core_py.agent.tooling import AgentTool
+from pi_agent_core_py.ai.model_client import ModelClient
 from pi_agent_core_py.policy import ToolPermissionPolicy
-from pi_agent_core_py.skills import SkillRegistry, SkillSelection
 from pi_agent_core_py.telemetry import SpanOptions, TelemetrySpan
-from pi_agent_core_py.tools import AgentTool
 
 from .prompts import PromptContribution, compose_system_prompt_suffix
 from .resources import CodingAgentResourceSnapshot, HarnessCodingAgentResourceLoader

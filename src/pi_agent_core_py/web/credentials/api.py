@@ -32,7 +32,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from ...providers.registry import (
+from ...ai.providers.registry import (
     ProviderDefinition,
     detect_provider_hint,
     list_provider_definitions,

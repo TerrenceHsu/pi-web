@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
-from ..skills import PromptTemplate, Skill
+from ..agent.harness.skills import PromptTemplate, Skill
 
 if TYPE_CHECKING:
     # 仅用于类型注解——避免 client.py ↔ prompts.py 之间的循环 import

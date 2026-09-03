@@ -75,16 +75,18 @@ vi.mock("../../src/api/client", () => ({
   requestJson: vi.fn(),
 }))
 
-vi.mock("../../src/api", () => ({
+vi.mock("../../src/api/state", () => ({
   abortRun: vi.fn().mockResolvedValue(undefined),
   getState: vi.fn().mockResolvedValue({ plan_mode: { enabled: true } }),
+}))
+vi.mock("../../src/api/slashCommands", () => ({
   listSlashCommands: vi.fn().mockResolvedValue({ count: 0, commands: [] }),
 }))
 
 import ChatPanel from "../../src/components/chat/ChatPanel.vue"
 import SessionSidebar from "../../src/components/layout/SessionSidebar.vue"
 import ProviderSettingsModal from "../../src/components/providers/ProviderSettingsModal.vue"
-import { getState } from "../../src/api"
+import { getState } from "../../src/api/state"
 import { useProviderStore } from "../../src/stores/providerStore"
 import { useSessionStore } from "../../src/stores/sessionStore"
 import { useChatStore } from "../../src/stores/chatStore"

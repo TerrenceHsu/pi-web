@@ -107,39 +107,3 @@ export interface MCPServerDeleteResponse {
   name: string
   cleaned_disabled_tools: string[]
 }
-
-// ============================================================================
-// 旧 DeveloperDrawer 用的兼容类型（保留以让 McpPanel.vue 编译过）
-// ============================================================================
-
-/** 旧 GET /api/mcp response 中的 server 项。 */
-export interface McpServerStateCompat {
-  name: string
-  connected: boolean
-  tool_count: number
-  last_error: string | null
-  metadata: JsonValue
-}
-
-/** 旧 GET /api/mcp response 中的 tool 项（不含 enabled 字段）。 */
-export interface McpToolSummaryCompat {
-  name: string
-  server: string
-  mcp_tool: string
-  description: string
-}
-
-/** 旧 GET /api/mcp response 中的 prompt 项。 */
-export interface McpPromptSummaryCompat {
-  server: string
-  name: string
-  description: string
-}
-
-/** 旧 GET /api/mcp response——DeveloperDrawer/McpPanel 用。 */
-export interface McpResponse {
-  attached: boolean
-  servers: McpServerStateCompat[]
-  tools: McpToolSummaryCompat[]
-  prompts: McpPromptSummaryCompat[]
-}

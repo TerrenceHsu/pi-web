@@ -1,7 +1,7 @@
 """New page-centric LLM Wiki persistence package.
 
-The legacy chunk-RAG implementation remains isolated under ``web.knowledge``
-until the explicit retirement cutover.  This package never imports it.
+Legacy on-disk Chunk-RAG data is retired by ``wiki.legacy`` during migration;
+the former runtime package and API are no longer shipped.
 """
 
 from .changes import WikiChangeSetService

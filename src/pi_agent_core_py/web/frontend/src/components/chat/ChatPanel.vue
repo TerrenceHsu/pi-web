@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue"
 
-import { abortRun, getState, listSlashCommands } from "../../api"
+import { abortRun, getState } from "../../api/state"
+import { listSlashCommands } from "../../api/slashCommands"
 import type { SlashCommandDefinition } from "../../types"
 import { useChatStore } from "../../stores/chatStore"
 import { useCodingSandboxStore } from "../../stores/codingSandboxStore"

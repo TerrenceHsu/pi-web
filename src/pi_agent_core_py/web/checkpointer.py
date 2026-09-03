@@ -31,12 +31,12 @@ from agent_workspace.continuity import (
     recover_checkpointer_operations as _recover_checkpointer_operations,
 )
 
-from ..llm_messages import LLMUserMessage
-from ..messages import TextContent
-from ..model_client import ModelClient
-from ..session import serialize_messages
-from ..session_sqlite import SessionOperationConflictError
-from ..stream_events import DoneEvent, ErrorEvent, TextDeltaEvent
+from ..agent.harness.session.memory import serialize_messages
+from ..agent.messages import TextContent
+from ..ai.llm_messages import LLMUserMessage
+from ..ai.model_client import ModelClient
+from ..ai.stream_events import DoneEvent, ErrorEvent, TextDeltaEvent
+from ..session_backends.sqlite import SessionOperationConflictError
 
 
 def build_checkpoint_source(messages: list[Any]) -> CheckpointSource:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 import pytest
@@ -53,12 +54,15 @@ def _gateway(tmp_path: Path) -> FastAPI:
                         stop_reason="stop",
                         usage=Usage(input=12, output=5, total_tokens=17),
                     ),
-                ]
+                ],
+                [TextDeltaEvent(delta="regenerated answer"), DoneEvent(stop_reason="stop")],
+                [TextDeltaEvent(delta="# Memory\n\n- retained"), DoneEvent(stop_reason="stop")],
             ]
         )
         return create_app(
             AgentHarness(Agent(system_prompt="", client=client)),
             db_path=workspace_root / "workspace.sqlite",
+            uploads_dir=workspace_root / "uploads",
             telemetry_db_path=telemetry_database,
             telemetry_account_id=user.id,
             telemetry_account_name=user.name,
@@ -82,6 +86,18 @@ def _login(client: TestClient, name: str, password: str) -> None:
     assert response.status_code == 200
 
 
+def _wait_for_request(client: TestClient, request_id: str) -> dict[str, object]:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        response = client.get(f"/api/requests/{request_id}")
+        assert response.status_code == 200
+        payload: dict[str, object] = response.json()
+        if payload["status"] in {"completed", "error", "aborted"}:
+            return payload
+        time.sleep(0.01)
+    raise AssertionError(f"request {request_id} did not finish")
+
+
 def test_admin_can_inspect_cross_account_telemetry_but_user_cannot(tmp_path: Path) -> None:
     marker = "USER_PROMPT_MUST_NOT_BE_RECORDED"
     with TestClient(_gateway(tmp_path)) as client:
@@ -94,6 +110,23 @@ def test_admin_can_inspect_cross_account_telemetry_but_user_cannot(tmp_path: Pat
             json={"session_id": session_id, "text": marker},
         )
         assert prompt.status_code == 200
+
+        messages = client.get(f"/api/messages?session_id={session_id}").json()["messages"]
+        assistant_id = next(
+            message["message_id"]
+            for message in reversed(messages)
+            if message["role"] == "assistant"
+        )
+        regenerate = client.post(f"/api/sessions/{session_id}/messages/{assistant_id}/regenerate")
+        assert regenerate.status_code == 202
+        assert _wait_for_request(client, regenerate.json()["request_id"])["status"] == "completed"
+
+        checkpointer = client.post(
+            f"/api/sessions/{session_id}/slash-commands",
+            json={"command": "/checkpointer"},
+        )
+        assert checkpointer.status_code == 202
+        assert _wait_for_request(client, checkpointer.json()["request_id"])["status"] == "completed"
 
         forbidden = client.get("/api/admin/telemetry/summary", headers=UI_HEADERS)
         assert forbidden.status_code == 403
@@ -110,7 +143,7 @@ def test_admin_can_inspect_cross_account_telemetry_but_user_cannot(tmp_path: Pat
         )
         assert summary_response.status_code == 200
         summary = summary_response.json()
-        assert summary["requests"]["total"] == 1
+        assert summary["requests"]["total"] == 3
         assert summary["usage"]["total_tokens"] == 17
         assert {account["name"] for account in summary["accounts"]} == {"alice"}
 
@@ -120,7 +153,13 @@ def test_admin_can_inspect_cross_account_telemetry_but_user_cannot(tmp_path: Pat
             params={"name": "web.request", "window_hours": 24},
         )
         assert spans_response.status_code == 200
-        span = spans_response.json()["spans"][0]
+        spans = spans_response.json()["spans"]
+        assert {span["attributes"]["operation"] for span in spans} == {
+            "prompt",
+            "regenerate",
+            "checkpointer",
+        }
+        span = next(span for span in spans if span["attributes"]["operation"] == "prompt")
         assert span["attributes"]["account_name"] == "alice"
         assert span["attributes"]["outcome"] == "completed"
         assert span["attributes"]["input_tokens"] == 12

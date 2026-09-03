@@ -3,7 +3,6 @@
 三类实现：
 - `MCPTransport`：抽象基类（connect / send / receive / close）
 - `StdioMCPTransport`：JSON Lines over asyncio subprocess；Step 16 MVP
-- `HttpMCPTransport`：HTTP transport 占位（Step 16 不实现，调方法时抛 NotImplementedError）
 - `FakeMCPTransport`：测试用，无需起 subprocess
 
 JSON-RPC 2.0 协议：
@@ -221,42 +220,6 @@ class StdioMCPTransport(MCPTransport):
 
 
 # ============================================================================
-# HTTP transport：Step 16 占位
-# ============================================================================
-
-
-class HttpMCPTransport(MCPTransport):
-    """HTTP MCP transport 占位。
-
-    Step 16 不实现。调用任何方法都抛 `NotImplementedError`，避免被误用。
-    """
-
-    def __init__(
-        self,
-        url: str,
-        *,
-        headers: dict[str, str] | None = None,
-        timeout_s: float = 30.0,
-    ) -> None:
-        self._url = url
-        self._headers = dict(headers or {})
-        self._timeout_s = timeout_s
-
-    async def connect(self) -> None:
-        raise NotImplementedError("HTTP MCP transport is not implemented in Step 16")
-
-    async def send(self, message: dict[str, Any]) -> None:
-        raise NotImplementedError("HTTP MCP transport is not implemented in Step 16")
-
-    async def receive(self) -> dict[str, Any]:
-        raise NotImplementedError("HTTP MCP transport is not implemented in Step 16")
-
-    async def close(self) -> None:
-        # close 幂等且无副作用
-        return
-
-
-# ============================================================================
 # Fake transport：测试用
 # ============================================================================
 
@@ -351,7 +314,6 @@ class FakeMCPTransport(MCPTransport):
 __all__ = [
     "MCPTransport",
     "StdioMCPTransport",
-    "HttpMCPTransport",
     "FakeMCPTransport",
     "FakeHandler",
 ]

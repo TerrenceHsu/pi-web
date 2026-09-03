@@ -1,6 +1,6 @@
 """Provider Profiles / Provider 选择域子包（P1-E2 / M1-5 演进，目录重组收编）。
 
-按域聚合（与 ``web/knowledge/``、``web/credentials/`` 约定一致）：
+按域聚合（与 ``web/wiki/``、``web/credentials/`` 约定一致）：
 
 - ``api``           —— Provider Profiles REST API（7 endpoints）+ BodyLimit middleware
 - ``config_store``  —— SQLiteProviderConfigStore（profiles / bindings repository）

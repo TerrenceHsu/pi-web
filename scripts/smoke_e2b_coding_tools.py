@@ -21,6 +21,9 @@ if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 from agent_workspace import WorkspaceStore  # noqa: E402
+from coding_agent_app.sandbox.automation import (  # noqa: E402
+    CodingSandboxAutomation,
+)
 from coding_agent_app.sandbox_workspace import (  # noqa: E402
     WorkspaceSandboxArtifactPublisher,
     WorkspaceSandboxBaselineProvider,
@@ -47,9 +50,6 @@ from coding_sandbox.admin import (  # noqa: E402
 from pi_agent_core_py.tools import (  # noqa: E402
     create_coding_sandbox_tools,
     create_coding_validation_tool,
-)
-from pi_agent_core_py.web.coding_sandbox.automation import (  # noqa: E402
-    CodingSandboxAutomation,
 )
 from pi_agent_core_py.web.credentials.runtime import (  # noqa: E402
     build_credential_runtime_config,

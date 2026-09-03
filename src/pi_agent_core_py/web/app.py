@@ -39,7 +39,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeVar, cast
 from uuid import uuid4
 
 from fastapi import (
@@ -86,11 +86,12 @@ from coding_agent_app.intent_router import (
 )
 
 from .. import __version__
-from ..harness import AgentHarness
-from ..session_sqlite import SessionOperationConflictError
-from ..skills import SkillSelection
+from ..agent.harness import AgentHarness
+from ..agent.harness.skills import SkillSelection
+from ..session_backends.sqlite import SessionOperationConflictError
 from ..telemetry import (
     NOOP_TELEMETRY_CONTEXT,
+    AttributeValue,
     SpanOptions,
     SpanStatus,
     TelemetryError,
@@ -152,6 +153,7 @@ if TYPE_CHECKING:
 
 
 _STATIC_DIR: Path = Path(__file__).parent / "static"
+_ObservedResultT = TypeVar("_ObservedResultT")
 
 #: fallback HTML——Vue 未 build 时返回，告诉用户怎么 build。
 #: 不能 import 任何 frontend 产物；保持单文件可读。
@@ -329,55 +331,6 @@ class PromptRunOutcome:
 # ============================================================================
 
 
-def _apply_citation_transform(
-    execution: PromptExecutionResult,
-    state: WebAppState,
-) -> None:
-    """P2-R4-C2: Post-execution citation transform.
-
-    After the LLM generates text containing ``[cite:E1]`` tokens,
-    validate them against the turn-scoped EvidenceRegistry and
-    render numbered citations + source footer before persistence.
-
-    Operates in-place on ``execution.messages`` (mutates the last
-    qualifying AssistantMessage's text content). No-op if registry
-    is empty or no citations found.
-    """
-    registry = getattr(state, "_evidence_registry", None)
-    if registry is None or len(registry) == 0:
-        return
-
-    from ..messages import AssistantMessage, TextContent
-    from .knowledge.citations import (
-        process_citations,
-        render_source_footer,
-    )
-
-    for msg in reversed(execution.messages):
-        if not isinstance(msg, AssistantMessage):
-            continue
-        if getattr(msg, "error_message", None):
-            continue
-        for i in range(len(msg.content) - 1, -1, -1):
-            block = msg.content[i]
-            if not isinstance(block, TextContent):
-                continue
-            if "[cite:" not in block.text:
-                continue
-            result = process_citations(block.text, registry)
-            if not result.citations:
-                msg.content[i] = TextContent(text=result.rendered_content)
-                continue
-            footer = render_source_footer(result.citations)
-            if footer:
-                final_text = result.rendered_content.rstrip() + "\n\n" + footer
-            else:
-                final_text = result.rendered_content
-            msg.content[i] = TextContent(text=final_text)
-            return
-        break
-
-
 def create_app(
     harness: AgentHarness,
     *,
@@ -427,21 +380,7 @@ def create_app(
     # Independent Planner–Executor–Verifier execution for Coding requests.
     # The product entrypoint enables it; low-level embedders opt in.
     enable_plan_mode: bool = False,
-    # Deprecated Chunk Knowledge compatibility root.
-    # The legacy DB, workers, Tool and REST API only start when
-    # enable_knowledge_api=True is also explicit. Product composition uses
-    # wiki_root and leaves this disabled.
-    #   - 在 <knowledge_root>/knowledge.db 打开独立 aiosqlite connection
-    #   - <knowledge_root>/libraries/{library_id}/documents/... 物理文件
-    #   - 挂载 Knowledge Library CRUD + Session Binding REST API（仅当
-    #     trusted_host + UI header deps 启用时；否则不挂 router，service
-    #     仍可用于内部 / 测试）
-    knowledge_root: str | Path | None = None,
-    # True is an explicit compatibility opt-in. None/False retires the entire
-    # legacy runtime rather than merely hiding its router.
-    enable_knowledge_api: bool | None = None,
-    # Page-centric LLM Wiki product runtime. The deprecated Chunk Knowledge
-    # compatibility path stays off unless independently and explicitly enabled.
+    # Page-centric LLM Wiki product runtime.
     wiki_root: str | Path | None = None,
     enable_wiki_api: bool | None = None,
     wiki_pdf_provider: ParserProvider | None = None,
@@ -560,7 +499,7 @@ def create_app(
         # 不静默降级——必须显式修正
         raise RuntimeError(f"credential web security configuration error: {e}") from e
 
-    from .coding_sandbox.runtime import (
+    from coding_sandbox.admin.runtime import (
         SandboxRuntimeConfigurationError,
         resolve_sandbox_runtime_configuration,
     )
@@ -576,9 +515,6 @@ def create_app(
     except SandboxRuntimeConfigurationError as e:
         raise RuntimeError(f"coding sandbox web security configuration error: {e}") from e
 
-    if enable_knowledge_api is True and knowledge_root is None:
-        raise RuntimeError("legacy knowledge API requires knowledge_root")
-    _legacy_knowledge_enabled = enable_knowledge_api is True
 
     # ========================================================================
     # P1-E2-3B1: Resolve Provider Profiles API configuration at app creation
@@ -780,9 +716,9 @@ def create_app(
         # 工具执行期间必须优先绑定 request 的 session；UI 当前选中项只作为
         # 非请求调用的 fallback，避免请求指定 sid 时误读/误写默认目录。
         if state.file_store is not None:
-            from ..tools.list_files import create_list_files_tool
-            from ..tools.view_file import create_view_file_tool
-            from ..tools.write_file import create_write_file_tool
+            from ..agent.harness.tools.list_files import create_list_files_tool
+            from ..agent.harness.tools.view_file import create_view_file_tool
+            from ..agent.harness.tools.write_file import create_write_file_tool
 
             def _session_id_getter() -> str | None:
                 return (
@@ -903,192 +839,6 @@ def create_app(
         await _restore_mcp_servers(extension_store)
         if ddgs_settings is not None:
             _mark_builtin_ddgs_runtime(ddgs_settings)
-
-        # ====================================================================
-        # Deprecated Chunk Knowledge compatibility composition. This is never
-        # auto-started; explicit enable_knowledge_api=True is required.
-        # ====================================================================
-        knowledge_service = None
-        if _legacy_knowledge_enabled:
-            assert knowledge_root is not None
-            from .knowledge.files import KnowledgeFileStore
-            from .knowledge.service import KnowledgeService
-            from .knowledge.store import KnowledgeStore
-
-            kroot = Path(knowledge_root)
-            await asyncio.to_thread(kroot.mkdir, parents=True, exist_ok=True)
-            k_file_store = KnowledgeFileStore(root=kroot)
-            await asyncio.to_thread(k_file_store.ensure_root)
-            k_store = await KnowledgeStore.open(str(kroot / "knowledge.db"))
-
-            async def _session_exists_for_knowledge(session_id: str) -> bool:
-                if state.session_store is None:
-                    return False
-                try:
-                    sess = await state.session_store.get_session(session_id)
-                except Exception:
-                    return False
-                return sess is not None
-
-            knowledge_service = KnowledgeService(
-                store=k_store,
-                file_store=k_file_store,
-                session_exists=_session_exists_for_knowledge,
-            )
-            state.knowledge_service = knowledge_service
-            state.knowledge_store = k_store
-            state.knowledge_file_store = k_file_store
-
-            # ============================================================
-            # P2-R2-C2: Ingestion Worker Manager — app-scoped singleton
-            # that drives PDF → Canonical Markdown pipeline.
-            #
-            # Constructed only if [rag] extra is available (PypdfParser
-            # import succeeds). If pypdf not installed, manager stays
-            # None — knowledge subsystem still works for metadata-only
-            # operations.
-            # ============================================================
-            ingestion_manager = None
-            try:
-                from .knowledge.canonical_markdown import (
-                    CanonicalMarkdownBuilder,
-                )
-                from .knowledge.ingestion_orchestrator import (
-                    IngestionOrchestrator,
-                )
-                from .knowledge.ingestion_store import IngestionStore
-                from .knowledge.ingestion_worker import (
-                    IngestionWorkerManager,
-                )
-                from .knowledge.markdown_persistence import (
-                    CanonicalMarkdownPersistence,
-                )
-                from .knowledge.pdf_quality import PdfTextQualityEvaluator
-                from .knowledge.pypdf_parser import PypdfParser
-
-                ingestion_store_obj = IngestionStore(k_store)
-                parser_obj = PypdfParser()
-                orchestrator_obj = IngestionOrchestrator(
-                    store=k_store,
-                    ingestion_store=ingestion_store_obj,
-                    file_store=k_file_store,
-                    parser=parser_obj,
-                    quality_evaluator=PdfTextQualityEvaluator(),
-                    builder=CanonicalMarkdownBuilder(),
-                    persistence=CanonicalMarkdownPersistence(k_file_store),
-                )
-                ingestion_manager = IngestionWorkerManager(
-                    orchestrator=orchestrator_obj,
-                    ingestion_store=ingestion_store_obj,
-                    store=k_store,
-                    parser=parser_obj,
-                    owns_parser=True,
-                )
-            except ImportError:
-                # [rag] extra (pypdf) not installed — skip ingestion pipeline
-                pass
-            except Exception as e:
-                raise RuntimeError(
-                    f"ingestion worker manager init failed: {type(e).__name__}"
-                ) from e
-
-            if ingestion_manager is not None:
-                try:
-                    await ingestion_manager.start()
-                    state.ingestion_worker_manager = ingestion_manager
-                except Exception as e:
-                    raise RuntimeError(
-                        f"ingestion worker manager start failed: {type(e).__name__}"
-                    ) from e
-
-            # ============================================================
-            # P2-R3-D2: Indexing Worker Manager — app-scoped singleton
-            # that drives normalizing → chunking → indexing → ready.
-            #
-            # Constructed only if Ingestion Worker is available (depends
-            # on the same [rag] extra). Started AFTER Ingestion Worker
-            # (producer before consumer); stopped BEFORE Ingestion Worker
-            # stop in shutdown (consumer before producer — actually
-            # directive §28 says producer stops first to prevent new
-            # normalizing Docs during Index Worker drain; so Index
-            # Worker stops AFTER Ingestion Worker in shutdown).
-            # ============================================================
-            if ingestion_manager is not None:
-                try:
-                    from .knowledge.chunk_store import ChunkStore
-                    from .knowledge.indexing_orchestrator import (
-                        IndexingOrchestrator,
-                    )
-                    from .knowledge.indexing_store import IndexingStore
-                    from .knowledge.indexing_worker import (
-                        IndexingWorkerManager,
-                    )
-
-                    chunk_store_obj = ChunkStore(k_store)
-                    indexing_store_obj = IndexingStore(k_store)
-                    indexing_orchestrator_obj = IndexingOrchestrator(
-                        knowledge_store=k_store,
-                        knowledge_file_store=k_file_store,
-                        chunk_store=chunk_store_obj,
-                        indexing_store=indexing_store_obj,
-                    )
-                    indexing_manager = IndexingWorkerManager(
-                        knowledge_store=k_store,
-                        chunk_store=chunk_store_obj,
-                        indexing_store=indexing_store_obj,
-                        orchestrator=indexing_orchestrator_obj,
-                    )
-                    await indexing_manager.start()
-                    state.indexing_worker_manager = indexing_manager
-                except Exception as e:
-                    raise RuntimeError(
-                        f"indexing worker manager start failed: {type(e).__name__}"
-                    ) from e
-
-            # ============================================================
-            # P2-R4-B2: search_knowledge Agent Tool — Session-scoped
-            # FTS5 retrieval via SearchKnowledgeService. Registered only
-            # when Knowledge subsystem + [rag] extra are available.
-            # ============================================================
-            if ingestion_manager is not None:
-                try:
-                    from .knowledge.chunk_store import ChunkStore as _CS
-                    from .knowledge.evidence import EvidenceRegistry as _ER
-                    from .knowledge.search_service import (
-                        SearchKnowledgeService as _SKS,
-                    )
-                    from .knowledge.search_tool import (
-                        create_search_knowledge_tool,
-                    )
-
-                    _chunk_store_for_search = _CS(k_store)
-                    _search_service = _SKS(
-                        knowledge_store=k_store,
-                        chunk_store=_chunk_store_for_search,
-                    )
-
-                    def _evidence_registry_getter() -> Any:
-                        if state._evidence_registry is None:
-                            state._evidence_registry = _ER()
-                        return state._evidence_registry
-
-                    _search_tool = create_search_knowledge_tool(
-                        search_service=_search_service,
-                        session_id_getter=_session_id_getter,
-                        evidence_registry_getter=_evidence_registry_getter,
-                    )
-                    if not harness.agent.tools.has("search_knowledge"):
-                        harness.agent.tools.register(_search_tool)
-                except Exception as e:
-                    raise RuntimeError(
-                        f"search_knowledge tool init failed: {type(e).__name__}"
-                    ) from e
-        else:
-            state.knowledge_service = None
-            state.knowledge_store = None
-            state.knowledge_file_store = None
-            state.ingestion_worker_manager = None
-            state.indexing_worker_manager = None
 
         @asynccontextmanager
         async def _wiki_runtime_context() -> AsyncIterator[None]:
@@ -1221,8 +971,7 @@ def create_app(
                         WorkspaceSandboxBaselineProvider,
                     )
                     from coding_sandbox import HMACSHA256ArtifactSigner
-
-                    from .coding_sandbox.runtime import sandbox_runtime_context
+                    from coding_sandbox.admin.runtime import sandbox_runtime_context
 
                     database_path = await asyncio.to_thread(
                         Path(str(db_path)).resolve,
@@ -1381,7 +1130,7 @@ def create_app(
                     _app.state.coding_sandbox_runtime = await sandbox_runtime_cm.__aenter__()
                     lifecycle = _app.state.coding_sandbox_runtime.lifecycle
                     if lifecycle is not None:
-                        from ..tools import (
+                        from ..tools.coding_sandbox import (
                             create_coding_sandbox_tools,
                             create_coding_validation_tool,
                         )
@@ -1422,8 +1171,8 @@ def create_app(
                     # Config 两个 runtime 都启动时. 无独立 lifespan——纯 Python 对象
                     # 无长期网络资源. Prompt 路径通过 app.state.request_provider_runtime
                     # 读取；为 None 时 _execute_prompt 走 legacy client 兼容路径.
-                    from ..providers.factory import create_provider
-                    from ..providers.registry import _DEFAULT_REGISTRY
+                    from ..ai.providers.factory import create_provider
+                    from ..ai.providers.registry import _DEFAULT_REGISTRY
                     from .providers.runtime import RequestProviderRuntime
 
                     _app.state.request_provider_runtime = RequestProviderRuntime(
@@ -1572,40 +1321,6 @@ def create_app(
         coding_agent_services.session_search = None
         coding_agent_services.session_store = None
         coding_agent_services.workspace_store = None
-        # P2-R2-C2: 关闭 Ingestion Worker Manager（在 KnowledgeStore.close 之前）
-        # Manager.stop() 会触发 startup recovery（已 done）+ graceful shutdown
-        # + parser.close(). 必须在 KnowledgeStore.close() 之前完成，否则
-        # Manager 的 worker_loop 会访问已关闭的 connection.
-        ingestion_mgr = (
-            state.ingestion_worker_manager if hasattr(state, "ingestion_worker_manager") else None
-        )
-        if ingestion_mgr is not None:
-            try:
-                await ingestion_mgr.stop()
-            except Exception:
-                pass
-            state.ingestion_worker_manager = None
-        # P2-R3-D2: 关闭 Indexing Worker Manager（在 Ingestion Worker stop 之后，
-        # KnowledgeStore.close 之前）。Per directive §28: producer stops
-        # first to prevent new normalizing during Index Worker drain.
-        indexing_mgr = (
-            state.indexing_worker_manager if hasattr(state, "indexing_worker_manager") else None
-        )
-        if indexing_mgr is not None:
-            try:
-                await indexing_mgr.stop()
-            except Exception:
-                pass
-            state.indexing_worker_manager = None
-        # P2-R1: 关闭 KnowledgeStore（独立 connection）
-        knowledge_store_to_close = (
-            state.knowledge_store if hasattr(state, "knowledge_store") else None
-        )
-        if knowledge_store_to_close is not None:
-            try:
-                await knowledge_store_to_close.close()
-            except Exception:
-                pass
         # WorkspaceStore 不需要 close（纯文件 IO），保留目录给后续进程用
         if telemetry_recorder is not None:
             try:
@@ -1776,22 +1491,6 @@ def create_app(
             ),
         )
 
-    # Deprecated Chunk Knowledge REST API. Explicit compatibility opt-in only.
-    if _legacy_knowledge_enabled:
-        assert knowledge_root is not None
-        from .knowledge.api import (
-            build_knowledge_router,
-            build_session_knowledge_router,
-        )
-        from .local_web_security import default_web_security_config as _k_ws
-
-        _k_ws_cfg = _k_ws(
-            extra_hosts=credential_extra_hosts,
-            extra_ui_origins=credential_extra_ui_origins,
-        )
-        app.include_router(build_knowledge_router(_k_ws_cfg), prefix="/api/knowledge")
-        app.include_router(build_session_knowledge_router(_k_ws_cfg), prefix="/api/sessions")
-
     if enable_wiki_api is True and wiki_root is None:
         raise RuntimeError("wiki API requires wiki_root")
     if wiki_root is not None:
@@ -1919,8 +1618,8 @@ def create_app(
     app.state.web_tool_approval_handler = _web_tool_approval_handler
     app.state.previous_tool_approval_handler = previous_tool_approval_handler
 
-    from ..context_budget import ContextEstimate, estimate_context
-    from ..loop import ModelCallDecision
+    from ..agent.harness.compaction.budget import ContextEstimate, estimate_context
+    from ..agent.loop import ModelCallDecision
 
     previous_before_model_call = harness.agent.before_model_call
 
@@ -2130,7 +1829,7 @@ def create_app(
         import hashlib
         import json as _json
 
-        from ..skills import Skill, SkillRegistrationError
+        from ..agent.harness.skills import Skill, SkillRegistrationError
         from .extension_store import ExtensionSQLiteStore
 
         registry = harness.skill_registry
@@ -2482,8 +2181,8 @@ def create_app(
             VirtualFileNotFoundError,
         )
 
-        from ..messages import FileBlock
-        from ..tools.view_file import _classify_format
+        from ..agent.harness.tools.view_file import _classify_format
+        from ..agent.messages import FileBlock
 
         attached_blocks: list[Any] = []
         attached_summary: list[dict[str, Any]] = []
@@ -2647,7 +2346,7 @@ def create_app(
             store = state.session_store
 
             if store is not None and session_id is not None:
-                from ..session_sqlite import SessionNotFoundError
+                from ..session_backends.sqlite import SessionNotFoundError
 
                 try:
                     history = await store.list_messages(session_id)
@@ -2778,14 +2477,6 @@ def create_app(
         旧调用方无需改动——此函数返回 PromptRunOutcome（旧 PromptExecutionResult
         的重命名），字段完全兼容。
         """
-        # P2-R4-B2: Reset turn-scoped Evidence Registry at each prompt
-        # request boundary. The registry is lazily created by
-        # search_knowledge tool's evidence_registry_getter on first use
-        # within this request. Multiple search_knowledge calls in the
-        # same request share the registry (chunk_id dedupe).
-        # Next request starts fresh from E1.
-        state._evidence_registry = None
-
         execution = cast(
             PromptExecutionResult,
             await _execute_prompt(
@@ -2794,11 +2485,6 @@ def create_app(
                 manage_running_state=False,
             ),
         )
-
-        # P2-R4-C2: Citation transform — after LLM generates text with
-        # [cite:E1] tokens, validate against EvidenceRegistry and render
-        # numbered citations + source footer before persistence.
-        _apply_citation_transform(execution, state)
 
         return await _persist_normal_prompt_result(validated, execution)
 
@@ -2993,7 +2679,7 @@ def create_app(
         if store is None or session_id is None:
             return
         messages = list(await store.list_messages(session_id))
-        from ..messages import UserMessage
+        from ..agent.messages import UserMessage
 
         try:
             turn_start = max(
@@ -3236,7 +2922,7 @@ def create_app(
             CodingSandboxAutomationError,
         )
 
-        from ..messages import AssistantMessage, TextContent, Usage, UserMessage
+        from ..agent.messages import AssistantMessage, TextContent, Usage, UserMessage
 
         session_id = validated.session_id
         request_harness = validated.agent_session.harness
@@ -3540,31 +3226,31 @@ def create_app(
                 request_harness.agent.state.messages = validated.original_messages
             _refresh_running_state()
 
-    async def _run_prompt_request(
-        validated: _PromptValidated,
+    async def _run_observed_web_operation(
+        operation: str,
+        session_id: str | None,
+        run: Callable[[], Awaitable[_ObservedResultT]],
         *,
-        abort_requested: Callable[[], bool] | None = None,
-    ) -> PromptRunOutcome:
-        """Run one Web prompt inside a passive, content-free Telemetry span."""
-
+        attributes: dict[str, AttributeValue | None] | None = None,
+        completion_attributes: (
+            Callable[[_ObservedResultT], dict[str, AttributeValue | None]] | None
+        ) = None,
+    ) -> _ObservedResultT:
+        """Observe one content-free Web operation with shared outcome semantics."""
         stats = RequestTelemetryStats()
 
-        async def _observe(request_span: TelemetrySpan) -> PromptRunOutcome:
+        async def _observe(request_span: TelemetrySpan) -> _ObservedResultT:
             span_token = telemetry_span_context.set(request_span)
             stats_token = telemetry_stats_context.set(stats)
             try:
-                result = await _run_prompt_request_inner(
-                    validated,
-                    abort_requested=abort_requested,
-                )
-                request_span.set_attributes(
-                    {
-                        **stats.end_attributes(),
-                        "outcome": "completed",
-                        "message_count": len(result.messages),
-                        "applied_skill_count": len(result.applied_skill_names),
-                    }
-                )
+                result = await run()
+                completed: dict[str, AttributeValue | None] = {
+                    **stats.end_attributes(),
+                    "outcome": "completed",
+                }
+                if completion_attributes is not None:
+                    completed.update(completion_attributes(result))
+                request_span.set_attributes(completed)
                 return result
             except BaseException as error:
                 aborted = isinstance(error, asyncio.CancelledError) or (
@@ -3590,20 +3276,46 @@ def create_app(
                 telemetry_stats_context.reset(stats_token)
                 telemetry_span_context.reset(span_token)
 
-        intent_route = validated.intent.route if validated.intent is not None else None
+        span_attributes: dict[str, AttributeValue | None] = {
+            "request_id": request_id_context.get(),
+            "session_id": session_id,
+            "operation": operation,
+        }
+        if attributes is not None:
+            span_attributes.update(attributes)
         return await coding_agent_services.telemetry.start_span(
-            SpanOptions(
-                "web.request",
-                {
-                    "request_id": request_id_context.get(),
-                    "session_id": validated.session_id,
-                    "operation": "prompt",
-                    "coding_mode": validated.coding_mode,
-                    "execution_mode": validated.execution_mode,
-                    "intent_route": intent_route,
-                },
-            ),
+            SpanOptions("web.request", span_attributes),
             _observe,
+        )
+
+    async def _run_prompt_request(
+        validated: _PromptValidated,
+        *,
+        abort_requested: Callable[[], bool] | None = None,
+    ) -> PromptRunOutcome:
+        """Run one Web prompt inside a passive, content-free Telemetry span."""
+
+        intent_route = validated.intent.route if validated.intent is not None else None
+
+        async def _run() -> PromptRunOutcome:
+            return await _run_prompt_request_inner(
+                validated,
+                abort_requested=abort_requested,
+            )
+
+        return await _run_observed_web_operation(
+            "prompt",
+            validated.session_id,
+            _run,
+            attributes={
+                "coding_mode": validated.coding_mode,
+                "execution_mode": validated.execution_mode,
+                "intent_route": intent_route,
+            },
+            completion_attributes=lambda result: {
+                "message_count": len(result.messages),
+                "applied_skill_count": len(result.applied_skill_names),
+            },
         )
 
     def _extract_terminal_assistant(suffix: list[Any]) -> Any | None:
@@ -3618,7 +3330,7 @@ def create_app(
 
         返回最后一个**合格** candidate；没有则 None。
         """
-        from ..messages import AssistantMessage, TextContent, ToolCall
+        from ..agent.messages import AssistantMessage, TextContent, ToolCall
 
         for msg in reversed(suffix):
             if not isinstance(msg, AssistantMessage):
@@ -3712,7 +3424,7 @@ def create_app(
         # 截断：caller 已校验过目标是 session 最新 assistant，所以 canonical_before
         # 中最后一个 AssistantMessage 就是它。regeneration_history =
         # canonical_before[:last_assistant_idx]（含 preceding user，不含旧 assistant）
-        from ..messages import AssistantMessage, UserMessage
+        from ..agent.messages import AssistantMessage, UserMessage
 
         try:
             target_idx = max(
@@ -3736,11 +3448,6 @@ def create_app(
         # 2. 临时替换 harness state，执行 model
         request_harness.agent.state.messages = list(regeneration_history)
 
-        # P2-R4-B2 + R4-C2: Reset turn-scoped Evidence Registry + apply
-        # citation transform for regenerate path (mirrors _run_prompt_core).
-        # Without this, regenerate would bypass the citation pipeline.
-        state._evidence_registry = None
-
         try:
             execution = cast(
                 PromptExecutionResult,
@@ -3751,8 +3458,6 @@ def create_app(
                     manage_running_state=False,
                 ),
             )
-            # P2-R4-C2: Citation transform — same as _run_prompt_core.
-            _apply_citation_transform(execution, state)
         except PromptRuntimeError as e:
             # 模型/Agent 执行失败 → revision.error
             await ext_store.mark_revision_error(
@@ -3893,7 +3598,7 @@ def create_app(
         try:
             messages = list(await store.list_messages(session_id))
         except Exception as exc:
-            from ..session_sqlite import SessionNotFoundError
+            from ..session_backends.sqlite import SessionNotFoundError
 
             if isinstance(exc, SessionNotFoundError):
                 raise HTTPException(status_code=404, detail="session not found") from None
@@ -3960,7 +3665,7 @@ def create_app(
                     detail=exc.detail,
                 ) from None
         if draft_text.strip() or attached_blocks:
-            from ..messages import TextContent, UserMessage
+            from ..agent.messages import TextContent, UserMessage
 
             messages.append(
                 UserMessage(
@@ -4048,9 +3753,9 @@ def create_app(
             session_harness.context.metadata = metadata_before
             session_harness.skill_registry = skills_before
 
-        from ..context import apply_transform_context, convert_to_llm
-        from ..context import transform_context as default_transform_context
-        from ..context_budget import estimate_context
+        from ..agent.context import apply_transform_context, convert_to_llm
+        from ..agent.context import transform_context as default_transform_context
+        from ..agent.harness.compaction.budget import estimate_context
 
         transform = session_harness.agent.transform_context_fn or default_transform_context
         transformed = await apply_transform_context(transform, list(messages))
@@ -4081,7 +3786,7 @@ def create_app(
         )
         tool_registry = state.wiki_knowledge_tools if knowledge_conversation is not None else None
         if knowledge_conversation is None:
-            from ..tools import ToolRegistry
+            from ..agent.tooling import ToolRegistry
 
             if intent is not None and intent.route == "read_only":
                 tool_registry = ToolRegistry(
@@ -4394,7 +4099,7 @@ def create_app(
                         system_prompt_suffix=composition.system_prompt_suffix,
                     )
                 elif validated.attached_blocks:
-                    from ..messages import TextContent, UserMessage
+                    from ..agent.messages import TextContent, UserMessage
 
                     user_msg = UserMessage(
                         content=[
@@ -4971,6 +4676,7 @@ def create_app(
     ) -> None:
         """Managed async runner for /checkpointer."""
         assert web_request.session_id is not None
+        session_id = web_request.session_id
         web_request.status = "running"
         web_request.started_at = _now_utc()
         state.current_request_id = web_request.id
@@ -4979,7 +4685,15 @@ def create_app(
         request_id_token = request_id_context.set(web_request.id)
         web_request.event_start_sequence = state.next_event_sequence
         try:
-            result = await _run_checkpointer_core(web_request.session_id, source, operation_id)
+            result = await _run_observed_web_operation(
+                "checkpointer",
+                session_id,
+                lambda: _run_checkpointer_core(session_id, source, operation_id),
+                attributes={"source_message_count": source.message_count},
+                completion_attributes=lambda outcome: {
+                    "idempotent_recovery": bool(outcome["idempotent_recovery"]),
+                },
+            )
         except asyncio.CancelledError:
             # If Memory.md crossed its commit point, cancellation must converge
             # forward; otherwise close the no-effect intent as aborted.
@@ -5475,11 +5189,22 @@ def create_app(
         )
 
         try:
-            result = await _run_regeneration_core(
-                prompt_validated,
-                revision_id=revision_id,
-                assistant_message_id=validated.assistant_message_id,
-                request_id=request_id,
+            result = await _run_observed_web_operation(
+                "regenerate",
+                validated.session_id,
+                lambda: _run_regeneration_core(
+                    prompt_validated,
+                    revision_id=revision_id,
+                    assistant_message_id=validated.assistant_message_id,
+                    request_id=request_id,
+                ),
+                attributes={
+                    "knowledge_mode": validated.knowledge_conversation is not None,
+                },
+                completion_attributes=lambda outcome: {
+                    "message_count": len(outcome.messages),
+                    "applied_skill_count": len(outcome.applied_skill_names),
+                },
             )
         except asyncio.CancelledError:
             # 显式 mark_revision_aborted（不让通用 except 捕获）
@@ -5680,7 +5405,7 @@ def create_app(
                 status_code=503,
                 content={"detail": "session store not initialized"},
             )
-        from ..session_sqlite import SessionNotFoundError
+        from ..session_backends.sqlite import SessionNotFoundError
         from .serializers import serialize_persisted_message
 
         try:
@@ -5855,7 +5580,7 @@ def create_app(
         return {"count": len(items), "sessions": items}
 
     def _raise_session_tree_error(error: Exception) -> NoReturn:
-        from ..session_sqlite import (
+        from ..session_backends.sqlite import (
             SessionBranchError,
             SessionEntryNotFoundError,
             SessionLaneExistsError,
@@ -5884,7 +5609,7 @@ def create_app(
     async def _sync_current_session_tree_projection(sid: str) -> None:
         if state.session_store is None:
             return
-        from ..messages import AgentMessage
+        from ..agent.messages import AgentMessage
 
         messages = await state.session_store.list_messages(sid)
         session_harness = await _get_session_harness(sid)
@@ -5921,7 +5646,7 @@ def create_app(
         try:
             session = await store.get_session(sid)
             if session is None:
-                from ..session_sqlite import SessionNotFoundError
+                from ..session_backends.sqlite import SessionNotFoundError
 
                 raise SessionNotFoundError(f"session {sid!r} 不存在")
             selected_lane = lane or session.active_lane
@@ -6149,14 +5874,14 @@ def create_app(
                 raise HTTPException(status_code=503, detail="session store unavailable")
             from pydantic import TypeAdapter
 
-            from ..compaction import CompactionConfig, compact_messages
-            from ..messages import AgentMessage
+            from ..agent.harness.compaction.service import CompactionConfig, compact_messages
+            from ..agent.messages import AgentMessage
 
             try:
                 messages = list(await store.list_messages(sid))
                 snapshots = list(await store.list_snapshots(sid))
             except Exception as exc:
-                from ..session_sqlite import SessionNotFoundError
+                from ..session_backends.sqlite import SessionNotFoundError
 
                 if isinstance(exc, SessionNotFoundError):
                     raise HTTPException(status_code=404, detail="session not found") from None
@@ -6324,7 +6049,7 @@ def create_app(
         payload: dict[str, Any],
     ) -> dict[str, Any] | JSONResponse:
         """重命名 session（spec endpoint，P0-1）。"""
-        from ..session_sqlite import SessionNotFoundError
+        from ..session_backends.sqlite import SessionNotFoundError
 
         store = state.session_store
         if store is None:
@@ -6364,7 +6089,7 @@ def create_app(
         P0-2：确认停稳后先删 uploads/{sid}/，再删 sqlite session——避免孤儿目录。
         文件删除失败不阻塞 sqlite 删除（记 warning 到 metadata）。
         """
-        from ..session_sqlite import SessionNotFoundError
+        from ..session_backends.sqlite import SessionNotFoundError
 
         store = state.session_store
         if store is None:
@@ -6415,18 +6140,6 @@ def create_app(
                     content={"detail": f"session {sid!r} not found"},
                 )
             await _remove_coding_agent_session(sid)
-            # P2-R1: 删除 session 后清理 knowledge library bindings（P2-R0 §7.2 不变量 7）
-            # 只清 binding，不删 library 本身。失败不阻塞 session 删除（记 warning）。
-            k_service = (
-                state.knowledge_service if hasattr(state, "knowledge_service") else None
-            )
-            if k_service is not None:
-                try:
-                    await k_service.on_session_deleted(sid)
-                except Exception as e:
-                    state.last_error = (
-                        f"knowledge.on_session_deleted({sid}) failed: {type(e).__name__}"
-                    )
             wiki_store = state.wiki_store
             if wiki_store is not None:
                 try:
@@ -6696,7 +6409,7 @@ def create_app(
         """
         from datetime import UTC, datetime
 
-        from ..session_sqlite import SessionNotFoundError
+        from ..session_backends.sqlite import SessionNotFoundError
         from .markdown_export import (
             MarkdownExportOptions,
             build_content_disposition,
@@ -6783,7 +6496,7 @@ def create_app(
         """返回逻辑文件 metadata，绝不暴露物理磁盘路径。"""
         from agent_workspace.store import workspace_path_policy
 
-        from ..tools.view_file import _classify_format
+        from ..agent.harness.tools.view_file import _classify_format
 
         path_policy = workspace_path_policy(ref.logical_path, purpose=ref.purpose)
         return {
@@ -8501,11 +8214,11 @@ def create_app(
         """
         import hashlib
 
-        from ..skill_loader import (
+        from ..agent.harness.skill_loader import (
             SkillFileFormatError,
             parse_skill_markdown,
         )
-        from ..skills import SkillRegistrationError
+        from ..agent.harness.skills import SkillRegistrationError
         from .extension_store import ExtensionStoreError
 
         registry = _require_skill_registry()
@@ -8667,7 +8380,7 @@ def create_app(
         - include_prompt=True 默认 403；allow_prompt_preview=True + localhost 才放行
         - skill 不存在 → 404
         """
-        from ..skills import SkillNotFoundError
+        from ..agent.harness.skills import SkillNotFoundError
 
         registry = _require_skill_registry()
         if include_prompt:
@@ -8701,7 +8414,7 @@ def create_app(
         非 uploaded Skill（filesystem/builtin/mcp_prompt）只改 runtime，不写 DB。
         DB 失败时恢复原 runtime 状态。
         """
-        from ..skills import SkillNotFoundError
+        from ..agent.harness.skills import SkillNotFoundError
         from .extension_store import ExtensionStoreConflictError, ExtensionStoreError
 
         registry = _require_skill_registry()
@@ -8741,7 +8454,7 @@ def create_app(
 
         P1-C2: uploaded Skill 的 enabled 状态持久化到 SQLite。
         """
-        from ..skills import SkillNotFoundError
+        from ..agent.harness.skills import SkillNotFoundError
         from .extension_store import ExtensionStoreConflictError, ExtensionStoreError
 
         registry = _require_skill_registry()
@@ -8779,7 +8492,7 @@ def create_app(
         P1-C2: DB row 为准——只有 web_uploaded_skills 中存在的 Skill 才能删除。
         DB 删除失败时重新 register 原 Skill 对象。
         """
-        from ..skills import SkillNotFoundError
+        from ..agent.harness.skills import SkillNotFoundError
         from .extension_store import ExtensionStoreError
 
         registry = _require_skill_registry()
@@ -9666,7 +9379,7 @@ async def _compensate_delete_session(state: Any, session_id: str) -> None:
 
     Caller must wrap in ``asyncio.shield`` if cancellation safety is required.
     """
-    from ..session_sqlite import SessionNotFoundError
+    from ..session_backends.sqlite import SessionNotFoundError
 
     file_store = getattr(state, "file_store", None)
     if file_store is not None:

@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass
 
+from pi_agent_core_py.agent.tooling import AgentTool, ToolRegistry
 from pi_agent_core_py.policy import ToolPermissionPolicy
-from pi_agent_core_py.tools import AgentTool, ToolRegistry
 
 from .settings import CodingAgentMode
 

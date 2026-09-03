@@ -15,7 +15,7 @@ from ...agent.events import (
     TurnEndEvent,
     TurnStartEvent,
 )
-from ...messages import AssistantMessage
+from ...agent.messages import AssistantMessage
 from ...telemetry import AttributeValue, TelemetrySpan
 
 

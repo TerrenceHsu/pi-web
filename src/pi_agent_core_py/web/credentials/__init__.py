@@ -1,6 +1,6 @@
 """Credentials 域子包（P1-E1 / E2 演进，目录重组收编）。
 
-按域聚合（与 ``web/knowledge/`` 约定一致）：
+按域聚合（与 ``web/providers/`` 约定一致）：
 
 - ``api``       —— Credential REST API（8 endpoints）+ BodyLimit middleware
 - ``dto``       —— API 层 DTO（request/response models）

@@ -13,10 +13,10 @@ from coding_agent_app.sandbox.automation import (
     CodingSandboxAutomationError,
 )
 from pi_agent_core_py.agent import Agent
-from pi_agent_core_py.harness import AgentHarness
-from pi_agent_core_py.model_client import ModelClient
+from pi_agent_core_py.agent.harness import AgentHarness
+from pi_agent_core_py.agent.tooling import AgentTool, ToolRegistry
+from pi_agent_core_py.ai.model_client import ModelClient
 from pi_agent_core_py.policy import AllowAllToolPermissionPolicy
-from pi_agent_core_py.tools import AgentTool, ToolRegistry
 
 from .models import (
     PlanRunResult,

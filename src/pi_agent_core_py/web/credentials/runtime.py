@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from ...providers.registry import (
+from ...ai.providers.registry import (
     ProviderRegistry,
     list_provider_definitions,
 )

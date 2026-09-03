@@ -2,7 +2,6 @@
 
 覆盖：
 - StdioMCPTransport：connect/send/receive/close 成功路径 + 错误路径
-- HttpMCPTransport：占位抛 NotImplementedError + close 幂等
 - FakeMCPTransport：已由其它测试覆盖，这里只做冒烟
 
 StdioMCPTransport 用 `sys.executable -c` 启动最小 echo JSON Lines 子进程，
@@ -13,7 +12,9 @@ from __future__ import annotations
 import sys
 
 import pytest
+from pydantic import ValidationError
 
+from pi_agent_core_py.mcp.config import MCPServerConfig
 from pi_agent_core_py.mcp.errors import (
     MCPConnectionError,
     MCPProtocolError,
@@ -21,7 +22,6 @@ from pi_agent_core_py.mcp.errors import (
 )
 from pi_agent_core_py.mcp.transport import (
     FakeMCPTransport,
-    HttpMCPTransport,
     StdioMCPTransport,
 )
 
@@ -46,6 +46,18 @@ _ECHO_SCRIPT = (
     "    sys.stdout.write(json.dumps({'echo': msg}) + '\\n')\n"
     "    sys.stdout.flush()\n"
 )
+
+
+def test_remote_http_transport_is_rejected() -> None:
+    """The local Web product must not accept an unimplemented remote transport."""
+    with pytest.raises(ValidationError):
+        MCPServerConfig.model_validate(
+            {
+                "name": "remote",
+                "transport": "http",
+                "url": "https://example.com/mcp",
+            }
+        )
 
 
 # ============================================================================
@@ -243,52 +255,6 @@ async def test_stdio_env_passed_to_subprocess():
     resp = await t.receive()
     assert resp == {"var": "present"}
     await t.close()
-
-
-# ============================================================================
-# HttpMCPTransport：占位
-# ============================================================================
-
-
-@pytest.mark.asyncio
-async def test_http_transport_connect_raises():
-    t = HttpMCPTransport("https://example.com/mcp")
-    with pytest.raises(NotImplementedError, match="not implemented"):
-        await t.connect()
-
-
-@pytest.mark.asyncio
-async def test_http_transport_send_raises():
-    t = HttpMCPTransport("https://example.com/mcp")
-    with pytest.raises(NotImplementedError, match="not implemented"):
-        await t.send({"x": 1})
-
-
-@pytest.mark.asyncio
-async def test_http_transport_receive_raises():
-    t = HttpMCPTransport("https://example.com/mcp")
-    with pytest.raises(NotImplementedError, match="not implemented"):
-        await t.receive()
-
-
-@pytest.mark.asyncio
-async def test_http_transport_close_idempotent():
-    """close 不抛错且无副作用——可多次调用。"""
-    t = HttpMCPTransport("https://example.com/mcp")
-    await t.close()
-    await t.close()
-    await t.close()
-
-
-def test_http_transport_init_stores_config():
-    t = HttpMCPTransport(
-        "https://example.com/mcp",
-        headers={"Authorization": "Bearer x"},
-        timeout_s=60.0,
-    )
-    assert t._url == "https://example.com/mcp"
-    assert t._headers == {"Authorization": "Bearer x"}
-    assert t._timeout_s == 60.0
 
 
 # ============================================================================

@@ -20,6 +20,7 @@ from coding_sandbox.admin import (
     SandboxAdminService,
     SandboxConfigConflictError,
     SandboxConfigStoreError,
+    SandboxRuntimeState,
 )
 from coding_sandbox.lifecycle import (
     SANDBOX_STATE_MACHINE_VERSION,
@@ -36,7 +37,6 @@ from ..credentials.api import (
     safe_validation_response,
 )
 from ..local_web_security import WebSecurityConfig
-from .runtime import SandboxRuntimeState
 
 _API_PREFIX = "/api/coding-sandbox"
 

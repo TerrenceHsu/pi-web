@@ -129,7 +129,6 @@ from .mcp import (
     MAX_NAMESPACED_NAME_LEN,
     MCP_NAME_RE,
     FakeMCPTransport,
-    HttpMCPTransport,
     MCPAgentTool,
     MCPCallResult,
     MCPClient,
@@ -324,7 +323,7 @@ from .tool_validation import (
     validate_tool_arguments,
 )
 
-# Tool 基础模型 + 内置工具（Step 5.5 加 WebSearchTool）
+# Tool 基础模型
 from .tools import (
     AgentTool,
     ToolDef,
@@ -334,7 +333,6 @@ from .tools import (
     ToolRegistry,
     ToolResult,
     ToolUpdateCallback,
-    WebSearchTool,
 )
 
 __all__ = [
@@ -545,8 +543,6 @@ __all__ = [
     "ToolUpdateCallback",
     "ToolRegistrationError",
     "ToolNotFoundError",
-    # built-in tools (Step 5.5)
-    "WebSearchTool",
     # tool validation (Step 16)
     "ToolArgumentValidationError",
     "validate_tool_arguments",
@@ -564,7 +560,6 @@ __all__ = [
     "MCPTransportClosedError",
     "MCPTransport",
     "StdioMCPTransport",
-    "HttpMCPTransport",
     "FakeMCPTransport",
     "MCPClient",
     "MCPToolInfo",

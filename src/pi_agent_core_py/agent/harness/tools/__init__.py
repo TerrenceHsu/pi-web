@@ -11,11 +11,9 @@ from .view_file import (
     ViewFileTool,
     create_view_file_tool,
 )
-from .web_search import WebSearchTool
 from .write_file import WriteFileTool, create_write_file_tool
 
 __all__ = [
-    "WebSearchTool",
     "ListFilesTool",
     "create_list_files_tool",
     "ViewFileTool",

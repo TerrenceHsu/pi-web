@@ -2,7 +2,7 @@
 
 导出：
 - 配置 / 异常
-- Transport（抽象 + stdio + http 占位 + fake）
+- Transport（抽象 + local stdio + fake）
 - Client
 - Adapter（MCPAgentTool）
 - Registry（MCPRegistry + MCPServerState）
@@ -42,7 +42,6 @@ from .prompts import (
 from .registry import MCPRegistry, MCPServerState
 from .transport import (
     FakeMCPTransport,
-    HttpMCPTransport,
     MCPTransport,
     StdioMCPTransport,
 )
@@ -65,7 +64,6 @@ __all__ = [
     # transport
     "MCPTransport",
     "StdioMCPTransport",
-    "HttpMCPTransport",
     "FakeMCPTransport",
     # client
     "MCPClient",

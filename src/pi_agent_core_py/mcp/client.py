@@ -32,7 +32,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from ..messages import TextContent
+from ..ai.messages import TextContent
 from .config import MCPServerConfig
 from .errors import (
     MCPError,
@@ -46,11 +46,7 @@ from .prompts import (
     MCPPromptResult,
     _parse_message_content,
 )
-from .transport import (
-    HttpMCPTransport,
-    MCPTransport,
-    StdioMCPTransport,
-)
+from .transport import MCPTransport, StdioMCPTransport
 
 
 class MCPToolInfo(BaseModel):
@@ -99,22 +95,16 @@ _PROTOCOL_VERSION = "2024-11-05"
 
 
 def _build_default_transport(config: MCPServerConfig) -> MCPTransport:
-    """按 config.transport 类型构造默认 transport。
-
-    Step 16：stdio 完整支持；http 抛 NotImplementedError。
-    """
-    if config.transport == "stdio":
-        assert config.command is not None  # 由 MCPServerConfig 校验保证
-        return StdioMCPTransport(
-            config.command, config.args,
-            cwd=config.cwd, env=config.env,
-        )
-    if config.transport == "http":
-        assert config.url is not None  # 由 MCPServerConfig 校验保证
-        return HttpMCPTransport(
-            config.url, headers=config.headers, timeout_s=config.timeout_s,
-        )
-    raise MCPProtocolError(f"unknown transport type: {config.transport}")
+    """Build the local stdio transport supported by the Web product."""
+    if config.transport != "stdio":  # defensive guard for unchecked construction
+        raise MCPProtocolError(f"unsupported transport type: {config.transport}")
+    assert config.command is not None  # 由 MCPServerConfig 校验保证
+    return StdioMCPTransport(
+        config.command,
+        config.args,
+        cwd=config.cwd,
+        env=config.env,
+    )
 
 
 class MCPClient:

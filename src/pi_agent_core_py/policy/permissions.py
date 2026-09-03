@@ -44,8 +44,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from ..agent.messages import AgentMessage, ToolCall
 from ..agent.tooling import AgentTool
-from ..messages import AgentMessage, ToolCall
 
 # ============================================================================
 # Decision 类型

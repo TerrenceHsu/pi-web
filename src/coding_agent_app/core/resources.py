@@ -10,9 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
-from pi_agent_core_py.harness import AgentHarness
-from pi_agent_core_py.skills import Skill
-from pi_agent_core_py.tools import AgentTool
+from pi_agent_core_py.agent.harness import AgentHarness
+from pi_agent_core_py.agent.harness.skills import Skill
+from pi_agent_core_py.agent.tooling import AgentTool
 
 ResourceDiagnosticLevel = Literal["info", "warning", "error"]
 
