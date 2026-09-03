@@ -290,6 +290,9 @@ def main() -> None:
         return create_app(
             _build_test_harness(),
             db_path=str(workspace_db),
+            telemetry_db_path=tmp_root / "telemetry.sqlite",
+            telemetry_account_id=user.id,
+            telemetry_account_name=user.name,
             uploads_dir=str(uploads_dir),
             wiki_root=str(wiki_root),
             allow_prompt_preview=True,

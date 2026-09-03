@@ -68,6 +68,7 @@ class AuthService:
         record, created = await self._store.create_initial_user_if_empty(
             BOOTSTRAP_USER_NAME,
             password_hash,
+            is_admin=True,
         )
         self._dummy_hash = password_hash
         return to_auth_user(record), created

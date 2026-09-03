@@ -13,6 +13,7 @@ from pi_agent_core_py.messages import AgentMessage
 from pi_agent_core_py.model_client import ModelClient
 from pi_agent_core_py.policy import ToolPermissionPolicy
 from pi_agent_core_py.skills import SkillRegistry, SkillSelection
+from pi_agent_core_py.telemetry import SpanOptions, TelemetrySpan
 from pi_agent_core_py.tools import AgentTool
 
 from .prompts import PromptContribution, compose_system_prompt_suffix
@@ -234,22 +235,65 @@ class CodingAgentSession:
         skill_selection: SkillSelection | None = None,
         system_prompt_suffix: str | None = None,
     ) -> list[AgentMessage]:
-        async with self.compose_request(
-            mode=mode,
-            coding_tool_names=coding_tool_names,
-            override_tools=override_tools,
-            permission_policy=permission_policy,
-            prompt_contributions=(
-                (PromptContribution(source="caller", text=system_prompt_suffix),)
-                if system_prompt_suffix is not None
-                else ()
+        async def _run(request_span: TelemetrySpan) -> list[AgentMessage]:
+            try:
+                async with self.compose_request(
+                    mode=mode,
+                    coding_tool_names=coding_tool_names,
+                    override_tools=override_tools,
+                    permission_policy=permission_policy,
+                    prompt_contributions=(
+                        (PromptContribution(source="caller", text=system_prompt_suffix),)
+                        if system_prompt_suffix is not None
+                        else ()
+                    ),
+                ) as composition:
+                    client = self.harness.agent.client
+                    request_span.set_attributes(
+                        {
+                            "active_tool_count": len(composition.binding.active_tool_names),
+                            "skill_count": len(composition.resources.skills),
+                            "mcp_tool_count": len(composition.resources.mcp_tool_names),
+                            "provider": client.provider_id,
+                            "model": client.model,
+                        }
+                    )
+
+                    async def _agent_run(
+                        agent_span: TelemetrySpan,
+                    ) -> list[AgentMessage]:
+                        messages = await self.harness.run_prompt(
+                            text,
+                            skill_selection=skill_selection,
+                            system_prompt_suffix=composition.system_prompt_suffix,
+                        )
+                        agent_span.set_attributes({"message_count": len(messages)})
+                        return messages
+
+                    result: list[AgentMessage] = await request_span.start_span(
+                        SpanOptions("agent.run", {"request_type": "prompt"}),
+                        _agent_run,
+                    )
+                    request_span.set_attributes({"outcome": "completed"})
+                    return result
+            except asyncio.CancelledError:
+                request_span.set_attributes({"outcome": "aborted"})
+                raise
+            except BaseException:
+                request_span.set_attributes({"outcome": "error"})
+                raise
+
+        return await self.services.telemetry.start_span(
+            SpanOptions(
+                "coding_agent.request",
+                {
+                    "session_id": self.session_id,
+                    "request_type": "prompt",
+                    "mode": mode,
+                },
             ),
-        ) as composition:
-            return await self.harness.run_prompt(
-                text,
-                skill_selection=skill_selection,
-                system_prompt_suffix=composition.system_prompt_suffix,
-            )
+            _run,
+        )
 
     async def run_continue(
         self,
@@ -261,21 +305,64 @@ class CodingAgentSession:
         skill_selection: SkillSelection | None = None,
         system_prompt_suffix: str | None = None,
     ) -> list[AgentMessage]:
-        async with self.compose_request(
-            mode=mode,
-            coding_tool_names=coding_tool_names,
-            override_tools=override_tools,
-            permission_policy=permission_policy,
-            prompt_contributions=(
-                (PromptContribution(source="caller", text=system_prompt_suffix),)
-                if system_prompt_suffix is not None
-                else ()
+        async def _run(request_span: TelemetrySpan) -> list[AgentMessage]:
+            try:
+                async with self.compose_request(
+                    mode=mode,
+                    coding_tool_names=coding_tool_names,
+                    override_tools=override_tools,
+                    permission_policy=permission_policy,
+                    prompt_contributions=(
+                        (PromptContribution(source="caller", text=system_prompt_suffix),)
+                        if system_prompt_suffix is not None
+                        else ()
+                    ),
+                ) as composition:
+                    client = self.harness.agent.client
+                    request_span.set_attributes(
+                        {
+                            "active_tool_count": len(composition.binding.active_tool_names),
+                            "skill_count": len(composition.resources.skills),
+                            "mcp_tool_count": len(composition.resources.mcp_tool_names),
+                            "provider": client.provider_id,
+                            "model": client.model,
+                        }
+                    )
+
+                    async def _agent_run(
+                        agent_span: TelemetrySpan,
+                    ) -> list[AgentMessage]:
+                        messages = await self.harness.run_continue(
+                            skill_selection=skill_selection,
+                            system_prompt_suffix=composition.system_prompt_suffix,
+                        )
+                        agent_span.set_attributes({"message_count": len(messages)})
+                        return messages
+
+                    result: list[AgentMessage] = await request_span.start_span(
+                        SpanOptions("agent.run", {"request_type": "continue"}),
+                        _agent_run,
+                    )
+                    request_span.set_attributes({"outcome": "completed"})
+                    return result
+            except asyncio.CancelledError:
+                request_span.set_attributes({"outcome": "aborted"})
+                raise
+            except BaseException:
+                request_span.set_attributes({"outcome": "error"})
+                raise
+
+        return await self.services.telemetry.start_span(
+            SpanOptions(
+                "coding_agent.request",
+                {
+                    "session_id": self.session_id,
+                    "request_type": "continue",
+                    "mode": mode,
+                },
             ),
-        ) as composition:
-            return await self.harness.run_continue(
-                skill_selection=skill_selection,
-                system_prompt_suffix=composition.system_prompt_suffix,
-            )
+            _run,
+        )
 
     async def close(self) -> None:
         if self._closed:

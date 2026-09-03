@@ -174,8 +174,8 @@ class LoginRequest(BaseModel):
     password: SecretStr = Field(..., min_length=6, max_length=128)
 
 
-def _serialize_user(user: AuthUser) -> dict[str, str]:
-    return {"id": user.id, "name": user.name}
+def _serialize_user(user: AuthUser) -> dict[str, str | bool]:
+    return {"id": user.id, "name": user.name, "is_admin": user.is_admin}
 
 
 def _client_key(request: Request) -> str:
@@ -359,6 +359,14 @@ def create_authenticated_app(
     async def knowledge_route(knowledge_path: str | None = None) -> Response:
         """Serve the independent LLM Wiki SPA shell on direct entry."""
         del knowledge_path
+        return await index()
+
+    @app.get("/telemetry", include_in_schema=False)
+    @app.get("/telemetry/", include_in_schema=False)
+    @app.get("/telemetry/{telemetry_path:path}", include_in_schema=False)
+    async def telemetry_route(telemetry_path: str | None = None) -> Response:
+        """Serve the admin Telemetry SPA shell on direct entry."""
+        del telemetry_path
         return await index()
 
     @app.get("/assets/{path:path}", include_in_schema=False)

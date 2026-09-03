@@ -164,6 +164,27 @@ def test_agent_core_does_not_depend_on_harness_or_product_layers() -> None:
     assert violations == []
 
 
+def test_telemetry_package_is_backend_neutral() -> None:
+    telemetry_root = PACKAGE_ROOT / "telemetry"
+    expected = {"types.py", "noop.py", "memory.py", "schema.py", "sqlite.py"}
+    present = {
+        path.relative_to(telemetry_root).as_posix()
+        for path in telemetry_root.rglob("*.py")
+        if "__pycache__" not in path.parts
+    }
+    assert expected <= present
+
+    violations = [
+        violation
+        for path in _python_files(telemetry_root)
+        for violation in _imports_banned_root(
+            path,
+            {"agent", "coding_agent", "session_backends", "web"},
+        )
+    ]
+    assert violations == []
+
+
 def test_legacy_modules_are_thin_facades() -> None:
     legacy_modules = [
         "compaction.py",

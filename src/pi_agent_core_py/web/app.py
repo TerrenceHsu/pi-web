@@ -89,6 +89,13 @@ from .. import __version__
 from ..harness import AgentHarness
 from ..session_sqlite import SessionOperationConflictError
 from ..skills import SkillSelection
+from ..telemetry import (
+    NOOP_TELEMETRY_CONTEXT,
+    SpanOptions,
+    SpanStatus,
+    TelemetryError,
+    TelemetrySpan,
+)
 from .approvals import ToolApprovalManager
 from .checkpointer import (
     CHECKPOINTER_COMMAND,
@@ -103,6 +110,7 @@ from .checkpointer import (
     recover_checkpointer_operations,
 )
 from .content_integrity import summarize_content_integrity
+from .local_web_security import default_web_security_config
 from .providers.runtime import (
     ProviderInitializationError,
     ProviderSelectionDisabledError,
@@ -121,6 +129,7 @@ from .serializers import (
     to_json_safe,
 )
 from .state import WebAppState, WebMCPServerConfig, WebRunRequest
+from .telemetry import RequestTelemetryStats, build_telemetry_router, record_agent_event
 
 if TYPE_CHECKING:
     from agent_workspace.code_continuity import CodeContinuityTrigger
@@ -381,6 +390,9 @@ def create_app(
     workspace_document_converters: WorkspaceDocumentConverterRegistry | None = None,
     request_history_maxlen: int = 100,
     shutdown_grace_s: float = 5.0,
+    telemetry_db_path: str | Path | None = None,
+    telemetry_account_id: str | None = None,
+    telemetry_account_name: str | None = None,
     # P1-E1-4A: Credential runtime composition（可选）
     # None / ":memory:" 时跳过 credential runtime——保持向后兼容
     credential_secret_backend: str = "auto",
@@ -508,6 +520,14 @@ def create_app(
     )
     request_id_context: ContextVar[str | None] = ContextVar(
         "pi_agent_web_request_id",
+        default=None,
+    )
+    telemetry_span_context: ContextVar[TelemetrySpan | None] = ContextVar(
+        "pi_agent_web_telemetry_span",
+        default=None,
+    )
+    telemetry_stats_context: ContextVar[RequestTelemetryStats | None] = ContextVar(
+        "pi_agent_web_telemetry_stats",
         default=None,
     )
     # The configured Harness is the product template and owns shared extension
@@ -800,6 +820,27 @@ def create_app(
         state.extension_store = extension_store
         state.skill_mutation_lock = asyncio.Lock()
 
+        telemetry_recorder = None
+        if telemetry_db_path is not None:
+            from ..telemetry import SQLiteTelemetryContext
+
+            telemetry_recorder = SQLiteTelemetryContext(
+                telemetry_db_path,
+                base_attributes={
+                    "account_id": telemetry_account_id,
+                    "account_name": telemetry_account_name,
+                },
+            )
+            try:
+                await telemetry_recorder.init()
+            except Exception:
+                _logger.exception(
+                    "Telemetry initialization failed; continuing without recording"
+                )
+                telemetry_recorder = None
+        coding_agent_services.telemetry = telemetry_recorder or NOOP_TELEMETRY_CONTEXT
+        _app.state.telemetry_reader = telemetry_recorder
+
         async def _close_startup_sqlite_stores() -> None:
             """Close core stores when startup fails before lifespan yield."""
 
@@ -819,6 +860,13 @@ def create_app(
                 await session_store.close()
             except Exception:
                 pass
+            if telemetry_recorder is not None:
+                try:
+                    await telemetry_recorder.close()
+                except Exception:
+                    pass
+            coding_agent_services.telemetry = NOOP_TELEMETRY_CONTEXT
+            _app.state.telemetry_reader = None
             state.extension_store = None
             state.session_store = None
             coding_agent_services.session_repository = None
@@ -1559,6 +1607,13 @@ def create_app(
             except Exception:
                 pass
         # WorkspaceStore 不需要 close（纯文件 IO），保留目录给后续进程用
+        if telemetry_recorder is not None:
+            try:
+                await telemetry_recorder.close()
+            except Exception:
+                pass
+        coding_agent_services.telemetry = NOOP_TELEMETRY_CONTEXT
+        _app.state.telemetry_reader = None
 
     app = FastAPI(
         title="pi-agent-core-py · Trace Viewer",
@@ -1599,9 +1654,15 @@ def create_app(
     # M1-5: request_provider_runtime placeholder——仅 cred + pc runtime 都启用时填入
     app.state.request_provider_runtime = None
     app.state.coding_agent_runtime = coding_agent_runtime
+    app.state.telemetry_reader = None
     # Backwards-compatible projection of the currently selected product
     # Session.  New code must resolve through coding_agent_runtime by ID.
     app.state.coding_agent_session = None
+    telemetry_security_config = default_web_security_config(
+        extra_hosts=credential_extra_hosts,
+        extra_ui_origins=credential_extra_ui_origins,
+    )
+    app.include_router(build_telemetry_router(telemetry_security_config))
     from .source_offer import (
         SourceOfferError,
         build_about_router,
@@ -1632,9 +1693,9 @@ def create_app(
     if _cred_resolved.trusted_host_enabled:
         from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-        from .local_web_security import default_web_security_config
+        from .local_web_security import default_web_security_config as _trusted_ws
 
-        _ws_cfg = default_web_security_config(
+        _ws_cfg = _trusted_ws(
             extra_hosts=credential_extra_hosts,
             extra_ui_origins=credential_extra_ui_origins,
         )
@@ -1807,6 +1868,10 @@ def create_app(
         本身有 try/except 兜底，这里再加一层防御）。
         """
         try:
+            telemetry_span = telemetry_span_context.get()
+            telemetry_stats = telemetry_stats_context.get()
+            if telemetry_span is not None and telemetry_stats is not None:
+                record_agent_event(telemetry_span, event, telemetry_stats)
             payload = serialize_event(event)
             if not isinstance(payload, dict):
                 # 防御坏 event——不可能发生但兜底
@@ -3328,7 +3393,7 @@ def create_app(
             session_persisted=True,
         )
 
-    async def _run_prompt_request(
+    async def _run_prompt_request_inner(
         validated: _PromptValidated,
         *,
         abort_requested: Callable[[], bool] | None = None,
@@ -3474,6 +3539,72 @@ def create_app(
             if not model_persisted and validated.original_messages is not None:
                 request_harness.agent.state.messages = validated.original_messages
             _refresh_running_state()
+
+    async def _run_prompt_request(
+        validated: _PromptValidated,
+        *,
+        abort_requested: Callable[[], bool] | None = None,
+    ) -> PromptRunOutcome:
+        """Run one Web prompt inside a passive, content-free Telemetry span."""
+
+        stats = RequestTelemetryStats()
+
+        async def _observe(request_span: TelemetrySpan) -> PromptRunOutcome:
+            span_token = telemetry_span_context.set(request_span)
+            stats_token = telemetry_stats_context.set(stats)
+            try:
+                result = await _run_prompt_request_inner(
+                    validated,
+                    abort_requested=abort_requested,
+                )
+                request_span.set_attributes(
+                    {
+                        **stats.end_attributes(),
+                        "outcome": "completed",
+                        "message_count": len(result.messages),
+                        "applied_skill_count": len(result.applied_skill_names),
+                    }
+                )
+                return result
+            except BaseException as error:
+                aborted = isinstance(error, asyncio.CancelledError) or (
+                    isinstance(error, PromptRuntimeError)
+                    and error.error_type in {"request_aborted", "aborted"}
+                )
+                request_span.set_attributes(
+                    {
+                        **stats.end_attributes(),
+                        "outcome": "aborted" if aborted else "error",
+                        "error_type": type(error).__name__,
+                    }
+                )
+                if not aborted:
+                    request_span.set_status(
+                        SpanStatus(
+                            status="error",
+                            error=TelemetryError(name=type(error).__name__),
+                        )
+                    )
+                raise
+            finally:
+                telemetry_stats_context.reset(stats_token)
+                telemetry_span_context.reset(span_token)
+
+        intent_route = validated.intent.route if validated.intent is not None else None
+        return await coding_agent_services.telemetry.start_span(
+            SpanOptions(
+                "web.request",
+                {
+                    "request_id": request_id_context.get(),
+                    "session_id": validated.session_id,
+                    "operation": "prompt",
+                    "coding_mode": validated.coding_mode,
+                    "execution_mode": validated.execution_mode,
+                    "intent_route": intent_route,
+                },
+            ),
+            _observe,
+        )
 
     def _extract_terminal_assistant(suffix: list[Any]) -> Any | None:
         """D2-4：从执行 suffix 中提取最终 assistant candidate。

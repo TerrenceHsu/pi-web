@@ -10,7 +10,7 @@ import aiosqlite
 
 from .models import AuthUserRecord
 
-AUTH_SCHEMA_VERSION = 1
+AUTH_SCHEMA_VERSION = 2
 
 
 class AuthStoreError(Exception):
@@ -37,6 +37,7 @@ def _row_to_user(row: aiosqlite.Row) -> AuthUserRecord:
     return AuthUserRecord(
         id=str(row["id"]),
         name=str(row["name"]),
+        is_admin=bool(row["is_admin"]),
         password_hash=str(row["password_hash"]),
         created_at=int(row["created_at"]),
         updated_at=int(row["updated_at"]),
@@ -84,12 +85,13 @@ class AuthStore:
                         "INSERT INTO auth_schema_meta (singleton, version) VALUES (1, ?)",
                         (AUTH_SCHEMA_VERSION,),
                     )
-                elif int(version_row["version"]) != AUTH_SCHEMA_VERSION:
+                elif not 1 <= int(version_row["version"]) <= AUTH_SCHEMA_VERSION:
                     raise AuthSchemaError("authentication schema version is unsupported")
                 await db.execute(
                     "CREATE TABLE IF NOT EXISTS auth_users ("
                     "id TEXT PRIMARY KEY, "
                     "name TEXT NOT NULL COLLATE NOCASE UNIQUE, "
+                    "is_admin INTEGER NOT NULL DEFAULT 0 CHECK (is_admin IN (0, 1)), "
                     "password_hash TEXT NOT NULL, "
                     "created_at INTEGER NOT NULL, "
                     "updated_at INTEGER NOT NULL, "
@@ -97,6 +99,22 @@ class AuthStore:
                     "CHECK (length(name) BETWEEN 1 AND 64), "
                     "CHECK (length(password_hash) BETWEEN 40 AND 512))"
                 )
+                if version_row is not None and int(version_row["version"]) == 1:
+                    async with db.execute("PRAGMA table_info(auth_users)") as cursor:
+                        columns = {str(row["name"]) for row in await cursor.fetchall()}
+                    if "is_admin" not in columns:
+                        await db.execute(
+                            "ALTER TABLE auth_users ADD COLUMN is_admin INTEGER "
+                            "NOT NULL DEFAULT 0 CHECK (is_admin IN (0, 1))"
+                        )
+                    await db.execute(
+                        "UPDATE auth_users SET is_admin = 1 "
+                        "WHERE name = 'admin' COLLATE NOCASE"
+                    )
+                    await db.execute(
+                        "UPDATE auth_schema_meta SET version = ? WHERE singleton = 1",
+                        (AUTH_SCHEMA_VERSION,),
+                    )
                 await db.execute(
                     "CREATE TABLE IF NOT EXISTS auth_sessions ("
                     "token_hash TEXT PRIMARY KEY, "
@@ -121,7 +139,7 @@ class AuthStore:
     async def get_user_by_name(self, name: str) -> AuthUserRecord | None:
         db = self._require_connection()
         async with db.execute(
-            "SELECT id, name, password_hash, created_at, updated_at "
+            "SELECT id, name, is_admin, password_hash, created_at, updated_at "
             "FROM auth_users WHERE name = ? COLLATE NOCASE",
             (name,),
         ) as cursor:
@@ -131,14 +149,20 @@ class AuthStore:
     async def get_user(self, user_id: str) -> AuthUserRecord | None:
         db = self._require_connection()
         async with db.execute(
-            "SELECT id, name, password_hash, created_at, updated_at "
+            "SELECT id, name, is_admin, password_hash, created_at, updated_at "
             "FROM auth_users WHERE id = ?",
             (user_id,),
         ) as cursor:
             row = await cursor.fetchone()
         return _row_to_user(row) if row is not None else None
 
-    async def create_user(self, name: str, password_hash: str) -> AuthUserRecord:
+    async def create_user(
+        self,
+        name: str,
+        password_hash: str,
+        *,
+        is_admin: bool = False,
+    ) -> AuthUserRecord:
         """Create an account for bootstrap/administrative tooling (no public API)."""
 
         db = self._require_connection()
@@ -149,9 +173,9 @@ class AuthStore:
                 await db.execute("BEGIN IMMEDIATE")
                 await db.execute(
                     "INSERT INTO auth_users "
-                    "(id, name, password_hash, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (user_id, name, password_hash, now, now),
+                    "(id, name, is_admin, password_hash, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (user_id, name, int(is_admin), password_hash, now, now),
                 )
                 await db.execute("COMMIT")
             except aiosqlite.IntegrityError as exc:
@@ -175,13 +199,15 @@ class AuthStore:
         self,
         name: str,
         password_hash: str,
+        *,
+        is_admin: bool = False,
     ) -> tuple[AuthUserRecord, bool]:
         db = self._require_connection()
         async with self._write_lock:
             try:
                 await db.execute("BEGIN IMMEDIATE")
                 async with db.execute(
-                    "SELECT id, name, password_hash, created_at, updated_at "
+                    "SELECT id, name, is_admin, password_hash, created_at, updated_at "
                     "FROM auth_users ORDER BY created_at ASC, id ASC LIMIT 1"
                 ) as cursor:
                     row = await cursor.fetchone()
@@ -192,9 +218,9 @@ class AuthStore:
                 now = _now_ms()
                 await db.execute(
                     "INSERT INTO auth_users "
-                    "(id, name, password_hash, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (user_id, name, password_hash, now, now),
+                    "(id, name, is_admin, password_hash, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (user_id, name, int(is_admin), password_hash, now, now),
                 )
                 await db.execute("COMMIT")
             except Exception:
@@ -245,7 +271,7 @@ class AuthStore:
     ) -> AuthUserRecord | None:
         db = self._require_connection()
         async with db.execute(
-            "SELECT u.id, u.name, u.password_hash, u.created_at, u.updated_at "
+            "SELECT u.id, u.name, u.is_admin, u.password_hash, u.created_at, u.updated_at "
             "FROM auth_sessions AS s "
             "JOIN auth_users AS u ON u.id = s.user_id "
             "WHERE s.token_hash = ? AND s.expires_at > ?",

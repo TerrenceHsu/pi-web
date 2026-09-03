@@ -164,7 +164,11 @@ def test_login_gate_session_and_logout(tmp_path: Path) -> None:
         assert session.status_code == 200
         assert session.json() == {
             "authenticated": True,
-            "user": {"id": session.json()["user"]["id"], "name": "admin"},
+            "user": {
+                "id": session.json()["user"]["id"],
+                "name": "admin",
+                "is_admin": True,
+            },
         }
         assert client.get("/api/profile").json()["user"] == "admin"
         with client.websocket_connect("/ws/events") as websocket:

@@ -12,6 +12,7 @@ class AuthUserRecord:
     id: str
     name: str
     password_hash: str = field(repr=False)
+    is_admin: bool = False
     created_at: int = 0
     updated_at: int = 0
 
@@ -22,10 +23,11 @@ class AuthUser:
 
     id: str
     name: str
+    is_admin: bool = False
 
 
 def to_auth_user(record: AuthUserRecord) -> AuthUser:
-    return AuthUser(id=record.id, name=record.name)
+    return AuthUser(id=record.id, name=record.name, is_admin=record.is_admin)
 
 
 __all__ = ["AuthUser", "AuthUserRecord", "to_auth_user"]

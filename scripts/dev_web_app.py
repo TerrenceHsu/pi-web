@@ -107,6 +107,7 @@ def main() -> None:
     ).resolve()
     auth_db_path = data_root / "auth.sqlite"
     user_data_root = data_root / "users"
+    telemetry_db_path = data_root / "telemetry.sqlite"
 
     default_origins = "http://localhost:5173 http://127.0.0.1:5173"
     extra_origins_env = os.environ.get("EXTRA_UI_ORIGINS", default_origins)
@@ -121,10 +122,12 @@ def main() -> None:
     )
 
     def _workspace_app(user: AuthUser, workspace_root: Path) -> FastAPI:
-        del user  # The stable user id is already encoded in workspace_root.
         return create_app(
             _build_harness(),
             db_path=str(workspace_root / "workspace.sqlite"),
+            telemetry_db_path=telemetry_db_path,
+            telemetry_account_id=user.id,
+            telemetry_account_name=user.name,
             uploads_dir=str(workspace_root / "uploads"),
             wiki_root=str(workspace_root / "knowledge"),
             wiki_parser_worker_source_root=REPO_ROOT

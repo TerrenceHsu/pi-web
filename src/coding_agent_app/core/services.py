@@ -12,6 +12,7 @@ from pi_agent_core_py.agent.harness.session.types import (
     SessionSearch,
 )
 from pi_agent_core_py.harness import AgentHarness
+from pi_agent_core_py.telemetry import NOOP_TELEMETRY_CONTEXT, TelemetryContext
 
 from .resources import (
     CodingAgentResourceLoader,
@@ -58,6 +59,7 @@ class CodingAgentServices:
     workspace_store: object | None = None
     provider_runtime: CodingAgentProviderRuntime | None = None
     sandbox_lifecycle: object | None = None
+    telemetry: TelemetryContext = NOOP_TELEMETRY_CONTEXT
     diagnostics: list[ResourceDiagnostic] = field(default_factory=list)
 
 
@@ -71,6 +73,7 @@ def create_coding_agent_services(
     workspace_store: object | None = None,
     provider_runtime: CodingAgentProviderRuntime | None = None,
     sandbox_lifecycle: object | None = None,
+    telemetry: TelemetryContext | None = None,
 ) -> CodingAgentServices:
     """Create the product service bundle without starting network resources."""
 
@@ -83,6 +86,7 @@ def create_coding_agent_services(
         workspace_store=workspace_store,
         provider_runtime=provider_runtime,
         sandbox_lifecycle=sandbox_lifecycle,
+        telemetry=telemetry or NOOP_TELEMETRY_CONTEXT,
     )
 
 
