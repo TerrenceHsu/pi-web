@@ -544,8 +544,8 @@ Knowledge
 - **已完成**：前端覆盖上传/解析/Raw、Summary→Proposal→Change Set、diff 审批、页面 FTS5、正式
   图谱与每 Space 多对话；Knowledge Chat 复用既有流事件但保持独立模式与工具白名单。
 - **已完成**：删除旧 Library/Document/Chunk UI；开发启动器和 E2E 产品组合不再启动旧 DB、
-  ingestion/indexing worker、`search_knowledge` Tool 或 REST。旧 Backend 代码仅能由
-  `enable_knowledge_api=True` 显式开启，用于历史兼容测试，不再属于产品运行时。
+  ingestion/indexing worker、`search_knowledge` Tool 或 REST。后续 Web-only 审计已删除旧 Backend
+  package 与装配开关；历史磁盘数据只由 `wiki/legacy.py` 的显式归档流程处理。
 - **已完成**：Frontend lint/typecheck/build、Vitest 352/352、Playwright 54/54、Ruff、strict Mypy
   168 files / 0 issues 均通过；Backend 全量结果记录于项目状态页。
 

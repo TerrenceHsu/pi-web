@@ -59,7 +59,7 @@
 - 内置 `ddgs` MCP 随开发工作区固定创建且不可删除
 - DDGS 前端可调整返回数、地区、安全搜索、时间范围、后端等参数
 - MCP 子进程强制 `PYTHONIOENCODING=utf-8` / `PYTHONUTF8=1`；非法 UTF-8 作为协议错误拒绝
-- HTTP MCP transport 仍是 placeholder；当前生产可用 transport 为 stdio
+- MCP 配置只接受本机 stdio transport；远程 HTTP transport 不属于当前 Web 产品范围
 
 ### LLM Wiki / Knowledge Agent
 
@@ -69,7 +69,7 @@
 - 只对 active/current/approved 页面使用 SQLite FTS5/BM25；知识图谱包含五种页面关系和系统维护的 `derived_from`
 - `/knowledge` 提供 Pages、Sources、Graph、Changes、Conversations 五个视图；Knowledge Agent 使用独立 Prompt/Skill 与工具白名单
 
-Wiki 不创建 Chunk、embedding 或向量检索主链路。旧 Library/Document/`search_knowledge` 产品已退役；Backend 仅保留显式兼容测试入口。
+Wiki 不创建 Chunk、embedding 或向量检索主链路。旧 Library/Document/`search_knowledge` 的运行时、API、工具与可选依赖均已删除；`wiki/legacy.py` 只负责识别并归档旧磁盘数据。
 
 ## 关键数据边界
 
@@ -110,7 +110,7 @@ D:\miniconda\envs\pipy\python.exe
 
 ```powershell
 Set-Location D:\LLMTutorial\test
-D:\miniconda\envs\pipy\python.exe -m pip install -e ".[dev,web,rag]"
+D:\miniconda\envs\pipy\python.exe -m pip install -e ".[dev,web]"
 npm --prefix src/pi_agent_core_py/web/frontend ci
 ```
 
@@ -321,12 +321,12 @@ FakeClient，不访问真实 Provider。
 
 ## 当前限制
 
-- 单账号单 harness、单 active request；没有并行 Session 生成
+- 每个持久 Web Session ID 映射独立 Runtime Session/Harness；同一 Session 单请求串行，不同 Session 可并行
 - Context estimator 不是 Provider 官方 tokenizer；compaction 默认手动、规则式
 - Regenerate 只支持最新 Assistant；没有 revision history UI
 - Session Folder 不解析 PDF 正文；PDF 知识处理必须上传到 Wiki Space
 - Wiki 支持 Docling OCR preset，但不做通用图片理解、向量检索、Multi-Agent、RBAC/OAuth 或公网部署
-- MCP HTTP transport 未实现；只支持 stdio
+- MCP 有意限定为本机 stdio；不接受远程 HTTP transport 配置
 - 历史数据中已经存在的 `U+FFFD` 无法自动恢复原字符
 - 当前 package baseline 为 `0.0.29`，Python、FastAPI/Auth、前端与 Wiki Parser Worker 版本已统一；Git remote 仍待配置
 
@@ -352,7 +352,6 @@ FakeClient，不访问真实 Provider。
 │       ├── providers/          # Profile/Binding/runtime
 │       ├── telemetry/          # Admin API 与 Agent event 安全投影
 │       ├── wiki/               # Raw、页面、审批、FTS5、图谱、Knowledge Agent
-│       ├── knowledge/          # 已退役 Chunk Knowledge 的显式兼容 Backend
 │       └── frontend/           # Vue 3/Vite/Pinia
 ├── scripts/dev_web_app.py
 ├── tests/

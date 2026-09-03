@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Web-only Agent Core audit（2026-09-03）
+
+- 全面审计 `pi_agent_core_py` 顶层模块：保留 Web 产品主链所需的 `ai/agent/mcp/policy/secrets/session_backends/telemetry/web`，保留旧平铺公开导入的对象身份兼容 facade，但让生产组合统一依赖 canonical owner
+- 删除旧 Chunk-RAG package、REST/Worker/Store/Search Tool 与 `rag` extra，删除 Tavily 重复搜索实现；产品搜索只保留可配置的本机 DDGS MCP，知识主链只保留页面中心 LLM Wiki
+- 删除 HTTP MCP placeholder，并让配置模型直接拒绝非 stdio transport；同步清除未挂载的旧 Vue inspector 组件、前端 API barrel 与兼容类型
+- Prompt、Regenerate、Checkpointer 统一进入不含正文的 `web.request` Telemetry span；新增 Admin 鉴权集成回归，并以 AST 测试禁止产品 runtime 反向依赖旧 facade
+- 详细模块取舍与最小闭环见 `docs/validation/web-agent-module-audit-2026-09-03.md`
+- 验证：Ruff、strict Mypy 263 files、Worker Ruff/Mypy、lockfile、5 suites / 10 observations Evals gate、Backend 2191 passed / 7 skipped / 9 deselected / coverage 76.65%、Frontend 187/187 + lint/typecheck/build、Chromium E2E 20/20 全部通过
+
 ### Local coding-agent evals（2026-09-03）
 
 - 新增独立、非 wheel 的本机离线 `evals` 包，以真实 `CodingAgentApplication → Runtime → Session → AgentHarness` 运行 Prompt/Reload 场景；每个 Observation 使用独立临时 Workspace、SQLite 和 Fake Provider
