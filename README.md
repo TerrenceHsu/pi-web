@@ -259,6 +259,19 @@ D:\miniconda\envs\pipy\python.exe -m pytest tests -q --no-cov --basetemp=.test-t
 
 默认 marker 排除 `slow`、`integration` 和 `docker`，不会调用真实 LLM、外部 DDGS 或 Docker。
 
+### Local coding-agent evals
+
+独立 `evals/` 模块在真实 `CodingAgentApplication → Runtime → Session` 边界上执行
+baseline/candidate 配对评测。内置套件只用 Fake Provider、临时 Workspace 和临时
+SQLite，不读取 `.env`、不访问网络：
+
+    $env:PYTHONPATH = "src"
+    D:\miniconda\envs\pipy\python.exe -m evals --gate
+
+默认 `.eval/` 产物不保存 Prompt、Response、Tool payload、Workspace 正文或
+Telemetry 属性；只有显式 `--include-content` 才保存完整内容。详细契约见
+[`evals/README.md`](evals/README.md)。
+
 ### DDGS + GLM 真实 smoke
 
 必须从当前 Windows 交互式登录用户会话运行，确保真实网络和 Credential Manager

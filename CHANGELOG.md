@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Local coding-agent evals（2026-09-03）
+
+- 新增独立、非 wheel 的本机离线 `evals` 包，以真实 `CodingAgentApplication → Runtime → Session → AgentHarness` 运行 Prompt/Reload 场景；每个 Observation 使用独立临时 Workspace、SQLite 和 Fake Provider
+- 新增确定性 Judge、baseline/candidate/repetition 配对、pass-rate lift、token/latency/cost 汇总、缺失观测诊断，以及默认脱敏的 manifest/JSONL/JSON/Markdown 产物
+- 内置 smoke、工具/Workspace、Provider/Skill/MCP/Workspace/Prompt 资源装配、SQLite Session reload 和 Telemetry 隐私五组套件；CI 增加 candidate threshold eval gate，且静态门禁覆盖 `evals/`
+- 验证：Evals 18 passed，5 suites / 10 observations candidate gate PASS；全仓 Ruff、strict Mypy 290 files、Backend 2205 passed / coverage 76.42%、Frontend 187/187 + typecheck/lint/build、Worker Ruff/Mypy 全部通过
+
 ### pi `agent` core and package structure parity（2026-09-01）
 
 - 补齐 Agent loop/state/tool 契约：终态生命周期、下一轮控制顺序、富消息 prompt、signal-aware context、自定义转换、工具参数预处理/hook patch、assistant-tail queue、thinking 与动态运行时替换
