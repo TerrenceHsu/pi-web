@@ -34,6 +34,29 @@
 
 ---
 
+## Admin Telemetry
+
+三个接口均要求有效登录 Cookie、`X-PI-Agent-UI: 1`、允许的 Origin（浏览器请求）以及服务端
+`auth_user.is_admin=true`。普通账号返回 **403**；Recorder 未启用或不可用时返回 **503**。响应均带
+`Cache-Control: no-store`。
+
+### `GET /api/admin/telemetry/summary?window_hours=24`
+
+返回请求总量/结果、错误率、平均/P95 延迟、token/cost、工具、Provider、账号和小时趋势。
+`window_hours` 范围为 1–720。
+
+### `GET /api/admin/telemetry/spans`
+
+列出最近 spans。支持 `window_hours`、`limit`（1–200）、`status=running|ok|error`、`name`、
+`account_id` 和 `session_id`。Admin 前端固定查询 `name=web.request`。
+
+### `GET /api/admin/telemetry/spans/{span_id}`
+
+返回单个 span 的 trace/parent、状态、有界 attributes 和结构化 event timeline。Telemetry 永不保存
+Prompt、消息/thinking、Tool arguments/output、凭证、异常正文或 abort reason。
+
+---
+
 ## Sessions（SQLite append-only tree + lane）
 
 ### `GET /api/sessions`

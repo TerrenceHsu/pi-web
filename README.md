@@ -186,8 +186,9 @@ D:\miniconda\envs\pipy\python.exe scripts/dev_web_app.py
 6. `Knowledge` 创建 Wiki Space，上传 PDF/HTML，审核 Summary/页面 Change Set，并在 Space 对话中检索或提出修改。
 7. `MCP` 配置自定义 stdio server；内置 DDGS 参数可直接编辑。
 8. `Providers` 管理凭证/Profile/模型窗口，并切换当前 Session binding。
-9. 对最新 Assistant 使用 Regenerate；从 Session 菜单导出 Markdown。
-10. 遇到高风险工具，在内联 Approval Card 中选择 Approve once 或 Deny。
+9. Admin 可打开 `Telemetry` 查看跨账号请求量、错误率、P95、token、Provider、工具与安全事件详情。
+10. 对最新 Assistant 使用 Regenerate；从 Session 菜单导出 Markdown。
+11. 遇到高风险工具，在内联 Approval Card 中选择 Approve once 或 Deny。
 
 ## 持久化布局
 
@@ -196,6 +197,7 @@ D:\miniconda\envs\pipy\python.exe scripts/dev_web_app.py
 ```text
 .pi-agent-data/
 ├── auth.sqlite
+├── telemetry.sqlite            # 跨账号结构化运行元数据；不保存 Prompt/消息/工具正文
 └── users/
     └── {user_id}/
         ├── workspace.sqlite
@@ -229,6 +231,7 @@ D:\miniconda\envs\pipy\python.exe scripts/dev_web_app.py
 - `/api/requests*`：active request、abort、approval
 - `/api/provider-*`、`/api/credentials`：Provider/Profile/Binding/Credential
 - `/api/mcp/*`、`/api/skills/*`：MCP 与 Skills
+- `/api/admin/telemetry/*`：Admin-only 运行摘要、请求列表与 span/event 详情
 - `/api/wiki/*`：Space、Source/parse artifact、Summary/Proposal、Page/FTS/Graph、Change Set 与 Conversation
 - `/api/stream` 与 `/ws/events`：SSE/WebSocket 实时事件
 
@@ -299,6 +302,7 @@ FakeClient，不访问真实 Provider。
 - API Key 不在 API response、日志、SQLite main/WAL/SHM 中回显或明文持久化
 - MCP env values 不回显；配置后前端立即清空输入
 - Prompt preview 默认关闭；开发启动器只对受信任本地 origin 开启
+- Telemetry 只保存有界结构化元数据；不采集 Prompt、消息/thinking、Tool 参数/输出、凭证、异常正文或 abort reason
 - MCP command、Session 文件、Wiki Source 与 Parser artifacts 均视为不可信输入
 - Pending approval 与 active request 是进程内状态，不是永久授权或审计数据库
 
@@ -323,6 +327,7 @@ FakeClient，不访问真实 Provider。
 │   │   └── harness/            # lifecycle、compaction、session、skills、通用工具
 │   ├── session_backends/
 │   │   └── sqlite/             # append-only Session tree backend
+│   ├── telemetry/              # Context/Span、noop/memory/schema 与 SQLite Recorder
 │   ├── *.py / providers/       # 旧公开路径的兼容 facade
 │   ├── mcp/                    # MCP client、transport、DDGS server
 │   ├── policy/                 # permission 与 sandbox helpers
@@ -332,6 +337,7 @@ FakeClient，不访问真实 Provider。
 │       ├── auth/               # 本地账号与登录网关
 │       ├── credentials/        # Credential metadata/runtime
 │       ├── providers/          # Profile/Binding/runtime
+│       ├── telemetry/          # Admin API 与 Agent event 安全投影
 │       ├── wiki/               # Raw、页面、审批、FTS5、图谱、Knowledge Agent
 │       ├── knowledge/          # 已退役 Chunk Knowledge 的显式兼容 Backend
 │       └── frontend/           # Vue 3/Vite/Pinia
