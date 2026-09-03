@@ -54,13 +54,14 @@ coding_agent_app/
 
 ## 与上游仍有差距
 
-1. Provider、Skill、MCP、Workspace 和 Prompt 已统一进入请求 composition pipeline，但持久 Store、
-   Credential/Provider 配置 API、MCP transport 启停和 Workspace assembler 的具体生命周期仍由 Web
-   application adapter 持有；后续可继续缩小 `web.app` 的组合体积。
+1. Provider、Skill、MCP、Workspace 和 Prompt 已统一进入请求 composition pipeline；第 4 项又把
+   SQLite Repository/Search 装入共享 Services，并让每个已启动 Runtime Session 持有独立可释放的
+   Storage handle。Credential/Provider 配置 API、MCP transport 启停和 Workspace assembler 的具体
+   生命周期仍由 Web application adapter 持有；后续可继续缩小 `web.app` 的组合体积。
 2. 上游 `modes/extensions/cli/tui` 的产品化能力尚未对齐。本项目已有意图路由、Plan、Web UI
    和扩展 Store，但它们仍是分散实现，未形成统一 extension/mode 生命周期。
-3. 图片附件到 provider-neutral `ImageContent` 的产品接线仍待完成；SQLite backend 与 telemetry
-   分别属于原五项对齐计划的第 4、5 项，不在本轮范围内。
+3. 图片附件到 provider-neutral `ImageContent` 的产品接线仍待完成；SQLite backend 已在第 4 项
+   对齐，telemetry 仍属于原五项计划的第 5 项。
 
 ## 验证结果
 

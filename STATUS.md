@@ -1,12 +1,12 @@
 # Project Status
 
-> 当前事实快照，校准日期：**2026-09-01**。本页只描述当前代码基线；阶段性测试数字和历史决策保留在 `docs/validation/`、`CHANGELOG.md` 与归档计划中。
+> 当前事实快照，校准日期：**2026-09-03**。本页只描述当前代码基线；阶段性测试数字和历史决策保留在 `docs/validation/`、`CHANGELOG.md` 与归档计划中。
 
 ## 基线身份
 
 | 项 | 当前事实 |
 |---|---|
-| 代码基线 | `0.0.29` 发布基线之后的 `master`；新增三类意图路由、Planner–Executor–Verifier Plan Mode、Sandbox 审阅/冲突恢复，以及 pi `ai` / `agent` 核心契约、package 边界与首轮 `coding-agent` 产品组合边界对齐 |
+| 代码基线 | `0.0.29` 发布基线之后的 `master`；新增三类意图路由、Planner–Executor–Verifier Plan Mode、Sandbox 审阅/冲突恢复，以及 pi `ai` / `agent` 核心契约、package 边界、`coding-agent` 产品组合与 `session-backends/sqlite-node` 持久化边界对齐 |
 | 分支 | `master` |
 | 最新 release tag | `0.0.29`；annotated tag 指向本次统一版本与发布验证提交 |
 | Python / API 版本 | `0.0.29`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
@@ -33,6 +33,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 | pi `agent` 核心契约对齐（第二项） | ✅ P0 差距已补齐 | 生命周期终化、下一轮控制顺序、文本/图片/AgentMessage prompt、signal-aware context、自定义 LLM 转换、工具参数预处理与 hook patch、assistant-tail 队列续作、thinking/运行时替换和公开状态同步；详见 `docs/validation/pi-agent-parity-2026-08-31.md` |
 | pi `agent` package 结构对齐 | ✅ 完成 | canonical 实现迁入 `ai/`、`agent/`、`agent/harness/{compaction,session,tools}` 与 `session_backends/sqlite/`；旧平铺模块保留 thin facade/模块别名，兼容导入保持对象身份；AST 依赖边界、wheel 内容与隔离安装导入均通过；详见 `docs/validation/pi-agent-package-structure-2026-09-01.md` |
 | pi `coding-agent` 产品组合边界（第三项） | ✅ 阶段 1–3 完成 | 新增 `coding_agent_app.core` 的 Application/Runtime/Session/Services/Settings/Resources/Toolset/Prompt/SDK 边界；Web Session ID 真实映射独立 Runtime Session/Harness，不同 Session 可并行；Provider、Skill、MCP、Workspace 与 Prompt 统一经请求 composition 快照装配；Sandbox automation/workspace 迁入产品包并保留旧导入对象身份。详见 `docs/validation/pi-coding-agent-parity-2026-09-01.md` |
+| pi `session-backends/sqlite-node` 持久化边界（第四项） | ✅ 核心差距已补齐 | 新增 Harness 级 Repository/Storage/Search 协议、全局 append-only log、typed query、统计、writer lease/fence/heartbeat、branch cache/repair、有序事务 migration 与惰性 FTS5；共享 SQLite 服务按 connection 串行并在异常/取消时回滚；每个已启动 Web Runtime Session 持有独立可释放 Storage handle。详见 `docs/validation/pi-session-backend-parity-2026-09-03.md` |
 | 旧 Chunk Knowledge PDF → Chunk FTS5 → Citation | 🗄️ 历史兼容 | 实现仅保留显式兼容入口；默认套件只保留不可误启动守卫，不再进入产品组合或前端 |
 | 登录与账号工作区隔离 | ✅ 完成 | `b529bbc` |
 | Session Workspace、`AGENT.md`、`Memory.md`、`/checkpointer` | ✅ 完成 | `WorkspaceStore` 为唯一规范事实源；新旧 Session 幂等初始化两个固定根文件，保留旧正文/file id；设计见 `docs/design/workspace-sandbox-integration.md` |
@@ -114,7 +115,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 - `AgentState` 公开 secret-free model 身份、system prompt、active tool names、thinking level、请求流状态、当前 partial message、执行中 tool-call ID 与最近 assistant error；Web `/api/state` 使用同一事实源
 - thinking level 由 Agent loop 逐次传入 `ProviderRequest`，`prepare_next_turn` 可原子替换下一轮 context/system/client/tools/thinking；`AgentEndEvent` 同时公开兼容的完整 transcript 与明确的本轮 delta
 - ToolResult 可携带工具自身 usage 与 `added_tool_names`；usage 不并入主 LLM 上下文计费，added names 只标记 `Context.tools` 的 provider 加载点且不能由 after hook 伪造
-- SQLite Session 使用 append-only parent-entry tree；命名 lane 持久化 active leaf，支持 branch、fork、append-only label fact 与重启恢复；`messages` 是 active lane 的兼容投影
+- SQLite Session 使用 Harness 级 Repository/Storage/Search 边界；entry/record/lane/fact 共享 append-only sequence，命名 lane 持久化 active leaf，支持 branch/fork、name/label fact、writer fence、统计、branch cache 修复、FTS5 搜索与重启恢复；`messages` 是 active lane 的兼容投影
 - Session lane operation 使用 append-only intent/effect/finish records；`Memory.md` 更新以 immutable generation + 原子 metadata pointer 发布，旧 JSON Session save 使用可修复 torn tail 的 append-only journal
 - Compaction 默认按完整 user→assistant/tool-result turn 切分；token 目标不拆最新 turn，压缩前后 token/window 可审计，旧摘要按 pi-compatible envelope 迭代折叠，瞬时摘要错误可按不可变输入重试
 - Web 消息序列化会递归检测 `U+FFFD` 并附加 `content_warnings`，`/api/messages` 同时返回 Session 汇总；前端在对应消息/工具卡标记疑似编码损坏和 JSON 字段路径，检测过程只读且明确不可自动恢复
@@ -143,20 +144,23 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 | API Key | OS Keyring、显式 session-only memory 或显式 env；不写入 SQLite 明文 |
 | Active request / pending approval / event subscribers | 当前后端进程内存；后端重启不恢复执行 |
 
-## 2026-09-01 当前验证基线
+## 2026-09-03 当前验证基线
 
 当前 `0.0.29` 后续代码已实际复跑全量离线 Backend、Frontend、Browser E2E 与静态门禁；本轮
-完成 pi `coding-agent` 首轮产品组合边界对齐，并验证旧导入兼容、依赖方向、覆盖率范围与 wheel
-内容。真实 E2B、Parser OCI 与 DDGS/GLM 继续沿用最近一次保留证据：
+完成 pi `session-backends/sqlite-node` 持久化边界对齐，并验证 migration、并发/取消回滚、writer
+lease、搜索、Runtime Storage 绑定、旧导入兼容、依赖方向与 wheel 内容。真实 E2B、Parser OCI 与
+DDGS/GLM 继续沿用最近一次保留证据：
 
 | 验证 | 结果 | 备注 |
 |---|---|---|
 | Ruff 全量 | **PASS** | `ruff check src tests scripts`；0 errors |
-| strict Mypy 全量 | **PASS** | `mypy src`：246 source files / 0 issues；覆盖 Wiki、独立 Workspace/Plan 包、Workspace 文档转换、Managed Sandbox、AI/Agent/Harness/SQLite 与 Coding Agent 产品组合边界 |
+| strict Mypy 全量 | **PASS** | `mypy src`：265 source files / 0 issues；覆盖 Wiki、独立 Workspace/Plan 包、Workspace 文档转换、Managed Sandbox、AI/Agent/Harness/SQLite Repository 与 Coding Agent 产品组合边界 |
 | Wiki Parser Worker 静态门禁 | **PASS** | Ruff 0 errors；strict Mypy 16 source files / 0 issues |
 | Backend 全量离线（第二轮前基线） | **3143 passed, 7 skipped, 9 deselected** | 当时为 3159 collected；`pytest tests --tb=short -q`；1053.41s；coverage 81.91% |
-| Backend 当前精简套件 | **2160 passed, 7 skipped, 9 deselected** | `pytest`；372.67s；合并 coverage 76.14%；默认门禁现覆盖 `pi_agent_core_py`、`agent_workspace`、`coding_agent_app`、`coding_sandbox`，并排除真实外网、LLM 与 Docker marker |
+| Backend 当前精简套件 | **2175 passed, 7 skipped, 9 deselected** | `pytest`；407.31s；合并 coverage 76.27%；默认门禁现覆盖 `pi_agent_core_py`、`agent_workspace`、`coding_agent_app`、`coding_sandbox`，并排除真实外网、LLM 与 Docker marker |
 | Frontend 当前精简套件 | **183/183 passed** | 26 files；Vitest 0 failure / 0 stderr warning；同时通过 typecheck、ESLint 与 production build |
+| pi SQLite Session backend 专项 | **94 passed；共享服务邻接 152 passed；兼容回归 75 passed** | 覆盖 Repository/Storage/Search、migration、统计、fork/branch cache、writer fence、取消 rollback、Web Runtime handle、Extension/Plan 共享 connection 与未启动 lifespan 的兼容投影 |
+| pi SQLite Session backend wheel | **PASS** | 离线构建主 wheel，共 428 entries；migration SQL、SQLite storage 子模块与 Coding Agent Core 均在包内；`python -I` 隔离导入和 migration 初始化 PASS |
 | pi `coding-agent` 阶段 1–3 专项 | **Core 17 passed；Web Session 映射 57 passed** | 覆盖工具集解析/恢复、请求级 Provider/Skill/MCP/Workspace/Prompt composition、Session/Harness 隔离、跨 Session 并行、删除后状态隔离、关闭竞态、产品包依赖边界与 Web 执行/持久化回归 |
 | pi `coding-agent` wheel | **PASS** | 离线构建主 wheel，共 407 entries；新增 `coding_agent_app/core` 模块均在包内；`python -I` 隔离导入 Agent/Harness/SQLite/Runtime/Resource Loader PASS |
 | pi `ai` 对齐专项 | **159 passed** | provider history/image/usage/retry 新增回归及 Anthropic/OpenAI/Factory/Context Budget/Compaction 邻接测试；2.36s，0 failure |
@@ -223,7 +227,7 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 ### Runtime / Web
 
-- 每个持久 Web Session ID 已映射独立 `CodingAgentRuntime` Session 与 Agent/Harness 状态机；同 Session 单请求串行，不同 Session 可并行。默认 Session 只把入参 Harness 作为兼容投影，其他 Session 从模板克隆；宿主自定义 ModelClient 行为保留，Provider transport 关闭所有权不转移
+- 每个持久 Web Session ID 已映射独立 `CodingAgentRuntime` Session、Agent/Harness 状态机与可释放 SQLite `SessionStorage` handle；同 Session 单请求串行，不同 Session 可并行。默认 Session 只把入参 Harness 作为兼容投影，其他 Session 从模板克隆；宿主自定义 ModelClient 行为保留，Provider transport 关闭所有权不转移
 - 普通 Prompt/Regenerate active request 与 pending approval 不跨后端重启恢复；浏览器刷新只恢复仍在当前进程运行的请求。Checkpointer 可对已接受 intent 前滚；Managed Sandbox 只恢复持久状态/事件并把重启前未完成操作标为 `interrupted`，不重放模型、命令或发布
 - Human Approval 只有 Approve once / Deny；没有永久授权
 - Context Budget 是带安全余量的确定性近似，不是 Provider 官方 tokenizer
@@ -254,7 +258,7 @@ LLM Wiki 阶段 0–10、Session Workspace 阶段 1–7 与 Coding Agent Workspa
 
 ## 建议下一步
 
-1. 按逐模块对齐顺序，下一项进入第 4 项 `session-backends/sqlite-node` 持久化审查；P2-D Session organization 仍为后续候选。
+1. 按逐模块对齐顺序，下一项进入第 5 项 `telemetry` 运行观测审查；P2-D Session organization 的收藏/归档/UI 仍为后续候选。
 2. 如需发布到远端，先配置 Git remote 再单独授权 push；Modal 与图片能力继续按既有决定暂缓。
 
 未完成事项的唯一清单见 [`TODO.md`](TODO.md)。使用与架构说明见 [`README.md`](README.md)。
