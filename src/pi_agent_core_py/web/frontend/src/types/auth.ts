@@ -1,6 +1,7 @@
 export interface AuthUser {
   id: string
   name: string
+  is_admin: boolean
 }
 
 export interface AuthSessionResponse {

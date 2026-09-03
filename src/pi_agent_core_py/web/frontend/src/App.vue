@@ -7,6 +7,7 @@ import ChatPanel from "./components/chat/ChatPanel.vue"
 import WorkspacePanel from "./components/workspace/WorkspacePanel.vue"
 import WikiWorkspace from "./components/wiki/WikiWorkspace.vue"
 import LoginPage from "./components/auth/LoginPage.vue"
+import TelemetryDashboard from "./components/telemetry/TelemetryDashboard.vue"
 import { useAuthStore } from "./stores/authStore"
 import { useChatStore } from "./stores/chatStore"
 import { useCodingSandboxStore } from "./stores/codingSandboxStore"
@@ -16,8 +17,14 @@ import { useMcpStore } from "./stores/mcpStore"
 import { useProviderStore } from "./stores/providerStore"
 import { useSessionStore } from "./stores/sessionStore"
 import { useSkillStore } from "./stores/skillStore"
+import { useTelemetryStore } from "./stores/telemetryStore"
 import { useWikiStore } from "./stores/wikiStore"
-import { pushKnowledgeRoute, readAppView, type AppView } from "./utils/appRoute"
+import {
+  pushKnowledgeRoute,
+  pushTelemetryRoute,
+  readAppView,
+  type AppView,
+} from "./utils/appRoute"
 import { pushSessionRoute, readSessionRoute, replaceSessionRoute } from "./utils/sessionRoute"
 
 const authStore = useAuthStore()
@@ -30,6 +37,7 @@ const skillStore = useSkillStore()
 const mcpStore = useMcpStore()
 const providerStore = useProviderStore()
 const wikiStore = useWikiStore()
+const telemetryStore = useTelemetryStore()
 const activeView = ref<AppView>(readAppView())
 const appShellRef = ref<InstanceType<typeof AppShell> | null>(null)
 const workspaceStarted = ref(false)
@@ -160,6 +168,7 @@ function resetWorkspaceState(): void {
   providerStore.resetWorkspace()
   codingSandboxStore.resetWorkspace()
   wikiStore.reset()
+  telemetryStore.reset()
   sessionStore.resetWorkspace()
   workspaceStarted.value = false
   workspaceLoading.value = false
@@ -169,6 +178,10 @@ watch(
   () => authStore.user,
   (user) => {
     if (user) {
+      if (activeView.value === "telemetry" && !user.is_admin) {
+        activeView.value = "chat"
+        replaceSessionRoute(null)
+      }
       if (activeUserId !== null && activeUserId !== user.id) {
         resetWorkspaceState()
       }
@@ -202,6 +215,10 @@ function handlePopState(): void {
   const nextView = readAppView()
   activeView.value = nextView
   if (nextView === "knowledge") return
+  if (nextView === "telemetry") {
+    if (authStore.user?.is_admin) return
+    activeView.value = "chat"
+  }
   const route = readSessionRoute()
   if (route.sessionId && sessionStore.sessions.some((session) => session.id === route.sessionId)) {
     sessionStore.setActiveSession(route.sessionId)
@@ -216,7 +233,20 @@ function openKnowledge(): void {
   activeView.value = "knowledge"
 }
 
+function openTelemetry(): void {
+  if (!authStore.user?.is_admin) return
+  pushTelemetryRoute()
+  activeView.value = "telemetry"
+}
+
 function closeKnowledge(): void {
+  activeView.value = "chat"
+  const sessionId = sessionStore.activeSessionId
+  if (sessionId) pushSessionRoute(sessionId)
+  else replaceSessionRoute(null)
+}
+
+function closeTelemetry(): void {
   activeView.value = "chat"
   const sessionId = sessionStore.activeSessionId
   if (sessionId) pushSessionRoute(sessionId)
@@ -244,6 +274,10 @@ onBeforeUnmount(() => {
     Loading {{ authStore.user?.name }} workspace…
   </div>
   <WikiWorkspace v-else-if="activeView === 'knowledge'" @close="closeKnowledge" />
+  <TelemetryDashboard
+    v-else-if="activeView === 'telemetry' && authStore.user?.is_admin"
+    @close="closeTelemetry"
+  />
   <AppShell
     v-else
     ref="appShellRef"
@@ -251,7 +285,10 @@ onBeforeUnmount(() => {
     @workspace-opened="acknowledgeWorkspace"
   >
     <template #sidebar>
-      <SessionSidebar @open-knowledge="openKnowledge" />
+      <SessionSidebar
+        @open-knowledge="openKnowledge"
+        @open-telemetry="openTelemetry"
+      />
     </template>
     <template #main>
       <ChatPanel @open-workspace="openWorkspaceResults" />

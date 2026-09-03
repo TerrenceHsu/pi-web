@@ -17,7 +17,10 @@ import CodingSandboxModal from "../coding-sandbox/CodingSandboxModal.vue"
 const authStore = useAuthStore()
 const sessionStore = useSessionStore()
 const chatStore = useChatStore()
-const emit = defineEmits<{ (event: "open-knowledge"): void }>()
+const emit = defineEmits<{
+  (event: "open-knowledge"): void
+  (event: "open-telemetry"): void
+}>()
 
 const sessions = computed(() => sessionStore.sessions)
 const activeId = computed(() => sessionStore.activeSessionId)
@@ -166,6 +169,16 @@ async function signOut(): Promise<void> {
         @click="providerOpen = true"
       >
         Providers
+      </button>
+      <button
+        v-if="authStore.user?.is_admin"
+        class="sidebar-tool-btn admin-tool-btn"
+        data-testid="telemetry-button"
+        title="Open Agent Telemetry"
+        @click="emit('open-telemetry')"
+      >
+        Telemetry
+        <span class="admin-badge">Admin</span>
       </button>
       <button
         class="sidebar-tool-btn"
@@ -336,6 +349,22 @@ async function signOut(): Promise<void> {
 .sidebar-tool-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+.admin-tool-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #0f766e;
+}
+.admin-badge {
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: #dff5ef;
+  color: #0f766e;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
 }
 .sidebar-section-title {
   padding: 8px 12px 4px;
