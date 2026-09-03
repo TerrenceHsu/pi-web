@@ -62,7 +62,7 @@ def web_client():
 
 def test_get_sessions_returns_sqlite_default(web_client):
     """GET /api/sessions：lifespan 创建的 default session 可见。"""
-    client, _, _ = web_client
+    client, _, app = web_client
     resp = client.get("/api/sessions")
     assert resp.status_code == 200
     data = resp.json()
@@ -77,6 +77,13 @@ def test_get_sessions_returns_sqlite_default(web_client):
     assert "title" in first
     assert "is_current" in first
     assert first["title"] == "default"
+    services = app.state.coding_agent_runtime.services
+    assert services.session_repository is not None
+    assert services.session_search is not None
+    default_runtime = app.state.coding_agent_runtime.get(first["id"])
+    assert default_runtime is not None
+    assert default_runtime.session_storage is not None
+    assert default_runtime.session_storage.session_id == first["id"]
 
 
 def test_post_sessions_creates_new_session(web_client):
@@ -189,6 +196,11 @@ def test_different_sessions_do_not_leak_messages(web_client):
     assert runtime_s1.harness.agent.state.messages is not (
         runtime_s2.harness.agent.state.messages
     )
+    assert runtime_s1.session_storage is not None
+    assert runtime_s2.session_storage is not None
+    assert runtime_s1.session_storage is not runtime_s2.session_storage
+    assert runtime_s1.session_storage.session_id == s1["id"]
+    assert runtime_s2.session_storage.session_id == s2["id"]
 
 
 # ============================================================================
@@ -198,12 +210,16 @@ def test_different_sessions_do_not_leak_messages(web_client):
 
 def test_delete_session_removes_session(web_client):
     """DELETE /api/sessions/{sid} 删除 session。"""
-    client, _, _ = web_client
+    client, _, app = web_client
     s = client.post("/api/sessions", json={"title": "to-remove"}).json()
     sid = s["id"]
 
     # 加一条 message 让 cascade 也能验证
     client.post("/api/prompt", json={"text": "hi", "session_id": sid})
+    runtime_session = app.state.coding_agent_runtime.get(sid)
+    assert runtime_session is not None
+    storage = runtime_session.session_storage
+    assert storage is not None
 
     # 删除
     resp = client.delete(f"/api/sessions/{sid}")
@@ -213,6 +229,8 @@ def test_delete_session_removes_session(web_client):
     # 再 GET messages 应 404
     msgs_resp = client.get(f"/api/messages?session_id={sid}")
     assert msgs_resp.status_code == 404
+    with pytest.raises(RuntimeError, match="closed"):
+        client.portal.call(storage.get_metadata)
 
 
 def test_delete_template_session_does_not_reuse_its_agent_state(web_client):

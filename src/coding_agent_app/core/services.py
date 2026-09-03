@@ -7,6 +7,10 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from pi_agent_core_py.agent.harness.session.types import (
+    SessionRepository,
+    SessionSearch,
+)
 from pi_agent_core_py.harness import AgentHarness
 
 from .resources import (
@@ -49,6 +53,8 @@ class CodingAgentServices:
         default_factory=StaticCodingAgentResourceLoader
     )
     session_store: object | None = None
+    session_repository: SessionRepository | None = None
+    session_search: SessionSearch | None = None
     workspace_store: object | None = None
     provider_runtime: CodingAgentProviderRuntime | None = None
     sandbox_lifecycle: object | None = None
@@ -60,6 +66,8 @@ def create_coding_agent_services(
     settings: CodingAgentSettingsProvider | None = None,
     resources: CodingAgentResourceLoader | None = None,
     session_store: object | None = None,
+    session_repository: SessionRepository | None = None,
+    session_search: SessionSearch | None = None,
     workspace_store: object | None = None,
     provider_runtime: CodingAgentProviderRuntime | None = None,
     sandbox_lifecycle: object | None = None,
@@ -70,6 +78,8 @@ def create_coding_agent_services(
         settings=settings or StaticCodingAgentSettingsProvider(),
         resources=resources or StaticCodingAgentResourceLoader(),
         session_store=session_store,
+        session_repository=session_repository,
+        session_search=session_search,
         workspace_store=workspace_store,
         provider_runtime=provider_runtime,
         sandbox_lifecycle=sandbox_lifecycle,

@@ -582,29 +582,31 @@ def create_app(
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        # startup：初始化 SQLiteSessionStore + 默认 session
-        from ..session_sqlite import SQLiteSessionStore
+        # startup：初始化 SQLite Session repository + 默认 session
+        from ..session_backends.sqlite import (
+            SQLiteSessionRepository,
+            SQLiteSessionSearch,
+            SQLiteSessionStore,
+        )
 
         store_path = str(db_path) if db_path is not None else ":memory:"
         session_store = SQLiteSessionStore(store_path)
         await session_store.init()
+        session_repository = SQLiteSessionRepository(store_path, store=session_store)
+        await session_repository.init()
+        coding_agent_services.session_store = session_store
+        coding_agent_services.session_repository = session_repository
+        coding_agent_services.session_search = SQLiteSessionSearch(
+            store_path,
+            connection=session_store.connection,
+        )
         # 自动创建 / 复用 default session，作为 current_session_id
         try:
             default_session = await session_store.ensure_default_session()
             state.session_store = session_store
             state.current_session_id = default_session.id
-            if coding_agent_runtime.get(default_session.id) is None:
-                default_coding_session = create_coding_agent_session(
-                    session_id=default_session.id,
-                    harness=harness,
-                    read_only_tool=is_read_only_tool_name,
-                    services=coding_agent_services,
-                    close_harness=False,
-                )
-                coding_agent_runtime.register(default_coding_session)
-                _register_web_coding_agent_session(default_coding_session)
-            _app.state.coding_agent_session = coding_agent_runtime.get(
-                default_session.id
+            _app.state.coding_agent_session = (
+                await coding_agent_runtime.get_or_create(default_session.id)
             )
         except Exception:
             # 初始化失败不应阻塞 app 启动——session_store 仍可用 None 路径
@@ -647,6 +649,7 @@ def create_app(
                 for existing_session in await session_store.list_sessions():
                     await file_store.ensure_session_workspace(existing_session.id)
                 state.file_store = file_store
+                coding_agent_services.workspace_store = file_store
                 state.uploads_dir = Path(uploads_dir)
                 from agent_workspace.documents import WorkspaceDocumentService
 
@@ -688,12 +691,14 @@ def create_app(
                     uploads_dir,
                 )
                 state.file_store = None
+                coding_agent_services.workspace_store = None
                 state.uploads_dir = None
                 state.workspace_document_service = None
                 state.code_continuity_service = None
                 state.workspace_context_assembler = None
         else:
             state.file_store = None
+            coding_agent_services.workspace_store = None
             state.uploads_dir = None
             state.workspace_document_service = None
             state.code_continuity_service = None
@@ -799,6 +804,14 @@ def create_app(
             """Close core stores when startup fails before lifespan yield."""
 
             try:
+                await coding_agent_runtime.close()
+            except Exception:
+                pass
+            try:
+                await session_repository.close()
+            except Exception:
+                pass
+            try:
                 await extension_store.close()
             except Exception:
                 pass
@@ -808,6 +821,9 @@ def create_app(
                 pass
             state.extension_store = None
             state.session_store = None
+            coding_agent_services.session_repository = None
+            coding_agent_services.session_search = None
+            coding_agent_services.session_store = None
 
         # P1-D2-6: sweep 遗留 running revisions → interrupted
         # **必须在 restore Skills/MCP 之前**——sweep 只依赖 session/extension SQLite，
@@ -1459,6 +1475,12 @@ def create_app(
             await coding_agent_runtime.close()
         except Exception:
             pass
+        session_repository = coding_agent_services.session_repository
+        if session_repository is not None:
+            try:
+                await session_repository.close()
+            except Exception:
+                pass
 
         # ====================================================================
         # 原清理流程
@@ -1487,18 +1509,21 @@ def create_app(
         except Exception:
             pass  # 单个 detach 失败不阻塞 shutdown
 
-        # 关闭 SQLiteSessionStore
-        if state.session_store is not None:
-            try:
-                await state.session_store.close()
-            except Exception:
-                pass
-        # P1-C2: 关闭 extension_store（injected connection 不 close——由 session_store 负责）
+        # P1-C2: 先 detach injected extension store，再关闭 connection owner。
         if state.extension_store is not None:
             try:
                 await state.extension_store.close()
             except Exception:
                 pass
+        if state.session_store is not None:
+            try:
+                await state.session_store.close()
+            except Exception:
+                pass
+        coding_agent_services.session_repository = None
+        coding_agent_services.session_search = None
+        coding_agent_services.session_store = None
+        coding_agent_services.workspace_store = None
         # P2-R2-C2: 关闭 Ingestion Worker Manager（在 KnowledgeStore.close 之前）
         # Manager.stop() 会触发 startup recovery（已 done）+ graceful shutdown
         # + parser.close(). 必须在 KnowledgeStore.close() 之前完成，否则
@@ -1901,16 +1926,42 @@ def create_app(
         if agent_session.harness is harness:
             container["coding_agent_template_session_id"] = agent_session.session_id
 
-    def _create_web_coding_agent_session(session_id: str) -> CodingAgentSession:
+    async def _create_web_coding_agent_session(
+        session_id: str,
+    ) -> CodingAgentSession:
+        repository = coding_agent_services.session_repository
+        session_storage = None
+        if repository is not None:
+            metadata = next(
+                (
+                    candidate
+                    for candidate in await repository.list()
+                    if candidate.id == session_id
+                ),
+                None,
+            )
+            if metadata is None:
+                raise RuntimeError(f"durable Session {session_id!r} does not exist")
+            session_storage = await repository.open(metadata)
+        # A few embedders construct TestClient without entering its lifespan
+        # solely to exercise the legacy in-memory projection.  Normal started
+        # applications always install the repository above and therefore bind
+        # every Runtime Session to durable storage.
         uses_template = container["coding_agent_template_session_id"] is None
         session_harness = harness if uses_template else clone_agent_harness(harness)
-        agent_session = create_coding_agent_session(
-            session_id=session_id,
-            harness=session_harness,
-            read_only_tool=is_read_only_tool_name,
-            services=coding_agent_services,
-            close_harness=not uses_template,
-        )
+        try:
+            agent_session = create_coding_agent_session(
+                session_id=session_id,
+                harness=session_harness,
+                read_only_tool=is_read_only_tool_name,
+                services=coding_agent_services,
+                session_storage=session_storage,
+                close_harness=not uses_template,
+            )
+        except BaseException:
+            if session_storage is not None:
+                await session_storage.release()
+            raise
         _register_web_coding_agent_session(agent_session)
         return agent_session
 
@@ -5757,9 +5808,15 @@ def create_app(
                 "parent_id": entry.parent_id,
                 "message_id": entry.message_id,
                 "role": entry.role,
-                "message": serialize_message(entry.message),
+                "message": (
+                    serialize_message(entry.message)
+                    if entry.message is not None
+                    else None
+                ),
                 "created_at": entry.created_at,
                 "label": entry.label,
+                "entry_type": entry.entry_type,
+                "payload": entry.payload,
             }
 
         return {

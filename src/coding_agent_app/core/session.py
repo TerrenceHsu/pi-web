@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Callable, Collection, Iterable, Itera
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass
 
+from pi_agent_core_py.agent.harness.session.types import SessionStorage
 from pi_agent_core_py.harness import AgentHarness
 from pi_agent_core_py.messages import AgentMessage
 from pi_agent_core_py.model_client import ModelClient
@@ -54,6 +55,7 @@ class CodingAgentSession:
         harness: AgentHarness,
         toolsets: ToolsetResolver,
         services: CodingAgentServices | None = None,
+        session_storage: SessionStorage | None = None,
         close_harness: bool = True,
     ) -> None:
         if not session_id:
@@ -64,6 +66,7 @@ class CodingAgentSession:
         self.services = services or create_coding_agent_services(
             resources=HarnessCodingAgentResourceLoader(harness)
         )
+        self.session_storage = session_storage
         self._close_harness = close_harness
         self._binding_lock = asyncio.Lock()
         self._closed = False
@@ -280,8 +283,19 @@ class CodingAgentSession:
         if self._binding_lock.locked():
             raise RuntimeError("cannot close coding-agent session during an active request")
         self._closed = True
+        errors: list[Exception] = []
+        if self.session_storage is not None:
+            try:
+                await self.session_storage.release()
+            except Exception as error:
+                errors.append(error)
         if self._close_harness:
-            await self.harness.close()
+            try:
+                await self.harness.close()
+            except Exception as error:
+                errors.append(error)
+        if errors:
+            raise ExceptionGroup("coding-agent session close failed", errors)
 
 
 def create_coding_agent_session(
@@ -290,6 +304,7 @@ def create_coding_agent_session(
     harness: AgentHarness,
     read_only_tool: Callable[[str], bool],
     services: CodingAgentServices | None = None,
+    session_storage: SessionStorage | None = None,
     close_harness: bool = True,
 ) -> CodingAgentSession:
     """Create a product Session around an already configured Harness."""
@@ -299,6 +314,7 @@ def create_coding_agent_session(
         harness=harness,
         toolsets=ToolsetResolver(read_only=read_only_tool),
         services=services,
+        session_storage=session_storage,
         close_harness=close_harness,
     )
 
