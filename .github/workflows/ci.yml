@@ -35,15 +35,18 @@ jobs:
           pip install -e ".[web]"
 
       - name: Ruff
-        run: ruff check src/ tests/
+        run: ruff check src/ tests/ evals/
 
       - name: Mypy (strict)
-        run: mypy src
+        run: mypy src evals
 
       - name: Backend offline tests + coverage
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: pytest tests/ --tb=short -q
+
+      - name: Local coding-agent eval gate
+        run: python -m evals --gate --artifacts-dir .eval/ci
 
       - name: Upload coverage XML
         if: always()

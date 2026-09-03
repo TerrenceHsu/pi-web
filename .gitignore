@@ -21,6 +21,9 @@ dist/
 htmlcov/
 coverage.xml
 
+# Local behavioral eval artifacts (may contain opt-in transcripts)
+/.eval/
+
 # Virtualenvs
 .venv/
 .conda/
