@@ -31,6 +31,12 @@ from datetime import UTC, datetime
 
 import aiosqlite
 
+from ..session_backends.sqlite.database import (
+    ReentrantAsyncLock,
+    database_for,
+    serialized_operation,
+)
+
 
 def _now_ms() -> int:
     """毫秒时间戳——用于 revision id 生成。"""
@@ -359,6 +365,11 @@ class ExtensionSQLiteStore:
         self._owns_connection = connection is None
         self._db: aiosqlite.Connection | None = None
         self._closed = False
+        self._operation_lock = (
+            database_for(connection).operation_lock
+            if connection is not None
+            else ReentrantAsyncLock()
+        )
 
     def _require_db(self) -> aiosqlite.Connection:
         """统一检查 connection 可用——关闭后抛 ExtensionStoreError 而非 AssertionError。"""
@@ -366,6 +377,7 @@ class ExtensionSQLiteStore:
             raise ExtensionStoreError("store not initialized or already closed")
         return self._db
 
+    @serialized_operation
     async def init(self) -> None:
         """打开 / 接受 connection + 按 schema version 初始化。幂等。
 
@@ -398,6 +410,7 @@ class ExtensionSQLiteStore:
         db = self._db
         assert db is not None
         try:
+            self._operation_lock = database_for(db).operation_lock
             if self._owns_connection:
                 db.row_factory = aiosqlite.Row
                 await db.execute("PRAGMA foreign_keys=ON")
@@ -427,6 +440,8 @@ class ExtensionSQLiteStore:
         except BaseException:
             # Injected connections are shared with SessionStore and remain the
             # caller's responsibility.  Always detach the failed Store state.
+            if getattr(db, "in_transaction", False):
+                await db.rollback()
             self._db = None
             if self._owns_connection:
                 await db.close()
@@ -456,7 +471,7 @@ class ExtensionSQLiteStore:
                 (SCHEMA_VERSION,),
             )
             await db.commit()
-        except Exception:
+        except BaseException:
             await db.rollback()
             raise
 
@@ -494,7 +509,7 @@ class ExtensionSQLiteStore:
                     "migration rowcount mismatch——version unchanged"
                 )
             await db.commit()
-        except Exception:
+        except BaseException:
             await db.rollback()
             raise
 
@@ -531,6 +546,7 @@ class ExtensionSQLiteStore:
                     f"(index={index!r})"
                 )
 
+    @serialized_operation
     async def close(self) -> None:
         """关闭连接。幂等。
 
@@ -543,6 +559,8 @@ class ExtensionSQLiteStore:
             self._closed = True
             return
         try:
+            if getattr(self._db, "in_transaction", False):
+                await self._db.rollback()
             if self._owns_connection:
                 await self._db.close()
         finally:
@@ -570,6 +588,7 @@ class ExtensionSQLiteStore:
     # Skills
     # ==================================================================
 
+    @serialized_operation
     async def upsert_uploaded_skill(
         self,
         *,
@@ -622,6 +641,7 @@ class ExtensionSQLiteStore:
         except Exception as e:
             raise ExtensionStoreError(self._safe_db_error(e)) from None
 
+    @serialized_operation
     async def get_uploaded_skill(self, name: str) -> PersistedSkill | None:
         """单条查询——返回 None 如果不存在。"""
         db = self._require_db()
@@ -637,6 +657,7 @@ class ExtensionSQLiteStore:
         except Exception as e:
             raise ExtensionStoreError(self._safe_db_error(e)) from None
 
+    @serialized_operation
     async def list_uploaded_skill_rows(self) -> list[aiosqlite.Row]:
         """返回所有原始 rows——调用方逐行 decode 隔离损坏。"""
         db = self._require_db()
@@ -684,6 +705,7 @@ class ExtensionSQLiteStore:
             updated_at=row["updated_at"],
         )
 
+    @serialized_operation
     async def set_skill_enabled(self, name: str, enabled: bool) -> None:
         """更新 enabled 状态。不存在抛 ConflictError。"""
         db = self._require_db()
@@ -703,6 +725,7 @@ class ExtensionSQLiteStore:
         except Exception as e:
             raise ExtensionStoreError(self._safe_db_error(e)) from None
 
+    @serialized_operation
     async def set_skill_restore_error(
         self, name: str, error: str | None
     ) -> None:
@@ -718,6 +741,7 @@ class ExtensionSQLiteStore:
         except Exception as e:
             raise ExtensionStoreError(self._safe_db_error(e)) from None
 
+    @serialized_operation
     async def delete_uploaded_skill(self, name: str) -> bool:
         """删除上传 Skill row。返回 True 如果删除了，False 如果不存在。"""
         db = self._require_db()
@@ -734,6 +758,7 @@ class ExtensionSQLiteStore:
     # MCP servers
     # ==================================================================
 
+    @serialized_operation
     async def upsert_mcp_server(
         self,
         *,
@@ -790,6 +815,7 @@ class ExtensionSQLiteStore:
         except Exception as e:
             raise ExtensionStoreError(self._safe_db_error(e)) from None
 
+    @serialized_operation
     async def get_mcp_server(self, name: str) -> PersistedMCPServer | None:
         db = self._require_db()
         try:
@@ -803,6 +829,7 @@ class ExtensionSQLiteStore:
         except Exception as e:
             raise ExtensionStoreError(self._safe_db_error(e)) from None
 
+    @serialized_operation
     async def list_mcp_server_rows(self) -> list[aiosqlite.Row]:
         """返回所有原始 rows——逐行 decode 隔离损坏。"""
         db = self._require_db()
@@ -846,6 +873,7 @@ class ExtensionSQLiteStore:
             updated_at=row["updated_at"],
         )
 
+    @serialized_operation
     async def set_mcp_server_enabled(
         self, name: str, desired_enabled: bool
     ) -> None:
@@ -867,6 +895,7 @@ class ExtensionSQLiteStore:
         except Exception as e:
             raise ExtensionStoreError(self._safe_db_error(e)) from None
 
+    @serialized_operation
     async def set_mcp_restore_error(
         self, name: str, error: str | None
     ) -> None:
@@ -881,6 +910,7 @@ class ExtensionSQLiteStore:
         except Exception as e:
             raise ExtensionStoreError(self._safe_db_error(e)) from None
 
+    @serialized_operation
     async def delete_mcp_server(self, name: str) -> bool:
         """删除 server + cascade disabled tools（FK ON DELETE CASCADE）。"""
         db = self._require_db()
@@ -897,6 +927,7 @@ class ExtensionSQLiteStore:
     # MCP disabled tools（结构化 key: server_name + raw tool_name）
     # ==================================================================
 
+    @serialized_operation
     async def disable_mcp_tool(
         self, server_name: str, tool_name: str
     ) -> None:
@@ -921,6 +952,7 @@ class ExtensionSQLiteStore:
         except Exception as e:
             raise ExtensionStoreError(self._safe_db_error(e)) from None
 
+    @serialized_operation
     async def enable_mcp_tool(
         self, server_name: str, tool_name: str
     ) -> None:
@@ -936,6 +968,7 @@ class ExtensionSQLiteStore:
         except Exception as e:
             raise ExtensionStoreError(self._safe_db_error(e)) from None
 
+    @serialized_operation
     async def list_disabled_mcp_tools(
         self, server_name: str | None = None
     ) -> list[PersistedDisabledTool]:
@@ -969,6 +1002,7 @@ class ExtensionSQLiteStore:
     # Schema meta
     # ==================================================================
 
+    @serialized_operation
     async def get_schema_version(self) -> int | None:
         """读取 schema version——未来 migration 入口。"""
         db = self._require_db()
@@ -1063,6 +1097,7 @@ class ExtensionSQLiteStore:
             )
         return msg
 
+    @serialized_operation
     async def create_running_revision(
         self,
         *,
@@ -1145,7 +1180,7 @@ class ExtensionSQLiteStore:
                 ),
             )
             await db.commit()
-        except Exception:
+        except BaseException:
             await db.rollback()
             raise
 
@@ -1153,6 +1188,7 @@ class ExtensionSQLiteStore:
         assert result is not None, "just-inserted revision missing"
         return result
 
+    @serialized_operation
     async def get_revision(
         self, revision_id: str,
     ) -> PersistedMessageRevision | None:
@@ -1169,6 +1205,7 @@ class ExtensionSQLiteStore:
         except Exception as e:
             raise ExtensionStoreError(self._safe_db_error(e)) from None
 
+    @serialized_operation
     async def get_revision_by_request_id(
         self, request_id: str,
     ) -> PersistedMessageRevision | None:
@@ -1188,6 +1225,7 @@ class ExtensionSQLiteStore:
         except Exception as e:
             raise ExtensionStoreError(self._safe_db_error(e)) from None
 
+    @serialized_operation
     async def list_revisions(
         self,
         *,
@@ -1228,6 +1266,7 @@ class ExtensionSQLiteStore:
         except Exception as e:
             raise ExtensionStoreError(self._safe_db_error(e)) from None
 
+    @serialized_operation
     async def finalize_revision(
         self,
         *,
@@ -1479,7 +1518,7 @@ class ExtensionSQLiteStore:
             )
 
             await db.commit()
-        except Exception:
+        except BaseException:
             await db.rollback()
             raise
 
@@ -1520,6 +1559,7 @@ class ExtensionSQLiteStore:
             error_summary=None,
         )
 
+    @serialized_operation
     async def _transition_terminal(
         self,
         *,
@@ -1581,7 +1621,7 @@ class ExtensionSQLiteStore:
                 )
 
             await db.commit()
-        except Exception:
+        except BaseException:
             await db.rollback()
             raise
 
@@ -1589,6 +1629,7 @@ class ExtensionSQLiteStore:
         assert result is not None, "transitioned revision missing"
         return result
 
+    @serialized_operation
     async def mark_running_revisions_interrupted(
         self,
         *,
@@ -1618,7 +1659,7 @@ class ExtensionSQLiteStore:
             affected = cursor.rowcount
             await db.commit()
             return affected
-        except Exception:
+        except BaseException:
             await db.rollback()
             raise
 

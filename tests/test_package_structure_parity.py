@@ -81,10 +81,62 @@ def test_old_and_new_harness_and_session_imports_share_identity() -> None:
 
 
 def test_old_and_new_sqlite_imports_share_identity() -> None:
-    from pi_agent_core_py.session_backends.sqlite import SQLiteSessionStore as canonical
-    from pi_agent_core_py.session_sqlite import SQLiteSessionStore as legacy
+    from pi_agent_core_py.session_backends.sqlite import (
+        SQLiteSessionRepository as canonical_repository,
+    )
+    from pi_agent_core_py.session_backends.sqlite import (
+        SQLiteSessionStore as canonical,
+    )
+    from pi_agent_core_py.session_backends.sqlite.repo import (
+        SQLiteSessionRepository as implementation_repository,
+    )
+    from pi_agent_core_py.session_sqlite import (
+        SQLiteSessionRepository as legacy_repository,
+    )
+    from pi_agent_core_py.session_sqlite import (
+        SQLiteSessionStore as legacy,
+    )
 
     assert canonical is legacy
+    assert canonical_repository is implementation_repository is legacy_repository
+
+
+def test_sqlite_backend_has_pi_aligned_physical_ownership() -> None:
+    sqlite_root = PACKAGE_ROOT / "session_backends" / "sqlite"
+    expected = {
+        "branch_cache.py",
+        "database.py",
+        "migrations.py",
+        "repo.py",
+        "search_backend.py",
+        "sql.py",
+        "types.py",
+        "storage/branch_entries.py",
+        "storage/branch_tips.py",
+        "storage/entries.py",
+        "storage/facts.py",
+        "storage/lanes.py",
+        "storage/records.py",
+        "storage/session_sequences.py",
+        "storage/session_stats.py",
+        "storage/sessions.py",
+        "storage/writer_leases.py",
+    }
+    present = {
+        path.relative_to(sqlite_root).as_posix()
+        for path in sqlite_root.rglob("*.py")
+        if "__pycache__" not in path.parts
+    }
+    assert expected <= present
+
+
+def test_sqlite_backend_does_not_depend_on_product_layers() -> None:
+    violations = [
+        violation
+        for path in _python_files(PACKAGE_ROOT / "session_backends" / "sqlite")
+        for violation in _imports_banned_root(path, {"coding_agent", "web"})
+    ]
+    assert violations == []
 
 
 def test_ai_package_does_not_depend_on_higher_layers() -> None:

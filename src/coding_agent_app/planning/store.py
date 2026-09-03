@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from typing import Any, cast
 from uuid import uuid4
 
 import aiosqlite
+
+from pi_agent_core_py.session_backends.sqlite.database import (
+    database_for,
+    serialized_operation,
+)
 
 from .models import (
     PlanEvent,
@@ -48,8 +52,10 @@ class PlanStore:
 
     def __init__(self, connection: aiosqlite.Connection) -> None:
         self._db = connection
-        self._write_lock = asyncio.Lock()
+        self._operation_lock = database_for(connection).operation_lock
+        self._write_lock = self._operation_lock
 
+    @serialized_operation
     async def init(self) -> None:
         await self._db.executescript(
             """
@@ -116,6 +122,7 @@ class PlanStore:
         )
         await self._db.commit()
 
+    @serialized_operation
     async def recover_interrupted(self) -> int:
         """Fail closed after restart; never replay model calls or tool effects."""
         async with self._write_lock:
@@ -145,6 +152,7 @@ class PlanStore:
             await self._db.commit()
             return len(run_ids)
 
+    @serialized_operation
     async def create_run(self, session_id: str, request_id: str, goal: str) -> PlanRunView:
         run_id = f"plan_{uuid4().hex}"
         now = _now_ms()
@@ -161,6 +169,7 @@ class PlanStore:
             await self._db.commit()
         return await self.get_run(run_id)
 
+    @serialized_operation
     async def save_plan(self, run_id: str, spec: PlanSpec) -> PlanRunView:
         now = _now_ms()
         async with self._write_lock:
@@ -207,6 +216,7 @@ class PlanStore:
             await self._db.commit()
         return await self.get_run(run_id)
 
+    @serialized_operation
     async def approve(self, run_id: str) -> tuple[PlanRunView, bool]:
         async with self._write_lock:
             row = await self._run_row_locked(run_id)
@@ -223,6 +233,7 @@ class PlanStore:
             await self._db.commit()
             return await self._get_run_locked(run_id), False
 
+    @serialized_operation
     async def set_sandbox_operation(self, run_id: str, operation_id: str) -> PlanRunView:
         await self._update_run(
             run_id,
@@ -233,6 +244,7 @@ class PlanStore:
         )
         return await self.get_run(run_id)
 
+    @serialized_operation
     async def start_task(self, run_id: str, task_id: str) -> PlanRunView:
         async with self._write_lock:
             row = await self._task_row_locked(run_id, task_id)
@@ -257,6 +269,7 @@ class PlanStore:
             await self._db.commit()
         return await self.get_run(run_id)
 
+    @serialized_operation
     async def submit_execution(
         self, run_id: str, task_id: str, report: TaskExecutionReport
     ) -> PlanRunView:
@@ -286,6 +299,7 @@ class PlanStore:
             await self._db.commit()
         return await self.get_run(run_id)
 
+    @serialized_operation
     async def block_task(
         self, run_id: str, task_id: str, report: TaskBlockedReport
     ) -> PlanRunView:
@@ -318,6 +332,7 @@ class PlanStore:
             await self._db.commit()
         return await self.get_run(run_id)
 
+    @serialized_operation
     async def submit_verification(
         self, run_id: str, task_id: str, report: VerificationReport
     ) -> PlanRunView:
@@ -344,6 +359,7 @@ class PlanStore:
             await self._db.commit()
         return await self.get_run(run_id)
 
+    @serialized_operation
     async def mark_artifact_ready(
         self, run_id: str, *, artifact_id: str | None
     ) -> PlanRunView:
@@ -356,6 +372,7 @@ class PlanStore:
         )
         return await self.get_run(run_id)
 
+    @serialized_operation
     async def mark_completed(self, run_id: str) -> PlanRunView:
         async with self._write_lock:
             row = await self._run_row_locked(run_id)
@@ -372,6 +389,7 @@ class PlanStore:
             await self._db.commit()
             return await self._get_run_locked(run_id)
 
+    @serialized_operation
     async def finish(
         self,
         run_id: str,
@@ -391,6 +409,7 @@ class PlanStore:
         )
         return await self.get_run(run_id)
 
+    @serialized_operation
     async def append_event(
         self,
         run_id: str,
@@ -415,10 +434,12 @@ class PlanStore:
             await self._db.commit()
             return event
 
+    @serialized_operation
     async def get_run(self, run_id: str) -> PlanRunView:
         async with self._write_lock:
             return await self._get_run_locked(run_id)
 
+    @serialized_operation
     async def latest_for_session(self, session_id: str) -> PlanRunView | None:
         async with self._write_lock:
             cursor = await self._db.execute(
@@ -430,6 +451,7 @@ class PlanStore:
                 return None
             return await self._get_run_locked(str(row["id"]))
 
+    @serialized_operation
     async def find_by_sandbox_operation(self, operation_id: str) -> PlanRunView | None:
         async with self._write_lock:
             cursor = await self._db.execute(
@@ -441,6 +463,7 @@ class PlanStore:
                 return None
             return await self._get_run_locked(str(row["id"]))
 
+    @serialized_operation
     async def list_events(self, run_id: str) -> tuple[PlanEvent, ...]:
         async with self._write_lock:
             await self._run_row_locked(run_id)
