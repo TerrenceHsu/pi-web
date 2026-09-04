@@ -44,6 +44,7 @@ from .transport import (
     FakeMCPTransport,
     MCPTransport,
     StdioMCPTransport,
+    StreamableHttpMCPTransport,
 )
 
 __all__ = [
@@ -64,6 +65,7 @@ __all__ = [
     # transport
     "MCPTransport",
     "StdioMCPTransport",
+    "StreamableHttpMCPTransport",
     "FakeMCPTransport",
     # client
     "MCPClient",

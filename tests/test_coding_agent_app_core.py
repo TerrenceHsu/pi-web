@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 import pytest
 
 from coding_agent_app.core import (
+    CodingAgentResourceSelection,
     CodingAgentResourceSnapshot,
     CodingAgentServices,
     CodingAgentSession,
@@ -23,6 +24,8 @@ from coding_agent_app.core import (
 )
 from pi_agent_core_py.agent import Agent
 from pi_agent_core_py.harness import AgentHarness
+from pi_agent_core_py.mcp import MCPAgentTool, MCPClient, MCPServerConfig, MCPToolInfo
+from pi_agent_core_py.mcp.transport import FakeMCPTransport
 from pi_agent_core_py.model_client import DoneEvent, FakeClient
 from pi_agent_core_py.policy import (
     AllowAllToolPermissionPolicy,
@@ -474,3 +477,37 @@ async def test_harness_resource_loader_returns_detached_skill_and_tool_snapshot(
     assert snapshot.mcp_tool_names == ("mcp__docs__search",)
     assert tuple(skill.name for skill in snapshot.skills) == ("review",)
     assert snapshot.skills[0] is not harness.skill_registry.get("review")
+
+
+@pytest.mark.asyncio
+async def test_harness_resource_loader_filters_mcp_and_skills_per_session() -> None:
+    harness = _harness("read_file")
+    harness.attach_skills(
+        [
+            Skill(name="alpha", description="alpha", prompt="alpha"),
+            Skill(name="beta", description="beta", prompt="beta"),
+        ]
+    )
+    client = MCPClient(
+        MCPServerConfig(name="docs", command="unused"),
+        FakeMCPTransport(),
+    )
+    mcp_tool = MCPAgentTool(
+        server_name="docs",
+        client=client,
+        tool_info=MCPToolInfo(name="search"),
+    )
+    harness.agent.tools.register(mcp_tool)
+    harness._mcp_tool_names.add(mcp_tool.name)
+
+    async def selection(_: str) -> CodingAgentResourceSelection:
+        return CodingAgentResourceSelection(skill_names=frozenset({"alpha"}))
+
+    snapshot = await HarnessCodingAgentResourceLoader(
+        harness,
+        selection_loader=selection,
+    ).load("session-1")
+
+    assert tuple(skill.name for skill in snapshot.skills) == ("alpha",)
+    assert tuple(tool.name for tool in snapshot.tools) == ("read_file",)
+    assert snapshot.mcp_tool_names == ()

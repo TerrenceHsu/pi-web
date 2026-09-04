@@ -117,16 +117,22 @@ async def test_4_disabled_state_restored(tmp_path):
 
 
 # ============================================================================
-# Test 5: Use-this-turn selection 不持久化
+# Test 5: Workspace selection persists and becomes the request default
 # ============================================================================
 
 
-async def test_5_skill_names_not_persisted(web_client):
-    client, _, _ = web_client
+async def test_5_workspace_skill_selection_applies_by_default(web_client):
+    client, _, app = web_client
     _upload_skill(client, "codereview")
+    session_id = app.state.web.current_session_id
+    selected = client.put(
+        f"/api/workspaces/{session_id}/extensions",
+        json={"mcp_server_names": [], "skill_names": ["codereview"]},
+    )
+    assert selected.status_code == 200
     resp = client.post(
         "/api/prompt",
-        json={"text": "hello", "skill_names": ["codereview"]},
+        json={"text": "hello"},
     )
     assert resp.status_code == 200
     assert resp.json()["applied_skill_names"] == ["codereview"]

@@ -8,14 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Web MCP/Skills Workspace composition（2026-09-04）
+
+- 将 MCP 建模为账号级全局目录，新增真实 Streamable HTTP transport：支持 JSON 与 SSE response、`Mcp-Session-Id`、`MCP-Protocol-Version`、`notifications/initialized` 和关闭时 DELETE；继续保留 stdio
+- HTTP 请求头只持久化为 Header 到环境变量名的映射，运行时解析 secret；URL 禁止嵌入 credentials，transport 控制的协议头不可被配置覆盖
+- Skills 与 MCP 均可由每个 Web Workspace/Session 独立选择；选择进入 SQLite schema v3，并在 `CodingAgentRuntime` request composition 中过滤为不可变资源快照
+- 新增 Workspace Extensions 前端；原“Use this turn” Skill 状态改为 Workspace 持久选择；DDGS 继续位于 `mcp` 模块、固定存在且不可删除，全局启用后作为新 Workspace 默认项
+
 ### Web-only Agent Core audit（2026-09-03）
 
 - 全面审计 `pi_agent_core_py` 顶层模块：保留 Web 产品主链所需的 `ai/agent/mcp/policy/secrets/session_backends/telemetry/web`，保留旧平铺公开导入的对象身份兼容 facade，但让生产组合统一依赖 canonical owner
 - 删除旧 Chunk-RAG package、REST/Worker/Store/Search Tool 与 `rag` extra，删除 Tavily 重复搜索实现；产品搜索只保留可配置的本机 DDGS MCP，知识主链只保留页面中心 LLM Wiki
-- 删除 HTTP MCP placeholder，并让配置模型直接拒绝非 stdio transport；同步清除未挂载的旧 Vue inspector 组件、前端 API barrel 与兼容类型
+- 审计当时曾删除 HTTP MCP placeholder；2026-09-04 经产品边界校正后已由完整 Streamable HTTP transport 取代，不再是空壳；未挂载的旧 Vue inspector、前端 API barrel 与兼容类型仍保持删除
 - Prompt、Regenerate、Checkpointer 统一进入不含正文的 `web.request` Telemetry span；新增 Admin 鉴权集成回归，并以 AST 测试禁止产品 runtime 反向依赖旧 facade
 - 详细模块取舍与最小闭环见 `docs/validation/web-agent-module-audit-2026-09-03.md`
-- 验证：Ruff、strict Mypy 263 files、Worker Ruff/Mypy、lockfile、5 suites / 10 observations Evals gate、Backend 2191 passed / 7 skipped / 9 deselected / coverage 76.65%、Frontend 187/187 + lint/typecheck/build、Chromium E2E 20/20 全部通过
+- 验证：Ruff、strict Mypy 263 files、Worker Ruff/Mypy、lockfile、5 suites / 10 observations Evals gate、Backend 2201 passed / 7 skipped / 9 deselected / coverage 76.63%、Frontend 188/188 + lint/typecheck/build、Chromium E2E 20/20 全部通过
 
 ### Local coding-agent evals（2026-09-03）
 

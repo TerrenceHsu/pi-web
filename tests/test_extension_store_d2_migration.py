@@ -1,17 +1,17 @@
-"""P1-D2-2: web_message_revisions schema + migration v1→v2 专项测试。
+"""Extension schema migrations, including historical v1→v2 and current v2→v3.
 
 审核要求的 20 个测试门槛（按用户 2026-07-15 审核结论 §"D2-2 测试门槛"）：
 
-1.  全新 DB 直接为 version 2
-2.  v1 DB 升级到 v2
+1.  全新 DB 直接为当前版本
+2.  v1 DB 连续升级到当前版本
 3.  migration 后 C1 三张表数据保持
 4.  session/messages 数据保持
 5.  Skill 数据保持
 6.  MCP server 数据保持
 7.  disabled tool 数据保持
 8.  migration 重复 initialize 幂等
-9.  version=2 重开不重复 DDL
-10. version>2 在任何 schema 修改前失败
+9.  当前版本重开不重复 DDL
+10. 未来版本在任何 schema 修改前失败
 11. migration 中途异常后 version 仍为 1
 12. migration 中途异常后 revision table 不残留
 13. status CHECK 拒绝非法状态
@@ -165,6 +165,22 @@ async def _seed_v1_db(
     await db.close()
 
 
+async def _seed_v2_db(db_path: str) -> None:
+    """Build the exact pre-HTTP v2 layout with representative MCP data."""
+    await _seed_v1_db(db_path, include_extension_data=True)
+    db = await aiosqlite.connect(db_path)
+    try:
+        await db.execute("PRAGMA foreign_keys=ON")
+        for statement in ext_module._REVISIONS_DDL_STATEMENTS:
+            await db.execute(statement)
+        await db.execute(
+            "UPDATE web_extension_schema_meta SET version = 2 WHERE id = 1"
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
 async def _read_meta_version(db_path: str) -> int | None:
     db = await aiosqlite.connect(db_path)
     db.row_factory = aiosqlite.Row
@@ -228,19 +244,22 @@ async def shared_store(tmp_path):
 # ============================================================================
 
 
-async def test_fresh_db_initializes_to_v2(tmp_path):
-    """门槛 1：全新 DB 直接为 version 2。"""
+async def test_fresh_db_initializes_to_current_version(tmp_path):
+    """门槛 1：全新 DB 直接为当前版本。"""
     db_path = str(tmp_path / "fresh.sqlite")
     store = ExtensionSQLiteStore(db_path)
     await store.init()
     try:
-        assert await store.get_schema_version() == 2
-        assert SCHEMA_VERSION == 2
+        assert await store.get_schema_version() == SCHEMA_VERSION
+        assert SCHEMA_VERSION == 3
         for table in (
             "web_uploaded_skills",
             "web_mcp_servers",
             "web_mcp_disabled_tools",
             "web_message_revisions",
+            "web_workspace_extension_selection",
+            "web_workspace_mcp_selection",
+            "web_workspace_skill_selection",
         ):
             assert await _table_exists(db_path, table), f"missing table {table}"
         for idx in (
@@ -254,8 +273,8 @@ async def test_fresh_db_initializes_to_v2(tmp_path):
         await store.close()
 
 
-async def test_v1_db_upgrades_to_v2(tmp_path):
-    """门槛 2：v1 DB 升级到 v2。"""
+async def test_v1_db_upgrades_to_current_version(tmp_path):
+    """门槛 2：v1 DB 连续升级到当前版本。"""
     db_path = str(tmp_path / "v1.sqlite")
     await _seed_v1_db(db_path)
     assert await _read_meta_version(db_path) == 1
@@ -263,8 +282,31 @@ async def test_v1_db_upgrades_to_v2(tmp_path):
     store = ExtensionSQLiteStore(db_path)
     await store.init()
     try:
-        assert await store.get_schema_version() == 2
+        assert await store.get_schema_version() == SCHEMA_VERSION
         assert await _table_exists(db_path, "web_message_revisions")
+    finally:
+        await store.close()
+
+
+async def test_v2_db_upgrades_to_v3_and_preserves_mcp_rows(tmp_path):
+    db_path = str(tmp_path / "v2-to-v3.sqlite")
+    await _seed_v2_db(db_path)
+
+    store = ExtensionSQLiteStore(db_path)
+    await store.init()
+    try:
+        assert await store.get_schema_version() == 3
+        persisted = await store.get_mcp_server("seeded_srv")
+        assert persisted is not None
+        assert persisted.transport == "stdio"
+        assert persisted.command == "echo"
+        assert persisted.url is None
+        assert persisted.header_env_json == "{}"
+        disabled = await store.list_disabled_mcp_tools()
+        assert [(item.server_name, item.tool_name) for item in disabled] == [
+            ("seeded_srv", "dangerous_tool")
+        ]
+        assert await _table_exists(db_path, "web_workspace_extension_selection")
     finally:
         await store.close()
 
@@ -312,7 +354,7 @@ async def test_migration_preserves_sessions_and_messages(tmp_path):
     await store.init()
     try:
         # migration 已完成
-        assert await store.get_schema_version() == 2
+        assert await store.get_schema_version() == SCHEMA_VERSION
         # 通过 shared connection 直接查 sessions 表
         db = store._require_db()
         cur = await db.execute("SELECT id FROM sessions")
@@ -393,20 +435,20 @@ async def test_migration_idempotent_on_reinit(tmp_path):
     await store.init()
     try:
         await store.init()  # 同一 store 再 init——no-op
-        assert await store.get_schema_version() == 2
+        assert await store.get_schema_version() == SCHEMA_VERSION
     finally:
         await store.close()
 
     store2 = ExtensionSQLiteStore(db_path)
     await store2.init()
     try:
-        assert await store2.get_schema_version() == 2
+        assert await store2.get_schema_version() == SCHEMA_VERSION
     finally:
         await store2.close()
 
 
-async def test_v2_reopen_does_not_repeat_ddl(tmp_path):
-    """门槛 9：version=2 重开不重复 DDL——validate 路径不修改 schema。
+async def test_current_version_reopen_does_not_repeat_ddl(tmp_path):
+    """门槛 9：当前版本重开不重复 DDL——validate 路径不修改 schema。
 
     用 shared_store 模式创建一个真实的 session row + revision row，然后 close →
     重开 → 验证 revision row 仍在（schema 没被 DROP+CREATE）。
@@ -452,12 +494,12 @@ async def test_v2_reopen_does_not_repeat_ddl(tmp_path):
 
 
 # ============================================================================
-# 10. version > 2 拒绝
+# 10. future version 拒绝
 # ============================================================================
 
 
 async def test_future_version_fails_before_any_ddl(tmp_path):
-    """门槛 10：version>2 在任何 schema 修改前失败。
+    """门槛 10：未来 version 在任何 schema 修改前失败。
 
     关键审核要求——避免把未来版本的 DB 当成旧版重建。
     """

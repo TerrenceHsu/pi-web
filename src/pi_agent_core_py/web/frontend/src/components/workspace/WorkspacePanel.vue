@@ -12,8 +12,9 @@ import { useSessionStore } from "../../stores/sessionStore"
 import CodingSandboxModal from "../coding-sandbox/CodingSandboxModal.vue"
 import FileTreeNode from "../chat/FileTreeNode.vue"
 import WorkspaceFilePreview from "./WorkspaceFilePreview.vue"
+import WorkspaceExtensions from "./WorkspaceExtensions.vue"
 
-type WorkspaceTab = "files" | "sandbox" | "changes"
+type WorkspaceTab = "files" | "extensions" | "sandbox" | "changes"
 
 interface AgentArtifactSignal {
   signature: string
@@ -399,7 +400,7 @@ onBeforeUnmount(() => {
 
     <nav class="workspace-tabs" aria-label="Workspace views">
       <button
-        v-for="tab in ['files', 'sandbox', 'changes'] as WorkspaceTab[]"
+        v-for="tab in ['files', 'extensions', 'sandbox', 'changes'] as WorkspaceTab[]"
         :key="tab"
         type="button"
         :class="{ active: activeTab === tab }"
@@ -520,6 +521,8 @@ onBeforeUnmount(() => {
         <p>Select a file, or ask the Agent to create Markdown or code.</p>
       </div>
     </template>
+
+    <WorkspaceExtensions v-else-if="activeTab === 'extensions'" />
 
     <div v-else-if="activeTab === 'sandbox'" class="workspace-tab-body">
       <div v-if="!sandboxStore.available" class="workspace-empty">Managed Sandbox unavailable.</div>

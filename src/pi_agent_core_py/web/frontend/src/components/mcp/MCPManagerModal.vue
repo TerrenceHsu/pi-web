@@ -29,7 +29,7 @@ watch(
 <template>
   <Modal :open="open" title="MCP Servers" data-testid="mcp-modal" @close="emit('close')">
     <p class="modal-intro">
-      Add local MCP servers, test connections, and control exposed tools.
+      Manage the account-wide stdio and Streamable HTTP MCP catalog. Select servers per Workspace.
     </p>
     <MCPServerForm />
     <ErrorBanner

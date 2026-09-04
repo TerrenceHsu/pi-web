@@ -46,7 +46,7 @@ from .prompts import (
     MCPPromptResult,
     _parse_message_content,
 )
-from .transport import MCPTransport, StdioMCPTransport
+from .transport import MCPTransport, StdioMCPTransport, StreamableHttpMCPTransport
 
 
 class MCPToolInfo(BaseModel):
@@ -95,16 +95,24 @@ _PROTOCOL_VERSION = "2024-11-05"
 
 
 def _build_default_transport(config: MCPServerConfig) -> MCPTransport:
-    """Build the local stdio transport supported by the Web product."""
-    if config.transport != "stdio":  # defensive guard for unchecked construction
-        raise MCPProtocolError(f"unsupported transport type: {config.transport}")
-    assert config.command is not None  # 由 MCPServerConfig 校验保证
-    return StdioMCPTransport(
-        config.command,
-        config.args,
-        cwd=config.cwd,
-        env=config.env,
-    )
+    """Build the configured stdio or Streamable HTTP transport."""
+    if config.transport == "stdio":
+        assert config.command is not None  # 由 MCPServerConfig 校验保证
+        return StdioMCPTransport(
+            config.command,
+            config.args,
+            cwd=config.cwd,
+            env=config.env,
+        )
+    if config.transport == "http":
+        assert config.url is not None
+        return StreamableHttpMCPTransport(
+            config.url,
+            headers=config.headers,
+            protocol_version=config.protocol_version or "2025-06-18",
+            timeout_s=config.timeout_s,
+        )
+    raise MCPProtocolError(f"unsupported transport type: {config.transport}")
 
 
 class MCPClient:
@@ -180,11 +188,38 @@ class MCPClient:
         if self._initialized:
             return dict(self._initialize_result or {})
         params = {
-            "protocolVersion": _PROTOCOL_VERSION,
+            "protocolVersion": self._config.protocol_version
+            or ("2025-06-18" if self._config.transport == "http" else _PROTOCOL_VERSION),
             "capabilities": {},
             "clientInfo": _CLIENT_INFO,
         }
         result = await self._request("initialize", params)
+        if self._config.transport == "http":
+            negotiated_version = result.get("protocolVersion")
+            if (
+                isinstance(negotiated_version, str)
+                and isinstance(self._transport, StreamableHttpMCPTransport)
+            ):
+                self._transport.set_protocol_version(negotiated_version)
+            try:
+                await asyncio.wait_for(
+                    self._transport.send(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "notifications/initialized",
+                            "params": {},
+                        }
+                    ),
+                    timeout=self._config.timeout_s,
+                )
+            except TimeoutError as e:
+                await self._safe_close_after_protocol_error()
+                raise MCPProtocolError(
+                    f"MCPClient({self.server_name}): initialized notification timeout"
+                ) from e
+            except MCPError:
+                await self._safe_close_after_protocol_error()
+                raise
         self._initialize_result = result
         self._initialized = True
         return result

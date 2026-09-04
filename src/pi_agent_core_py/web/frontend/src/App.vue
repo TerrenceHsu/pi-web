@@ -19,12 +19,8 @@ import { useSessionStore } from "./stores/sessionStore"
 import { useSkillStore } from "./stores/skillStore"
 import { useTelemetryStore } from "./stores/telemetryStore"
 import { useWikiStore } from "./stores/wikiStore"
-import {
-  pushKnowledgeRoute,
-  pushTelemetryRoute,
-  readAppView,
-  type AppView,
-} from "./utils/appRoute"
+import { useWorkspaceExtensionStore } from "./stores/workspaceExtensionStore"
+import { pushKnowledgeRoute, pushTelemetryRoute, readAppView, type AppView } from "./utils/appRoute"
 import { pushSessionRoute, readSessionRoute, replaceSessionRoute } from "./utils/sessionRoute"
 
 const authStore = useAuthStore()
@@ -38,6 +34,7 @@ const mcpStore = useMcpStore()
 const providerStore = useProviderStore()
 const wikiStore = useWikiStore()
 const telemetryStore = useTelemetryStore()
+const workspaceExtensionStore = useWorkspaceExtensionStore()
 const activeView = ref<AppView>(readAppView())
 const appShellRef = ref<InstanceType<typeof AppShell> | null>(null)
 const workspaceStarted = ref(false)
@@ -124,6 +121,8 @@ async function restoreWorkspaceSession(sessionId: string | null): Promise<void> 
   contextBudgetStore.resetForSession()
   fileStore.resetForSession()
   if (!sessionId) {
+    workspaceExtensionStore.reset()
+    skillStore.setSelectedSkillNames([])
     await codingSandboxStore.restoreSession(null)
     return
   }
@@ -133,6 +132,14 @@ async function restoreWorkspaceSession(sessionId: string | null): Promise<void> 
     fileStore.loadFiles(sessionId),
     contextBudgetStore.load(sessionId),
     codingSandboxStore.restoreSession(sessionId),
+    workspaceExtensionStore
+      .load(sessionId)
+      .then((result) => {
+        if (sessionStore.activeSessionId === sessionId) {
+          skillStore.setSelectedSkillNames(result.selected_skill_names)
+        }
+      })
+      .catch(() => undefined),
   ])
   if (version !== activationVersion || sessionStore.activeSessionId !== sessionId) return
 
@@ -165,6 +172,7 @@ function resetWorkspaceState(): void {
   fileStore.resetWorkspace()
   skillStore.resetWorkspace()
   mcpStore.resetWorkspace()
+  workspaceExtensionStore.reset()
   providerStore.resetWorkspace()
   codingSandboxStore.resetWorkspace()
   wikiStore.reset()
@@ -285,10 +293,7 @@ onBeforeUnmount(() => {
     @workspace-opened="acknowledgeWorkspace"
   >
     <template #sidebar>
-      <SessionSidebar
-        @open-knowledge="openKnowledge"
-        @open-telemetry="openTelemetry"
-      />
+      <SessionSidebar @open-knowledge="openKnowledge" @open-telemetry="openTelemetry" />
     </template>
     <template #main>
       <ChatPanel @open-workspace="openWorkspaceResults" />

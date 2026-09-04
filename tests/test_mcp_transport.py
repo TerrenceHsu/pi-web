@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import sys
 
+import httpx
 import pytest
-from pydantic import ValidationError
 
+from pi_agent_core_py.mcp.client import MCPClient
 from pi_agent_core_py.mcp.config import MCPServerConfig
 from pi_agent_core_py.mcp.errors import (
     MCPConnectionError,
@@ -23,6 +24,7 @@ from pi_agent_core_py.mcp.errors import (
 from pi_agent_core_py.mcp.transport import (
     FakeMCPTransport,
     StdioMCPTransport,
+    StreamableHttpMCPTransport,
 )
 
 # ============================================================================
@@ -48,16 +50,111 @@ _ECHO_SCRIPT = (
 )
 
 
-def test_remote_http_transport_is_rejected() -> None:
-    """The local Web product must not accept an unimplemented remote transport."""
-    with pytest.raises(ValidationError):
-        MCPServerConfig.model_validate(
-            {
-                "name": "remote",
-                "transport": "http",
-                "url": "https://example.com/mcp",
-            }
+def test_remote_http_transport_config_is_supported() -> None:
+    config = MCPServerConfig.model_validate(
+        {
+            "name": "remote",
+            "transport": "http",
+            "url": "https://example.com/mcp",
+        }
+    )
+    assert config.url == "https://example.com/mcp"
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_json_session_and_close() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "DELETE":
+            return httpx.Response(200)
+        payload = __import__("json").loads(request.content)
+        return httpx.Response(
+            200,
+            headers={
+                "content-type": "application/json",
+                "Mcp-Session-Id": "session-1",
+            },
+            json={"jsonrpc": "2.0", "id": payload["id"], "result": {}},
         )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    transport = StreamableHttpMCPTransport(
+        "https://example.com/mcp",
+        headers={"Authorization": "Bearer test"},
+        client=http,
+    )
+    await transport.connect()
+    await transport.send({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+    assert (await transport.receive())["id"] == 1
+    await transport.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    assert (await transport.receive())["id"] == 2
+    await transport.close()
+    await http.aclose()
+
+    assert requests[0].headers["accept"] == "application/json, text/event-stream"
+    assert "mcp-protocol-version" not in requests[0].headers
+    assert requests[1].headers["mcp-session-id"] == "session-1"
+    assert requests[1].headers["mcp-protocol-version"] == "2025-06-18"
+    assert requests[-1].method == "DELETE"
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_parses_sse_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream; charset=utf-8"},
+            text=(
+                'event: message\ndata: {"jsonrpc":"2.0","method":"progress"}\n\n'
+                'event: message\ndata: {"jsonrpc":"2.0","id":7,"result":{}}\n\n'
+            ),
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    transport = StreamableHttpMCPTransport("https://example.com/mcp", client=http)
+    await transport.connect()
+    await transport.send({"jsonrpc": "2.0", "id": 7, "method": "tools/list"})
+    assert await transport.receive() == {"jsonrpc": "2.0", "id": 7, "result": {}}
+    await transport.close()
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_http_mcp_client_sends_initialized_notification() -> None:
+    methods: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = __import__("json").loads(request.content)
+        methods.append(payload["method"])
+        if "id" not in payload:
+            return httpx.Response(202)
+        result = (
+            {"protocolVersion": "2025-06-18", "capabilities": {}}
+            if payload["method"] == "initialize"
+            else {"tools": []}
+        )
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={"jsonrpc": "2.0", "id": payload["id"], "result": result},
+        )
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    config = MCPServerConfig(
+        name="remote",
+        transport="http",
+        url="https://example.com/mcp",
+    )
+    transport = StreamableHttpMCPTransport(config.url or "", client=http)
+    client = MCPClient(config, transport)
+    await client.connect()
+    await client.initialize()
+    assert await client.list_tools() == []
+    await client.close()
+    await http.aclose()
+    assert methods == ["initialize", "notifications/initialized", "tools/list"]
 
 
 # ============================================================================

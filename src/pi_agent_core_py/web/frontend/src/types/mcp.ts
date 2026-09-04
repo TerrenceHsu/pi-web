@@ -14,8 +14,12 @@ import type { JsonValue } from "./state"
  */
 export interface MCPServerSummary {
   name: string
+  transport?: "stdio" | "http"
   command: string
   args: string[]
+  url?: string | null
+  header_env?: Record<string, string>
+  protocol_version?: string | null
   enabled: boolean
   desired_enabled?: boolean
   attached?: boolean
@@ -42,9 +46,13 @@ export interface DDGSSearchSettings {
 /** POST /api/mcp/servers body——允许传 env values。 */
 export interface MCPServerCreateRequest {
   name: string
-  command: string
+  transport?: "stdio" | "http"
+  command?: string
   args?: string[]
   env?: Record<string, string>
+  url?: string
+  header_env?: Record<string, string>
+  protocol_version?: string
   enabled?: boolean
 }
 

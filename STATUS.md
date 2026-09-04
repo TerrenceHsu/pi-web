@@ -37,7 +37,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 | pi `telemetry` 运行观测（第五项） | ✅ 核心与 Admin 产品面完成 | 对齐 Context/Span、noop/memory/schema 与 passive callback 语义；增加共享 SQLite Recorder、Web/Coding Agent 安全指标、Admin-only summary/list/detail API 和 Vue 仪表盘。正文、工具参数/输出、凭证与异常正文不落盘。详见 `docs/validation/pi-telemetry-parity-2026-09-03.md` |
 | pi `evals` 本机行为评测 | ✅ 离线核心完成 | 独立私有包在真实 Coding Agent Application/Runtime/Session 上运行 Prompt/Reload；每个 Observation 隔离临时 Workspace/SQLite，以 Fake Provider 执行确定性 Judge、baseline/candidate 配对、pass-rate/token/latency/cost 汇总和默认脱敏产物。详见 `docs/validation/pi-evals-parity-2026-09-03.md` |
 | 旧 Chunk Knowledge PDF → Chunk FTS5 → Citation | 🗑️ 已移除 | 运行时、REST、工具、前端与 `rag` extra 均已删除；只保留 `wiki/legacy.py` 识别并归档旧磁盘数据 |
-| Web-only Agent Core 模块审计 | ✅ 完成 | 保留 Web 主链需要的 `ai/agent/mcp/policy/secrets/session_backends/telemetry/web`；移除 Chunk-RAG、Tavily 重复搜索、HTTP MCP placeholder 与死前端兼容层，并以结构测试固定产品代码只依赖 canonical 模块 |
+| Web-only Agent Core 模块审计 | ✅ 完成并校正 MCP 产品边界 | 保留 Web 主链需要的 `ai/agent/mcp/policy/secrets/session_backends/telemetry/web`；移除 Chunk-RAG、Tavily 重复搜索与死前端兼容层；HTTP MCP 已按产品设计实现为 Streamable HTTP，MCP/Skills 使用账号级目录 + Workspace 选择，并以结构测试固定产品代码只依赖 canonical 模块 |
 | 登录与账号工作区隔离 | ✅ 完成 | `b529bbc` |
 | Session Workspace、`AGENT.md`、`Memory.md`、`/checkpointer` | ✅ 完成 | `WorkspaceStore` 为唯一规范事实源；新旧 Session 幂等初始化两个固定根文件，保留旧正文/file id；设计见 `docs/design/workspace-sandbox-integration.md` |
 | Workspace 模块分离 | ✅ 阶段 1 完成 | 规范 Store、固定文档转换和 provider-neutral continuity 已迁移到顶层 `agent_workspace`；Workspace/Sandbox adapter 位于 `coding_agent_app`，旧 Core 路径只保留兼容层；独立 import boundary 与 wheel 内容验证通过，Ruff、strict Mypy 177 files、既有定向 133 passed |
@@ -102,7 +102,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 - Provider Profile、Session Model Binding、Context Window 与 Max Output Tokens 持久化；UI 管理 GLM/Qwen/Kimi
 - Admin 可通过 `/telemetry` 查看跨账号 Agent 请求量、错误率、P95、token/cost、Provider、工具调用和结构化事件；服务端按持久 `is_admin` 鉴权
 - 持久化凭证默认进入 OS Keyring；开发启动器在监听端口前执行 write/read/delete 探针
-- MCP 支持 stdio tools/prompts；内置 DDGS 固定存在、不可删除，可修改返回数、地区、安全搜索、时间范围等参数
+- MCP 支持 stdio 与 Streamable HTTP tools/prompts；MCP/Skills 由账号级全局目录配置、Workspace/Session 持久选择，请求级资源快照隔离；内置 DDGS 固定存在、不可删除，全局启用后为新 Workspace 默认项，可修改返回数、地区、安全搜索、时间范围等参数
 - 独立 `/knowledge` 页面支持 Wiki Space、PDF/HTML Source、Raw artifacts、页面/revision、页面 FTS5、已发布图谱、统一 diff 审批与每 Space 多 Agent 对话
 - `create_app(wiki_root=...)` 运行独立 Wiki Store/API/Worker；HTML 真实离线解析，PDF 未配置 Provider 时保持 `uploaded`。旧 Chunk Knowledge 已无运行时或 API 装配入口，不与 Wiki 共享表或业务数据
 - Core Runtime 的一个 Turn 等于“一次 LLM 调用 + 该调用产生的当批工具”；Snapshot 分为 RequestSnapshot 与 TurnSnapshot
@@ -152,7 +152,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 ## 2026-09-04 当前验证基线
 
 当前 `0.0.29` 后续代码已实际复跑全量离线 Backend、Frontend、Chromium E2E、Evals 与静态门禁；
-本轮完成 Web-only Agent Core 全模块审计，验证删除旧 Chunk-RAG、重复搜索、HTTP MCP 空壳和死前端层后，
+本轮完成 Web-only Agent Core 全模块审计，并按产品设计恢复和实现 HTTP MCP；验证删除旧 Chunk-RAG、重复搜索和死前端层后，
 真实 Coding Agent Session、SQLite reload、Workspace/Tool、Provider/Skill/MCP/Prompt 装配、Telemetry 隐私与
 全部 Web 主旅程仍闭环。真实 E2B、Parser OCI 与 DDGS/GLM 沿用最近一次保留证据：
 
@@ -162,8 +162,8 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 | strict Mypy 全量 | **PASS** | `mypy src evals`：263 source files / 0 issues；覆盖 Wiki、独立 Workspace/Plan 包、Managed Sandbox、AI/Agent/Harness/SQLite Repository、Coding Agent、Telemetry 与 Evals 边界 |
 | Wiki Parser Worker 静态门禁 | **PASS** | Ruff 0 errors；strict Mypy 18 source files / 0 issues |
 | Backend 全量离线（第二轮前基线） | **3143 passed, 7 skipped, 9 deselected** | 当时为 3159 collected；`pytest tests --tb=short -q`；1053.41s；coverage 81.91% |
-| Backend 当前精简套件 | **2191 passed, 7 skipped, 9 deselected** | `pytest tests --tb=short -q`；449.15s；coverage 76.65%；默认门禁覆盖 `pi_agent_core_py`、`agent_workspace`、`coding_agent_app`、`coding_sandbox`，并排除真实外网、LLM 与 Docker marker |
-| Frontend 当前精简套件 | **187/187 passed** | 28 files；Vitest 0 failure；同时通过 typecheck、ESLint 与 production build |
+| Backend 当前精简套件 | **2201 passed, 7 skipped, 9 deselected** | `pytest tests --tb=short -q --basetemp=.p`；428.17s；coverage 76.63%；默认门禁覆盖 `pi_agent_core_py`、`agent_workspace`、`coding_agent_app`、`coding_sandbox`，并排除真实外网、LLM 与 Docker marker |
+| Frontend 当前精简套件 | **188/188 passed** | 29 files；Vitest 0 failure；同时通过 typecheck、ESLint 与 production build |
 | pi Evals 专项 | **18 passed；5 suites / 10 observations；candidate gate PASS** | 覆盖数据契约、Judge、配对/诊断、真实 Application/Runtime/Session、工具/Workspace、统一资源装配、SQLite reload、Telemetry 隐私、默认/显式正文产物和离线依赖边界；默认 JSONL 泄漏扫描 PASS |
 | pi Telemetry 专项 | **21 passed** | 覆盖 noop/memory/nested span、SQLite 并发/持久/筛选、passive failure、正文脱敏、Agent event 投影、Admin API、跨账号查询、Auth v1→v2 和 package 依赖方向 |
 | pi Telemetry wheel | **PASS** | 离线构建主 wheel，共 444 entries；Core/Web Telemetry 与前端资源在包内；隔离安装导入 PASS |
@@ -242,7 +242,7 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 - Context compaction 由用户手动触发，默认摘要器为本地规则式；自动 Session Memory 与 `/checkpointer` 调用当前 Session LLM，但前者保留消息、后者成功后清空当前 lane
 - Regenerate 仅支持最新 Assistant，不提供历史 revision 切换 UI
 - Session tree 的 Core/Web API 已完成；当前聊天 UI 尚无可视化 branch/lane navigator
-- MCP 有意限定为可信本机 stdio；配置模型直接拒绝 HTTP transport
+- MCP stdio command 是可信本机代码执行边界；Streamable HTTP endpoint 允许用户配置，但只作为当前 Web Agent 的扩展 transport，不提供独立远程 Agent 服务
 - `added_tool_names` 已保留到 provider 边界，但当前 OpenAI/Anthropic-compatible adapters 不实现原生 deferred tool loading，仍按完整 ToolRegistry 发送工具
 - 通用、无正文的 `web.request` span 已覆盖 Prompt、Regenerate 与 Checkpointer；Knowledge Prompt 沿用同一入口。当前没有 Wiki 子步骤专用 span、OTLP exporter、外部告警或完整 RBAC
 - 本机 Evals 当前只使用脚本化 Fake Provider，分数代表编排、隔离、持久化与安全契约；不能解释为开放式模型智能或自然语言 Prompt 的真实质量差异

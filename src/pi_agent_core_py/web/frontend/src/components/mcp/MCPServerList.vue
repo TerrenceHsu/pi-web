@@ -72,23 +72,29 @@ async function onDelete(name: string) {
           class="badge"
           :class="s.enabled ? 'badge-on' : 'badge-off'"
           data-testid="mcp-server-status-badge"
-        >{{ s.enabled ? "enabled" : "disabled" }}</span>
+          >{{ s.enabled ? "enabled" : "disabled" }}</span
+        >
         <span
-          v-if="s.enabled && !s.last_error"
+          v-if="s.enabled && s.attached"
           class="badge badge-success"
           data-testid="mcp-server-attached-badge"
-        >attached · {{ s.tool_count }} tool{{ s.tool_count === 1 ? "" : "s" }}</span>
-        <span
-          v-else-if="s.enabled && s.last_error"
-          class="badge badge-error"
-        >attach error</span>
+          >attached · {{ s.tool_count }} tool{{ s.tool_count === 1 ? "" : "s" }}</span
+        >
+        <span v-else-if="s.enabled" class="badge badge-error">attach error</span>
         <span v-else class="badge badge-muted">off</span>
       </div>
       <div v-if="!s.builtin" class="server-cmd">
-        <code>{{ s.command }}</code>
-        <span v-if="s.args && s.args.length" class="server-args">
+        <code>{{ s.transport === "http" ? s.url : s.command }}</code>
+        <span v-if="s.transport !== 'http' && s.args && s.args.length" class="server-args">
           {{ s.args.join(" ") }}
         </span>
+      </div>
+      <div
+        v-if="s.transport === 'http' && Object.keys(s.header_env || {}).length"
+        class="server-env"
+      >
+        headers: <code>{{ Object.keys(s.header_env || {}).join(", ") }}</code>
+        <span class="muted">(values from environment)</span>
       </div>
       <div v-if="s.env_keys && s.env_keys.length" class="server-env">
         env keys: <code>{{ s.env_keys.join(", ") }}</code>
@@ -101,11 +107,12 @@ async function onDelete(name: string) {
           v-if="lastTest(s.name)?.error == null && lastTest(s.name)?.toolCount != null"
           class="test-ok"
         >
-          ✓ last test: {{ lastTest(s.name)?.toolCount }} tool{{ (lastTest(s.name)?.toolCount ?? 0) === 1 ? "" : "s" }} detected
+          ✓ last test: {{ lastTest(s.name)?.toolCount }} tool{{
+            (lastTest(s.name)?.toolCount ?? 0) === 1 ? "" : "s"
+          }}
+          detected
         </span>
-        <span v-else class="server-error">
-          ✗ last test failed: {{ lastTest(s.name)?.error }}
-        </span>
+        <span v-else class="server-error"> ✗ last test failed: {{ lastTest(s.name)?.error }} </span>
       </div>
       <div class="server-actions">
         <button
@@ -123,20 +130,26 @@ async function onDelete(name: string) {
           class="primary"
           data-testid="mcp-server-enable-btn"
           @click="onEnable(s.name)"
-        >Enable</button>
+        >
+          Enable
+        </button>
         <button
           v-else
           type="button"
           data-testid="mcp-server-disable-btn"
           @click="onDisable(s.name)"
-        >Disable</button>
+        >
+          Disable
+        </button>
         <button
           v-if="s.deletable !== false"
           type="button"
           class="danger"
           data-testid="mcp-server-delete-btn"
           @click="onDelete(s.name)"
-        >Delete</button>
+        >
+          Delete
+        </button>
       </div>
     </div>
   </div>

@@ -10,7 +10,7 @@
    `decode_uploaded_skill(row)` 独立 decode。单行损坏 JSON 不阻塞其他行 restore。
 
 3. **Schema version**——`web_extension_schema_meta(version)` 为未来 alter column /
-   数据回填留入口。当前 version=1。
+   数据回填留入口。当前 version=3。
 
 4. **MCP env 安全**——只持久化 env_keys（list[str]），**绝不**持久化 env value。
    value 从 os.environ 恢复（C4 实现）。
@@ -28,6 +28,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from urllib.parse import urlsplit
 
 import aiosqlite
 
@@ -127,7 +128,7 @@ class PersistedSkill:
 
 @dataclass
 class PersistedMCPServer:
-    """MCP server 持久化视图——**不含 env value**，只存 env_keys。"""
+    """MCP server 持久化视图——不含任何 secret value。"""
 
     name: str
     transport: str = "stdio"
@@ -135,6 +136,9 @@ class PersistedMCPServer:
     args_json: str = "[]"  # JSON-encoded list[str]
     desired_enabled: bool = False
     env_keys_json: str = "[]"  # JSON-encoded list[str]——**绝不**含 value
+    url: str | None = None
+    header_env_json: str = "{}"  # JSON object: HTTP header -> env variable name
+    protocol_version: str | None = None
     last_restore_error: str | None = None
     created_at: str = ""
     updated_at: str = ""
@@ -168,6 +172,15 @@ class MCPServerRowResult:
 
 
 @dataclass(frozen=True)
+class WorkspaceExtensionSelection:
+    """One Web Workspace's persisted selection from the global catalog."""
+
+    configured: bool = False
+    mcp_server_names: tuple[str, ...] = ()
+    skill_names: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class PersistedMessageRevision:
     """P1-D2-3：message revision 的持久化视图（不可变）。
 
@@ -194,7 +207,7 @@ class PersistedMessageRevision:
 # ============================================================================
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 # ============================================================================
@@ -209,7 +222,7 @@ CREATE TABLE IF NOT EXISTS web_extension_schema_meta (
 )
 """
 
-# P1-C1 三张表——fresh v2 与既有 v1 共用（CREATE IF NOT EXISTS 幂等）
+# P1-C1 三张基础表——fresh schema 与 migration 共用（CREATE IF NOT EXISTS 幂等）
 _C1_TABLE_DDL_STATEMENTS: list[str] = [
     """
     CREATE TABLE IF NOT EXISTS web_uploaded_skills (
@@ -229,12 +242,15 @@ _C1_TABLE_DDL_STATEMENTS: list[str] = [
     CREATE TABLE IF NOT EXISTS web_mcp_servers (
         name                TEXT PRIMARY KEY,
         transport           TEXT NOT NULL DEFAULT 'stdio'
-                            CHECK (transport IN ('stdio')),
-        command             TEXT NOT NULL,
+                            CHECK (transport IN ('stdio', 'http')),
+        command             TEXT NOT NULL DEFAULT '',
         args_json           TEXT NOT NULL DEFAULT '[]',
         desired_enabled     INTEGER NOT NULL DEFAULT 0
                             CHECK (desired_enabled IN (0, 1)),
         env_keys_json       TEXT NOT NULL DEFAULT '[]',
+        url                 TEXT,
+        header_env_json     TEXT NOT NULL DEFAULT '{}',
+        protocol_version    TEXT,
         last_restore_error  TEXT,
         created_at          TEXT NOT NULL,
         updated_at          TEXT NOT NULL
@@ -253,7 +269,33 @@ _C1_TABLE_DDL_STATEMENTS: list[str] = [
     """,
 ]
 
-# P1-D2 revisions 表——fresh v2 与 v1→v2 migration 共用
+_WORKSPACE_SELECTION_DDL_STATEMENTS: list[str] = [
+    """
+    CREATE TABLE IF NOT EXISTS web_workspace_extension_selection (
+        session_id          TEXT PRIMARY KEY,
+        configured_at       TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS web_workspace_mcp_selection (
+        session_id          TEXT NOT NULL,
+        server_name         TEXT NOT NULL,
+        selected_at         TEXT NOT NULL,
+        PRIMARY KEY (session_id, server_name),
+        FOREIGN KEY (server_name) REFERENCES web_mcp_servers(name) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS web_workspace_skill_selection (
+        session_id          TEXT NOT NULL,
+        skill_name          TEXT NOT NULL,
+        selected_at         TEXT NOT NULL,
+        PRIMARY KEY (session_id, skill_name)
+    )
+    """,
+]
+
+# P1-D2 revisions 表——fresh schema 与 migration 共用
 # DDL 补充（审核要求）：
 #   - revision_number CHECK >= 0
 #   - status IN ('completed','superseded') → content_json NOT NULL
@@ -317,12 +359,15 @@ _REVISIONS_DDL_STATEMENTS: list[str] = [
 ]
 
 
-# fresh-v2 schema validation 必须存在的表 + 索引
+# 当前 schema validation 必须存在的表 + 索引
 _REQUIRED_TABLES = (
     "web_uploaded_skills",
     "web_mcp_servers",
     "web_mcp_disabled_tools",
     "web_message_revisions",
+    "web_workspace_extension_selection",
+    "web_workspace_mcp_selection",
+    "web_workspace_skill_selection",
 )
 _REQUIRED_INDEXES = (
     "uq_web_message_revision_request",
@@ -387,10 +432,10 @@ class ExtensionSQLiteStore:
             2. 只确保 schema_meta 表存在（CREATE IF NOT EXISTS）
             3. 读 schema version
             4. 按 version 分支：
-               - None      → 全新 DB，单 transaction 建 v2 全部 schema
-               - 1         → migrate v1→v2（单 transaction）
-               - 2         → 只 validate，不重建
-               - > 2       → 在任何 DDL 前 raise（防止 downgrade 损坏）
+               - None      → 全新 DB，单 transaction 建当前全部 schema
+               - 1         → migrate v1→v2→v3
+               - 2         → migrate v2→v3
+               - 3         → 只 validate，不重建
                - 其它      → raise
         """
         if self._db is not None:
@@ -423,11 +468,14 @@ class ExtensionSQLiteStore:
             version = await self.get_schema_version()
 
             if version is None:
-                await self._initialize_fresh_v2_schema()
+                await self._initialize_fresh_schema()
             elif version == 1:
                 await self._migrate_v1_to_v2()
+                await self._migrate_v2_to_v3()
+            elif version == 2:
+                await self._migrate_v2_to_v3()
             elif version == SCHEMA_VERSION:
-                await self._validate_v2_schema()
+                await self._validate_schema()
             elif version > SCHEMA_VERSION:
                 # 关键：在任何 DDL 前失败——防止把未来版本的 DB 当成旧版重建
                 raise ExtensionStoreError(
@@ -452,9 +500,9 @@ class ExtensionSQLiteStore:
     # schema 初始化 / migration 内部方法
     # ------------------------------------------------------------------
 
-    async def _initialize_fresh_v2_schema(self) -> None:
-        """全新 DB——单 BEGIN IMMEDIATE transaction 建 C1 三表 + revisions 表 + 索引
-        + 插入 schema_meta(id=1, version=2)。
+    async def _initialize_fresh_schema(self) -> None:
+        """全新 DB——单 BEGIN IMMEDIATE transaction 建当前全部表和索引
+        + 插入 schema_meta(id=1, version=3)。
 
         任一步失败 → ROLLBACK（schema_meta 表仍在但 version 字段未填——下次 init
         会重新进入此分支重试；幂等）。
@@ -465,6 +513,8 @@ class ExtensionSQLiteStore:
             for stmt in _C1_TABLE_DDL_STATEMENTS:
                 await db.execute(stmt)
             for stmt in _REVISIONS_DDL_STATEMENTS:
+                await db.execute(stmt)
+            for stmt in _WORKSPACE_SELECTION_DDL_STATEMENTS:
                 await db.execute(stmt)
             await db.execute(
                 "INSERT INTO web_extension_schema_meta (id, version) VALUES (1, ?)",
@@ -502,6 +552,63 @@ class ExtensionSQLiteStore:
             cursor = await db.execute(
                 "UPDATE web_extension_schema_meta SET version = ? "
                 "WHERE id = 1 AND version = 1",
+                (2,),
+            )
+            if cursor.rowcount != 1:
+                raise ExtensionStoreError(
+                    "migration rowcount mismatch——version unchanged"
+                )
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
+
+    async def _migrate_v2_to_v3(self) -> None:
+        """Add HTTP MCP fields and per-Workspace extension selections atomically."""
+        db = self._require_db()
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                "SELECT version FROM web_extension_schema_meta WHERE id = 1"
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None or row["version"] != 2:
+                raise ExtensionStoreError(
+                    "schema version changed unexpectedly during migration"
+                )
+
+            await db.execute(
+                "CREATE TEMP TABLE web_mcp_disabled_tools_v2_backup AS "
+                "SELECT server_name, tool_name, disabled_at "
+                "FROM web_mcp_disabled_tools"
+            )
+            await db.execute("DROP TABLE web_mcp_disabled_tools")
+            await db.execute("ALTER TABLE web_mcp_servers RENAME TO web_mcp_servers_v2")
+            await db.execute(_C1_TABLE_DDL_STATEMENTS[1])
+            await db.execute(
+                "INSERT INTO web_mcp_servers "
+                "(name, transport, command, args_json, desired_enabled, "
+                "env_keys_json, url, header_env_json, protocol_version, "
+                "last_restore_error, created_at, updated_at) "
+                "SELECT name, transport, command, args_json, desired_enabled, "
+                "env_keys_json, NULL, '{}', NULL, last_restore_error, created_at, "
+                "updated_at FROM web_mcp_servers_v2"
+            )
+            await db.execute("DROP TABLE web_mcp_servers_v2")
+            await db.execute(_C1_TABLE_DDL_STATEMENTS[2])
+            await db.execute(
+                "INSERT INTO web_mcp_disabled_tools "
+                "(server_name, tool_name, disabled_at) "
+                "SELECT server_name, tool_name, disabled_at "
+                "FROM web_mcp_disabled_tools_v2_backup"
+            )
+            await db.execute("DROP TABLE web_mcp_disabled_tools_v2_backup")
+            for stmt in _WORKSPACE_SELECTION_DDL_STATEMENTS:
+                await db.execute(stmt)
+            cursor = await db.execute(
+                "UPDATE web_extension_schema_meta SET version = ? "
+                "WHERE id = 1 AND version = 2",
                 (SCHEMA_VERSION,),
             )
             if cursor.rowcount != 1:
@@ -513,10 +620,10 @@ class ExtensionSQLiteStore:
             await db.rollback()
             raise
 
-    async def _validate_v2_schema(self) -> None:
-        """version=2 已就绪——只读校验关键表/索引存在，不重建。
+    async def _validate_schema(self) -> None:
+        """当前 schema 已就绪——只读校验关键表/索引存在，不重建。
 
-        若 version=2 但 schema 不完整，报告 corruption（不静默重建——审核要求）。
+        若版本匹配但 schema 不完整，报告 corruption（不静默重建——审核要求）。
         """
         db = self._require_db()
         for table in _REQUIRED_TABLES:
@@ -529,7 +636,7 @@ class ExtensionSQLiteStore:
             await cursor.close()
             if row is None:
                 raise ExtensionStoreError(
-                    "schema corruption: table missing despite version=2 "
+                    f"schema corruption: table missing despite version={SCHEMA_VERSION} "
                     f"(table={table!r})"
                 )
         for index in _REQUIRED_INDEXES:
@@ -542,7 +649,7 @@ class ExtensionSQLiteStore:
             await cursor.close()
             if row is None:
                 raise ExtensionStoreError(
-                    "schema corruption: index missing despite version=2 "
+                    f"schema corruption: index missing despite version={SCHEMA_VERSION} "
                     f"(index={index!r})"
                 )
 
@@ -743,9 +850,13 @@ class ExtensionSQLiteStore:
 
     @serialized_operation
     async def delete_uploaded_skill(self, name: str) -> bool:
-        """删除上传 Skill row。返回 True 如果删除了，False 如果不存在。"""
+        """删除上传 Skill，并清理所有 Workspace 中的同名选择。"""
         db = self._require_db()
         try:
+            await db.execute(
+                "DELETE FROM web_workspace_skill_selection WHERE skill_name = ?",
+                (name,),
+            )
             cursor = await db.execute(
                 "DELETE FROM web_uploaded_skills WHERE name = ?", (name,)
             )
@@ -764,38 +875,79 @@ class ExtensionSQLiteStore:
         *,
         name: str,
         transport: str = "stdio",
-        command: str,
+        command: str = "",
         args: list[str],
         desired_enabled: bool = False,
         env_keys: list[str],
+        url: str | None = None,
+        header_env: dict[str, str] | None = None,
+        protocol_version: str | None = None,
     ) -> None:
-        """插入 / 更新 MCP server config——**只存 env_keys，不存 value**。"""
+        """Upsert global MCP config without persisting any secret value."""
         db = self._require_db()
         if not name or not name.strip():
             raise ExtensionStoreValidationError("mcp server name is required")
-        if not command or not command.strip():
+        if transport not in {"stdio", "http"}:
+            raise ExtensionStoreValidationError("unsupported mcp transport")
+        if transport == "stdio" and (not command or not command.strip()):
             raise ExtensionStoreValidationError("mcp server command is required")
+        if transport == "http":
+            parsed = urlsplit(url or "")
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ExtensionStoreValidationError(
+                    "http mcp server requires an absolute http(s) url"
+                )
+            if parsed.username is not None or parsed.password is not None:
+                raise ExtensionStoreValidationError(
+                    "http mcp url must not contain credentials"
+                )
         if not isinstance(args, list):
             raise ExtensionStoreValidationError("args must be a list of strings")
         if not isinstance(env_keys, list):
             raise ExtensionStoreValidationError(
                 "env_keys must be a list of strings"
             )
+        header_env = dict(header_env or {})
+        if not all(
+            isinstance(key, str)
+            and key.strip()
+            and isinstance(value, str)
+            and value.strip()
+            for key, value in header_env.items()
+        ):
+            raise ExtensionStoreValidationError(
+                "header_env must map non-empty header names to environment keys"
+            )
+        reserved_headers = {
+            "accept",
+            "content-type",
+            "mcp-session-id",
+            "mcp-protocol-version",
+        }
+        if any(key.lower() in reserved_headers for key in header_env):
+            raise ExtensionStoreValidationError(
+                "header_env contains a transport-reserved header"
+            )
         args_json = json.dumps(args)
         env_keys_json = json.dumps(sorted(env_keys))
+        header_env_json = json.dumps(header_env, sort_keys=True)
         now = self._now_iso()
         try:
             await db.execute(
                 """
                 INSERT INTO web_mcp_servers
                     (name, transport, command, args_json, desired_enabled,
-                     env_keys_json, last_restore_error, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                     env_keys_json, url, header_env_json, protocol_version,
+                     last_restore_error, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
                 ON CONFLICT(name) DO UPDATE SET
                     transport = excluded.transport,
                     command = excluded.command,
                     args_json = excluded.args_json,
                     env_keys_json = excluded.env_keys_json,
+                    url = excluded.url,
+                    header_env_json = excluded.header_env_json,
+                    protocol_version = excluded.protocol_version,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -805,6 +957,9 @@ class ExtensionSQLiteStore:
                     args_json,
                     1 if desired_enabled else 0,
                     env_keys_json,
+                    url if transport == "http" else None,
+                    header_env_json if transport == "http" else "{}",
+                    protocol_version if transport == "http" else None,
                     now,
                     now,
                 ),
@@ -858,9 +1013,12 @@ class ExtensionSQLiteStore:
 
     @staticmethod
     def _row_to_mcp_server(row: aiosqlite.Row) -> PersistedMCPServer:
-        # 验证 args_json / env_keys_json 是合法 JSON——损坏抛异常被 decode catch
+        # 验证 JSON——损坏抛异常被 decode catch
         json.loads(row["args_json"])
         json.loads(row["env_keys_json"])
+        header_env = json.loads(row["header_env_json"])
+        if not isinstance(header_env, dict):
+            raise ValueError("header_env_json must contain an object")
         return PersistedMCPServer(
             name=row["name"],
             transport=row["transport"],
@@ -868,6 +1026,9 @@ class ExtensionSQLiteStore:
             args_json=row["args_json"],
             desired_enabled=bool(row["desired_enabled"]),
             env_keys_json=row["env_keys_json"],
+            url=row["url"],
+            header_env_json=row["header_env_json"],
+            protocol_version=row["protocol_version"],
             last_restore_error=row["last_restore_error"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
@@ -921,6 +1082,134 @@ class ExtensionSQLiteStore:
             await db.commit()
             return cursor.rowcount > 0
         except Exception as e:
+            raise ExtensionStoreError(self._safe_db_error(e)) from None
+
+    # ==================================================================
+    # Per-Workspace selection from the account-global catalogs
+    # ==================================================================
+
+    @serialized_operation
+    async def get_workspace_extension_selection(
+        self, session_id: str
+    ) -> WorkspaceExtensionSelection:
+        db = self._require_db()
+        try:
+            cursor = await db.execute(
+                "SELECT 1 FROM web_workspace_extension_selection "
+                "WHERE session_id = ?",
+                (session_id,),
+            )
+            configured = await cursor.fetchone() is not None
+            await cursor.close()
+            if not configured:
+                return WorkspaceExtensionSelection()
+            cursor = await db.execute(
+                "SELECT server_name FROM web_workspace_mcp_selection "
+                "WHERE session_id = ? ORDER BY server_name",
+                (session_id,),
+            )
+            mcp_names = tuple(str(row[0]) for row in await cursor.fetchall())
+            await cursor.close()
+            cursor = await db.execute(
+                "SELECT skill_name FROM web_workspace_skill_selection "
+                "WHERE session_id = ? ORDER BY skill_name",
+                (session_id,),
+            )
+            skill_names = tuple(str(row[0]) for row in await cursor.fetchall())
+            await cursor.close()
+            return WorkspaceExtensionSelection(
+                configured=True,
+                mcp_server_names=mcp_names,
+                skill_names=skill_names,
+            )
+        except Exception as e:
+            raise ExtensionStoreError(self._safe_db_error(e)) from None
+
+    @serialized_operation
+    async def replace_workspace_extension_selection(
+        self,
+        session_id: str,
+        *,
+        mcp_server_names: list[str],
+        skill_names: list[str],
+    ) -> WorkspaceExtensionSelection:
+        """Atomically replace a Workspace selection, including an empty selection."""
+        db = self._require_db()
+        mcp_names = sorted(set(mcp_server_names))
+        skills = sorted(set(skill_names))
+        if not all(isinstance(value, str) and value for value in [*mcp_names, *skills]):
+            raise ExtensionStoreValidationError("extension names must be non-empty strings")
+        now = self._now_iso()
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                "SELECT 1 FROM sessions WHERE id = ?", (session_id,)
+            )
+            exists = await cursor.fetchone() is not None
+            await cursor.close()
+            if not exists:
+                raise ExtensionStoreConflictError("workspace session does not exist")
+            await db.execute(
+                "INSERT INTO web_workspace_extension_selection "
+                "(session_id, configured_at) VALUES (?, ?) "
+                "ON CONFLICT(session_id) DO UPDATE SET "
+                "configured_at = excluded.configured_at",
+                (session_id, now),
+            )
+            await db.execute(
+                "DELETE FROM web_workspace_mcp_selection WHERE session_id = ?",
+                (session_id,),
+            )
+            await db.execute(
+                "DELETE FROM web_workspace_skill_selection WHERE session_id = ?",
+                (session_id,),
+            )
+            for server_name in mcp_names:
+                await db.execute(
+                    "INSERT INTO web_workspace_mcp_selection "
+                    "(session_id, server_name, selected_at) VALUES (?, ?, ?)",
+                    (session_id, server_name, now),
+                )
+            for skill_name in skills:
+                await db.execute(
+                    "INSERT INTO web_workspace_skill_selection "
+                    "(session_id, skill_name, selected_at) VALUES (?, ?, ?)",
+                    (session_id, skill_name, now),
+                )
+            await db.commit()
+        except ExtensionStoreConflictError:
+            await db.rollback()
+            raise
+        except Exception as e:
+            await db.rollback()
+            raise ExtensionStoreError(self._safe_db_error(e)) from None
+        return WorkspaceExtensionSelection(
+            configured=True,
+            mcp_server_names=tuple(mcp_names),
+            skill_names=tuple(skills),
+        )
+
+    @serialized_operation
+    async def delete_workspace_extension_selection(self, session_id: str) -> None:
+        """Remove all per-Workspace selection rows after a Session is deleted."""
+        db = self._require_db()
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            await db.execute(
+                "DELETE FROM web_workspace_mcp_selection WHERE session_id = ?",
+                (session_id,),
+            )
+            await db.execute(
+                "DELETE FROM web_workspace_skill_selection WHERE session_id = ?",
+                (session_id,),
+            )
+            await db.execute(
+                "DELETE FROM web_workspace_extension_selection WHERE session_id = ?",
+                (session_id,),
+            )
+            await db.commit()
+        except Exception as e:
+            await db.rollback()
             raise ExtensionStoreError(self._safe_db_error(e)) from None
 
     # ==================================================================
@@ -1682,6 +1971,7 @@ __all__ = [
     "PersistedDisabledTool",
     "SkillRowResult",
     "MCPServerRowResult",
+    "WorkspaceExtensionSelection",
     "PersistedMessageRevision",
     "ExtensionSQLiteStore",
     "SCHEMA_VERSION",

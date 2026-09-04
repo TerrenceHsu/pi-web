@@ -18,7 +18,8 @@
 - [x] **12. 完成第 4 项 `session-backends/sqlite-node` 对齐**：新增 Harness 级 Repository/Storage/Search 协议与物理 backend 分层；补齐全局 sequence/log、typed entry/record 查询、统计、name/label fact、writer lease/fence/heartbeat、branch cache/repair、fork、有序事务 migration、未来版本拒绝和惰性 FTS5。Session/Extension/Plan 共用 connection 级可重入串行化，异常/取消与关闭残留事务统一 rollback；每个已启动 Web Runtime Session 持有独立 Storage handle 并在删除/关闭时释放。专项 94 passed、共享服务邻接 152 passed、兼容回归 75 passed；Backend 全量 2175 passed/7 skipped/9 deselected/76.27%；Ruff、strict Mypy 265 files、Worker 静态门禁、Frontend 183/183 + typecheck/lint/build、Playwright 19/19、428-entry wheel 隔离导入与 migration 初始化均通过。详见 [`docs/validation/pi-session-backend-parity-2026-09-03.md`](docs/validation/pi-session-backend-parity-2026-09-03.md)
 - [x] **13. 完成第 5 项 `telemetry` 对齐并增加 Admin 前端**：新增 Backend-neutral Context/Span/Reader、noop/memory/schema 与 passive SQLite Recorder；Web/Coding Agent 统一记录嵌套请求、Provider/model、token/cost、工具、耗时和 outcome，所有账号共享独立 Telemetry DB。Auth schema v2 持久化 Admin 角色，服务端 API 强制鉴权；Admin 前端提供摘要、趋势、筛选、请求与事件详情。Prompt/消息/Tool 参数和输出/凭证/异常正文不落盘。专项 21 passed；Backend 2187 passed/7 skipped/9 deselected/76.43%；Ruff、strict Mypy 275 files、Worker 静态门禁、Frontend 187/187 + typecheck/lint/build、Playwright 20/20、444-entry wheel 隔离导入均通过。详见 [`docs/validation/pi-telemetry-parity-2026-09-03.md`](docs/validation/pi-telemetry-parity-2026-09-03.md)
 - [x] **14. 建立本机离线 `evals` 模块**：在独立私有包中运行真实 Coding Agent Application/Runtime/Session，支持 Prompt/Reload、临时 SQLite/Workspace、确定性 Judge、baseline/candidate 配对、重复运行、pass-rate/token/latency/cost 汇总和缺失观测诊断。默认产物严格省略正文与 payload；内置 5 个套件只用 Fake Provider，不加载凭证、不访问网络。专项 18 passed，5 suites / 10 observations candidate gate PASS；Backend 2205 passed / coverage 76.42%，Ruff、strict Mypy、Frontend、Worker 门禁通过。详见 [`docs/validation/pi-evals-parity-2026-09-03.md`](docs/validation/pi-evals-parity-2026-09-03.md)
-- [x] **15. 完成 Web-only Agent Core 全模块审计与最小闭环**：保留 `ai/agent/mcp/policy/secrets/session_backends/telemetry/web` 主链及必要兼容 facade；移除旧 Chunk-RAG 运行时/API/工具/依赖、重复 Tavily 搜索、HTTP MCP placeholder、死前端组件与 API/type 兼容层；产品代码改用 canonical owner import，并以 AST 回归固定依赖方向。Prompt、Regenerate、Checkpointer 统一进入无正文 Telemetry span。详见 [`docs/validation/web-agent-module-audit-2026-09-03.md`](docs/validation/web-agent-module-audit-2026-09-03.md)
+- [x] **15. 完成 Web-only Agent Core 全模块审计与最小闭环**：保留 `ai/agent/mcp/policy/secrets/session_backends/telemetry/web` 主链及必要兼容 facade；移除旧 Chunk-RAG 运行时/API/工具/依赖、重复 Tavily 搜索、死前端组件与 API/type 兼容层；产品代码改用 canonical owner import，并以 AST 回归固定依赖方向。HTTP MCP 经后续产品边界校正已完整实现。Prompt、Regenerate、Checkpointer 统一进入无正文 Telemetry span。详见 [`docs/validation/web-agent-module-audit-2026-09-03.md`](docs/validation/web-agent-module-audit-2026-09-03.md)
+- [x] **16. 实现 Web MCP/Skills 全局目录与 Workspace 选择**：MCP 支持 stdio + Streamable HTTP JSON/SSE、Session ID/协议版本头与 initialized notification；HTTP header secret 仅以环境变量引用持久化。MCP/Skills 为账号级目录，每个 Workspace/Session 原子保存选择并在 Coding Agent request composition 中冻结；DDGS 保留为不可删除内置默认项。
 
 ## P0 — Coding Agent Workspace 连续性
 
@@ -203,7 +204,7 @@ Modal 与 Local Docker 作为后续兼容后端，最终用户不需要安装 Py
 - [ ] RBAC、OAuth、企业级多租户、TLS 公网部署、横向扩展
 - [ ] 向量数据库、embedding、hybrid retrieval 与 Chunk RAG；LLM Wiki 仅保留已批准页面的 SQLite FTS5
 - [ ] 自动 provider fallback、模型负载均衡、长期后台任务调度
-- 远程 MCP HTTP transport、独立 `client/protocol/server/tui` 均不属于 localhost Web Agent 产品范围；MCP 固定使用可信本机 stdio
+- 独立 `client/protocol/server/tui` 不属于 localhost Web Agent 产品范围；远程 MCP 只作为当前 Web Agent 的 Streamable HTTP 扩展 transport，不扩展成独立远程 Agent 产品
 
 ## 已完成基线索引
 

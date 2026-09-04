@@ -2,6 +2,8 @@
 import { watch } from "vue"
 
 import { useSkillStore } from "../../stores/skillStore"
+import { useSessionStore } from "../../stores/sessionStore"
+import { useWorkspaceExtensionStore } from "../../stores/workspaceExtensionStore"
 import ErrorBanner from "../common/ErrorBanner.vue"
 import LoadingSpinner from "../common/LoadingSpinner.vue"
 import Modal from "../common/Modal.vue"
@@ -12,6 +14,8 @@ const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ (e: "close"): void }>()
 
 const skillStore = useSkillStore()
+const sessionStore = useSessionStore()
+const workspaceExtensionStore = useWorkspaceExtensionStore()
 
 watch(
   () => props.open,
@@ -19,6 +23,17 @@ watch(
     if (open) {
       skillStore.error = null
       skillStore.loadSkills()
+      const sessionId = sessionStore.activeSessionId
+      if (sessionId) {
+        workspaceExtensionStore
+          .load(sessionId)
+          .then((result) => {
+            if (sessionStore.activeSessionId === sessionId) {
+              skillStore.setSelectedSkillNames(result.selected_skill_names)
+            }
+          })
+          .catch(() => undefined)
+      }
     }
   },
 )
@@ -26,9 +41,7 @@ watch(
 
 <template>
   <Modal :open="open" title="Skills" data-testid="skills-modal" @close="emit('close')">
-    <p class="modal-intro">
-      Upload SKILL.md files and choose which skills to use for the current turn.
-    </p>
+    <p class="modal-intro">Manage the global Skill catalog and choose Skills for this Workspace.</p>
     <SkillUploadForm />
     <ErrorBanner
       v-if="skillStore.error"

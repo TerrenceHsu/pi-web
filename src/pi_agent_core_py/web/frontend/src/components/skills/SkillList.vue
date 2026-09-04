@@ -2,9 +2,13 @@
 import { computed } from "vue"
 
 import { useSkillStore } from "../../stores/skillStore"
+import { useSessionStore } from "../../stores/sessionStore"
+import { useWorkspaceExtensionStore } from "../../stores/workspaceExtensionStore"
 import type { SkillSummary } from "../../types"
 
 const skillStore = useSkillStore()
+const sessionStore = useSessionStore()
+const workspaceExtensionStore = useWorkspaceExtensionStore()
 
 const skills = computed<SkillSummary[]>(() => skillStore.skills)
 const enabledSet = computed(() => new Set(skillStore.enabledSkillNames))
@@ -20,11 +24,30 @@ async function toggleEnabled(s: SkillSummary) {
   } catch {
     // store 已 set error
   }
+  const sessionId = sessionStore.activeSessionId
+  if (sessionId) {
+    try {
+      const result = await workspaceExtensionStore.load(sessionId)
+      skillStore.setSelectedSkillNames(result.selected_skill_names)
+    } catch {
+      // Workspace selector displays its own error.
+    }
+  }
 }
 
-function toggleSelected(s: SkillSummary) {
+async function toggleSelected(s: SkillSummary) {
   if (!enabledSet.value.has(s.name)) return
-  skillStore.toggleSelectedSkill(s.name)
+  const sessionId = sessionStore.activeSessionId
+  if (!sessionId) return
+  try {
+    if (!workspaceExtensionStore.snapshot) {
+      await workspaceExtensionStore.load(sessionId)
+    }
+    const result = await workspaceExtensionStore.toggleSkill(sessionId, s.name)
+    if (result) skillStore.setSelectedSkillNames(result.selected_skill_names)
+  } catch {
+    // Workspace selector displays its own error.
+  }
 }
 </script>
 
@@ -41,41 +64,32 @@ function toggleSelected(s: SkillSummary) {
       <div class="skill-card-main">
         <div class="skill-card-header">
           <span class="skill-name">{{ s.name }}</span>
-          <span
-            class="badge"
-            :class="enabledSet.has(s.name) ? 'badge-on' : 'badge-off'"
-          >{{ s.status }}</span>
+          <span class="badge" :class="enabledSet.has(s.name) ? 'badge-on' : 'badge-off'">{{
+            s.status
+          }}</span>
           <span class="priority">P{{ s.priority }}</span>
         </div>
         <p class="skill-desc">{{ s.description || "(no description)" }}</p>
         <div class="skill-meta">
           <span v-for="tag in s.tags" :key="tag" class="tag">{{ tag }}</span>
-          <span
-            v-if="s.tool_names && s.tool_names.length"
-            class="tool-names"
-          >tools: {{ s.tool_names.join(", ") }}</span>
+          <span v-if="s.tool_names && s.tool_names.length" class="tool-names"
+            >tools: {{ s.tool_names.join(", ") }}</span
+          >
         </div>
       </div>
       <div class="skill-card-actions">
         <label class="switch">
-          <input
-            type="checkbox"
-            :checked="enabledSet.has(s.name)"
-            @change="toggleEnabled(s)"
-          />
+          <input type="checkbox" :checked="enabledSet.has(s.name)" @change="toggleEnabled(s)" />
           <span class="switch-label">Enabled</span>
         </label>
-        <label
-          class="select-box"
-          :class="{ disabled: !enabledSet.has(s.name) }"
-        >
+        <label class="select-box" :class="{ disabled: !enabledSet.has(s.name) }">
           <input
             type="checkbox"
             :disabled="!enabledSet.has(s.name)"
             :checked="selectedSet.has(s.name)"
             @change="toggleSelected(s)"
           />
-          <span class="select-label">Use this turn</span>
+          <span class="select-label">Use in Workspace</span>
         </label>
       </div>
     </div>

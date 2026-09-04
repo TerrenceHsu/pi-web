@@ -55,11 +55,12 @@
 
 ### MCP 与网络搜索
 
-- MCP client 支持 stdio tools/prompts、server 生命周期、工具 enable/disable 和持久化恢复
-- 内置 `ddgs` MCP 随开发工作区固定创建且不可删除
+- MCP client 支持 stdio 与 Streamable HTTP（JSON/SSE）tools/prompts、HTTP Session 续传、server 生命周期、工具 enable/disable 和持久化恢复
+- MCP 与 Skills 均为账号级全局目录；每个 Web Workspace/Session 持久选择自己的可用集合，请求开始时冻结为独立运行时快照
+- 内置 `ddgs` MCP 随开发工作区固定创建且不可删除；全局启用后，新 Workspace 默认选中
 - DDGS 前端可调整返回数、地区、安全搜索、时间范围、后端等参数
 - MCP 子进程强制 `PYTHONIOENCODING=utf-8` / `PYTHONUTF8=1`；非法 UTF-8 作为协议错误拒绝
-- MCP 配置只接受本机 stdio transport；远程 HTTP transport 不属于当前 Web 产品范围
+- HTTP MCP 认证头通过“Header 名 → 服务进程环境变量名”配置，SQLite 只保存引用、不保存 secret value
 
 ### LLM Wiki / Knowledge Agent
 
@@ -326,7 +327,7 @@ FakeClient，不访问真实 Provider。
 - Regenerate 只支持最新 Assistant；没有 revision history UI
 - Session Folder 不解析 PDF 正文；PDF 知识处理必须上传到 Wiki Space
 - Wiki 支持 Docling OCR preset，但不做通用图片理解、向量检索、Multi-Agent、RBAC/OAuth 或公网部署
-- MCP 有意限定为本机 stdio；不接受远程 HTTP transport 配置
+- MCP 支持本机 stdio 与用户配置的 Streamable HTTP endpoint；HTTP 仅作为当前 Web Agent 的扩展 transport，不提供独立远程 Agent 服务
 - 历史数据中已经存在的 `U+FFFD` 无法自动恢复原字符
 - 当前 package baseline 为 `0.0.29`，Python、FastAPI/Auth、前端与 Wiki Parser Worker 版本已统一；Git remote 仍待配置
 

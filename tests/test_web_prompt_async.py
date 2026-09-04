@@ -212,7 +212,7 @@ def test_6_async_prompt_with_file_ids(web_client):
 
 def test_7_async_prompt_with_skill_names(web_client):
     """async 请求带 skill_names 正常合并到 applied_skill_names（§5.8 #7）。"""
-    client, _, _ = web_client
+    client, _, app = web_client
     # 上传一个 skill
     skill_md = (
         b"---\nname: coding_review\ndescription: test skill\n---\n\nbody"
@@ -222,6 +222,12 @@ def test_7_async_prompt_with_skill_names(web_client):
         files={"files": ("SKILL.md", skill_md, "text/markdown")},
     )
     assert upload_resp.status_code == 200
+    session_id = app.state.web.current_session_id
+    selected = client.put(
+        f"/api/workspaces/{session_id}/extensions",
+        json={"mcp_server_names": [], "skill_names": ["coding_review"]},
+    )
+    assert selected.status_code == 200
 
     resp = client.post(
         "/api/prompt/async",

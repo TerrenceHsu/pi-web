@@ -111,6 +111,7 @@ class WebMCPServerConfig(BaseModel):
 
     字段语义（P1-C3 修正）：
         name            server 唯一名
+        transport       stdio 或 Streamable HTTP
         command         stdio 启动命令
         args            命令参数 list[str]
         env             完整环境变量 dict[str, str]——**仅在服务端内存**，
@@ -132,9 +133,16 @@ class WebMCPServerConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     name: str
-    command: str
+    transport: Literal["stdio", "http"] = "stdio"
+    command: str = ""
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
+    url: str | None = None
+    # Runtime values are server-only and are never serialized by the API.
+    headers: dict[str, str] = Field(default_factory=dict)
+    # Persisted indirection: HTTP header name -> environment variable name.
+    header_env: dict[str, str] = Field(default_factory=dict)
+    protocol_version: str | None = None
     enabled: bool = False  # desired_enabled（用户期望）
     attached: bool = False  # runtime 派生（attach 成功 True）
     last_error: str | None = None

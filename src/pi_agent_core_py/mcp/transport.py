@@ -1,8 +1,9 @@
 """MCP 传输层（Step 16 新增）。
 
-三类实现：
+四类实现：
 - `MCPTransport`：抽象基类（connect / send / receive / close）
 - `StdioMCPTransport`：JSON Lines over asyncio subprocess；Step 16 MVP
+- `StreamableHttpMCPTransport`：MCP Streamable HTTP（一问一答 JSON/SSE）
 - `FakeMCPTransport`：测试用，无需起 subprocess
 
 JSON-RPC 2.0 协议：
@@ -19,6 +20,8 @@ import json
 import os
 from collections.abc import Awaitable, Callable
 from typing import Any, Union
+
+import httpx
 
 from .errors import (
     MCPConnectionError,
@@ -220,6 +223,193 @@ class StdioMCPTransport(MCPTransport):
 
 
 # ============================================================================
+# Streamable HTTP transport
+# ============================================================================
+
+
+class StreamableHttpMCPTransport(MCPTransport):
+    """MCP Streamable HTTP transport。
+
+    当前 MCPClient 是严格的一问一答客户端，因此每次 ``send`` 发起一个 POST，
+    并把 JSON 或 SSE 中与该请求对应的 JSON-RPC response 暂存给 ``receive``。
+    transport 会保存初始化响应中的 ``Mcp-Session-Id``，后续请求自动携带；关闭
+    时尽力发送 DELETE 释放服务端 Session。HTTP redirect 默认禁止，避免认证头
+    被转发到另一个 origin。
+    """
+
+    def __init__(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        protocol_version: str = "2025-06-18",
+        timeout_s: float = 30.0,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self._url = url
+        self._headers = dict(headers or {})
+        self._protocol_version = protocol_version
+        self._timeout_s = timeout_s
+        self._client = client
+        self._owns_client = client is None
+        self._connected = False
+        self._closed = False
+        self._session_id: str | None = None
+        self._next_response: dict[str, Any] | None = None
+
+    @property
+    def session_id(self) -> str | None:
+        return self._session_id
+
+    def set_protocol_version(self, version: str) -> None:
+        """Use the version negotiated by the initialize response."""
+        if version:
+            self._protocol_version = version
+
+    async def connect(self) -> None:
+        if self._closed:
+            raise MCPTransportClosedError("StreamableHttpMCPTransport: already closed")
+        if self._connected:
+            return
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                timeout=self._timeout_s,
+                follow_redirects=False,
+            )
+        self._connected = True
+
+    def _request_headers(self, *, initialize: bool = False) -> dict[str, str]:
+        headers = dict(self._headers)
+        headers["Accept"] = "application/json, text/event-stream"
+        headers["Content-Type"] = "application/json"
+        if self._session_id:
+            headers["Mcp-Session-Id"] = self._session_id
+        if not initialize:
+            headers["MCP-Protocol-Version"] = self._protocol_version
+        return headers
+
+    async def send(self, message: dict[str, Any]) -> None:
+        if self._closed or not self._connected or self._client is None:
+            raise MCPTransportClosedError(
+                "StreamableHttpMCPTransport: not connected or closed"
+            )
+        if self._next_response is not None:
+            raise MCPProtocolError(
+                "StreamableHttpMCPTransport: receive previous response before send"
+            )
+        initialize = message.get("method") == "initialize"
+        try:
+            async with self._client.stream(
+                "POST",
+                self._url,
+                headers=self._request_headers(initialize=initialize),
+                json=message,
+            ) as response:
+                if response.status_code < 200 or response.status_code >= 300:
+                    raise MCPConnectionError(
+                        "StreamableHttpMCPTransport: server returned HTTP "
+                        f"{response.status_code}"
+                    )
+                session_id = response.headers.get("Mcp-Session-Id")
+                if session_id:
+                    self._session_id = session_id
+
+                # JSON-RPC notifications have no response body. Streamable HTTP
+                # servers normally acknowledge them with 202 Accepted.
+                if "id" not in message:
+                    await response.aread()
+                    return
+
+                content_type = response.headers.get("content-type", "").lower()
+                if "application/json" in content_type:
+                    await response.aread()
+                    payload = response.json()
+                    if not isinstance(payload, dict):
+                        raise MCPProtocolError(
+                            "StreamableHttpMCPTransport: JSON response must be an object"
+                        )
+                    self._next_response = payload
+                    return
+                if "text/event-stream" in content_type:
+                    self._next_response = await self._read_sse_response(response)
+                    return
+                raise MCPProtocolError(
+                    "StreamableHttpMCPTransport: response content-type must be "
+                    "application/json or text/event-stream"
+                )
+        except httpx.HTTPError as e:
+            raise MCPConnectionError(
+                f"StreamableHttpMCPTransport: POST failed: {e}"
+            ) from e
+        except (ValueError, UnicodeError) as e:
+            raise MCPProtocolError(
+                f"StreamableHttpMCPTransport: invalid response body: {e}"
+            ) from e
+
+    @classmethod
+    async def _read_sse_response(
+        cls, response: httpx.Response
+    ) -> dict[str, Any]:
+        data_lines: list[str] = []
+        async for line in response.aiter_lines():
+            if not line:
+                if data_lines:
+                    candidate = cls._decode_sse_candidate("\n".join(data_lines))
+                    if candidate is not None:
+                        return candidate
+                    data_lines = []
+                continue
+            if line.startswith(":"):
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line[5:].lstrip())
+        if data_lines:
+            candidate = cls._decode_sse_candidate("\n".join(data_lines))
+            if candidate is not None:
+                return candidate
+        raise MCPProtocolError(
+            "StreamableHttpMCPTransport: SSE did not contain a JSON-RPC response"
+        )
+
+    @staticmethod
+    def _decode_sse_candidate(candidate: str) -> dict[str, Any] | None:
+        try:
+            value = json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+        return value if isinstance(value, dict) and "id" in value else None
+
+    async def receive(self) -> dict[str, Any]:
+        if self._closed or not self._connected:
+            raise MCPTransportClosedError(
+                "StreamableHttpMCPTransport: not connected or closed"
+            )
+        if self._next_response is None:
+            raise MCPProtocolError("StreamableHttpMCPTransport: no response available")
+        response = self._next_response
+        self._next_response = None
+        return response
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        client = self._client
+        if client is not None and self._connected and self._session_id:
+            try:
+                await client.delete(
+                    self._url,
+                    headers=self._request_headers(),
+                )
+            except httpx.HTTPError:
+                pass
+        self._connected = False
+        if client is not None and self._owns_client:
+            await client.aclose()
+        self._client = None
+
+
+# ============================================================================
 # Fake transport：测试用
 # ============================================================================
 
@@ -314,6 +504,7 @@ class FakeMCPTransport(MCPTransport):
 __all__ = [
     "MCPTransport",
     "StdioMCPTransport",
+    "StreamableHttpMCPTransport",
     "FakeMCPTransport",
     "FakeHandler",
 ]

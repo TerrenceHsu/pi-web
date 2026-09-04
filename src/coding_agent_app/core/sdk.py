@@ -4,6 +4,8 @@ from .application import CodingAgentApplication, create_coding_agent_application
 from .harness_template import clone_agent_harness
 from .resources import (
     CodingAgentResourceLoader,
+    CodingAgentResourceSelection,
+    CodingAgentResourceSelectionLoader,
     CodingAgentResourceSnapshot,
     HarnessCodingAgentResourceLoader,
     ResourceDiagnostic,
@@ -44,6 +46,8 @@ __all__ = [
     "CodingAgentRequestBinding",
     "CodingAgentRequestComposition",
     "CodingAgentResourceLoader",
+    "CodingAgentResourceSelection",
+    "CodingAgentResourceSelectionLoader",
     "CodingAgentResourceSnapshot",
     "CodingAgentRuntime",
     "CodingAgentProviderRuntime",

@@ -69,6 +69,7 @@ from agent_workspace.continuity import (
 )
 from coding_agent_app.core import (
     CodingAgentMode,
+    CodingAgentResourceSelection,
     CodingAgentResourceSnapshot,
     CodingAgentRuntime,
     CodingAgentSession,
@@ -469,11 +470,49 @@ def create_app(
         "pi_agent_web_telemetry_stats",
         default=None,
     )
+
+    async def _load_workspace_resource_selection(
+        session_id: str,
+    ) -> CodingAgentResourceSelection | None:
+        """Resolve one Session's choices from the account-global catalogs."""
+
+        ext_store = state.extension_store
+        if ext_store is None:
+            return None
+        persisted = await ext_store.get_workspace_extension_selection(session_id)
+        if persisted.configured:
+            mcp_names = set(persisted.mcp_server_names)
+            skill_names = set(persisted.skill_names)
+        else:
+            # DDGS is the safe built-in default. User-added MCP servers and Skills
+            # require an explicit Workspace choice.
+            mcp_names = {"ddgs"} if enable_builtin_ddgs else set()
+            skill_names = set()
+        mcp_names = {
+            name
+            for name in mcp_names
+            if (cfg := state.mcp_server_configs.get(name)) is not None and cfg.enabled
+        }
+        registry = harness.skill_registry
+        if registry is None:
+            skill_names = set()
+        else:
+            enabled_skill_names = {
+                skill.name for skill in registry.list() if skill.status == "enabled"
+            }
+            skill_names.intersection_update(enabled_skill_names)
+        return CodingAgentResourceSelection(
+            skill_names=frozenset(skill_names),
+            mcp_server_names=frozenset(mcp_names),
+        )
     # The configured Harness is the product template and owns shared extension
     # transports.  CodingAgentRuntime maps every durable Web Session ID to an
     # independent Agent/Harness state machine.
     coding_agent_services = create_coding_agent_services(
-        resources=HarnessCodingAgentResourceLoader(harness),
+        resources=HarnessCodingAgentResourceLoader(
+            harness,
+            selection_loader=_load_workspace_resource_selection,
+        ),
     )
     coding_agent_runtime = CodingAgentRuntime(
         services=coding_agent_services,
@@ -1923,6 +1962,35 @@ def create_app(
                 missing.append(key)
         return resolved, missing
 
+    def _resolve_mcp_headers(
+        header_env: dict[str, str],
+    ) -> tuple[dict[str, str], list[str]]:
+        """Resolve HTTP header values from environment-variable references."""
+        import os
+
+        resolved: dict[str, str] = {}
+        missing: list[str] = []
+        for header_name, env_key in header_env.items():
+            value = os.environ.get(env_key)
+            if value is None:
+                missing.append(env_key)
+            else:
+                resolved[header_name] = value
+        return resolved, sorted(set(missing))
+
+    def _refresh_mcp_secret_references(cfg: WebMCPServerConfig) -> None:
+        """Re-read persisted environment references before an attach attempt."""
+        header_env_keys = set(cfg.header_env.values())
+        # Preserve stdio values submitted in this process. Only unresolved
+        # persisted references need another environment lookup.
+        env_keys = sorted(set(cfg.missing_env_keys).difference(header_env_keys))
+        newly_resolved_env, missing_env = _resolve_mcp_env(env_keys)
+        cfg.env.update(newly_resolved_env)
+        cfg.headers, missing_headers = _resolve_mcp_headers(cfg.header_env)
+        cfg.missing_env_keys = sorted(set([*missing_env, *missing_headers]))
+        if cfg.missing_env_keys:
+            cfg.restore_status = "needs_env"
+
     def _safe_extension_error(
         exc: BaseException,
         secret_values: list[str] | None = None,
@@ -2016,7 +2084,6 @@ def create_app(
         """
         import json as _json
 
-        from ..mcp import MCPServerConfig
         from .extension_store import ExtensionSQLiteStore
 
         rows = await ext_store.list_mcp_server_rows()
@@ -2030,22 +2097,40 @@ def create_app(
 
             persisted = result.server
 
-            # decode args / env_keys
+            # decode args / env/header references
             try:
                 args = _json.loads(persisted.args_json)
                 env_keys = _json.loads(persisted.env_keys_json)
+                header_env = _json.loads(persisted.header_env_json)
             except _json.JSONDecodeError as e:
                 await ext_store.set_mcp_restore_error(
                     name, f"json decode failed: {type(e).__name__}"
                 )
                 continue
+            if (
+                not isinstance(args, list)
+                or not all(isinstance(item, str) for item in args)
+                or not isinstance(env_keys, list)
+                or not all(isinstance(item, str) for item in env_keys)
+                or not isinstance(header_env, dict)
+                or not all(
+                    isinstance(key, str) and isinstance(value, str)
+                    for key, value in header_env.items()
+                )
+            ):
+                await ext_store.set_mcp_restore_error(name, "invalid persisted MCP config")
+                continue
 
             # 写入 runtime config（env 暂空——从 os.environ 解析后填入）
             cfg = WebMCPServerConfig(
                 name=name,
+                transport=persisted.transport,
                 command=persisted.command,
                 args=args,
                 env={},
+                url=persisted.url,
+                header_env=header_env,
+                protocol_version=persisted.protocol_version,
                 enabled=persisted.desired_enabled,
                 attached=False,
                 last_error=None,
@@ -2060,7 +2145,9 @@ def create_app(
                 continue
 
             # desired_enabled=true → resolve env
-            resolved_env, missing = _resolve_mcp_env(env_keys)
+            resolved_env, missing_env = _resolve_mcp_env(env_keys)
+            resolved_headers, missing_headers = _resolve_mcp_headers(header_env)
+            missing = sorted(set([*missing_env, *missing_headers]))
             if missing:
                 # missing env → 不 attach；结构化记录 key name（不含 value）
                 cfg.restore_status = "needs_env"
@@ -2070,19 +2157,17 @@ def create_app(
                 continue
 
             cfg.env = resolved_env
+            cfg.headers = resolved_headers
 
             # auto attach with timeout
             try:
-                mcp_cfg = MCPServerConfig(
-                    name=name,
-                    transport=persisted.transport,
-                    command=persisted.command,
-                    args=args,
-                    env=resolved_env,
-                    timeout_s=_mcp_request_timeout(cfg),
-                )
+                attach_configs = [
+                    _to_mcp_server_config(candidate)
+                    for candidate in state.mcp_server_configs.values()
+                    if candidate.enabled and not candidate.missing_env_keys
+                ]
                 await asyncio.wait_for(
-                    harness.attach_mcp_servers([mcp_cfg]),
+                    harness.attach_mcp_servers(attach_configs),
                     timeout=10.0,
                 )
                 # 检查 attach 是否真的成功——harness.attach_mcp_servers 可能不抛
@@ -2123,7 +2208,10 @@ def create_app(
                 await ext_store.set_mcp_restore_error(name, "restore timeout")
             except Exception as e:
                 cfg.attached = False
-                cfg.last_error = _safe_extension_error(e, list(resolved_env.values()))
+                cfg.last_error = _safe_extension_error(
+                    e,
+                    [*resolved_env.values(), *resolved_headers.values()],
+                )
                 await ext_store.set_mcp_restore_error(name, cfg.last_error)
 
     # ========================================================================
@@ -4173,11 +4261,10 @@ def create_app(
             except Exception:
                 snapshot_payload = None
 
-        applied_skill_names: list[str] = (
-            list(validated.skill_selection.names)
-            if (validated.skill_selection is not None and validated.skill_selection.names)
-            else []
-        )
+        # The Workspace resource snapshot is the request default when callers
+        # omit an explicit SkillSelection.  Report what the Harness actually
+        # rendered, rather than only echoing explicit request parameters.
+        applied_skill_names = list(request_harness.context.selected_skills)
 
         attachment_meta = _build_attachment_meta(validated.attached_summary)
 
@@ -4228,10 +4315,8 @@ def create_app(
                 if not session_persisted and validated.original_messages is not None:
                     request_harness.agent.state.messages = validated.original_messages
 
-        applied_skill_names: list[str] = (
-            list(validated.skill_selection.names)
-            if (validated.skill_selection is not None and validated.skill_selection.names)
-            else []
+        applied_skill_names = list(
+            (execution.result_summary or {}).get("applied_skill_names", [])
         )
         attachment_meta = _build_attachment_meta(validated.attached_summary)
 
@@ -4311,10 +4396,8 @@ def create_app(
                 snapshot_error = f"snapshot: {type(e).__name__}: {e}"
                 state.last_error = snapshot_error
 
-        applied_skill_names: list[str] = (
-            list(validated.skill_selection.names)
-            if (validated.skill_selection is not None and validated.skill_selection.names)
-            else []
+        applied_skill_names = list(
+            (execution.result_summary or {}).get("applied_skill_names", [])
         )
         attachment_meta = _build_attachment_meta(validated.attached_summary)
 
@@ -6139,6 +6222,14 @@ def create_app(
                     status_code=404,
                     content={"detail": f"session {sid!r} not found"},
                 )
+            if state.extension_store is not None:
+                try:
+                    await state.extension_store.delete_workspace_extension_selection(sid)
+                except Exception as e:
+                    state.last_error = (
+                        "delete_workspace_extension_selection failed: "
+                        f"{type(e).__name__}"
+                    )
             await _remove_coding_agent_session(sid)
             wiki_store = state.wiki_store
             if wiki_store is not None:
@@ -7425,8 +7516,12 @@ def create_app(
         """
         return {
             "name": cfg.name,
+            "transport": getattr(cfg, "transport", "stdio"),
             "command": cfg.command,
             "args": list(cfg.args or []),
+            "url": getattr(cfg, "url", None),
+            "header_env": dict(getattr(cfg, "header_env", {}) or {}),
+            "protocol_version": getattr(cfg, "protocol_version", None),
             "enabled": cfg.enabled,  # 兼容 = desired_enabled
             "desired_enabled": cfg.enabled,  # P1-C3 显式字段
             "attached": getattr(cfg, "attached", False),  # P1-C3 runtime 派生
@@ -7483,9 +7578,23 @@ def create_app(
                 f"name must match [A-Za-z0-9_-]+ (got {name!r})",
             )
 
-        command = (payload or {}).get("command")
-        if not isinstance(command, str) or not command.strip():
-            return None, "command is required (non-empty string)"
+        transport = (payload or {}).get("transport", "stdio")
+        if transport not in {"stdio", "http"}:
+            return None, "transport must be 'stdio' or 'http'"
+
+        command = (payload or {}).get("command") or ""
+        if transport == "stdio" and (
+            not isinstance(command, str) or not command.strip()
+        ):
+            return None, "command is required for stdio transport"
+        if not isinstance(command, str):
+            return None, "command must be a string"
+
+        url = (payload or {}).get("url")
+        if transport == "http" and (not isinstance(url, str) or not url.strip()):
+            return None, "url is required for http transport"
+        if url is not None and not isinstance(url, str):
+            return None, "url must be a string"
 
         args_raw = (payload or {}).get("args") or []
         if not isinstance(args_raw, list):
@@ -7503,15 +7612,55 @@ def create_app(
             if not isinstance(v, str):
                 return None, f"env[{k!r}] must be string (got {type(v).__name__})"
 
+        header_env_raw = (payload or {}).get("header_env") or {}
+        if not isinstance(header_env_raw, dict):
+            return None, "header_env must be a dict[str, str]"
+        for key, value in header_env_raw.items():
+            if not isinstance(key, str) or not key.strip():
+                return None, "header_env keys must be non-empty header names"
+            if key.lower() in {
+                "accept",
+                "content-type",
+                "mcp-session-id",
+                "mcp-protocol-version",
+            }:
+                return None, f"header_env contains reserved transport header {key!r}"
+            if not isinstance(value, str) or not value.strip():
+                return None, "header_env values must be environment variable names"
+
+        protocol_version = (payload or {}).get("protocol_version")
+        if protocol_version is not None and (
+            not isinstance(protocol_version, str) or not protocol_version.strip()
+        ):
+            return None, "protocol_version must be a non-empty string"
+
         enabled = bool((payload or {}).get("enabled", False))
 
-        cfg = WebMCPServerConfig(
-            name=name,
-            command=command.strip(),
-            args=list(args_raw),
-            env=dict(env_raw),
-            enabled=enabled,
+        resolved_headers, missing_header_keys = _resolve_mcp_headers(
+            dict(header_env_raw)
         )
+        try:
+            cfg = WebMCPServerConfig(
+                name=name,
+                transport=transport,
+                command=command.strip(),
+                args=list(args_raw),
+                env=dict(env_raw),
+                url=url.strip() if isinstance(url, str) else None,
+                headers=resolved_headers,
+                header_env=dict(header_env_raw),
+                protocol_version=(
+                    protocol_version.strip()
+                    if isinstance(protocol_version, str)
+                    else None
+                ),
+                enabled=enabled,
+                missing_env_keys=missing_header_keys,
+                restore_status="needs_env" if missing_header_keys else "not_requested",
+            )
+            _to_mcp_server_config(cfg)
+        except Exception as exc:
+            return None, str(exc)
         return cfg, None
 
     def _to_mcp_server_config(cfg: WebMCPServerConfig) -> Any:
@@ -7523,14 +7672,145 @@ def create_app(
 
         return MCPServerConfig(
             name=cfg.name,
-            transport="stdio",
+            transport=cfg.transport,
             command=cfg.command,
             args=list(cfg.args),
             env=dict(cfg.env),
+            url=cfg.url,
+            headers=dict(cfg.headers),
+            protocol_version=cfg.protocol_version,
             timeout_s=_mcp_request_timeout(cfg),
             enabled=True,  # attach 时只传 enabled=True 的；MCPServerConfig.enabled
             # 本身不影响 attach 行为，attach_mcp_servers 用的是 configs list
         )
+
+    async def _require_workspace_session(session_id: str) -> None:
+        if state.session_store is None:
+            raise HTTPException(status_code=503, detail="session store not initialized")
+        from ..session_backends.sqlite import SessionNotFoundError
+
+        try:
+            await state.session_store.get_session(session_id)
+        except SessionNotFoundError:
+            raise HTTPException(
+                status_code=404, detail="workspace session not found"
+            ) from None
+
+    async def _workspace_extensions_payload(session_id: str) -> dict[str, Any]:
+        await _require_workspace_session(session_id)
+        if state.extension_store is None:
+            raise HTTPException(status_code=503, detail="extension store not initialized")
+        selection = await state.extension_store.get_workspace_extension_selection(
+            session_id
+        )
+        if selection.configured:
+            selected_mcp = set(selection.mcp_server_names)
+            selected_skills = set(selection.skill_names)
+        else:
+            selected_mcp = {"ddgs"} if enable_builtin_ddgs else set()
+            selected_skills = set()
+
+        registry = harness.skill_registry
+        skill_items = [] if registry is None else registry.list()
+        selected_mcp.intersection_update(
+            {
+                cfg.name
+                for cfg in state.mcp_server_configs.values()
+                if cfg.enabled and cfg.attached
+            }
+        )
+        selected_skills.intersection_update(
+            {skill.name for skill in skill_items if skill.status == "enabled"}
+        )
+        return {
+            "session_id": session_id,
+            "configured": selection.configured,
+            "mcp_servers": [
+                {
+                    **_serialize_mcp_server(cfg),
+                    "available": bool(cfg.enabled and cfg.attached),
+                    "selected": cfg.name in selected_mcp,
+                }
+                for cfg in state.mcp_server_configs.values()
+            ],
+            "skills": [
+                {
+                    **serialize_skill(skill, include_prompt=False),
+                    "available": skill.status == "enabled",
+                    "selected": skill.name in selected_skills,
+                }
+                for skill in skill_items
+            ],
+            "selected_mcp_server_names": sorted(selected_mcp),
+            "selected_skill_names": sorted(selected_skills),
+        }
+
+    @app.get("/api/workspaces/{session_id}/extensions", response_model=None)
+    async def get_workspace_extensions(session_id: str) -> dict[str, Any]:
+        """List the global MCP/Skill catalogs and this Workspace's choices."""
+
+        return await _workspace_extensions_payload(session_id)
+
+    @app.put("/api/workspaces/{session_id}/extensions", response_model=None)
+    async def put_workspace_extensions(
+        session_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Atomically replace one Workspace's MCP and Skill selection."""
+
+        await _require_workspace_session(session_id)
+        if state.extension_store is None:
+            raise HTTPException(status_code=503, detail="extension store not initialized")
+        raw_mcp = (payload or {}).get("mcp_server_names", [])
+        raw_skills = (payload or {}).get("skill_names", [])
+        if not isinstance(raw_mcp, list) or not all(
+            isinstance(value, str) and value for value in raw_mcp
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="mcp_server_names must be a list of non-empty strings",
+            )
+        if not isinstance(raw_skills, list) or not all(
+            isinstance(value, str) and value for value in raw_skills
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="skill_names must be a list of non-empty strings",
+            )
+        if len(raw_mcp) > 100 or len(raw_skills) > 100:
+            raise HTTPException(status_code=413, detail="too many extension selections")
+
+        invalid_mcp = sorted(
+            {
+                name
+                for name in raw_mcp
+                if (cfg := state.mcp_server_configs.get(name)) is None
+                or not cfg.enabled
+                or not cfg.attached
+            }
+        )
+        registry = harness.skill_registry
+        enabled_skills = (
+            set()
+            if registry is None
+            else {skill.name for skill in registry.list() if skill.status == "enabled"}
+        )
+        invalid_skills = sorted({name for name in raw_skills if name not in enabled_skills})
+        if invalid_mcp or invalid_skills:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "selection contains unavailable extensions",
+                    "mcp_server_names": invalid_mcp,
+                    "skill_names": invalid_skills,
+                },
+            )
+        await state.extension_store.replace_workspace_extension_selection(
+            session_id,
+            mcp_server_names=list(raw_mcp),
+            skill_names=list(raw_skills),
+        )
+        return await _workspace_extensions_payload(session_id)
 
     async def _refresh_enabled_mcp_servers() -> None:
         """从 state.mcp_server_configs 取 enabled=True 的 configs，重 attach。
@@ -7543,7 +7823,11 @@ def create_app(
 
         约束：本函数只在 web 层操作；不动 harness 内部状态。
         """
-        enabled_cfgs = [cfg for cfg in state.mcp_server_configs.values() if cfg.enabled]
+        enabled_cfgs = [
+            cfg
+            for cfg in state.mcp_server_configs.values()
+            if cfg.enabled and not cfg.missing_env_keys
+        ]
         if not enabled_cfgs:
             # 没有 enabled server：detach 所有
             try:
@@ -7570,9 +7854,13 @@ def create_app(
             if st is None:
                 cfg.last_error = "missing from mcp_registry after attach"
                 cfg.tool_count = 0
+                cfg.attached = False
+                cfg.restore_status = "error"
             else:
                 cfg.tool_count = st.tool_count
                 cfg.last_error = st.last_error
+                cfg.attached = st.last_error is None
+                cfg.restore_status = "attached" if cfg.attached else "error"
 
         # 关键：重新应用 disabled_mcp_tools 过滤——attach 之后所有工具都被注册到
         # agent.tools；这里把用户 disabled 的工具 unregister 掉
@@ -7645,11 +7933,14 @@ def create_app(
                 try:
                     await state.extension_store.upsert_mcp_server(
                         name=cfg.name,
-                        transport="stdio",
+                        transport=cfg.transport,
                         command=cfg.command,
                         args=cfg.args,
                         desired_enabled=cfg.enabled,
                         env_keys=list(cfg.env.keys()),
+                        url=cfg.url,
+                        header_env=cfg.header_env,
+                        protocol_version=cfg.protocol_version,
                     )
                 except ExtensionStoreError:
                     # DB 失败 → 移除 runtime config
@@ -7661,10 +7952,10 @@ def create_app(
 
             # enabled=True → attach（独立流程，不影响 add + DB 已完成）
             attach_error: str | None = None
-            if cfg.enabled:
+            if cfg.enabled and not cfg.missing_env_keys:
                 try:
                     await _refresh_enabled_mcp_servers()
-                    cfg.attached = True
+                    cfg.attached = cfg.last_error is None
                 except Exception as e:
                     attach_error = f"{type(e).__name__}: {e}"
                     cfg.last_error = attach_error
@@ -7771,7 +8062,19 @@ def create_app(
                 content={"detail": f"MCP server {name!r} not found"},
             )
 
-        mcp_cfg = _to_mcp_server_config(cfg)
+        probe_cfg = cfg.model_copy(deep=True)
+        _refresh_mcp_secret_references(probe_cfg)
+        if probe_cfg.missing_env_keys:
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "ok": False,
+                    "server": name,
+                    "error": "MCP credentials are unavailable",
+                    "missing_env_keys": probe_cfg.missing_env_keys,
+                },
+            )
+        mcp_cfg = _to_mcp_server_config(probe_cfg)
         client = MCPClient(mcp_cfg)
         try:
             await client.connect()
@@ -7784,7 +8087,10 @@ def create_app(
                 content={
                     "ok": False,
                     "server": name,
-                    "error": f"{type(e).__name__}: {e}",
+                    "error": _safe_extension_error(
+                        e,
+                        [*probe_cfg.env.values(), *probe_cfg.headers.values()],
+                    ),
                 },
             )
         finally:
@@ -7840,6 +8146,14 @@ def create_app(
                         status_code=500,
                         content={"ok": False, "error": "persist failed; runtime rolled back"},
                     )
+
+            _refresh_mcp_secret_references(cfg)
+            if cfg.missing_env_keys:
+                cfg.attached = False
+                return JSONResponse(
+                    status_code=502,
+                    content=_serialize_mcp_server(cfg),
+                )
 
             # attach
             try:

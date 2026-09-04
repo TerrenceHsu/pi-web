@@ -1,8 +1,8 @@
-// Skill Store —— 管理 skill 列表 + enable/disable + 本轮 selected。
+// Skill Store —— 管理全局 Skill 列表、enable/disable 与当前 Workspace 选择。
 //
 // 重要区分：
 //   - enabled: 全局启用状态（POST /api/skills/{name}/enable / disable）
-//   - selectedSkillNames: 本轮发送 prompt 时选中的 skill names（局部 UI 状态）
+//   - selectedSkillNames: 当前 Workspace 持久化选择的 skill names（UI 镜像）
 //   - 二者独立：selected 必须是 enabled 的子集才能实际生效
 
 import { defineStore } from "pinia"
@@ -42,10 +42,7 @@ export const useSkillStore = defineStore("skills", () => {
       const resp = await skillsApi.uploadSkill(file)
       // 后端返回的是本次上传成功的 skill；merge 进 list
       const newNames = new Set(resp.skills.map((s) => s.name))
-      skills.value = [
-        ...resp.skills,
-        ...skills.value.filter((s) => !newNames.has(s.name)),
-      ]
+      skills.value = [...resp.skills, ...skills.value.filter((s) => !newNames.has(s.name))]
       return resp
     } catch (e: any) {
       error.value = e instanceof ApiError ? e.detail : String(e?.message ?? e)
@@ -77,9 +74,7 @@ export const useSkillStore = defineStore("skills", () => {
         skills.value[idx] = { ...skills.value[idx], status: resp.status }
       }
       // 同步从 selected 中移除——disabled 的 skill 不应被选中
-      selectedSkillNames.value = selectedSkillNames.value.filter(
-        (n) => n !== name,
-      )
+      selectedSkillNames.value = selectedSkillNames.value.filter((n) => n !== name)
       return resp
     } catch (e: any) {
       error.value = e instanceof ApiError ? e.detail : String(e?.message ?? e)
