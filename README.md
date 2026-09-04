@@ -65,7 +65,7 @@
 ### LLM Wiki / Knowledge Agent
 
 - 每个账号可创建多个 Wiki Space；每个 Space 支持 PDF、单文件 HTML Source 与多个独立对话
-- 原件不可变且对 Agent 只读；HTML 零网络解析，PDF 由外部 OCI Worker 执行 PyMuPDF4LLM fast、Docling accurate/auto fallback
+- 原件不可变且对 Agent 只读；HTML 零网络解析，PDF 由外部 OCI Worker 执行 MinerU 3.4.5，支持 `pipeline`、`gpu-medium`、`gpu-high`
 - Agent Summary 先生成入口页和主题页 Proposal；所有页面/关系修改进入一个 Change Set，用户批准后才原子发布
 - 只对 active/current/approved 页面使用 SQLite FTS5/BM25；知识图谱包含五种页面关系和系统维护的 `derived_from`
 - `/knowledge` 提供 Pages、Sources、Graph、Changes、Conversations 五个视图；Knowledge Agent 使用独立 Prompt/Skill 与工具白名单
@@ -82,7 +82,7 @@ Session 文件和 Wiki Source/Page 用途不同：
 | 输入 | 任意受配额文件 | PDF、单文件 HTML |
 | Agent 读取 | 文本/Markdown/HTML/CSV/Parquet；PDF 仅元信息 | 受限工具读取 Raw artifact 与已批准页面/FTS/图谱 |
 | 持久化 | `uploads/{session_id}/` + workspace metadata | `knowledge/wiki.db` + `knowledge/spaces/` |
-| 图片/OCR | 不支持 | PDF 内嵌图片；扫描件走 Docling OCR preset |
+| 图片/OCR | 不支持 | MinerU 提取 PDF 图片；扫描件和富版面按所选 MinerU 档位处理 |
 
 `AGENT.md` 是当前 Session 的行为指令；`Memory.md` 是当前 Session 的对话摘要。两者都不是跨 Session 用户画像，也不能覆盖平台安全规则。
 
@@ -95,7 +95,7 @@ Session 文件和 Wiki Source/Page 用途不同：
 | Web 后端 | FastAPI、uvicorn、WebSocket/SSE |
 | Web 前端 | Vue 3、Pinia、Vite、TypeScript |
 | 持久化 | aiosqlite、OS Keyring、受管文件目录 |
-| LLM Wiki | SQLite FTS5/BM25；外部 PyMuPDF4LLM + Docling OCI Worker |
+| LLM Wiki | SQLite FTS5/BM25；外部 MinerU OCI Worker |
 | MCP 搜索 | ddgs 9.x，stdio JSON-RPC |
 | 测试 | pytest/pytest-asyncio、Vitest、Playwright |
 
@@ -326,7 +326,7 @@ FakeClient，不访问真实 Provider。
 - Context estimator 不是 Provider 官方 tokenizer；compaction 默认手动、规则式
 - Regenerate 只支持最新 Assistant；没有 revision history UI
 - Session Folder 不解析 PDF 正文；PDF 知识处理必须上传到 Wiki Space
-- Wiki 支持 Docling OCR preset，但不做通用图片理解、向量检索、Multi-Agent、RBAC/OAuth 或公网部署
+- Wiki 的 `gpu-high` 档位启用 MinerU 图片/图表分析，但不做向量检索、Multi-Agent、RBAC/OAuth 或公网部署
 - MCP 支持本机 stdio 与用户配置的 Streamable HTTP endpoint；HTTP 仅作为当前 Web Agent 的扩展 transport，不提供独立远程 Agent 服务
 - 历史数据中已经存在的 `U+FFFD` 无法自动恢复原字符
 - 当前 package baseline 为 `0.0.29`，Python、FastAPI/Auth、前端与 Wiki Parser Worker 版本已统一；Git remote 仍待配置
@@ -374,9 +374,8 @@ FakeClient，不访问真实 Provider。
 
 主项目采用 MIT License，完整条款见 [`LICENSE`](LICENSE)，Python wheel 也携带同一许可证文件。
 
-LLM Wiki PDF Parser Worker 是独立组件，位于
-[`workers/wiki_parser_worker`](workers/wiki_parser_worker)，采用 `AGPL-3.0-only`，不属于主项目
-MIT 授权范围。Worker Source Offer 包含完整 AGPL 文本、notices、adapter/构建源码、锁、
-Corresponding Source manifest 与 SPDX SBOM；具体 PyMuPDF4LLM、Docling、OCR 和模型只由
-hash-locked OCI 构建物化，不装入主应用。2026-08-26 的断网镜像、隔离和代表性 PDF Gate 已通过，
-当前 manifest 为 `runtime_ready=true`。登录后的侧栏 **About & Source** 可查看许可证并下载同版本源码归档。
+LLM Wiki PDF Parser Worker 位于 [`workers/wiki_parser_worker`](workers/wiki_parser_worker)，自身采用
+MIT，并通过独立 OCI 环境使用 MinerU 3.4.5。Source archive 包含 notices、MinerU 许可提示、
+adapter/构建源码、完整依赖锁、manifest 与 SPDX SBOM；MinerU、Torch 和模型不会装入主应用。
+新 MinerU 镜像尚未完成真实 CPU/GPU/断网语料 Gate，因此 manifest 保持
+`runtime_ready=false`。登录后的侧栏 **About & Source** 可查看许可和下载同版本源码归档。

@@ -93,7 +93,7 @@ class WikiParseQueuedResponse(BaseModel):
 class WikiParseRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    parse_mode: Literal["auto", "fast", "accurate"] = "auto"
+    parse_mode: Literal["pipeline", "gpu-medium", "gpu-high"] = "pipeline"
 
 
 class WikiChangeSetResponse(BaseModel):
@@ -452,7 +452,10 @@ def build_wiki_router(config: WebSecurityConfig) -> APIRouter:
         file: Annotated[UploadFile, File(...)],
         service: Annotated[WikiIngestionService, Depends(_get_ingestion)],
         worker: Annotated[WikiIngestionWorkerManager, Depends(_get_worker)],
-        parse_mode: Annotated[Literal["auto", "fast", "accurate"] | None, Form()] = None,
+        parse_mode: Annotated[
+            Literal["pipeline", "gpu-medium", "gpu-high"] | None,
+            Form(),
+        ] = None,
     ) -> WikiSourceUploadResponse:
         filename = file.filename or ""
         try:

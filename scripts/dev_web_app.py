@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import sys
 from collections.abc import AsyncIterator
@@ -92,6 +94,10 @@ def main() -> None:
 
     from pi_agent_core_py.web.app import create_app
     from pi_agent_core_py.web.auth import AuthUser, create_authenticated_app
+    from wiki_parser import (
+        ParserRoutingConfigIdentity,
+        PersistentOciParserProvider,
+    )
 
     port = int(os.environ.get("PORT", "8000"))
     host = os.environ.get("HOST", "127.0.0.1")
@@ -108,6 +114,32 @@ def main() -> None:
     auth_db_path = data_root / "auth.sqlite"
     user_data_root = data_root / "users"
     telemetry_db_path = data_root / "telemetry.sqlite"
+    parser_worker_root = REPO_ROOT / "workers" / "wiki_parser_worker"
+    parser_config = json.loads(
+        (parser_worker_root / "config" / "routing-quality-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    parser_config_sha256 = hashlib.sha256(
+        json.dumps(
+            parser_config,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    parser_provider = PersistentOciParserProvider(
+        exchange_root=Path(
+            os.environ.get(
+                "PI_AGENT_WIKI_PARSER_EXCHANGE_DIR",
+                str(data_root / "wiki-parser-exchange"),
+            )
+        ).resolve(),
+        routing_config=ParserRoutingConfigIdentity(
+            revision=parser_config["revision"],
+            sha256=parser_config_sha256,
+        ),
+    )
 
     default_origins = "http://localhost:5173 http://127.0.0.1:5173"
     extra_origins_env = os.environ.get("EXTRA_UI_ORIGINS", default_origins)
@@ -130,9 +162,8 @@ def main() -> None:
             telemetry_account_name=user.name,
             uploads_dir=str(workspace_root / "uploads"),
             wiki_root=str(workspace_root / "knowledge"),
-            wiki_parser_worker_source_root=REPO_ROOT
-            / "workers"
-            / "wiki_parser_worker",
+            wiki_pdf_provider_v2=parser_provider,
+            wiki_parser_worker_source_root=parser_worker_root,
             allow_prompt_preview=True,
             enable_trusted_host=True,
             credential_extra_ui_origins=extra_ui_origins,

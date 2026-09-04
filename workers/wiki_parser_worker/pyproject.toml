@@ -13,19 +13,7 @@ pi-wiki-parser-worker = "wiki_parser_worker.cli:main"
 
 [project.optional-dependencies]
 runtime = [
-    "docling-core==2.92.0",
-    "docling-ibm-models==3.13.2",
-    "docling-parse==7.15.0",
-    "docling-slim[convert-core,feat-ocr-rapidocr-onnx,format-pdf-docling,models-local]==2.119.0",
-    "onnxruntime==1.29.0",
-    "pymupdf==1.28.2",
-    "pymupdf-layout==1.28.2",
-    "pymupdf4llm==1.28.2",
-    "pypdfium2==5.13.0",
-    "rapidocr==3.9.2",
-    "torch==2.13.0+cpu",
-    "torchvision==0.28.0+cpu",
-    "transformers==5.15.1",
+    "mineru[core]==3.4.5",
 ]
 
 [build-system]
@@ -37,6 +25,7 @@ packages = ["src/wiki_parser_worker"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "LICENSE" = "wiki_parser_worker/compliance_assets/LICENSE"
+"MINERU_LICENSE.md" = "wiki_parser_worker/compliance_assets/MINERU_LICENSE.md"
 "NOTICE.md" = "wiki_parser_worker/compliance_assets/NOTICE.md"
 "SOURCE_OFFER.md" = "wiki_parser_worker/compliance_assets/SOURCE_OFFER.md"
 "component-manifest.json" = "wiki_parser_worker/compliance_assets/component-manifest.json"
@@ -54,12 +43,3 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-[tool.uv.sources]
-torch = { index = "pytorch-cpu" }
-torchvision = { index = "pytorch-cpu" }

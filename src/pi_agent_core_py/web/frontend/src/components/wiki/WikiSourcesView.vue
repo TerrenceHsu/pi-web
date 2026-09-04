@@ -6,7 +6,7 @@ import type { WikiParseMode, WikiSource } from "../../types/wiki"
 
 const wikiStore = useWikiStore()
 const fileInput = ref<HTMLInputElement | null>(null)
-const parseMode = ref<Exclude<WikiParseMode, "builtin">>("auto")
+const parseMode = ref<Exclude<WikiParseMode, "builtin">>("pipeline")
 
 const selectedRevision = computed(() =>
   wikiStore.parseRevisions.find(
@@ -81,10 +81,10 @@ const workflowLabel = computed(() => {
           accept=".pdf,.html,application/pdf,text/html"
           :disabled="wikiStore.mutating"
         />
-        <select v-model="parseMode" aria-label="PDF parse mode" :disabled="wikiStore.mutating">
-          <option value="auto">Auto</option>
-          <option value="fast">Fast</option>
-          <option value="accurate">Accurate</option>
+        <select v-model="parseMode" aria-label="MinerU profile" :disabled="wikiStore.mutating">
+          <option value="pipeline">MinerU pipeline (CPU/GPU)</option>
+          <option value="gpu-medium">MinerU GPU · medium</option>
+          <option value="gpu-high">MinerU GPU · high</option>
         </select>
         <button
           type="button"
@@ -262,7 +262,7 @@ const workflowLabel = computed(() => {
 }
 .upload-card {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 100px auto;
+  grid-template-columns: minmax(0, 1fr) 210px auto;
   gap: 8px;
   align-items: center;
   margin-bottom: 14px;

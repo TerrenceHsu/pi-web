@@ -1,7 +1,7 @@
 """Persistent parser child process controlled by the OCI queue supervisor.
 
 Copyright (C) 2026 Pi Python Port
-SPDX-License-Identifier: AGPL-3.0-only
+SPDX-License-Identifier: MIT
 """
 
 from __future__ import annotations

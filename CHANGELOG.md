@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### MinerU-only Wiki parsing（2026-09-05）
+
+- PDF 解析运行时统一为 MinerU 3.4.5，删除旧解析器、回退状态机、模型获取脚本及对应测试/文档；每个 Contract v2 Job 只运行一个 MinerU attempt
+- Web 上传和重解析提供 `pipeline`、`gpu-medium`、`gpu-high` 三个固定档位；后两档映射 `hybrid-engine` 并要求 CUDA，`high` 启用图片/图表分析
+- Wiki schema 升到 v8，Jobs/Attempts/Revisions 固定保存新档位；开发组合根默认装配本机 OCI file queue Provider
+- Worker 依赖锁、构建期模型下载、CPU/GPU Compose、MIT/MinerU notice、SBOM、Source archive 与 About UI 已同步；新 OCI 真实语料 Gate 完成前保持 `runtime_ready=false`
+- 验证：Ruff、主/Worker strict Mypy、Backend 2182 passed / coverage 76.62%、Worker 10 passed、Frontend 188/188 + lint/typecheck/build、Chromium E2E 20/20、Evals gate 与主/Worker wheel 全部通过；当前主机无 Docker CLI，OCI 实机 Gate 未伪造通过
+
 ### Web MCP/Skills Workspace composition（2026-09-04）
 
 - 将 MCP 建模为账号级全局目录，新增真实 Streamable HTTP transport：支持 JSON 与 SSE response、`Mcp-Session-Id`、`MCP-Protocol-Version`、`notifications/initialized` 和关闭时 DELETE；继续保留 stdio
@@ -132,7 +140,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Python/API、Web 前端与独立 Wiki Parser Worker 的发布版本统一为 `0.0.29`；Worker OCI label、compose image、lock、SBOM、source offer 和合规身份同步更新
 - 最小发布门禁：全量 Ruff PASS；strict Mypy 179 source files / 0 issues；Backend 51 passed；Frontend 11 passed，typecheck/lint/production build PASS
-- 构建并核验 `pi_agent_core_py-0.0.29-py3-none-any.whl` 与 `pi_wiki_parser_worker-0.0.29-py3-none-any.whl`：METADATA 版本一致，MIT/AGPL 许可证与 Worker 合规资产完整，未包含工作区临时缓存
+- 构建并核验 `pi_agent_core_py-0.0.29-py3-none-any.whl` 与 `pi_wiki_parser_worker-0.0.29-py3-none-any.whl`：METADATA 版本一致，许可证与 Worker 合规资产完整，未包含工作区临时缓存
 
 ## [0.0.28] — 2026-08-28
 

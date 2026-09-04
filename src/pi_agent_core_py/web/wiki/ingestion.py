@@ -105,17 +105,17 @@ class WikiIngestionService:
                 raise WikiStoreError("unsupported_parse_mode")
             return "builtin"
         if self._pdf_provider_v2 is not None:
-            mode = "auto" if requested_mode is None else requested_mode
-            if mode not in {"auto", "fast", "accurate"}:
+            mode = "pipeline" if requested_mode is None else requested_mode
+            if mode not in {"pipeline", "gpu-medium", "gpu-high"}:
                 raise WikiStoreError("unsupported_parse_mode")
             return mode
         if self._pdf_provider is not None:
-            mode = "fast" if requested_mode is None else requested_mode
-            if mode != "fast":
+            mode = "pipeline" if requested_mode is None else requested_mode
+            if mode != "pipeline":
                 raise WikiStoreError("unsupported_parse_mode")
             return mode
-        mode = "fast" if requested_mode is None else requested_mode
-        if mode not in {"auto", "fast", "accurate"}:
+        mode = "pipeline" if requested_mode is None else requested_mode
+        if mode not in {"pipeline", "gpu-medium", "gpu-high"}:
             raise WikiStoreError("unsupported_parse_mode")
         return mode
 
@@ -261,7 +261,11 @@ class WikiIngestionService:
         signal: asyncio.Event | None,
     ) -> WikiSource:
         provider = self._pdf_provider_v2
-        if provider is None or job.requested_mode not in {"auto", "fast", "accurate"}:
+        if provider is None or job.requested_mode not in {
+            "pipeline",
+            "gpu-medium",
+            "gpu-high",
+        }:
             raise ParserError("invalid_configuration")
         probe = await provider.probe()
         if not probe.available:

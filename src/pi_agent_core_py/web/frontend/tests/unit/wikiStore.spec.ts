@@ -87,11 +87,15 @@ describe("Wiki store", () => {
 
     const result = await store.uploadSource(
       new File(["<h1>A</h1>"], "a.html", { type: "text/html" }),
-      "auto",
+      "pipeline",
     )
 
     expect(result).toEqual(uploaded)
-    expect(wikiApi.uploadWikiSource).toHaveBeenCalledWith("space_a", expect.any(File), "auto")
+    expect(wikiApi.uploadWikiSource).toHaveBeenCalledWith(
+      "space_a",
+      expect.any(File),
+      "pipeline",
+    )
     expect(store.selectedSourceId).toBe(uploaded.id)
     expect(wikiApi.listWikiArtifacts).toHaveBeenCalledWith(uploaded.id)
     expect(wikiApi.listWikiParseRevisions).toHaveBeenCalledWith(uploaded.id)

@@ -1,6 +1,6 @@
 # Project Status
 
-> 当前事实快照，校准日期：**2026-09-04**。本页只描述当前代码基线；阶段性测试数字和历史决策保留在 `docs/validation/`、`CHANGELOG.md` 与归档计划中。
+> 当前事实快照，校准日期：**2026-09-05**。本页只描述当前代码基线；阶段性测试数字和历史决策保留在 `docs/validation/`、`CHANGELOG.md` 与归档计划中。
 
 ## 基线身份
 
@@ -20,7 +20,7 @@
 
 ## 当前交付状态
 
-LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurate/auto fallback，HTML
+LLM Wiki 阶段 0–10 已完成：PDF 采用隔离 MinerU Worker 与三档固定配置，HTML
 保持零网络；Raw、Agent Summary、入口/主题页面、Change Set 审批、页面 FTS5、知识图谱、每 Space
 多 Knowledge 对话、独立前端、来源保留、Space 生命周期和归档只读门禁均已接通。产品组合不再启动
 旧 Chunk Knowledge DB/Worker/Tool/API/UI：
@@ -60,7 +60,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 | Durable operation / recovery | ✅ 完成 | `8a5c569`；append-only operation records、Checkpointer restart recovery、原子文件 generation、JSON journal |
 | Complete-turn Compaction semantics | ✅ 完成 | `0c72679`；完整 turn、token/window 审计、previous-summary envelope、瞬时错误重试 |
 | 全仓 Ruff / strict Mypy / CI 收敛 | ✅ 完成 | Ruff 0；strict Mypy 170 source files / 0 issues；Python CI timeout 30 分钟 |
-| `0.0.29` Release metadata 与许可证 | ✅ 完成 | Python/API/前端/Worker 统一版本；主 wheel 携带 MIT，Worker wheel 携带 AGPL 与合规资产；最小发布门禁通过 |
+| `0.0.29` Release metadata 与许可证 | ✅ 完成 | Python/API/前端/Worker 统一版本；主 wheel 与 Worker 携带 MIT，Worker 另附 MinerU 第三方许可、Notice 与 SBOM |
 | 当前发布前浏览器/联网门禁 | ✅ 完成 | 精简 Playwright 19/19、0 retry/flaky；真实 E2B Managed Sandbox/审批/WorkspaceStore 回写 PASS；此前 DDGS + GLM 真实 smoke 3/3 |
 | Managed Coding Sandbox P0 0–10 | ✅ 完成 | 独立包、快照、E2B、代码工具、固定验证、签名制品、本机事务 Publisher、Web 生命周期/状态恢复/审批发布 UI，以及真实 E2B、完整 CI、攻击矩阵和 Browser E2E 验收 |
 | 自动 Coding 请求编排 | ✅ 完成 | Chat `Code` 模式自动创建/复用 Sandbox，本轮仅暴露 9 个 `coding_*` 工具；Agent 结束后 Backend 独立重验并冻结到 `awaiting_approval`，绝不自动发布；验证失败保留可修复状态 |
@@ -75,10 +75,10 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 | Backend warning / pytest 状态目录 / ToolResult UTF-8 E2E | ✅ 完成 | Backend `-W error` 0 warning；cache/temp 固定到工作区；Playwright 48/48 |
 | Frontend warning 收敛 | ✅ 完成 | Modal/Teleport attrs、Vite mixed import 与 Playwright color env 三类提示归零；Vitest 404/404；Playwright 48/48 |
 | 历史消息 U+FFFD 完整性标记 | ✅ 完成 | 读取时递归检测并返回计数/RFC 6901 路径，不改写 SQLite、不伪造恢复；消息与工具卡可见，刷新保持；Playwright 49/49 |
-| LLM Wiki 产品合同与 Parser Provider Gate | ✅ Contract/Fake/OCI Provider v2 完成并实机验证 | 新 Wiki 保持无 Chunk-RAG；Marker 路线停止；Contract v2 固定 PyMuPDF4LLM fast、Docling accurate/auto fallback、逐页制品、同源 attempt 证据、hash-pinned config、原始 PDF 唯一事实源与 AGPL-3.0 路径；主应用通过无 Parser 依赖的 file queue Provider 连接外部 Worker |
-| LLM Wiki AGPL Worker 合规包 | ✅ `runtime_ready=true` | 独立 `workers/wiki_parser_worker`、AGPL-3.0-only、35 文件精确/确定性 Source Offer、SPDX 2.3 SBOM、88 包 uv lock、hash-required Linux resolution、三项 Artifex 源码物化器、digest-pinned OCI/断网 Compose、持久 supervisor/child 与 wheel verifier；Docker 29.7.2/Linux-amd64 下镜像 bundle/notices、隔离、真实 fast/accurate/复杂/OCR/fallback 与取消恢复均通过 |
-| LLM WikiStore、目录与旧库退役 Gate | ✅ schema v7 | 页面中心型 Store 已覆盖 Summary/Proposal/Page/Revision/Change Set/FTS5/Edge/Conversation；旧 Wiki flat schema 明确要求重建，旧 Chunk 库不自动打开、不迁移、不删除 |
-| LLM Wiki Raw Ingestion | ✅ 完成 | 不可变 PDF/HTML、零网络 HTML、双 Parser Contract v2、Raw parse revisions、不可信 artifact、恢复、真实 OCI Worker，以及 Space/Source/状态/Raw artifact 前端均已完成 |
+| LLM Wiki MinerU Parser | 🟡 源码闭环完成，真实镜像 Gate 待跑 | Contract v2 固定 `pipeline/gpu-medium/gpu-high`，每个 Job 单次 MinerU attempt；主应用通过 file queue 连接隔离 Worker，逐页制品、质量、同源 SHA 与 hash-pinned config 均保留；详见 `docs/design/llm-wiki-mineru-parser.md` 与 `docs/validation/wiki-mineru-parser-2026-09-05.md` |
+| LLM Wiki Worker 合规包 | 🟡 `runtime_ready=false` | Worker 自身 MIT，MinerU 3.4.5 独立许可；132 包 uv lock、131 包 hash requirements、CPU/GPU Compose、构建期模型下载、确定性源码归档、SPDX SBOM 与 wheel verifier 已更新；新 OCI 镜像、断网和代表性 CPU/GPU PDF 尚未复验 |
+| LLM WikiStore、目录与旧库退役 Gate | ✅ schema v8 | 三档 MinerU mode 进入 Jobs/Attempts/Revisions CHECK；旧 schema v7 明确要求重建；页面中心 Store 继续覆盖 Summary/Proposal/Page/Revision/Change Set/FTS5/Edge/Conversation |
+| LLM Wiki Raw Ingestion | ✅ 源码闭环 | 不可变 PDF/HTML、零网络 HTML、MinerU Contract v2、Raw parse revisions、不可信 artifact、恢复，以及 Space/Source/状态/Raw artifact 前端均已完成 |
 | LLM Wiki 页面中心主链路 | ✅ 完成 | Agent Summary → 入口页/主题页 Proposal → 单一 Change Set diff → 用户审批 → Page/Revision/FTS5/Graph 原子发布 |
 | 独立 Knowledge 页面与 Agent | ✅ 完成 | `/knowledge` 提供 Pages/Sources/Graph/Changes/Conversations；每 Space 多对话复用 Agent 流事件，采用独立 Prompt/Skill/10 工具白名单 |
 | 旧 Chunk Knowledge 产品退役 | ✅ 完成 | 删除运行时 package、REST、Worker、Store、`search_knowledge`、前端与 `rag` extra；产品只运行页面中心 LLM Wiki，旧磁盘数据仅可经 `wiki/legacy.py` 显式归档 |
@@ -144,12 +144,12 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 | Session 文件 | 用户目录下 `uploads/{session_id}/` |
 | Sandbox 本机状态 | 主应用 baseline 来自 `uploads/{session_id}` 的 WorkspaceStore revision；`coding-sandbox-staging/` 保存临时 materialization、snapshot、制品和隔离发布镜像，Workspace 事务 journal 位于 Session 隐藏目录并由 Store 恢复；`coding-sandbox-publisher/` 与 `coding-sandbox-projects/` 仅服务未配置 WorkspaceStore 的本地目录兼容组合 |
 | 旧 Chunk Knowledge（磁盘退役） | 若历史用户目录存在 `knowledge/knowledge.db` 与 `knowledge/libraries/`，产品启动不打开、不迁移也不删除；仅 `wiki/legacy.py` 的显式归档流程可处理 |
-| LLM Wiki | 开发启动器使用 `knowledge/wiki.db`、`knowledge/spaces/` 与 `knowledge/legacy/`；schema v7 Raw 原件/不可变 parse revisions、页面镜像、FTS5、图谱、Change Set 与 Conversation 均由新 Store 管理 |
+| LLM Wiki | 开发启动器使用 `knowledge/wiki.db`、`knowledge/spaces/` 与 `knowledge/legacy/`；schema v8 Raw 原件/不可变 parse revisions、MinerU 三档模式、页面镜像、FTS5、图谱、Change Set 与 Conversation 均由新 Store 管理 |
 | API Key | OS Keyring、显式 session-only memory 或显式 env；不写入 SQLite 明文 |
 | Agent Telemetry | `.pi-agent-data/telemetry.sqlite`；跨账号集中存储结构化运行元数据，默认 30 天且最多 50,000 spans；正文与凭证不采集 |
 | Active request / pending approval / event subscribers | 当前后端进程内存；后端重启不恢复执行 |
 
-## 2026-09-04 当前验证基线
+## 2026-09-05 当前验证基线
 
 当前 `0.0.29` 后续代码已实际复跑全量离线 Backend、Frontend、Chromium E2E、Evals 与静态门禁；
 本轮完成 Web-only Agent Core 全模块审计，并按产品设计恢复和实现 HTTP MCP；验证删除旧 Chunk-RAG、重复搜索和死前端层后，
@@ -162,7 +162,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 | strict Mypy 全量 | **PASS** | `mypy src evals`：263 source files / 0 issues；覆盖 Wiki、独立 Workspace/Plan 包、Managed Sandbox、AI/Agent/Harness/SQLite Repository、Coding Agent、Telemetry 与 Evals 边界 |
 | Wiki Parser Worker 静态门禁 | **PASS** | Ruff 0 errors；strict Mypy 18 source files / 0 issues |
 | Backend 全量离线（第二轮前基线） | **3143 passed, 7 skipped, 9 deselected** | 当时为 3159 collected；`pytest tests --tb=short -q`；1053.41s；coverage 81.91% |
-| Backend 当前精简套件 | **2201 passed, 7 skipped, 9 deselected** | `pytest tests --tb=short -q --basetemp=.p`；428.17s；coverage 76.63%；默认门禁覆盖 `pi_agent_core_py`、`agent_workspace`、`coding_agent_app`、`coding_sandbox`，并排除真实外网、LLM 与 Docker marker |
+| Backend 当前精简套件 | **2182 passed, 7 skipped, 9 deselected** | `pytest tests --tb=short -q`；419.32s；coverage 76.62%；默认门禁覆盖 `pi_agent_core_py`、`agent_workspace`、`coding_agent_app`、`coding_sandbox`，并排除真实外网、LLM 与 Docker marker |
 | Frontend 当前精简套件 | **188/188 passed** | 29 files；Vitest 0 failure；同时通过 typecheck、ESLint 与 production build |
 | pi Evals 专项 | **18 passed；5 suites / 10 observations；candidate gate PASS** | 覆盖数据契约、Judge、配对/诊断、真实 Application/Runtime/Session、工具/Workspace、统一资源装配、SQLite reload、Telemetry 隐私、默认/显式正文产物和离线依赖边界；默认 JSONL 泄漏扫描 PASS |
 | pi Telemetry 专项 | **21 passed** | 覆盖 noop/memory/nested span、SQLite 并发/持久/筛选、passive failure、正文脱敏、Agent event 投影、Admin API、跨账号查询、Auth v1→v2 和 package 依赖方向 |
@@ -178,13 +178,9 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 | Workspace 阶段 1 定向回归 | **125 passed** | `VirtualFileStore` 兼容别名、双根初始化、并发幂等、旧路径/purpose 迁移、固定根删除保护、Checkpointer/Auth/重启；`-W error` 下 0 warning |
 | Workspace 阶段 2 定向回归 | **116 passed** | 代码 `scripts/**` 映射、安全逻辑路径、revision 持久/冲突、Markdown CRUD、Agent 工具与 Web API；使用 `--no-cov` 定向运行 |
 | 自动 Coding 编排定向回归 | **Backend 31 passed；Frontend 21/21；real E2B PASS** | 新增 2 项测试覆盖自动创建→验证→冻结待批准，以及验证失败不冻结；全仓 Ruff、strict Mypy 171 files、Frontend typecheck/lint/build 通过；真实 E2B 由新编排器完成创建、9 工具、重验、冻结、签名、模拟批准回写与销毁（25.328s） |
-| LLM Wiki Parser Contract/Fake v1 | **29 passed** | 历史 PDF-only Contract v1 的 DTO/Protocol、来源/制品 SHA、路径/配额、确定性 tar、取消/超时/销毁和包依赖隔离；可复用但不代表双 Parser v2 行为 |
-| LLM Wiki Parser Contract/Fake v2 与隔离 | **30 passed** | Contract v2 三模式、预检/路由/质量、逐页规范 Markdown、同源单次 fallback、attempt/artifact evidence、离线 Fake v2 生命周期/制品、AGPL capability 和主进程无具体 Parser runtime 依赖 |
-| LLM Wiki Fake Router v2 专项 | **10 passed** | accurate/扫描/复杂直接 Docling、auto fast 通过、auto 单次 fallback、显式 fast 拒绝、Docling 终止、源路径事后修改仍固定原始 SHA、取消/销毁与内容不泄露 |
-| LLM Wiki 全邻接 | **156 passed, 4 skipped** | `pytest tests -k wiki -q --no-cov`；20.62s；Wiki schema/store/files/legacy、Parser v1/v2/Fake v2、Source/HTML、Contract v1/v2 不可信 artifact、AGPL Worker/Source Offer、attempt/quality/route evidence、revision history/CAS/pointer repair、Worker 与 API；skip 为 Windows symlink capability |
-| LLM Wiki OCI/合规专项 | **31 passed + real OCI PASS** | fast/accurate/auto/fallback、cancel/timeout/crash/restart、source/artifact 篡改、配额、官方 AGPL 文本 SHA、锁/基础镜像/Compose/上游源码、确定性 Source Offer/About API；最终镜像 `sha256:d1e517ba…0368b`，镜像内 bundle/notices、断网/只读/非 root/无 capability/资源上限与真实 digital/论文/复杂/OCR/fallback/取消恢复均通过；smoke mutable path 防误用回归已覆盖 |
-| LLM Wiki v2 邻接回归 | **92 passed** | Contract v1/v2、Fake/OCI Provider、ingestion、HTML、不可信 artifact import、主应用依赖隔离与 AGPL Source Offer；`--no-cov` |
-| LLM Wiki Contract v2 主链路新增回归 | **13 passed（纳入全量）** | 覆盖 auto fallback 原子发布、fast 质量拒绝、恶意/非规范 artifact、accurate 重解析历史、v1/v2 隔离、API parse mode/evidence 浏览、恢复模式保持与连续重解析排队 |
+| LLM Wiki Parser Contract v1 兼容边界 | **保留，非默认路径** | 仅供旧 API/provider 显式兼容；新上传、开发启动器与产品 UI 全部走 MinerU Contract v2，不包含旧 PDF 引擎运行时 |
+| LLM Wiki MinerU 源码级专项 | **64 passed；最终邻接 60 passed** | Contract/Fake、三档路由、MinerU adapter 输出规范化/图片去重、单 attempt、queue Provider、Ingestion/API/恢复、不可信 artifact、合规归档；最终变更同时已进入 Backend 全量门禁 |
+| LLM Wiki MinerU OCI/真实语料 | **环境阻塞，待验证** | 当前主机未安装/Expose Docker CLI；新镜像尚未执行模型预取、CPU pipeline、CUDA medium/high、断网、取消/恢复与代表性 PDF smoke；`runtime_ready=false` |
 | LLM Wiki Raw revision 专项 | **5 passed** | 重解析历史保留、selected version 防 ABA、失败保留 selected 并记录 attempt、启动修复 pointer、跨 Source FK 隔离 |
 | LLM Wiki Source retention | **2 API + 4 Worker + 4 View passed** | 删除后 Raw 立即不可读、零保留期安全物理清理、active Page 来源阻断；独立 retention 协程不干扰 Parser queue；定向 Ruff/Mypy/typecheck/ESLint PASS |
 | LLM Wiki Space lifecycle | **2 API + 1 Store + 2 Workspace passed** | archive/restore、空 Space 安全删除、active 内容 409 阻断；Ruff/Mypy/typecheck/ESLint PASS |
@@ -210,7 +206,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用 PyMuPDF4LLM fast + Docling accurat
 | Frontend ESLint | **PASS** | `eslint . --max-warnings=0` |
 | Frontend production build | **PASS** | `vite build`；0 mixed dynamic/static import warning |
 | 版本/许可证一致性回归 | **3 passed** | Python、两个 FastAPI、前端 package/lockfile 与根 LICENSE 元数据一致 |
-| `0.0.29` wheel 构建 | **PASS** | `pi_agent_core_py-0.0.29-py3-none-any.whl` 与 `pi_wiki_parser_worker-0.0.29-py3-none-any.whl`；METADATA、MIT/AGPL LICENSE、Worker 合规资产和临时目录排除均已核验 |
+| `0.0.29` wheel 构建 | **PASS** | 主 wheel 410 entries，包含 9 个 `wiki_parser` 文件且不携带 MinerU/Torch/Transformers；Worker wheel 30 entries，MIT/MinerU notice、路由配置、manifest 与 SBOM 全部通过 verifier |
 | `0.0.29` 最小发布回归 | **PASS** | Ruff；strict Mypy 179 source files；Backend 51；Frontend 11、typecheck/lint/build；不触发真实网络、E2B 或完整 Playwright |
 | B7 定向回归 | **248/248 passed** | SQLite Store lifecycle/open failure |
 | Keyring 定向回归 | **94/94 passed** | Runtime、launcher 与 restart 范围 |
@@ -251,9 +247,9 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 - Session 文件统一到 `WorkspaceStore` 事实源，代码归一到逻辑 `scripts/**`，Sandbox 已事务发布回同一事实源；右侧成果面板展示代码、Markdown 和固定文档转换产物
 - Session PDF/DOCX/XLSX 上传后进入 `documents/<id>/`；Agent/右栏读取生成的 `content.md`、CSV/schema 与 assets，二进制原件只提供元信息/下载且不可变
-- PDF 扫描件由 Docling OCR preset 处理；MVP 不做通用图片语义理解或视觉模型问答
+- PDF 扫描件由用户选择的 MinerU 档位处理；`gpu-high` 启用图片/图表分析
 - Wiki 只对已批准页面使用 SQLite FTS5/BM25，不建立 Chunk、向量数据库或 embedding 主链路
-- 新 Wiki 已独立接入 Web lifespan/API；真实用户旧 Chunk 库原样保留但产品不再打开。双 PDF Parser v2 与 OCI file-queue Provider 已接入；默认开发启动器未配置 Provider 时 PDF 保持 `uploaded`
+- 新 Wiki 已独立接入 Web lifespan/API；真实用户旧 Chunk 库原样保留但产品不再打开。MinerU Contract v2 与 OCI file-queue Provider 已接入；开发启动器默认装配本机 exchange，Worker 未启动时 PDF fail closed
 - 旧记录中已经写入的 Unicode replacement character `U+FFFD` 仍无法从现有数据反推出原字符；当前会在读取时把它标记为“疑似编码损坏”并显示受影响字段，但不会猜测或写回所谓修复
 
 ### 工程债务
@@ -264,7 +260,7 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 ## 当前阻塞项
 
-LLM Wiki 阶段 0–10、Session Workspace 阶段 1–7 与 Coding Agent Workspace 连续性阶段 1–5 已完成，没有功能阻塞。真实 OCI Worker 为 `runtime_ready=true`；当前 release tag 为 `0.0.29`。仓库仍未配置 Git remote，因此本次发布只包含本地提交与 tag。
+LLM Wiki 阶段 0–10、Session Workspace 阶段 1–7 与 Coding Agent Workspace 连续性阶段 1–5 已完成。MinerU 源码与 Web 产品闭环已完成，但真实 OCI Worker 仍为 `runtime_ready=false`，需在具有 Docker/CUDA 的主机完成 CPU/GPU/断网语料门禁。当前 release tag 为 `0.0.29`；仓库仍未配置 Git remote。
 
 ## 建议下一步
 

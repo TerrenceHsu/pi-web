@@ -1,6 +1,6 @@
 """Provider for the network-free persistent OCI parser file queue.
 
-The main application never imports the AGPL Worker or its parser dependencies.
+The main application never imports the MinerU Worker or its parser dependencies.
 It exchanges immutable Contract v2 JSON and bytes through one configured volume.
 """
 
@@ -64,25 +64,25 @@ def _identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
 
 def _safe_directory(path: Path, *, create: bool = False) -> Path:
     if not path.is_absolute():
-        raise ParserError("invalid_configuration", provider="dual_pdf")
+        raise ParserError("invalid_configuration", provider="mineru")
     try:
         if create:
             path.mkdir(mode=0o700, parents=True, exist_ok=True)
         resolved = path.resolve(strict=True)
     except OSError as error:
-        raise ParserError("invalid_configuration", provider="dual_pdf") from error
+        raise ParserError("invalid_configuration", provider="mineru") from error
     current = resolved
     while True:
         try:
             metadata = current.lstat()
         except OSError as error:
-            raise ParserError("invalid_configuration", provider="dual_pdf") from error
+            raise ParserError("invalid_configuration", provider="mineru") from error
         if (
             not stat.S_ISDIR(metadata.st_mode)
             or stat.S_ISLNK(metadata.st_mode)
             or _is_reparse(metadata)
         ):
-            raise ParserError("invalid_configuration", provider="dual_pdf")
+            raise ParserError("invalid_configuration", provider="mineru")
         if current.parent == current:
             break
         current = current.parent
@@ -98,19 +98,19 @@ def _read_stable(path: Path, *, maximum_bytes: int, error_code: str) -> bytes:
             or _is_reparse(before)
             or before.st_size > maximum_bytes
         ):
-            raise ParserError(cast(ParserErrorCode, error_code), provider="dual_pdf")
+            raise ParserError(cast(ParserErrorCode, error_code), provider="mineru")
         with path.open("rb") as stream:
             opened = os.fstat(stream.fileno())
             if _identity(opened) != _identity(before):
-                raise ParserError(cast(ParserErrorCode, error_code), provider="dual_pdf")
+                raise ParserError(cast(ParserErrorCode, error_code), provider="mineru")
             content = stream.read(maximum_bytes + 1)
         after = path.lstat()
     except ParserError:
         raise
     except OSError as error:
-        raise ParserError(cast(ParserErrorCode, error_code), provider="dual_pdf") from error
+        raise ParserError(cast(ParserErrorCode, error_code), provider="mineru") from error
     if len(content) > maximum_bytes or _identity(before) != _identity(after):
-        raise ParserError(cast(ParserErrorCode, error_code), provider="dual_pdf")
+        raise ParserError(cast(ParserErrorCode, error_code), provider="mineru")
     return content
 
 
@@ -124,7 +124,7 @@ def _write_new(path: Path, content: bytes) -> None:
             stream.flush()
             os.fsync(stream.fileno())
     except OSError as error:
-        raise ParserError("provider_unavailable", provider="dual_pdf") from error
+        raise ParserError("provider_unavailable", provider="mineru") from error
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -138,12 +138,12 @@ def _atomic_replace(path: Path, content: bytes) -> None:
         if path.exists() or path.is_symlink():
             metadata = path.lstat()
             if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
-                raise ParserError("artifact_unavailable", provider="dual_pdf")
+                raise ParserError("artifact_unavailable", provider="mineru")
         os.replace(temporary, path)
     except ParserError:
         raise
     except OSError as error:
-        raise ParserError("artifact_unavailable", provider="dual_pdf") from error
+        raise ParserError("artifact_unavailable", provider="mineru") from error
     finally:
         try:
             temporary.unlink(missing_ok=True)
@@ -172,8 +172,8 @@ class PersistentOciParserProvider:
         self._poll_interval = poll_interval_seconds
         self._management_timeout = management_timeout_seconds
 
-    def provider_name(self) -> Literal["dual_pdf"]:
-        return "dual_pdf"
+    def provider_name(self) -> Literal["mineru"]:
+        return "mineru"
 
     async def probe(self) -> ParserProbeV2:
         try:
@@ -186,10 +186,10 @@ class PersistentOciParserProvider:
             probe = ParserProbeV2.model_validate_json(payload)
         except (ParserError, ValidationError):
             return ParserProbeV2(
-                provider="dual_pdf",
+                provider="mineru",
                 available=False,
                 worker_version="0.0.29",
-                license_mode="agpl_3_0",
+                license_mode="mineru_open_source",
                 routing_config=self._routing,
                 observed_at_ms=self._clock_ms(),
                 error_code="provider_unavailable",
@@ -205,7 +205,7 @@ class PersistentOciParserProvider:
         return probe
 
     def _job_dir(self, handle: ParserJobHandleV2) -> Path:
-        if handle.provider != "dual_pdf":
+        if handle.provider != "mineru":
             raise ParserError("invalid_configuration", provider=self.provider_name())
         candidate = self._jobs / handle.provider_job_id
         try:
@@ -259,7 +259,7 @@ class PersistentOciParserProvider:
             or hashlib.sha256(content).hexdigest() != spec.source.sha256
             or not content.startswith(b"%PDF-")
         ):
-            raise ParserError("invalid_source", provider="dual_pdf")
+            raise ParserError("invalid_source", provider="mineru")
         return content
 
     def _create_job_sync(
@@ -270,7 +270,7 @@ class PersistentOciParserProvider:
         source = self._read_source(source_path, spec)
         provider_job_id = self._id_factory()
         handle = ParserJobHandleV2(
-            provider="dual_pdf",
+            provider="mineru",
             provider_job_id=provider_job_id,
             job_id=spec.job_id,
             source_id=spec.source.source_id,

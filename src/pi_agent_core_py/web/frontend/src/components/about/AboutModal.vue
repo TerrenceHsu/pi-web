@@ -97,15 +97,15 @@ watch(
       <section v-if="worker" class="license-card" data-testid="worker-license">
         <div class="license-heading">
           <strong>{{ worker.name }}</strong>
-          <span class="license-badge copyleft">{{ worker.license_expression }}</span>
+          <span class="license-badge">{{ worker.license_expression }}</span>
         </div>
         <div class="license-meta">
           Version {{ worker.version }} ·
           {{ worker.runtime_ready ? "runtime ready" : "compliance scaffold; runtime not ready" }}
         </div>
         <p class="legal-notice">
-          This separately licensed Worker is free software and comes with absolutely no warranty.
-          Its license does not replace the main application's MIT license.
+          This MIT Worker uses the separately licensed MinerU runtime and comes with absolutely no
+          warranty. See Notices for MinerU's additional terms.
         </p>
         <div v-if="worker.source_tree_sha256" class="source-hash">
           Source tree SHA-256: <code>{{ worker.source_tree_sha256 }}</code>
@@ -164,10 +164,6 @@ watch(
   color: var(--fg);
   font-size: 11px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-.license-badge.copyleft {
-  background: #e0f2fe;
-  color: #075985;
 }
 .license-meta,
 .legal-notice,

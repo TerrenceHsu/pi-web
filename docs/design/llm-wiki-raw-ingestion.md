@@ -1,6 +1,6 @@
 # LLM Wiki Raw Ingestion
 
-> 状态：阶段 3 进行中；Backend、HTML、Contract v1 Fake PDF、Contract v2、Raw parse revisions、离线 Fake v2、Contract v2 主应用编排、AGPL Worker 合规包与真实 Parser adapter/source Gate 已实现并验证
+> 状态：Raw Ingestion、MinerU Contract v2、主应用编排与源码 Gate 已实现；新 OCI 真实语料 Gate 待验证
 >
 > 校准日期：2026-08-26
 >
@@ -100,10 +100,10 @@ Provider 的成功状态、receipt、tar 与 manifest 都不是可信事实。�
    PNG/JPEG/WebP MIME 与魔数并满足配额。
 7. 全部验证成功后才把文件写入来源 bundle；DB 最终 transaction 再回读每个文件后提交。
 
-PyMuPDF、PyMuPDF4LLM、Docling、OCR、模型运行时与容器 SDK 均不得进入主应用依赖。当前 PDF
-集成测试使用完全离线 Fake Provider：Contract v1 只验证兼容 orchestration，不代表双 Parser
-路由、排版、质量或 OCR；Contract v2 Fake 则验证三种模式、质量回退、逐页 artifact 与 attempt
-证据，但同样不代表真实 Parser 输出质量。v1 兼容导入会把合并 Markdown 置于
+MinerU、Torch、模型运行时与容器 SDK 均不得进入主应用依赖。当前 PDF
+集成测试使用完全离线 Fake Provider：Contract v1 只验证兼容 orchestration；Contract v2 Fake
+验证三种固定档位、单次 attempt、逐页 artifact 与质量证据，但不代表真实 Parser 输出质量。
+v1 兼容导入会把合并 Markdown 置于
 `pages/000001.md`，其余已知页使用空页占位，以明确表达 v1 没有可靠逐页正文。
 
 Wiki schema 已升级为 v2。Source 只保存原件身份和 `selected_parse_revision_id / selection_version /
@@ -128,27 +128,22 @@ Knowledge Worker/FTS/Agent Tool 的情况下单独运行。
 HTML 上传会自动排队。没有 PDF Provider 时，PDF 保持 `uploaded` 且 `parse_queued=false`；显式
 解析请求返回 `invalid_configuration`，不会把“运行时未配置”伪装成文档解析失败。
 
-## 8. 双 Parser 配置 Gate
+## 8. MinerU 配置 Gate
 
-现行路线见 [`llm-wiki-dual-pdf-parser.md`](llm-wiki-dual-pdf-parser.md)。已确认：
+现行路线见 [`llm-wiki-mineru-parser.md`](llm-wiki-mineru-parser.md)。已确认：
 
 1. 不恢复 Chunk-RAG；解析页只用于 provenance，最终检索仍是已批准 Wiki 页面 FTS5。
-2. PyMuPDF4LLM 采用 AGPL-3.0 路径；当前 Worker scaffold 已补齐其自身的 Corresponding Source、
-   Source Offer、notices 与 SBOM，主应用 MIT 声明不覆盖 Worker。加入真实依赖、adapter、模型与
-   镜像构建后必须同步扩展这些资产，scaffold 归档不能冒充未来运行时源码。
-3. PyMuPDF4LLM fast、Docling 代码、布局/表格模型、OCR engine/语言都必须固定版本和 hash；
-   Docling 模型许可证按实际 preset 单独审计。
-4. 发布实现为持久、断外网 OCI Worker；Docling standard/ocr Converter 在启动期创建并预热，
-   每个 Job 仍拥有隔离临时目录和原始 PDF 副本。
-5. 真实语料先校准 versioned routing/quality config，再完成 fast/accurate/auto/fallback、取消、
-   超时、崩溃清理、SHA 篡改、断网、AGPL source offer 与资源上限 smoke。
+2. Worker 自身 MIT，MinerU 使用独立许可；Source archive、notices、SBOM 与锁必须同步。
+3. MinerU 版本、完整传递依赖、模型获取方式和固定 profile 映射必须可审计。
+4. 发布实现为持久、断外网 OCI Worker；每个 Job 拥有隔离临时目录和原始 PDF 副本。
+5. 真实语料必须覆盖 `pipeline|gpu-medium|gpu-high`、取消、超时、崩溃清理、SHA 篡改、断网与资源上限。
 
-Contract v2、配置和运行时 Gate 均已完成；主应用仍须显式配置已验证的 OCI Worker exchange，
-未配置部署的生产 PDF 解析继续 fail closed。
+Contract v2 和源码配置 Gate 已完成；真实 OCI Gate 尚未复验，`runtime_ready=false`。Worker
+不可用或 GPU 档位缺少 CUDA 时，PDF 解析继续 fail closed。
 
 ## 9. 未完成
 
-- 离线 OCI Worker 已完成：完整 lock、wheel/source/model 物化、持久 Contract v2 transport、OCI build manifest、隔离检查及 digital/论文/复杂/扫描/auto-fallback/取消恢复真实 smoke 均通过，`runtime_ready=true`；后续发布镜像必须复跑相同 Gate。
+- 新 MinerU OCI Worker 待完成模型物化、CPU/GPU、断网、隔离、代表性语料和取消恢复 smoke；通过后才可设置 `runtime_ready=true`。
 - Space/Source/状态/Raw artifact 最小前端；完整 Pages/Graph/Changes/Conversations 属于阶段 7。
 - Source 物理删除/保留策略；当前仅有 `deleting` 软状态，避免在 retention 合同冻结前删除 Raw。
 - 页面入口生成、Agent 总结、Change Set、FTS5 和图谱，分别属于阶段 4–6。

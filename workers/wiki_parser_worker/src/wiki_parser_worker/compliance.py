@@ -1,10 +1,7 @@
 """Immutable public identity for the verified Worker package.
 
 Copyright (C) 2026 Pi Python Port
-SPDX-License-Identifier: AGPL-3.0-only
-
-This program is free software under GNU AGPL version 3 only. It comes with
-ABSOLUTELY NO WARRANTY. See the LICENSE file in the component source root.
+SPDX-License-Identifier: MIT
 """
 
 from __future__ import annotations
@@ -29,8 +26,8 @@ def compliance_identity() -> WorkerComplianceIdentity:
     return WorkerComplianceIdentity(
         component_id="wiki-parser-worker",
         version="0.0.29",
-        license_expression="AGPL-3.0-only",
-        runtime_ready=True,
+        license_expression="MIT",
+        runtime_ready=False,
         source_offer_archive="wiki-parser-worker-0.0.29-source.tar.gz",
     )
 

@@ -1,7 +1,7 @@
 """Persistent, network-free file queue supervisor for the OCI Worker.
 
 Copyright (C) 2026 Pi Python Port
-SPDX-License-Identifier: AGPL-3.0-only
+SPDX-License-Identifier: MIT
 """
 
 from __future__ import annotations
@@ -95,8 +95,9 @@ class SubprocessRuntimeController:
         environment = {
             "HF_HUB_DISABLE_TELEMETRY": "1",
             "HF_HUB_OFFLINE": "1",
-            "HOME": "/nonexistent",
+            "HOME": os.environ.get("HOME", "/opt/mineru-home"),
             "LANG": "C.UTF-8",
+            "MINERU_MODEL_SOURCE": "local",
             "PATH": os.environ.get("PATH", "/opt/venv/bin:/usr/bin:/bin"),
             "PYTHONIOENCODING": "utf-8",
             "PYTHONUNBUFFERED": "1",
@@ -105,6 +106,10 @@ class SubprocessRuntimeController:
         python_path = os.environ.get("PYTHONPATH")
         if python_path:
             environment["PYTHONPATH"] = python_path
+        for name in ("CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"):
+            value = os.environ.get(name)
+            if value:
+                environment[name] = value
         command = [
             sys.executable,
             "-m",
@@ -258,24 +263,24 @@ class QueueWorkerService:
             {
                 "available": available,
                 "capabilities": {
-                    "auto_fallback_uses_original_pdf": True,
-                    "fast_uses_ocr": False,
+                    "gpu_presets_require_cuda": True,
                     "media_types": ["application/pdf"],
                     "network_during_job": False,
                     "output_schemas": ["llm-wiki-parser-artifact/v2"],
-                    "parsers": ["pymupdf4llm", "docling"],
+                    "parsers": ["mineru"],
+                    "pipeline_supports_cpu": True,
                     "presets": [
-                        "pymupdf4llm_fast_no_ocr",
-                        "docling_standard",
-                        "docling_ocr",
+                        "mineru_pipeline",
+                        "mineru_gpu_medium",
+                        "mineru_gpu_high",
                     ],
-                    "requested_modes": ["auto", "fast", "accurate"],
+                    "requested_modes": ["pipeline", "gpu-medium", "gpu-high"],
                 },
                 "contract_version": 2,
                 "error_code": error_code,
-                "license_mode": "agpl_3_0",
+                "license_mode": "mineru_open_source",
                 "observed_at_ms": self._clock_ms(),
-                "provider": "dual_pdf",
+                "provider": "mineru",
                 "routing_config": {
                     "revision": self._config.revision,
                     "schema_version": self._config.schema_version,

@@ -1,8 +1,4 @@
-"""PyMuPDF-only source verification, preflight, and deterministic routing.
-
-Copyright (C) 2026 Pi Python Port
-SPDX-License-Identifier: AGPL-3.0-only
-"""
+"""Source verification, safe PDF preflight, and MinerU preset mapping."""
 
 from __future__ import annotations
 
@@ -17,18 +13,11 @@ from typing import Any, cast
 
 from .config import WorkerRoutingConfig
 from .errors import WorkerRuntimeError
-from .models import (
-    RequestedMode,
-    RouteReason,
-    WorkerPreflightReport,
-    WorkerRouteDecision,
-)
-
-_EXPECTED_PYMUPDF_VERSION = "1.28.2"
+from .models import RequestedMode, WorkerPreflightReport, WorkerRouteDecision
 
 
 def verify_source_identity(path: Path, expected_sha256: str) -> tuple[int, int, int, int]:
-    """Verify an ordinary immutable source and return its stable file identity."""
+    """Verify an ordinary immutable PDF and return its stable file identity."""
 
     try:
         before = os.lstat(path)
@@ -56,117 +45,26 @@ def verify_source_identity(path: Path, expected_sha256: str) -> tuple[int, int, 
     return identity
 
 
-def _load_pymupdf() -> Any:
+def _load_pypdf() -> Any:
     try:
-        module = importlib.import_module("pymupdf")
+        return importlib.import_module("pypdf")
     except ImportError as error:
         raise WorkerRuntimeError("dependency_unavailable") from error
-    version = getattr(module, "__version__", None)
-    if version != _EXPECTED_PYMUPDF_VERSION:
-        raise WorkerRuntimeError("dependency_version_mismatch")
-    return module
 
 
-def _rect_values(rect: object) -> tuple[float, float, float, float] | None:
-    attributes = [getattr(rect, name, None) for name in ("x0", "y0", "x1", "y1")]
-    if all(isinstance(value, int | float) for value in attributes):
-        numeric = cast(list[int | float], attributes)
-        return cast(
-            tuple[float, float, float, float],
-            tuple(float(value) for value in numeric),
-        )
-    if isinstance(rect, list | tuple) and len(rect) >= 4:
-        values = rect[:4]
-        if all(isinstance(value, int | float) for value in values):
-            return cast(tuple[float, float, float, float], tuple(float(v) for v in values))
-    return None
-
-
-def _page_size(page: Any) -> tuple[float, float]:
-    values = _rect_values(page.rect)
-    if values is None:
-        raise WorkerRuntimeError("parser_failed")
-    x0, y0, x1, y1 = values
-    width, height = x1 - x0, y1 - y0
-    if width <= 0 or height <= 0:
-        raise WorkerRuntimeError("parser_failed")
-    return width, height
-
-
-def _text_blocks(page: Any) -> list[tuple[float, float, float, float, str]]:
-    raw = page.get_text("blocks")
-    if not isinstance(raw, list | tuple):
-        return []
-    blocks: list[tuple[float, float, float, float, str]] = []
-    for item in raw:
-        if not isinstance(item, list | tuple) or len(item) < 5:
-            continue
-        coords = _rect_values(item)
-        text = item[4]
-        if coords is None or not isinstance(text, str) or not text.strip():
-            continue
-        blocks.append((*coords, text))
-    return blocks
-
-
-def _is_multicolumn(
-    blocks: list[tuple[float, float, float, float, str]],
-    width: float,
-    config: WorkerRoutingConfig,
-) -> bool:
-    minimum = config.preflight.multicolumn_min_text_blocks
-    candidates = [block for block in blocks if len(block[4].strip()) >= 8]
-    if len(candidates) < minimum:
-        return False
-    midpoint = width / 2.0
-    gap = width * config.preflight.multicolumn_min_column_gap_ratio / 2.0
-    left = [block for block in candidates if block[2] <= midpoint - gap]
-    right = [block for block in candidates if block[0] >= midpoint + gap]
-    return len(left) >= minimum // 2 and len(right) >= minimum // 2
-
-
-def _image_area_ratio(page: Any, width: float, height: float) -> float:
-    raw_images = page.get_images(full=True)
-    if not isinstance(raw_images, list | tuple):
-        return 0.0
-    area = 0.0
-    seen: set[int] = set()
-    for item in raw_images:
-        if not isinstance(item, list | tuple) or not item or not isinstance(item[0], int):
-            continue
-        xref = item[0]
-        if xref <= 0 or xref in seen:
-            continue
-        seen.add(xref)
-        try:
-            rects = page.get_image_rects(xref)
-        except Exception:
-            continue
-        if not isinstance(rects, list | tuple):
-            continue
-        for rect in rects:
-            values = _rect_values(rect)
-            if values is None:
-                continue
-            x0, y0, x1, y1 = values
-            area += max(0.0, min(width, x1) - max(0.0, x0)) * max(
-                0.0, min(height, y1) - max(0.0, y0)
-            )
-    return min(area / (width * height), 1.0)
-
-
-def _has_javascript(document: Any, maximum_xrefs: int) -> bool:
-    length = document.xref_length()
-    if not isinstance(length, int) or length < 1 or length > maximum_xrefs:
-        raise WorkerRuntimeError("source_too_complex")
-    for xref in range(1, length):
-        try:
-            value = document.xref_object(xref, compressed=False)
-        except Exception:
-            continue
-        if isinstance(value, str) and ("/JavaScript" in value or "/JS" in value):
+def _catalog_flag(reader: Any, key: str) -> bool:
+    try:
+        root = reader.trailer["/Root"]
+        if hasattr(root, "get_object"):
+            root = root.get_object()
+        if key in root:
             return True
-    return False
+        names = root.get("/Names")
+        if hasattr(names, "get_object"):
+            names = names.get_object()
+        return isinstance(names, dict) and key in names
+    except Exception:
+        return False
 
 
 def inspect_pdf(
@@ -175,99 +73,66 @@ def inspect_pdf(
     source_id: str,
     expected_sha256: str,
     config: WorkerRoutingConfig,
-    pymupdf_module: object | None = None,
+    pypdf_module: object | None = None,
     clock_ms: Callable[[], int] | None = None,
 ) -> WorkerPreflightReport:
-    """Inspect the original PDF without OCR, layout models, or network access."""
+    """Inspect a PDF with MinerU's lightweight PDF dependency before model work."""
 
     identity = verify_source_identity(path, expected_sha256)
-    module = pymupdf_module if pymupdf_module is not None else _load_pymupdf()
-    if (
-        pymupdf_module is not None
-        and getattr(module, "__version__", None) != _EXPECTED_PYMUPDF_VERSION
-    ):
-        raise WorkerRuntimeError("dependency_version_mismatch")
+    module = pypdf_module if pypdf_module is not None else _load_pypdf()
     now = clock_ms or (lambda: time.time_ns() // 1_000_000)
     started = now()
     try:
-        document = cast(Any, module).open(str(path))
-    except Exception as error:
-        raise WorkerRuntimeError("invalid_source") from error
-
-    try:
-        page_count = document.page_count
-        if not isinstance(page_count, int) or page_count < 1:
+        reader = cast(Any, module).PdfReader(str(path), strict=True)
+        encrypted = bool(reader.is_encrypted)
+        if encrypted:
+            raise WorkerRuntimeError("unsafe_source")
+        page_count = len(reader.pages)
+        if page_count < 1:
             raise WorkerRuntimeError("invalid_source")
         if page_count > config.limits.max_pages:
             raise WorkerRuntimeError("source_too_complex")
-        encrypted = bool(getattr(document, "needs_pass", False)) or bool(
-            getattr(document, "is_encrypted", False)
+        has_javascript = _catalog_flag(reader, "/JavaScript") or _catalog_flag(
+            reader, "/OpenAction"
         )
-        has_javascript = _has_javascript(document, config.limits.max_xref_objects)
-        embedded_count = document.embfile_count()
-        has_embedded_files = isinstance(embedded_count, int) and embedded_count > 0
-        if encrypted or has_javascript or has_embedded_files:
+        has_embedded_files = _catalog_flag(reader, "/EmbeddedFiles")
+        if has_javascript or has_embedded_files:
             raise WorkerRuntimeError("unsafe_source")
 
-        text_pages = image_pages = multicolumn_pages = table_pages = native_chars = 0
-        for page_index in range(page_count):
-            page = document.load_page(page_index)
-            width, height = _page_size(page)
-            raw_text = page.get_text("text")
+        text_pages = 0
+        image_pages = 0
+        native_chars = 0
+        for page in reader.pages:
+            raw_text = page.extract_text()
             text = raw_text if isinstance(raw_text, str) else ""
             character_count = len("".join(text.split()))
             native_chars += character_count
             if character_count >= config.preflight.min_text_characters_per_page:
                 text_pages += 1
-            blocks = _text_blocks(page)
-            if _is_multicolumn(blocks, width, config):
-                multicolumn_pages += 1
-            if (
-                _image_area_ratio(page, width, height)
-                >= config.preflight.image_dominant_page_area_ratio
-            ):
+            images = getattr(page, "images", ())
+            if character_count == 0 and bool(images):
                 image_pages += 1
-            drawings = page.get_drawings()
-            if not isinstance(drawings, list | tuple):
-                drawings = ()
-            if len(drawings) > config.limits.max_drawings_per_page:
-                raise WorkerRuntimeError("source_too_complex")
-            if len(drawings) >= config.preflight.table_candidate_min_drawings:
-                table_pages += 1
     except WorkerRuntimeError:
         raise
     except Exception as error:
-        raise WorkerRuntimeError("parser_failed") from error
-    finally:
-        try:
-            document.close()
-        except Exception:
-            pass
+        raise WorkerRuntimeError("invalid_source") from error
 
     if verify_source_identity(path, expected_sha256) != identity:
         raise WorkerRuntimeError("source_changed")
     observed = now()
     image_ratio = image_pages / page_count
-    multicolumn_ratio = multicolumn_pages / page_count
-    table_ratio = table_pages / page_count
-    complexity = min(
-        1.0,
-        image_ratio * config.preflight.image_weight
-        + multicolumn_ratio * config.preflight.multicolumn_weight
-        + table_ratio * config.preflight.table_weight,
-    )
     return WorkerPreflightReport(
         source_id=source_id,
         source_sha256=expected_sha256,
         page_count=page_count,
         text_page_count=text_pages,
         image_dominant_page_count=image_pages,
-        multicolumn_page_count=multicolumn_pages,
-        table_candidate_page_count=table_pages,
+        multicolumn_page_count=0,
+        table_candidate_page_count=0,
         native_text_character_count=native_chars,
         text_page_ratio=text_pages / page_count,
         image_dominant_page_ratio=image_ratio,
-        complexity_score=complexity,
+        complexity_score=image_ratio,
         encrypted=False,
         has_javascript=False,
         has_embedded_files=False,
@@ -281,73 +146,34 @@ def route_pdf(
     report: WorkerPreflightReport,
     config: WorkerRoutingConfig,
 ) -> WorkerRouteDecision:
-    """Return one deterministic initial route; only auto fast has a fallback."""
+    """Map a public product preset to fixed MinerU backend arguments."""
 
-    scanned = (
-        report.text_page_count == 0
-        or report.text_page_ratio < config.preflight.scan_max_text_page_ratio
-    )
-    image_dominant = (
-        report.image_dominant_page_ratio
-        >= config.preflight.direct_docling_image_page_ratio
-    )
-    if requested_mode == "fast":
+    del report, config
+    if requested_mode == "pipeline":
         return WorkerRouteDecision(
-            requested_mode="fast",
-            parser="pymupdf4llm",
-            preset="pymupdf4llm_fast_no_ocr",
-            reasons=("explicit_fast",),
+            requested_mode=requested_mode,
+            parser="mineru",
+            preset="mineru_pipeline",
+            reasons=("explicit_pipeline",),
+            backend="pipeline",
+            effort=None,
         )
-    if requested_mode == "accurate":
+    if requested_mode == "gpu-medium":
         return WorkerRouteDecision(
-            requested_mode="accurate",
-            parser="docling",
-            preset="docling_ocr" if scanned or image_dominant else "docling_standard",
-            reasons=("explicit_accurate",),
-        )
-    if scanned:
-        return WorkerRouteDecision(
-            requested_mode="auto",
-            parser="docling",
-            preset="docling_ocr",
-            reasons=("scan_text_layer_missing",),
-        )
-    if image_dominant:
-        return WorkerRouteDecision(
-            requested_mode="auto",
-            parser="docling",
-            preset="docling_ocr",
-            reasons=("scan_image_dominant",),
-        )
-
-    page_count = report.page_count
-    reasons: list[RouteReason] = []
-    if (
-        report.multicolumn_page_count / page_count
-        >= config.preflight.direct_docling_multicolumn_page_ratio
-    ):
-        reasons.append("complex_multicolumn")
-    if (
-        report.table_candidate_page_count / page_count
-        >= config.preflight.direct_docling_table_page_ratio
-    ):
-        reasons.append("complex_table_dense")
-    if len(reasons) > 1:
-        reasons.append("complex_mixed_layout")
-    if reasons:
-        return WorkerRouteDecision(
-            requested_mode="auto",
-            parser="docling",
-            preset="docling_standard",
-            reasons=tuple(reasons),
+            requested_mode=requested_mode,
+            parser="mineru",
+            preset="mineru_gpu_medium",
+            reasons=("explicit_gpu_medium",),
+            backend="hybrid-engine",
+            effort="medium",
         )
     return WorkerRouteDecision(
-        requested_mode="auto",
-        parser="pymupdf4llm",
-        preset="pymupdf4llm_fast_no_ocr",
-        reasons=("simple_digital",),
-        fallback_parser="docling",
-        fallback_preset="docling_standard",
+        requested_mode=requested_mode,
+        parser="mineru",
+        preset="mineru_gpu_high",
+        reasons=("explicit_gpu_high",),
+        backend="hybrid-engine",
+        effort="high",
     )
 
 

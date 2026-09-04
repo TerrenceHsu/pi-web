@@ -1,7 +1,7 @@
 """Strict file-queue protocol shared by the OCI supervisor and runtime child.
 
 Copyright (C) 2026 Pi Python Port
-SPDX-License-Identifier: AGPL-3.0-only
+SPDX-License-Identifier: MIT
 """
 
 from __future__ import annotations
@@ -237,7 +237,7 @@ def load_queue_request(job_dir: Path) -> QueueRequest:
     )
     if (
         handle["contract_version"] != 2
-        or handle["provider"] != "dual_pdf"
+        or handle["provider"] != "mineru"
         or handle["provider_job_id"] != provider_job_id
     ):
         raise WorkerRuntimeError("invalid_source")

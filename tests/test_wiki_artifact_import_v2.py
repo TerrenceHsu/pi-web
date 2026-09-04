@@ -13,7 +13,7 @@ import pytest
 from pi_agent_core_py.web.wiki import WikiJob, WikiSource, WikiStore, WikiStoreError
 from pi_agent_core_py.web.wiki.artifact_import import import_parser_artifact_v2
 from wiki_parser import (
-    FakeDualPdfParserProvider,
+    FakeMineruParserProvider,
     FakeParserDocumentV2,
     FakeParserScenarioV2,
     ParserArtifactManifestV2,
@@ -34,7 +34,7 @@ async def _prepared_bundle(
     WikiStore,
     WikiSource,
     WikiJob,
-    FakeDualPdfParserProvider,
+    FakeMineruParserProvider,
     ParserJobHandleV2,
     ParserJobStatusV2,
     ParserArtifactReceiptV2,
@@ -53,16 +53,13 @@ async def _prepared_bundle(
         mime_type="application/pdf",
         content=_PDF,
     )
-    source, job = await store.begin_parse_job(source.id, requested_mode="auto")
+    source, job = await store.begin_parse_job(source.id, requested_mode="pipeline")
     job = await store.set_job_status(job.id, "running")
-    provider = FakeDualPdfParserProvider(
+    provider = FakeMineruParserProvider(
         scenarios=(
             FakeParserScenarioV2(
-                fast_document=FakeParserDocumentV2(
+                document=FakeParserDocumentV2(
                     pages=("# Page one\n", ""),
-                ),
-                accurate_document=FakeParserDocumentV2(
-                    pages=("# Accurate one\n", "Accurate two\n"),
                 ),
             ),
         )
@@ -76,7 +73,7 @@ async def _prepared_bundle(
             size_bytes=source.size_bytes,
             sha256=source.source_sha256,
         ),
-        requested_mode="auto",
+        requested_mode="pipeline",
         routing_config=probe.routing_config,
         limits=ParserLimits(),
     )
@@ -156,12 +153,12 @@ async def test_v2_import_accepts_exact_page_bundle(tmp_path: Path) -> None:
             store,
             source,
             job_id=job.id,
-            requested_mode="auto",
+            requested_mode="pipeline",
             archive_path=archive_path,
             receipt=receipt,
             status=status,
             limits=ParserLimits(),
-            expected_provider="fake_dual_pdf",
+            expected_provider="fake_mineru",
             expected_routing_config=probe.routing_config,
             parse_revision_id=revision_id,
         )
@@ -229,12 +226,12 @@ async def test_v2_import_rejects_rehashed_noncanonical_document_markdown(
                 store,
                 source,
                 job_id=job.id,
-                requested_mode="auto",
+                requested_mode="pipeline",
                 archive_path=archive_path,
                 receipt=changed_receipt,
                 status=changed_status,
                 limits=ParserLimits(),
-                expected_provider="fake_dual_pdf",
+                expected_provider="fake_mineru",
                 expected_routing_config=probe.routing_config,
                 parse_revision_id="parse_revision_000000000000000000000001",
             )
@@ -271,12 +268,12 @@ async def test_v2_import_rejects_extra_path_traversal_before_writing(
                 store,
                 source,
                 job_id=job.id,
-                requested_mode="auto",
+                requested_mode="pipeline",
                 archive_path=archive_path,
                 receipt=changed_receipt,
                 status=changed_status,
                 limits=ParserLimits(),
-                expected_provider="fake_dual_pdf",
+                expected_provider="fake_mineru",
                 expected_routing_config=probe.routing_config,
                 parse_revision_id="parse_revision_000000000000000000000001",
             )

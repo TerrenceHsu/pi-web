@@ -1,30 +1,21 @@
-"""Parser-neutral runtime models used inside the isolated Worker.
-
-Copyright (C) 2026 Pi Python Port
-SPDX-License-Identifier: AGPL-3.0-only
-"""
+"""Parser-neutral runtime models used inside the isolated MinerU Worker."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Literal
 
-ParserName = Literal["pymupdf4llm", "docling"]
+ParserName = Literal["mineru"]
 ParserPreset = Literal[
-    "pymupdf4llm_fast_no_ocr",
-    "docling_standard",
-    "docling_ocr",
+    "mineru_pipeline",
+    "mineru_gpu_medium",
+    "mineru_gpu_high",
 ]
-RequestedMode = Literal["auto", "fast", "accurate"]
+RequestedMode = Literal["pipeline", "gpu-medium", "gpu-high"]
 RouteReason = Literal[
-    "explicit_fast",
-    "explicit_accurate",
-    "simple_digital",
-    "scan_text_layer_missing",
-    "scan_image_dominant",
-    "complex_multicolumn",
-    "complex_table_dense",
-    "complex_mixed_layout",
+    "explicit_pipeline",
+    "explicit_gpu_medium",
+    "explicit_gpu_high",
 ]
 QualityFailure = Literal[
     "missing_pages",
@@ -64,8 +55,8 @@ class WorkerRouteDecision:
     parser: ParserName
     preset: ParserPreset
     reasons: tuple[RouteReason, ...]
-    fallback_parser: Literal["docling"] | None = None
-    fallback_preset: Literal["docling_standard", "docling_ocr"] | None = None
+    backend: Literal["pipeline", "hybrid-engine"]
+    effort: Literal["medium", "high"] | None
 
 
 @dataclass(frozen=True, slots=True)

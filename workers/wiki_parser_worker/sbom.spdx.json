@@ -2,10 +2,10 @@
   "SPDXID": "SPDXRef-DOCUMENT",
   "spdxVersion": "SPDX-2.3",
   "dataLicense": "CC0-1.0",
-  "name": "pi-wiki-parser-worker-0.0.29-adapter-gate",
-  "documentNamespace": "https://pi-agent.invalid/spdx/wiki-parser-worker/0.0.29/adapter-gate",
+  "name": "pi-wiki-parser-worker-0.0.29-mineru-adapter",
+  "documentNamespace": "https://pi-agent.invalid/spdx/wiki-parser-worker/0.0.29/mineru",
   "creationInfo": {
-    "created": "2026-08-24T00:00:00Z",
+    "created": "2026-09-04T00:00:00Z",
     "creators": ["Tool: pi-agent-compliance-gate-0.0.29"]
   },
   "documentDescribes": ["SPDXRef-Package-WikiParserWorker"],
@@ -16,190 +16,34 @@
       "versionInfo": "0.0.29",
       "downloadLocation": "NOASSERTION",
       "filesAnalyzed": false,
-      "licenseConcluded": "AGPL-3.0-only",
-      "licenseDeclared": "AGPL-3.0-only",
-      "copyrightText": "Copyright (C) 2026 Pi Python Port",
-      "summary": "Worker-owned adapter source and compliance assets; concrete runtime packages and models are materialized only by the hash-locked OCI build, whose offline runtime gate is verified."
-    },
-    {
-      "SPDXID": "SPDXRef-Package-PyMuPDF4LLM",
-      "name": "pymupdf4llm",
-      "versionInfo": "1.28.2",
-      "downloadLocation": "https://pypi.org/project/pymupdf4llm/1.28.2/",
-      "filesAnalyzed": false,
-      "licenseConcluded": "AGPL-3.0-only",
-      "licenseDeclared": "AGPL-3.0-only",
-      "copyrightText": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-Package-PyMuPDF",
-      "name": "pymupdf",
-      "versionInfo": "1.28.2",
-      "downloadLocation": "https://pypi.org/project/pymupdf/1.28.2/",
-      "filesAnalyzed": false,
-      "licenseConcluded": "AGPL-3.0-only",
-      "licenseDeclared": "AGPL-3.0-only",
-      "copyrightText": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-Package-PyMuPDFLayout",
-      "name": "pymupdf-layout",
-      "versionInfo": "1.28.2",
-      "downloadLocation": "https://pypi.org/project/pymupdf-layout/1.28.2/",
-      "filesAnalyzed": false,
-      "licenseConcluded": "AGPL-3.0-only",
-      "licenseDeclared": "AGPL-3.0-only",
-      "copyrightText": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-Package-DoclingSlim",
-      "name": "docling-slim",
-      "versionInfo": "2.119.0",
-      "downloadLocation": "https://pypi.org/project/docling-slim/2.119.0/",
-      "filesAnalyzed": false,
       "licenseConcluded": "MIT",
       "licenseDeclared": "MIT",
-      "copyrightText": "NOASSERTION"
+      "copyrightText": "Copyright (c) 2026 Pi Python Port"
     },
     {
-      "SPDXID": "SPDXRef-Package-DoclingCore",
-      "name": "docling-core",
-      "versionInfo": "2.92.0",
-      "downloadLocation": "https://pypi.org/project/docling-core/2.92.0/",
+      "SPDXID": "SPDXRef-Package-MinerU",
+      "name": "mineru",
+      "versionInfo": "3.4.5",
+      "downloadLocation": "https://pypi.org/project/mineru/3.4.5/",
       "filesAnalyzed": false,
-      "licenseConcluded": "MIT",
-      "licenseDeclared": "MIT",
-      "copyrightText": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-Package-DoclingParse",
-      "name": "docling-parse",
-      "versionInfo": "7.15.0",
-      "downloadLocation": "https://pypi.org/project/docling-parse/7.15.0/",
-      "filesAnalyzed": false,
-      "licenseConcluded": "MIT",
-      "licenseDeclared": "MIT",
-      "copyrightText": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-Package-DoclingIbmModels",
-      "name": "docling-ibm-models",
-      "versionInfo": "3.13.2",
-      "downloadLocation": "https://pypi.org/project/docling-ibm-models/3.13.2/",
-      "filesAnalyzed": false,
-      "licenseConcluded": "MIT",
-      "licenseDeclared": "MIT",
-      "copyrightText": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-Package-RapidOCR",
-      "name": "rapidocr",
-      "versionInfo": "3.9.2",
-      "downloadLocation": "https://pypi.org/project/rapidocr/3.9.2/",
-      "filesAnalyzed": false,
-      "licenseConcluded": "Apache-2.0",
-      "licenseDeclared": "Apache-2.0",
-      "copyrightText": "Copyright (c) 2021 RapidOCR Authors"
-    },
-    {
-      "SPDXID": "SPDXRef-Package-PyPDFium2",
-      "name": "pypdfium2",
-      "versionInfo": "5.13.0",
-      "downloadLocation": "https://pypi.org/project/pypdfium2/5.13.0/",
-      "filesAnalyzed": false,
-      "licenseConcluded": "NOASSERTION",
-      "licenseDeclared": "NOASSERTION",
-      "copyrightText": "NOASSERTION",
-      "summary": "Wrapper and bundled PDFium notices are audited separately in runtime-manifest.json and the verified OCI notice bundle."
-    },
-    {
-      "SPDXID": "SPDXRef-Package-Torch",
-      "name": "torch",
-      "versionInfo": "2.13.0+cpu",
-      "downloadLocation": "https://download.pytorch.org/whl/cpu/torch/",
-      "filesAnalyzed": false,
-      "licenseConcluded": "BSD-3-Clause",
-      "licenseDeclared": "BSD-3-Clause",
-      "copyrightText": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-Package-TorchVision",
-      "name": "torchvision",
-      "versionInfo": "0.28.0+cpu",
-      "downloadLocation": "https://download.pytorch.org/whl/cpu/torchvision/",
-      "filesAnalyzed": false,
-      "licenseConcluded": "BSD-3-Clause",
-      "licenseDeclared": "BSD-3-Clause",
-      "copyrightText": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-Package-Transformers",
-      "name": "transformers",
-      "versionInfo": "5.15.1",
-      "downloadLocation": "https://pypi.org/project/transformers/5.15.1/",
-      "filesAnalyzed": false,
-      "licenseConcluded": "Apache-2.0",
-      "licenseDeclared": "Apache-2.0",
-      "copyrightText": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-Package-OnnxRuntime",
-      "name": "onnxruntime",
-      "versionInfo": "1.29.0",
-      "downloadLocation": "https://pypi.org/project/onnxruntime/1.29.0/",
-      "filesAnalyzed": false,
-      "licenseConcluded": "MIT",
-      "licenseDeclared": "MIT",
-      "copyrightText": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-Package-LayoutHeron",
-      "name": "docling-layout-heron",
-      "versionInfo": "8f39ad3c0b4c58e9c2d2c84a38465abf757272d8",
-      "downloadLocation": "https://huggingface.co/docling-project/docling-layout-heron/tree/8f39ad3c0b4c58e9c2d2c84a38465abf757272d8",
-      "filesAnalyzed": false,
-      "licenseConcluded": "Apache-2.0",
-      "licenseDeclared": "Apache-2.0",
-      "copyrightText": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-Package-TableFormerAccurate",
-      "name": "tableformer-accurate",
-      "versionInfo": "fc0f2d45e2218ea24bce5045f58a389aed16dc23",
-      "downloadLocation": "https://huggingface.co/docling-project/docling-models/tree/fc0f2d45e2218ea24bce5045f58a389aed16dc23/model_artifacts/tableformer/accurate",
-      "filesAnalyzed": false,
-      "licenseConcluded": "NOASSERTION",
-      "licenseDeclared": "CDLA-Permissive-2.0 AND Apache-2.0",
-      "copyrightText": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-Package-RapidOcrModels",
-      "name": "rapidocr-ppocrv6-multilingual-onnx",
-      "versionInfo": "3.9.2",
-      "downloadLocation": "https://pypi.org/project/rapidocr/3.9.2/",
-      "filesAnalyzed": false,
-      "licenseConcluded": "Apache-2.0",
-      "licenseDeclared": "Apache-2.0",
-      "copyrightText": "NOASSERTION"
+      "licenseConcluded": "LicenseRef-MinerU-Open-Source-License",
+      "licenseDeclared": "LicenseRef-MinerU-Open-Source-License",
+      "copyrightText": "Copyright 2026 MinerU Team"
     }
   ],
   "relationships": [
-    {"spdxElementId": "SPDXRef-DOCUMENT", "relationshipType": "DESCRIBES", "relatedSpdxElement": "SPDXRef-Package-WikiParserWorker"},
-    {"spdxElementId": "SPDXRef-Package-WikiParserWorker", "relationshipType": "DEPENDS_ON", "relatedSpdxElement": "SPDXRef-Package-PyMuPDF4LLM"},
-    {"spdxElementId": "SPDXRef-Package-WikiParserWorker", "relationshipType": "DEPENDS_ON", "relatedSpdxElement": "SPDXRef-Package-PyMuPDF"},
-    {"spdxElementId": "SPDXRef-Package-WikiParserWorker", "relationshipType": "DEPENDS_ON", "relatedSpdxElement": "SPDXRef-Package-PyMuPDFLayout"},
-    {"spdxElementId": "SPDXRef-Package-WikiParserWorker", "relationshipType": "DEPENDS_ON", "relatedSpdxElement": "SPDXRef-Package-DoclingSlim"},
-    {"spdxElementId": "SPDXRef-Package-WikiParserWorker", "relationshipType": "DEPENDS_ON", "relatedSpdxElement": "SPDXRef-Package-DoclingCore"},
-    {"spdxElementId": "SPDXRef-Package-WikiParserWorker", "relationshipType": "DEPENDS_ON", "relatedSpdxElement": "SPDXRef-Package-DoclingParse"},
-    {"spdxElementId": "SPDXRef-Package-WikiParserWorker", "relationshipType": "DEPENDS_ON", "relatedSpdxElement": "SPDXRef-Package-DoclingIbmModels"},
-    {"spdxElementId": "SPDXRef-Package-WikiParserWorker", "relationshipType": "DEPENDS_ON", "relatedSpdxElement": "SPDXRef-Package-RapidOCR"},
-    {"spdxElementId": "SPDXRef-Package-WikiParserWorker", "relationshipType": "DEPENDS_ON", "relatedSpdxElement": "SPDXRef-Package-PyPDFium2"},
-    {"spdxElementId": "SPDXRef-Package-WikiParserWorker", "relationshipType": "DEPENDS_ON", "relatedSpdxElement": "SPDXRef-Package-Torch"},
-    {"spdxElementId": "SPDXRef-Package-WikiParserWorker", "relationshipType": "DEPENDS_ON", "relatedSpdxElement": "SPDXRef-Package-TorchVision"},
-    {"spdxElementId": "SPDXRef-Package-WikiParserWorker", "relationshipType": "DEPENDS_ON", "relatedSpdxElement": "SPDXRef-Package-Transformers"},
-    {"spdxElementId": "SPDXRef-Package-WikiParserWorker", "relationshipType": "DEPENDS_ON", "relatedSpdxElement": "SPDXRef-Package-OnnxRuntime"},
-    {"spdxElementId": "SPDXRef-Package-DoclingSlim", "relationshipType": "DEPENDS_ON", "relatedSpdxElement": "SPDXRef-Package-LayoutHeron"},
-    {"spdxElementId": "SPDXRef-Package-DoclingSlim", "relationshipType": "DEPENDS_ON", "relatedSpdxElement": "SPDXRef-Package-TableFormerAccurate"},
-    {"spdxElementId": "SPDXRef-Package-RapidOCR", "relationshipType": "CONTAINS", "relatedSpdxElement": "SPDXRef-Package-RapidOcrModels"}
+    {
+      "spdxElementId": "SPDXRef-Package-WikiParserWorker",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-MinerU"
+    }
+  ],
+  "hasExtractedLicensingInfos": [
+    {
+      "licenseId": "LicenseRef-MinerU-Open-Source-License",
+      "name": "MinerU Open Source License",
+      "seeAlsos": ["https://github.com/opendatalab/MinerU/blob/master/LICENSE.md"],
+      "extractedText": "Apache License 2.0 with the additional terms published by the MinerU Team."
+    }
   ]
 }

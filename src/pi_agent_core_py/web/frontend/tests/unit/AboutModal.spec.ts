@@ -26,8 +26,8 @@ const response = {
       component_id: "wiki-parser-worker",
       name: "pi Wiki Parser Worker",
       version: "0.0.29",
-      license_expression: "AGPL-3.0-only",
-      runtime_ready: true,
+      license_expression: "MIT",
+      runtime_ready: false,
       source_offer_available: true,
       source_offer_url: "/api/about/wiki-parser-worker/source-offer",
       source_archive_url: "/api/about/wiki-parser-worker/source",
@@ -60,16 +60,17 @@ beforeEach(() => {
 })
 
 describe("AboutModal", () => {
-  it("shows the separate MIT and AGPL identities with a prominent source offer", async () => {
+  it("shows the Worker and MinerU notice with a prominent source offer", async () => {
     mount(AboutModal, { props: { open: true } })
     await flushAll()
 
     expect(aboutApi.getAboutLicenses).toHaveBeenCalledTimes(1)
     expect(bodyGet('[data-testid="main-app-license"]').text()).toContain("MIT")
     const worker = bodyGet('[data-testid="worker-license"]')
-    expect(worker.text()).toContain("AGPL-3.0-only")
+    expect(worker.text()).toContain("MIT")
+    expect(worker.text()).toContain("MinerU")
     expect(worker.text()).toContain("absolutely no warranty")
-    expect(worker.text()).toContain("runtime ready")
+    expect(worker.text()).toContain("runtime not ready")
     expect(worker.text()).toContain("a".repeat(64))
   })
 
@@ -104,7 +105,7 @@ describe("AboutModal", () => {
     await flushAll()
 
     expect(bodyGet('[data-testid="about-error"]').text()).toContain("safe load failure")
-    expect(document.body.textContent).not.toContain("AGPL-3.0-only")
+    expect(document.body.textContent).not.toContain("MinerU runtime")
   })
 })
 

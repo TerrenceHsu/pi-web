@@ -1,4 +1,4 @@
-"""Immutable DTOs for LLM Wiki schema v7 and filesystem recovery."""
+"""Immutable DTOs for LLM Wiki schema v8 and filesystem recovery."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-WIKI_SCHEMA_VERSION: Literal[7] = 7
+WIKI_SCHEMA_VERSION: Literal[8] = 8
 WIKI_SPACE_MANIFEST_SCHEMA: Literal["llm-wiki-space/v1"] = "llm-wiki-space/v1"
 WIKI_LEGACY_MANIFEST_SCHEMA: Literal["llm-wiki-legacy-backup/v1"] = "llm-wiki-legacy-backup/v1"
 WIKI_SELECTED_PARSE_SCHEMA: Literal["llm-wiki-selected-parse/v1"] = "llm-wiki-selected-parse/v1"
@@ -23,7 +23,7 @@ WikiArtifactKind = Literal[
     "table_image",
     "manifest",
 ]
-WikiParseMode = Literal["builtin", "auto", "fast", "accurate"]
+WikiParseMode = Literal["builtin", "pipeline", "gpu-medium", "gpu-high"]
 WikiParseAttemptState = Literal[
     "queued",
     "running",

@@ -1,8 +1,4 @@
-"""Contract v2 orchestration inside the isolated parser runtime.
-
-Copyright (C) 2026 Pi Python Port
-SPDX-License-Identifier: AGPL-3.0-only
-"""
+"""Contract v2 orchestration inside the isolated MinerU runtime."""
 
 from __future__ import annotations
 
@@ -11,7 +7,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol, cast
+from typing import Protocol, cast
 
 from .artifact import prepare_artifact_payload, write_artifact
 from .config import WorkerRoutingConfig, load_routing_config
@@ -23,7 +19,7 @@ from .models import (
     WorkerQualityReport,
     WorkerRouteDecision,
 )
-from .parsers import DoclingAccurateParser, PyMuPdf4LlmFastParser
+from .parsers import MineruParser
 from .preflight import inspect_pdf, route_pdf, verify_source_identity
 from .protocol import (
     CANCEL_NAME,
@@ -37,24 +33,14 @@ from .protocol import (
 from .quality import QualityEvaluator
 
 
-class FastParser(Protocol):
+class Parser(Protocol):
     def parse(
         self,
         path: Path,
         *,
         expected_sha256: str,
         preflight: WorkerPreflightReport,
-    ) -> WorkerParsedDocument: ...
-
-
-class AccurateParser(Protocol):
-    def parse(
-        self,
-        path: Path,
-        *,
-        expected_sha256: str,
-        preflight: WorkerPreflightReport,
-        preset: Literal["docling_standard", "docling_ocr"],
+        route: WorkerRouteDecision,
     ) -> WorkerParsedDocument: ...
 
 
@@ -111,15 +97,14 @@ def _nonnegative_int(value: object) -> int:
 def _identifier(value: object) -> str:
     if not isinstance(value, str) or not value or len(value) > 128:
         raise WorkerRuntimeError("invalid_source")
-    if not value[0].isalnum() or any(not (char.isalnum() or char in "_-") for char in value):
+    if not value[0].isalnum() or any(
+        not (character.isalnum() or character in "_-") for character in value
+    ):
         raise WorkerRuntimeError("invalid_source")
     return value
 
 
-def _parse_spec(
-    request: QueueRequest,
-    config: WorkerRoutingConfig,
-) -> RuntimeJobSpec:
+def _parse_spec(request: QueueRequest, config: WorkerRoutingConfig) -> RuntimeJobSpec:
     spec = _exact(
         request.spec,
         {
@@ -154,11 +139,11 @@ def _parse_spec(
         spec["contract_version"] != 2
         or spec["output_schema"] != "llm-wiki-parser-artifact/v2"
         or source["mime_type"] != "application/pdf"
-        or requested_mode not in {"auto", "fast", "accurate"}
+        or requested_mode not in {"pipeline", "gpu-medium", "gpu-high"}
         or routing["schema_version"] != 1
         or not isinstance(digest, str)
         or len(digest) != 64
-        or any(char not in "0123456789abcdef" for char in digest)
+        or any(character not in "0123456789abcdef" for character in digest)
     ):
         raise WorkerRuntimeError("invalid_source")
     job_id = _identifier(spec["job_id"])
@@ -178,11 +163,10 @@ def _parse_spec(
         max_image_bytes=_positive_int(limits["max_image_bytes"]),
     )
     size = _positive_int(source["size_bytes"])
-    if size > parsed_limits.max_source_bytes:
-        raise WorkerRuntimeError("artifact_limit_exceeded")
     hard_limits = config.limits
     if (
-        parsed_limits.timeout_seconds > hard_limits.max_job_seconds
+        size > parsed_limits.max_source_bytes
+        or parsed_limits.timeout_seconds > hard_limits.max_job_seconds
         or parsed_limits.max_source_bytes > hard_limits.max_source_bytes
         or parsed_limits.max_artifact_bytes > hard_limits.max_artifact_bytes
         or parsed_limits.max_artifact_files > hard_limits.max_artifact_files
@@ -235,8 +219,8 @@ def _route_dict(
     preflight: dict[str, object],
 ) -> dict[str, object]:
     return {
-        "fallback_parser": route.fallback_parser,
-        "fallback_preset": route.fallback_preset,
+        "fallback_parser": None,
+        "fallback_preset": None,
         "initial_parser": route.parser,
         "initial_preset": route.preset,
         "preflight_sha256": hashlib.sha256(canonical_json_bytes(preflight)).hexdigest(),
@@ -281,9 +265,7 @@ def _quality_dict(
 def _attempt(
     *,
     attempt_id: str,
-    ordinal: int,
     spec: RuntimeJobSpec,
-    parser: str,
     parser_version: str,
     preset: str,
     route_reasons: tuple[str, ...],
@@ -294,19 +276,18 @@ def _attempt(
     quality_report: dict[str, object] | None = None,
     output_size_bytes: int | None = None,
     output_sha256: str | None = None,
-    fallback_from_attempt_id: str | None = None,
 ) -> dict[str, object]:
     return {
         "attempt_id": attempt_id,
         "duration_ms": (
             finished_at_ms - started_at_ms if finished_at_ms is not None else None
         ),
-        "fallback_from_attempt_id": fallback_from_attempt_id,
+        "fallback_from_attempt_id": None,
         "finished_at_ms": finished_at_ms,
-        "ordinal": ordinal,
+        "ordinal": 1,
         "output_sha256": output_sha256,
         "output_size_bytes": output_size_bytes,
-        "parser": parser,
+        "parser": "mineru",
         "parser_version": parser_version,
         "preset": preset,
         "quality_report": quality_report,
@@ -335,23 +316,21 @@ def _map_error(code: WorkerErrorCode, phase: str) -> str:
     return "parsing_failed"
 
 
-class DualPdfJobEngine:
-    """Run exactly one routed job while reusing startup-created parsers."""
+class MineruJobEngine:
+    """Run exactly one MinerU attempt for a fixed product preset."""
 
     def __init__(
         self,
         *,
         config: WorkerRoutingConfig,
-        fast_parser: FastParser,
-        accurate_parser: AccurateParser,
+        parser: Parser,
         quality_evaluator: QualityEvaluator,
         preflight_inspector: PreflightInspector = inspect_pdf,
         router: Router = route_pdf,
         clock_ms: Callable[[], int] | None = None,
     ) -> None:
         self._config = config
-        self._fast = fast_parser
-        self._accurate = accurate_parser
+        self._parser = parser
         self._quality = quality_evaluator
         self._inspect = preflight_inspector
         self._route = router
@@ -394,7 +373,8 @@ class DualPdfJobEngine:
             },
         )
 
-    def _check_cancelled(self, job_dir: Path) -> None:
+    @staticmethod
+    def _check_cancelled(job_dir: Path) -> None:
         if (job_dir / CANCEL_NAME).exists():
             raise _Cancelled
 
@@ -431,33 +411,24 @@ class DualPdfJobEngine:
             )
             preflight_payload = _preflight_dict(preflight)
             phase = "routing"
-            self._write_status(
-                job_dir,
-                request,
-                state="running",
-                phase=phase,
-                started_at_ms=started,
-            )
             route = self._route(spec.requested_mode, preflight, self._config)
             route_payload = _route_dict(route, preflight_payload)
             self._check_cancelled(job_dir)
 
-            first_id = f"{request.provider_job_id}-a1"
+            attempt_id = f"{request.provider_job_id}-a1"
             attempt_started = self._clock_ms()
             attempts.append(
                 _attempt(
-                    attempt_id=first_id,
-                    ordinal=1,
+                    attempt_id=attempt_id,
                     spec=spec,
-                    parser=route.parser,
-                    parser_version=("1.28.2" if route.parser == "pymupdf4llm" else "2.119.0"),
+                    parser_version="3.4.5",
                     preset=route.preset,
                     route_reasons=cast(tuple[str, ...], route.reasons),
                     state="running",
                     started_at_ms=attempt_started,
                 )
             )
-            phase = "fast_parse" if route.parser == "pymupdf4llm" else "accurate_parse"
+            phase = "mineru_parse"
             self._write_status(
                 job_dir,
                 request,
@@ -468,34 +439,21 @@ class DualPdfJobEngine:
                 route_decision=route_payload,
                 attempts=attempts,
             )
-            document = (
-                self._fast.parse(
-                    source_path,
-                    expected_sha256=spec.source_sha256,
-                    preflight=preflight,
-                )
-                if route.parser == "pymupdf4llm"
-                else self._accurate.parse(
-                    source_path,
-                    expected_sha256=spec.source_sha256,
-                    preflight=preflight,
-                    preset=cast(
-                        Literal["docling_standard", "docling_ocr"], route.preset
-                    ),
-                )
+            document = self._parser.parse(
+                source_path,
+                expected_sha256=spec.source_sha256,
+                preflight=preflight,
+                route=route,
             )
             self._check_cancelled(job_dir)
             phase = "quality_check"
             quality = self._quality.evaluate(document, preflight)
             quality_payload = _quality_dict(quality, document, spec)
-
             if not quality.passed:
                 rejected_at = self._clock_ms()
-                attempts[-1] = _attempt(
-                    attempt_id=first_id,
-                    ordinal=1,
+                attempts[0] = _attempt(
+                    attempt_id=attempt_id,
                     spec=spec,
-                    parser=document.parser,
                     parser_version=document.parser_version,
                     preset=document.preset,
                     route_reasons=cast(tuple[str, ...], route.reasons),
@@ -505,73 +463,7 @@ class DualPdfJobEngine:
                     safe_error_code="quality_rejected",
                     quality_report=quality_payload,
                 )
-                if route.fallback_parser != "docling" or route.fallback_preset is None:
-                    raise WorkerRuntimeError("quality_rejected")
-                self._check_cancelled(job_dir)
-                phase = "fallback"
-                second_id = f"{request.provider_job_id}-a2"
-                second_started = self._clock_ms()
-                attempts.append(
-                    _attempt(
-                        attempt_id=second_id,
-                        ordinal=2,
-                        spec=spec,
-                        parser="docling",
-                        parser_version="2.119.0",
-                        preset=route.fallback_preset,
-                        route_reasons=("fast_quality_fallback",),
-                        state="running",
-                        started_at_ms=second_started,
-                        fallback_from_attempt_id=first_id,
-                    )
-                )
-                self._write_status(
-                    job_dir,
-                    request,
-                    state="running",
-                    phase=phase,
-                    started_at_ms=started,
-                    current_attempt_ordinal=2,
-                    route_decision=route_payload,
-                    attempts=attempts,
-                )
-                document = self._accurate.parse(
-                    source_path,
-                    expected_sha256=spec.source_sha256,
-                    preflight=preflight,
-                    preset=route.fallback_preset,
-                )
-                self._check_cancelled(job_dir)
-                quality = self._quality.evaluate(document, preflight)
-                quality_payload = _quality_dict(quality, document, spec)
-                if not quality.passed:
-                    rejected_at = self._clock_ms()
-                    attempts[-1] = _attempt(
-                        attempt_id=second_id,
-                        ordinal=2,
-                        spec=spec,
-                        parser=document.parser,
-                        parser_version=document.parser_version,
-                        preset=document.preset,
-                        route_reasons=("fast_quality_fallback",),
-                        state="quality_rejected",
-                        started_at_ms=second_started,
-                        finished_at_ms=rejected_at,
-                        safe_error_code="quality_rejected",
-                        quality_report=quality_payload,
-                        fallback_from_attempt_id=first_id,
-                    )
-                    raise WorkerRuntimeError("quality_rejected")
-                selected_reasons: tuple[str, ...]
-                selected_id = second_id
-                selected_started = second_started
-                selected_reasons = ("fast_quality_fallback",)
-                fallback_from = first_id
-            else:
-                selected_id = first_id
-                selected_started = attempt_started
-                selected_reasons = cast(tuple[str, ...], route.reasons)
-                fallback_from = None
+                raise WorkerRuntimeError("quality_rejected")
 
             phase = "packaging"
             payload = prepare_artifact_payload(
@@ -581,21 +473,18 @@ class DualPdfJobEngine:
                 max_image_bytes=spec.limits.max_image_bytes,
             )
             finished_attempt = self._clock_ms()
-            attempts[-1] = _attempt(
-                attempt_id=selected_id,
-                ordinal=len(attempts),
+            attempts[0] = _attempt(
+                attempt_id=attempt_id,
                 spec=spec,
-                parser=document.parser,
                 parser_version=document.parser_version,
                 preset=document.preset,
-                route_reasons=selected_reasons,
+                route_reasons=cast(tuple[str, ...], route.reasons),
                 state="succeeded",
-                started_at_ms=selected_started,
+                started_at_ms=attempt_started,
                 finished_at_ms=finished_attempt,
                 quality_report=quality_payload,
                 output_size_bytes=payload.output_size_bytes,
                 output_sha256=payload.output_sha256,
-                fallback_from_attempt_id=fallback_from,
             )
             manifest: dict[str, object] = {
                 "assets": [item.manifest_dict() for item in payload.assets],
@@ -614,7 +503,7 @@ class DualPdfJobEngine:
                 "route_decision": route_payload,
                 "routing_config": _routing_identity(spec),
                 "schema": "llm-wiki-parser-artifact/v2",
-                "selected_attempt_id": selected_id,
+                "selected_attempt_id": attempt_id,
                 "source_id": spec.source_id,
                 "source_sha256": spec.source_sha256,
                 "warnings": [],
@@ -635,17 +524,17 @@ class DualPdfJobEngine:
                 phase="terminal",
                 started_at_ms=started,
                 finished_at_ms=finished,
-                current_attempt_ordinal=len(attempts),
+                current_attempt_ordinal=1,
                 route_decision=route_payload,
                 attempts=attempts,
                 receipt=receipt,
             )
         except _Cancelled:
             finished = self._clock_ms()
-            if attempts and attempts[-1]["state"] == "running":
-                attempts[-1] = {
-                    **attempts[-1],
-                    "duration_ms": finished - cast(int, attempts[-1]["started_at_ms"]),
+            if attempts and attempts[0]["state"] == "running":
+                attempts[0] = {
+                    **attempts[0],
+                    "duration_ms": finished - cast(int, attempts[0]["started_at_ms"]),
                     "finished_at_ms": finished,
                     "safe_error_code": "cancelled",
                     "state": "cancelled",
@@ -657,7 +546,7 @@ class DualPdfJobEngine:
                 phase="terminal",
                 started_at_ms=started,
                 finished_at_ms=finished,
-                current_attempt_ordinal=len(attempts) or None,
+                current_attempt_ordinal=1 if attempts else None,
                 route_decision=route_payload,
                 attempts=attempts,
                 safe_error_code="cancelled",
@@ -665,10 +554,10 @@ class DualPdfJobEngine:
         except WorkerRuntimeError as error:
             finished = self._clock_ms()
             safe_code = _map_error(error.code, phase)
-            if attempts and attempts[-1]["state"] == "running":
-                attempts[-1] = {
-                    **attempts[-1],
-                    "duration_ms": finished - cast(int, attempts[-1]["started_at_ms"]),
+            if attempts and attempts[0]["state"] == "running":
+                attempts[0] = {
+                    **attempts[0],
+                    "duration_ms": finished - cast(int, attempts[0]["started_at_ms"]),
                     "finished_at_ms": finished,
                     "safe_error_code": safe_code,
                     "state": "failed",
@@ -680,7 +569,7 @@ class DualPdfJobEngine:
                 phase="terminal",
                 started_at_ms=started,
                 finished_at_ms=finished,
-                current_attempt_ordinal=len(attempts) or None,
+                current_attempt_ordinal=1 if attempts else None,
                 route_decision=route_payload,
                 attempts=attempts,
                 safe_error_code=safe_code,
@@ -691,20 +580,19 @@ def create_runtime_engine(
     *,
     config_path: Path,
     model_root: Path,
-) -> DualPdfJobEngine:
+) -> MineruJobEngine:
+    del model_root
     config = load_routing_config(config_path)
-    return DualPdfJobEngine(
+    return MineruJobEngine(
         config=config,
-        fast_parser=PyMuPdf4LlmFastParser(config=config),
-        accurate_parser=DoclingAccurateParser(config=config, model_root=model_root),
+        parser=MineruParser(config=config),
         quality_evaluator=QualityEvaluator(config),
     )
 
 
 __all__ = [
-    "AccurateParser",
-    "DualPdfJobEngine",
-    "FastParser",
+    "MineruJobEngine",
+    "Parser",
     "RuntimeJobSpec",
     "RuntimeLimits",
     "create_runtime_engine",

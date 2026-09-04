@@ -48,14 +48,14 @@ describe("Wiki API", () => {
     fetchMock.mockResolvedValue(response({ source: { id: "source_1" }, parse_queued: true }, 201))
     const file = new File(["<h1>Guide</h1>"], "guide.html", { type: "text/html" })
 
-    await uploadWikiSource("space_1", file, "accurate")
+    await uploadWikiSource("space_1", file, "gpu-high")
 
     const [url, init] = fetchMock.mock.calls[0]
     expect(url).toBe("/api/wiki/spaces/space_1/sources")
     expect(init.body).toBeInstanceOf(FormData)
     const form = init.body as FormData
     expect((form.get("file") as File).name).toBe("guide.html")
-    expect(form.get("parse_mode")).toBe("accurate")
+    expect(form.get("parse_mode")).toBe("gpu-high")
     expect(new Headers(init.headers).has("content-type")).toBe(false)
   })
 

@@ -231,7 +231,7 @@ P1-E M1 之前的配置后端已 frozen，不再扩展。
 ## P2-R — Knowledge / RAG Subsystem（🗄️ SUPERSEDED BY LLM WIKI）
 
 > 以下 Chunk-RAG 计划仅作为历史记录。当前产品使用页面中心型 LLM Wiki：原始 PDF/HTML、
-> 双 Parser、Change Set 审批、页面 FTS5、图谱与每 Space 多对话；默认产品不启动旧 Chunk DB/Worker/Tool/UI。
+> MinerU 单次解析、Change Set 审批、页面 FTS5、图谱与每 Space 多对话；默认产品不启动旧 Chunk DB/Worker/Tool/UI。
 
 本地知识库 RAG 系统：PDF → Canonical Markdown → heading-aware chunk → SQLite FTS5 → Session-scoped Library ACL → `search_knowledge` AgentTool。
 

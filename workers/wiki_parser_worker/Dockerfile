@@ -13,36 +13,30 @@ RUN python -m pip install \
     --require-hashes \
     --target=/opt/runtime \
     -r /build/requirements-linux-x86_64.lock
-COPY runtime-manifest.json /build/runtime-manifest.json
-COPY scripts/fetch_runtime_models.py /build/fetch_runtime_models.py
-COPY scripts/fetch_runtime_sources.py /build/fetch_runtime_sources.py
-RUN python /build/fetch_runtime_sources.py \
-    --manifest /build/runtime-manifest.json \
-    --output /opt/upstream-sources
-RUN PYTHONPATH=/opt/runtime python /build/fetch_runtime_models.py \
-    --manifest /build/runtime-manifest.json \
-    --output /opt/models
-RUN chmod -R a-w /opt/runtime /opt/models /opt/upstream-sources
+RUN mkdir -p /opt/mineru-home \
+    && HOME=/opt/mineru-home PYTHONPATH=/opt/runtime \
+       python -m mineru.cli.models_download --source huggingface --model_type all \
+    && chmod -R a-w /opt/runtime /opt/mineru-home
 
 FROM ${PYTHON_IMAGE} AS runtime
 LABEL org.opencontainers.image.title="pi Wiki Parser Worker" \
       org.opencontainers.image.version="0.0.29" \
-      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.licenses="MIT AND LicenseRef-MinerU-Open-Source-License" \
       org.opencontainers.image.source="/usr/share/pi-wiki-parser-worker/source"
 ENV HF_HUB_DISABLE_TELEMETRY=1 \
     HF_HUB_OFFLINE=1 \
-    HOME=/nonexistent \
+    HOME=/opt/mineru-home \
     LANG=C.UTF-8 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/usr/share/pi-wiki-parser-worker/source/src:/opt/runtime \
     PYTHONUNBUFFERED=1 \
+    MINERU_MODEL_SOURCE=local \
     TRANSFORMERS_OFFLINE=1
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=dependency-builder /opt/runtime /opt/runtime
-COPY --from=dependency-builder /opt/models /opt/models
-COPY --from=dependency-builder /opt/upstream-sources /usr/share/pi-wiki-parser-worker/upstream-sources
+COPY --from=dependency-builder /opt/mineru-home /opt/mineru-home
 COPY . /usr/share/pi-wiki-parser-worker/source
 RUN mkdir -p /exchange/jobs /tmp \
     && chown -R 65532:65532 /exchange /tmp \
@@ -54,4 +48,4 @@ VOLUME ["/exchange"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15m --retries=3 \
     CMD ["python", "-m", "wiki_parser_worker", "probe", "--queue-root", "/exchange"]
 ENTRYPOINT ["python", "-m", "wiki_parser_worker"]
-CMD ["serve", "--queue-root", "/exchange", "--config", "/usr/share/pi-wiki-parser-worker/source/config/routing-quality-v1.json", "--model-root", "/opt/models"]
+CMD ["serve", "--queue-root", "/exchange", "--config", "/usr/share/pi-wiki-parser-worker/source/config/routing-quality-v1.json", "--model-root", "/opt/mineru-home"]

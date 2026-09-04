@@ -105,7 +105,7 @@ async def test_complete_parse_verifies_files_before_committing_artifacts(
         mime_type="application/pdf",
         content=b"%PDF-1.7\nsource\n",
     )
-    source, job = await source_store.begin_parse_job(source.id, requested_mode="fast")
+    source, job = await source_store.begin_parse_job(source.id, requested_mode="pipeline")
     job = await source_store.set_job_status(job.id, "running")
     revision_id = source_store.new_parse_revision_id()
     bundle = PurePosixPath(

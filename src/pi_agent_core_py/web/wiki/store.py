@@ -1,4 +1,4 @@
-"""SQLite canonical store for page-centric LLM Wiki schema v7."""
+"""SQLite canonical store for page-centric LLM Wiki schema v8."""
 
 from __future__ import annotations
 
@@ -312,7 +312,7 @@ _DDL_STATEMENTS: tuple[str, ...] = (
                         'rebuild_graph_projection')),
         CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
         CHECK (attempt >= 1),
-        CHECK (requested_mode IN ('builtin', 'auto', 'fast', 'accurate')),
+        CHECK (requested_mode IN ('builtin', 'pipeline', 'gpu-medium', 'gpu-high')),
         CHECK (base_selection_version >= 0),
         CHECK ((base_selected_parse_revision_id IS NULL AND base_selection_version = 0) OR
                (base_selected_parse_revision_id IS NOT NULL AND
@@ -349,7 +349,7 @@ _DDL_STATEMENTS: tuple[str, ...] = (
         started_at_ms            INTEGER,
         finished_at_ms           INTEGER,
         CHECK (ordinal >= 1),
-        CHECK (requested_mode IN ('builtin', 'auto', 'fast', 'accurate')),
+        CHECK (requested_mode IN ('builtin', 'pipeline', 'gpu-medium', 'gpu-high')),
         CHECK (length(source_sha256) = 64 AND source_sha256 = lower(source_sha256)),
         CHECK (provider_attempt_id <> '' AND parser <> '' AND parser_version <> ''),
         CHECK (preset <> ''),
@@ -405,7 +405,7 @@ _DDL_STATEMENTS: tuple[str, ...] = (
         created_at_ms              INTEGER NOT NULL,
         CHECK (contract_version >= 1),
         CHECK (artifact_schema <> ''),
-        CHECK (requested_mode IN ('builtin', 'auto', 'fast', 'accurate')),
+        CHECK (requested_mode IN ('builtin', 'pipeline', 'gpu-medium', 'gpu-high')),
         CHECK (length(source_sha256) = 64 AND source_sha256 = lower(source_sha256)),
         CHECK (parser <> '' AND parser_version <> '' AND preset <> ''),
         CHECK ((routing_config_revision = '' AND routing_config_sha256 = '') OR
@@ -5500,18 +5500,13 @@ class WikiStore:
         if revision.contract_version == 1 and len(attempts) != 1:
             raise WikiStoreError("invalid_artifact")
         if revision.contract_version == 2:
-            if job.requested_mode == "builtin" or len(attempts) > 2:
+            if (
+                job.requested_mode == "builtin"
+                or len(attempts) != 1
+                or attempts[0].parser != "mineru"
+                or attempts[0].fallback_from_attempt_id is not None
+            ):
                 raise WikiStoreError("invalid_artifact")
-            if len(attempts) == 2:
-                first, second = attempts
-                if (
-                    job.requested_mode != "auto"
-                    or first.parser != "pymupdf4llm"
-                    or first.state != "quality_rejected"
-                    or second.parser != "docling"
-                    or second.fallback_from_attempt_id != first.id
-                ):
-                    raise WikiStoreError("invalid_artifact")
 
         revision_dir = PurePosixPath(
             self._file_store.parse_revision_relative_path(source, revision.id)
@@ -6102,7 +6097,7 @@ class WikiStore:
             if existing - {"wiki_schema_meta"}:
                 raise WikiSchemaError("schema_incompatible")
             await self._initialize_fresh_schema()
-        elif version in {1, 2, 3, 4, 5, 6} and version < WIKI_SCHEMA_VERSION:
+        elif version in {1, 2, 3, 4, 5, 6, 7} and version < WIKI_SCHEMA_VERSION:
             raise WikiSchemaError("schema_rebuild_required")
         elif version != WIKI_SCHEMA_VERSION:
             raise WikiSchemaError("schema_incompatible")

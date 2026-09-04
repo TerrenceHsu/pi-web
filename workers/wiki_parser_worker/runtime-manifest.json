@@ -1,218 +1,45 @@
 {
   "schema_version": 1,
-  "revision": "wiki-parser-runtime-2026-08-24-v1",
+  "revision": "wiki-parser-mineru-2026-09-04-v1",
   "target": {
     "os": "linux",
     "architecture": "x86_64",
-    "python_abi": "cp312",
-    "minimum_glibc": "2.28"
-  },
-  "oci_build": {
-    "base_image": "python:3.12.13-slim-bookworm@sha256:72d3d75f2639ab82b34b29390ad3d6e0827c775befee94edda8e9976818f488d",
-    "dockerfile": "Dockerfile",
-    "compose_file": "compose.yaml",
-    "uv_lock": {
-      "path": "uv.lock",
-      "sha256": "4ab8ff1f8fc7bfb08802d879c59293299ad1674b19e6d66be5d30f1965bdf496",
-      "package_count": 88
-    },
-    "requirements_lock": {
-      "path": "requirements-linux-x86_64.lock",
-      "sha256": "39e9029934e5dd3a64e95dd8b2dac2bec8113cd01dd1648797299b2faf128287",
-      "resolved_package_count": 87,
-      "hash_required": true
-    }
+    "python_abi": "cp312"
   },
   "gate": {
     "adapter_source_ready": true,
-    "critical_dependency_artifacts_pinned": true,
-    "model_artifacts_pinned": true,
-    "dependency_source_identities_pinned": true,
     "full_transitive_lock_ready": true,
-    "offline_source_bundle_materialized": true,
-    "offline_oci_image_verified": true,
-    "representative_pdf_smoke_passed": true,
-    "runtime_ready": true
+    "gpu_profiles_verified": false,
+    "model_download_during_image_build": true,
+    "network_during_job": false,
+    "offline_oci_image_verified": false,
+    "representative_pdf_smoke_passed": false,
+    "runtime_ready": false
   },
-  "verification": {
-    "verified_at": "2026-08-26",
-    "docker_version": "29.7.2",
-    "platform": "linux/amd64",
-    "isolation": [
-      "network_none",
-      "read_only_rootfs",
-      "non_root_65532",
-      "cap_drop_all",
-      "no_new_privileges",
-      "bounded_resources"
-    ],
-    "smoke_cases": [
-      "digital_fast",
-      "paper_accurate",
-      "complex_accurate",
-      "scan_ocr",
-      "auto_quality_fallback",
-      "running_cancel_recovery"
-    ]
+  "oci_build": {
+    "base_image": "python:3.12.13-slim-bookworm@sha256:72d3d75f2639ab82b34b29390ad3d6e0827c775befee94edda8e9976818f488d",
+    "requirements_lock": {
+      "path": "requirements-linux-x86_64.lock",
+      "resolved_package_count": 131,
+      "sha256": "8dd4d08e73e148c93f38110507a8cc24eb3131a119b0bd13f3ce4d1564d981eb"
+    },
+    "uv_lock": {
+      "path": "uv.lock",
+      "package_count": 132,
+      "sha256": "102dc3d30199f2c87fa46956160f551387c6f13f6d422a62ec8aa51ba4b45209"
+    }
   },
   "routing_config": {
     "path": "config/routing-quality-v1.json",
-    "revision": "dual_pdf_routing_quality_2026_08_24_v1",
-    "sha256": "9832a7cbc6f66ae00fe87108812875d0deeca47387ddb592aa37294c43f6b348"
+    "revision": "mineru_profiles_2026_09_04_v2",
+    "sha256": "a2ba8bc5879124312497ec7f8b2bc53a79ce652b6d2f78f67d1bbaa103785519"
   },
   "packages": [
     {
-      "name": "pymupdf4llm",
-      "version": "1.28.2",
-      "license_expression": "AGPL-3.0-only OR LicenseRef-Artifex-Commercial",
-      "selected_license": "AGPL-3.0-only",
-      "wheel": {
-        "filename": "pymupdf4llm-1.28.2-py3-none-any.whl",
-        "sha256": "55c06c07d128f94c4d9271bd427d16ee219779e7d796a7b9da4e110be3004d96",
-        "size_bytes": 176403,
-        "url": "https://files.pythonhosted.org/packages/7d/93/0ec4c33150f127d19b306d876b969755f02ed721f3a9337fd1f4fe4a1c85/pymupdf4llm-1.28.2-py3-none-any.whl"
-      },
-      "source": {
-        "git_commit": "5de0c983abba8902bfe15ab0053eaecdb0fd761b",
-        "archive_sha256": "02681698ef67bda9a2acd5d9e1115d4e88be0eb9c5d68926e5e3cd98cd351874",
-        "url": "https://files.pythonhosted.org/packages/31/be/6f78a076947529c13bd0660cbe9e61f0155c903aa0c17fd9751733dccc36/pymupdf4llm-1.28.2.tar.gz"
-      }
-    },
-    {
-      "name": "pymupdf",
-      "version": "1.28.2",
-      "license_expression": "AGPL-3.0-only OR LicenseRef-Artifex-Commercial",
-      "selected_license": "AGPL-3.0-only",
-      "wheel": {
-        "filename": "pymupdf-1.28.2-cp310-abi3-manylinux_2_28_x86_64.whl",
-        "sha256": "397d6715c1f0df7548a92d0afd8ce370fc48fa47aeefac16be2bc04a16a8227f",
-        "size_bytes": 25762500,
-        "url": "https://files.pythonhosted.org/packages/c7/06/dace3e27af26690cb20bead80dbac42941b0841eb689b8aabbd67dde16f0/pymupdf-1.28.2-cp310-abi3-manylinux_2_28_x86_64.whl"
-      },
-      "source": {
-        "git_commit": "12786d12b2962a1d77fd13b103162eddf749644c",
-        "archive_sha256": "5e0be7908a715aa20333caddd73f1d6f01e4cd0c26e869fa2dd0b7f344da2249",
-        "url": "https://files.pythonhosted.org/packages/a3/fb/b6761fa2d5266f2cdb24c3b91f4023070ab7848381417678e7a289a1d52a/pymupdf-1.28.2.tar.gz"
-      }
-    },
-    {
-      "name": "pymupdf-layout",
-      "version": "1.28.2",
-      "license_expression": "AGPL-3.0-only OR LicenseRef-Artifex-Commercial",
-      "selected_license": "AGPL-3.0-only",
-      "wheel": {
-        "filename": "pymupdf_layout-1.28.2-cp310-abi3-manylinux_2_28_x86_64.whl",
-        "sha256": "4b44a1d8ebf897b0e862ee2d73e7df73099f1c047fc024d2dd24ef0632d2cb5f",
-        "size_bytes": 42939266,
-        "url": "https://files.pythonhosted.org/packages/03/65/6b92d25678c64839fb2066ee98d6d1f164d820ba045d83c77e79021cda98/pymupdf_layout-1.28.2-cp310-abi3-manylinux_2_28_x86_64.whl"
-      },
-      "source": {
-        "git_commit": "b6e83e8b55bf861c45e259762483f6863688ed16",
-        "archive_sha256": "7f9bede6d6a13c3c9f4e44e6c6e6b6a6b669746acc11b9dca0ed0121489ce2eb",
-        "url": "https://codeload.github.com/ArtifexSoftware/pymupdf_layout/tar.gz/b6e83e8b55bf861c45e259762483f6863688ed16"
-      }
-    },
-    {
-      "name": "docling-slim",
-      "version": "2.119.0",
-      "license_expression": "MIT",
-      "wheel_sha256": "ca385bc6b0ca99a4f0bba07feaa4c0fc4d5fa685a22184baa79de4bd87598323",
-      "source_sha256": "7b4ee3891e536403f07b6ab702bc757d6c3e4fe146475656d97cf911ac96db8f"
-    },
-    {
-      "name": "docling-core",
-      "version": "2.92.0",
-      "license_expression": "MIT",
-      "wheel_sha256": "726d89c23197e53be2f7192bb4c00108ff545830cf9ab7b981fb014fa92b5c02",
-      "source_sha256": "33fd25e38c199336447a21925374400aca13a6b9316a032f111972c2dc0f085c"
-    },
-    {
-      "name": "docling-parse",
-      "version": "7.15.0",
-      "license_expression": "MIT",
-      "wheel_sha256": "ca982b7df91f05b0bdcb28f437b2637623baccd205b941297f43b9e93aeb1f14",
-      "source_sha256": "fcb1b4e9a0e447f29e8248e46eea502ab4c7a75fe733a2ed911635a9b74b5092"
-    },
-    {
-      "name": "docling-ibm-models",
-      "version": "3.13.2",
-      "license_expression": "MIT",
-      "wheel_sha256": "5fa0838bf15a4e06d2fcb686d756a6f4c329ea0a8820d085f06d07abe96269ed",
-      "source_sha256": "195e02dd119df34d2ce5f76ac614da82825851013e4898db7b0468cdf8740a3d"
-    },
-    {
-      "name": "rapidocr",
-      "version": "3.9.2",
-      "license_expression": "Apache-2.0",
-      "wheel_sha256": "04d6b8d151f823d930bd91910555f57bea897c0c44fa6794267b94cf9c1ef9a0",
-      "source_git_commit": "095232a4c94f7f0e6600ba5bba1177010ad696d4"
-    },
-    {
-      "name": "pypdfium2",
-      "version": "5.13.0",
-      "license_expression": "BSD-3-Clause AND Apache-2.0",
-      "wheel_sha256": "81df25c1ab4c13ff773102d3cbea1967511d079123b067fc077bd0c4d57d91d8",
-      "source_sha256": "7ca2d8e31bd8d0d40c496416b7d8bea423388669ffd494929f50e8c3a82326b8"
-    },
-    {
-      "name": "torch",
-      "version": "2.13.0+cpu",
-      "license_expression": "BSD-3-Clause",
-      "wheel_sha256": "4ca4a9394b0c771238a4f73590fdbbc4debad85ed0fa63d026ae1b085da7d6e2",
-      "wheel_url": "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl"
-    },
-    {
-      "name": "torchvision",
-      "version": "0.28.0+cpu",
-      "license_expression": "BSD-3-Clause",
-      "wheel_sha256": "b545d46f4d2f9d30381281cf22874bfe1d32a8a7b0ee8396fccde89f30c6a9d9",
-      "wheel_url": "https://download-r2.pytorch.org/whl/cpu/torchvision-0.28.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl"
-    },
-    {
-      "name": "transformers",
-      "version": "5.15.1",
-      "license_expression": "Apache-2.0",
-      "wheel_sha256": "b7cdf238ff583e3a58dbc7fa34da1aaf091ce063141f65a30538160bd5afe93f"
-    },
-    {
-      "name": "onnxruntime",
-      "version": "1.29.0",
-      "license_expression": "MIT",
-      "wheel_sha256": "2b80d8c7ec2cc7438e4da3760b88c24568cba72c9ace96d668800a6c79419acb"
-    }
-  ],
-  "models": [
-    {
-      "name": "docling-layout-heron",
-      "repository": "docling-project/docling-layout-heron",
-      "revision": "8f39ad3c0b4c58e9c2d2c84a38465abf757272d8",
-      "license_expression": "Apache-2.0",
-      "files": [
-        {"path": "model.safetensors", "sha256": "00333a43451945aaf89db8ca9c0a17e75d1537c17db60fdb91aa95f4c7929e0c", "size_bytes": 171658996},
-        {"path": "config.json", "sha256": "fdea30805ce2f5666b147fca941dcdd27ad468e27d6ed21902207d3da056a97d", "size_bytes": 3268},
-        {"path": "preprocessor_config.json", "sha256": "cd38cd59999e7a95d68e487fbe5132df3d4e5c32a0836add57e6126ba0c4eaf1", "size_bytes": 444}
-      ]
-    },
-    {
-      "name": "tableformer-accurate",
-      "repository": "docling-project/docling-models",
-      "tag": "v2.3.0",
-      "revision": "fc0f2d45e2218ea24bce5045f58a389aed16dc23",
-      "license_expression": "CDLA-Permissive-2.0 AND Apache-2.0",
-      "files": [
-        {"path": "model_artifacts/tableformer/accurate/tableformer_accurate.safetensors", "sha256": "2a7d6c924b3cd12fb99a09280ca9c33a89c5d60b93253617d2e088c1a40374d9", "size_bytes": 212758388},
-        {"path": "model_artifacts/tableformer/accurate/tm_config.json", "sha256": "984e122ceb8ccf84d84c9d2882f6f2302a44b4f1e577babd6289892c36f3cffd", "size_bytes": 7060}
-      ]
-    },
-    {
-      "name": "rapidocr-ppocrv6-multilingual-onnx",
-      "container": "rapidocr-3.9.2-py3-none-any.whl",
-      "license_expression": "Apache-2.0",
-      "files": [
-        {"path": "rapidocr/models/PP-OCRv6_det_small.onnx", "sha256": "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f", "size_bytes": 9929594},
-        {"path": "rapidocr/models/PP-OCRv6_rec_small.onnx", "sha256": "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884", "size_bytes": 21234383},
-        {"path": "rapidocr/models/ch_ppocr_mobile_v2.0_cls_mobile.onnx", "sha256": "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c", "size_bytes": 585532}
-      ]
+      "name": "mineru",
+      "version": "3.4.5",
+      "license_expression": "LicenseRef-MinerU-Open-Source-License",
+      "source": "https://github.com/opendatalab/MinerU/tree/mineru-3.4.5-released"
     }
   ]
 }

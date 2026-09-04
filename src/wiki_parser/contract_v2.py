@@ -1,4 +1,4 @@
-"""Contract v2 for routed PyMuPDF4LLM and Docling PDF parsing.
+"""Contract v2 for isolated MinerU PDF parsing.
 
 This module contains data only. It deliberately does not import either parser
 runtime, the main application, a transport, or a container SDK.
@@ -22,25 +22,19 @@ PARSER_ARTIFACT_SCHEMA_V2: Literal["llm-wiki-parser-artifact/v2"] = (
     "llm-wiki-parser-artifact/v2"
 )
 
-ParserRequestedMode = Literal["auto", "fast", "accurate"]
-ParserEngineName = Literal["pymupdf4llm", "docling"]
+ParserRequestedMode = Literal["pipeline", "gpu-medium", "gpu-high"]
+ParserEngineName = Literal["mineru"]
 ParserPresetName = Literal[
-    "pymupdf4llm_fast_no_ocr",
-    "docling_standard",
-    "docling_ocr",
+    "mineru_pipeline",
+    "mineru_gpu_medium",
+    "mineru_gpu_high",
 ]
-ParserProviderV2Name = Literal["dual_pdf", "fake_dual_pdf"]
-ParserLicenseModeV2 = Literal["agpl_3_0", "not_required"]
+ParserProviderV2Name = Literal["mineru", "fake_mineru"]
+ParserLicenseModeV2 = Literal["mineru_open_source", "not_required"]
 ParserRouteReason = Literal[
-    "explicit_fast",
-    "explicit_accurate",
-    "simple_digital",
-    "scan_text_layer_missing",
-    "scan_image_dominant",
-    "complex_multicolumn",
-    "complex_table_dense",
-    "complex_mixed_layout",
-    "fast_quality_fallback",
+    "explicit_pipeline",
+    "explicit_gpu_medium",
+    "explicit_gpu_high",
 ]
 ParserQualityFailureCode = Literal[
     "missing_pages",
@@ -72,10 +66,8 @@ ParserJobPhaseV2 = Literal[
     "queued",
     "preflight",
     "routing",
-    "fast_parse",
-    "accurate_parse",
+    "mineru_parse",
     "quality_check",
-    "fallback",
     "packaging",
     "terminal",
 ]
@@ -121,10 +113,12 @@ def _validate_parser_preset(
     parser: ParserEngineName,
     preset: ParserPresetName,
 ) -> None:
-    if parser == "pymupdf4llm" and preset != "pymupdf4llm_fast_no_ocr":
-        raise ValueError("PyMuPDF4LLM requires the fast no-OCR preset")
-    if parser == "docling" and preset not in {"docling_standard", "docling_ocr"}:
-        raise ValueError("Docling requires a Docling preset")
+    if parser != "mineru" or preset not in {
+        "mineru_pipeline",
+        "mineru_gpu_medium",
+        "mineru_gpu_high",
+    }:
+        raise ValueError("MinerU parser identity and preset are inconsistent")
 
 
 def canonical_markdown_v2(pages: tuple[ParserParsedPage, ...]) -> bytes:
@@ -176,7 +170,7 @@ class ParserJobSpecV2(BaseModel):
     contract_version: Literal[2] = PARSER_CONTRACT_VERSION_V2
     job_id: str
     source: ParserSourceSpec
-    requested_mode: ParserRequestedMode = "auto"
+    requested_mode: ParserRequestedMode = "pipeline"
     routing_config: ParserRoutingConfigIdentity
     output_schema: Literal["llm-wiki-parser-artifact/v2"] = PARSER_ARTIFACT_SCHEMA_V2
     limits: ParserLimits = Field(default_factory=ParserLimits)
@@ -239,7 +233,7 @@ class ParserPreflightReport(BaseModel):
 
 
 class ParserRouteDecision(BaseModel):
-    """Auditable initial route and the only permitted auto fallback."""
+    """Auditable mapping from one product preset to one MinerU backend."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -248,8 +242,8 @@ class ParserRouteDecision(BaseModel):
     initial_preset: ParserPresetName
     reasons: tuple[ParserRouteReason, ...]
     preflight_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    fallback_parser: Literal["docling"] | None = None
-    fallback_preset: Literal["docling_standard", "docling_ocr"] | None = None
+    fallback_parser: None = None
+    fallback_preset: None = None
 
     @field_validator("reasons")
     @classmethod
@@ -265,33 +259,16 @@ class ParserRouteDecision(BaseModel):
     @model_validator(mode="after")
     def _validate_route(self) -> ParserRouteDecision:
         _validate_parser_preset(self.initial_parser, self.initial_preset)
-        has_fallback = self.fallback_parser is not None or self.fallback_preset is not None
-        if (self.fallback_parser is None) != (self.fallback_preset is None):
-            raise ValueError("fallback parser and preset must be complete")
-        if self.requested_mode == "fast":
-            if (
-                self.initial_parser != "pymupdf4llm"
-                or has_fallback
-                or self.reasons != ("explicit_fast",)
-            ):
-                raise ValueError("fast mode requires PyMuPDF4LLM without fallback")
-        elif self.requested_mode == "accurate":
-            if (
-                self.initial_parser != "docling"
-                or has_fallback
-                or "explicit_accurate" not in self.reasons
-            ):
-                raise ValueError("accurate mode requires Docling without fallback")
-        elif any(
-            reason in {"explicit_fast", "explicit_accurate", "fast_quality_fallback"}
-            for reason in self.reasons
-        ):
-            raise ValueError("auto route cannot use explicit or fallback reasons")
-        elif self.initial_parser == "pymupdf4llm":
-            if self.fallback_parser != "docling" or self.fallback_preset is None:
-                raise ValueError("auto fast route requires an explicit Docling fallback")
-        elif has_fallback:
-            raise ValueError("auto direct Docling route cannot include fallback")
+        expected = {
+            "pipeline": ("mineru_pipeline", ("explicit_pipeline",)),
+            "gpu-medium": ("mineru_gpu_medium", ("explicit_gpu_medium",)),
+            "gpu-high": ("mineru_gpu_high", ("explicit_gpu_high",)),
+        }[self.requested_mode]
+        if self.initial_parser != "mineru" or (
+            self.initial_preset,
+            self.reasons,
+        ) != expected:
+            raise ValueError("MinerU route does not match the requested preset")
         return self
 
 
@@ -590,10 +567,8 @@ class ParserAttemptEvidence(BaseModel):
             raise ValueError("queued attempt cannot have a start timestamp")
         if self.state == "running" and self.started_at_ms is None:
             raise ValueError("running attempt requires a start timestamp")
-        if self.fallback_from_attempt_id is not None and (
-            self.parser != "docling" or "fast_quality_fallback" not in self.route_reasons
-        ):
-            raise ValueError("fallback attempt must be Docling with fallback reason")
+        if self.fallback_from_attempt_id is not None:
+            raise ValueError("MinerU jobs do not support parser fallback attempts")
         return self
 
 
@@ -706,48 +681,31 @@ class ParserParsedDocument(BaseModel):
             or first_attempt.route_reasons != self.route_decision.reasons
         ):
             raise ValueError("initial attempt does not match route decision")
-        if self.requested_mode == "fast" and (
-            len(self.attempts) != 1 or self.parser != "pymupdf4llm"
-        ):
-            raise ValueError("fast ParsedDocument must select one PyMuPDF4LLM attempt")
-        if self.requested_mode == "accurate" and (
-            len(self.attempts) != 1 or self.parser != "docling"
-        ):
-            raise ValueError("accurate ParsedDocument must select one Docling attempt")
-        if self.requested_mode == "auto" and len(self.attempts) > 2:
-            raise ValueError("auto ParsedDocument supports at most one fallback")
-        if len(self.attempts) == 2:
-            first, second = self.attempts
-            if (
-                self.requested_mode != "auto"
-                or first.parser != "pymupdf4llm"
-                or first.state != "quality_rejected"
-                or second.parser != "docling"
-                or second.fallback_from_attempt_id != first.attempt_id
-                or second.preset != self.route_decision.fallback_preset
-                or self.route_decision.fallback_parser != "docling"
-                or second.route_reasons != ("fast_quality_fallback",)
-            ):
-                raise ValueError("two-attempt document must be auto fast-to-Docling fallback")
+        if len(self.attempts) != 1 or self.parser != "mineru":
+            raise ValueError("MinerU ParsedDocument requires exactly one attempt")
         return self
 
 
 class ParserCapabilitiesV2(BaseModel):
-    """Stable dual-parser capabilities without runtime paths or model details."""
+    """Stable MinerU capabilities without runtime paths or model details."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     media_types: tuple[Literal["application/pdf"], ...] = ("application/pdf",)
-    requested_modes: tuple[ParserRequestedMode, ...] = ("auto", "fast", "accurate")
-    parsers: tuple[ParserEngineName, ...] = ("pymupdf4llm", "docling")
+    requested_modes: tuple[ParserRequestedMode, ...] = (
+        "pipeline",
+        "gpu-medium",
+        "gpu-high",
+    )
+    parsers: tuple[ParserEngineName, ...] = ("mineru",)
     presets: tuple[ParserPresetName, ...] = (
-        "pymupdf4llm_fast_no_ocr",
-        "docling_standard",
-        "docling_ocr",
+        "mineru_pipeline",
+        "mineru_gpu_medium",
+        "mineru_gpu_high",
     )
     output_schemas: tuple[str, ...] = (PARSER_ARTIFACT_SCHEMA_V2,)
-    fast_uses_ocr: Literal[False] = False
-    auto_fallback_uses_original_pdf: Literal[True] = True
+    pipeline_supports_cpu: Literal[True] = True
+    gpu_presets_require_cuda: Literal[True] = True
     network_during_job: Literal[False] = False
 
     @field_validator(
@@ -765,7 +723,7 @@ class ParserCapabilitiesV2(BaseModel):
 
 
 class ParserProbeV2(BaseModel):
-    """Readiness snapshot for the dual-parser worker."""
+    """Readiness snapshot for the MinerU worker."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -788,10 +746,10 @@ class ParserProbeV2(BaseModel):
     def _validate_probe(self) -> ParserProbeV2:
         if self.available != (self.error_code is None):
             raise ValueError("probe availability and error code disagree")
-        if self.provider == "dual_pdf" and self.license_mode != "agpl_3_0":
-            raise ValueError("real dual PDF provider requires AGPL-3.0 license mode")
-        if self.provider == "fake_dual_pdf" and self.license_mode != "not_required":
-            raise ValueError("fake dual PDF provider must not claim a runtime license")
+        if self.provider == "mineru" and self.license_mode != "mineru_open_source":
+            raise ValueError("real MinerU provider requires its declared license mode")
+        if self.provider == "fake_mineru" and self.license_mode != "not_required":
+            raise ValueError("fake MinerU provider must not claim a runtime license")
         return self
 
 
@@ -853,12 +811,10 @@ class ParserJobStatusV2(BaseModel):
             raise ValueError("job attempts must use one original PDF SHA")
         if len({attempt.routing_config for attempt in self.attempts}) > 1:
             raise ValueError("job attempts must use one routing configuration")
-        for index, attempt in enumerate(self.attempts):
-            fallback_id = attempt.fallback_from_attempt_id
-            if fallback_id is not None and fallback_id not in {
-                previous.attempt_id for previous in self.attempts[:index]
-            }:
-                raise ValueError("job fallback must reference an earlier attempt")
+        if len(self.attempts) > 1 or any(
+            attempt.fallback_from_attempt_id is not None for attempt in self.attempts
+        ):
+            raise ValueError("MinerU jobs support exactly one parser attempt")
         if self.route_decision is not None and self.attempts:
             first_attempt = self.attempts[0]
             if (
@@ -867,20 +823,6 @@ class ParserJobStatusV2(BaseModel):
                 or first_attempt.route_reasons != self.route_decision.reasons
             ):
                 raise ValueError("job initial attempt does not match route decision")
-            if len(self.attempts) == 2:
-                first, second = self.attempts
-                if (
-                    self.route_decision.requested_mode != "auto"
-                    or first.parser != "pymupdf4llm"
-                    or first.state != "quality_rejected"
-                    or second.parser != "docling"
-                    or second.preset != self.route_decision.fallback_preset
-                    or second.fallback_from_attempt_id != first.attempt_id
-                    or second.route_reasons != ("fast_quality_fallback",)
-                ):
-                    raise ValueError("job fallback attempt evidence is inconsistent")
-            elif len(self.attempts) > 2:
-                raise ValueError("job supports at most one automatic fallback")
         if self.state == "succeeded":
             if (
                 not has_artifact
@@ -1067,17 +1009,13 @@ class ParserArtifactManifestV2(BaseModel):
             range(1, len(self.attempts) + 1)
         ):
             raise ValueError("manifest attempt ordinals must be contiguous")
-        for index, attempt in enumerate(self.attempts):
+        for attempt in self.attempts:
             if attempt.source_sha256 != self.source_sha256:
                 raise ValueError("manifest attempt source SHA does not match source")
             if attempt.routing_config != self.routing_config:
                 raise ValueError("manifest attempt uses a different routing config")
-            if (
-                attempt.fallback_from_attempt_id is not None
-                and attempt.fallback_from_attempt_id
-                not in {previous.attempt_id for previous in self.attempts[:index]}
-            ):
-                raise ValueError("manifest fallback must reference an earlier attempt")
+            if attempt.fallback_from_attempt_id is not None:
+                raise ValueError("MinerU manifests cannot contain fallback attempts")
         if self.quality_report.routing_config != self.routing_config:
             raise ValueError("manifest quality config does not match routing config")
         first_attempt = self.attempts[0]
@@ -1087,20 +1025,8 @@ class ParserArtifactManifestV2(BaseModel):
             or first_attempt.route_reasons != self.route_decision.reasons
         ):
             raise ValueError("manifest initial attempt does not match route decision")
-        if len(self.attempts) == 2:
-            first, second = self.attempts
-            if (
-                self.requested_mode != "auto"
-                or first.parser != "pymupdf4llm"
-                or first.state != "quality_rejected"
-                or second.parser != "docling"
-                or second.preset != self.route_decision.fallback_preset
-                or second.fallback_from_attempt_id != first.attempt_id
-                or second.route_reasons != ("fast_quality_fallback",)
-            ):
-                raise ValueError("manifest fallback attempt evidence is inconsistent")
-        elif len(self.attempts) != 1:
-            raise ValueError("manifest supports at most one automatic fallback")
+        if len(self.attempts) != 1:
+            raise ValueError("MinerU manifests require exactly one attempt")
         return self
 
 

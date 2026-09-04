@@ -69,7 +69,7 @@ export function listWikiSources(spaceId: string, signal?: AbortSignal): Promise<
 export function uploadWikiSource(
   spaceId: string,
   file: File,
-  parseMode: Exclude<WikiParseMode, "builtin"> = "auto",
+  parseMode: Exclude<WikiParseMode, "builtin"> = "pipeline",
 ): Promise<WikiSourceUploadResponse> {
   const form = new FormData()
   form.append("file", file, file.name)
@@ -79,7 +79,7 @@ export function uploadWikiSource(
 
 export function enqueueWikiParse(
   sourceId: string,
-  parseMode: Exclude<WikiParseMode, "builtin"> = "auto",
+  parseMode: Exclude<WikiParseMode, "builtin"> = "pipeline",
 ): Promise<WikiParseQueuedResponse> {
   return requestJson(`${WIKI_API}/sources/${segment(sourceId)}/parse`, {
     method: "POST",

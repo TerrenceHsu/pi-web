@@ -23,7 +23,7 @@ from pi_agent_core_py.model_client import (
 from pi_agent_core_py.web.app import create_app
 from pi_agent_core_py.web.wiki.knowledge_agent import KNOWLEDGE_AGENT_TOOL_NAMES
 from wiki_parser import (
-    FakeDualPdfParserProvider,
+    FakeMineruParserProvider,
     FakeParserOutput,
     FakeParserProvider,
     FakeParserScenarioV2,
@@ -36,7 +36,7 @@ def _app(
     tmp_path: Path,
     *,
     provider: FakeParserProvider | None = None,
-    provider_v2: FakeDualPdfParserProvider | None = None,
+    provider_v2: FakeMineruParserProvider | None = None,
     model_text: str = "ok",
     model_scripts: list[list[Any]] | None = None,
     source_retention_seconds: float = 7 * 24 * 60 * 60,
@@ -684,16 +684,16 @@ def test_pdf_fake_provider_runs_through_same_api(tmp_path: Path) -> None:
         unsupported = client.post(
             f"/api/wiki/sources/{source_id}/parse",
             headers=_HEADERS,
-            json={"parse_mode": "accurate"},
+            json={"parse_mode": "gpu-high"},
         )
         assert unsupported.status_code == 400
         assert unsupported.json()["detail"]["code"] == "unsupported_parse_mode"
 
 
-def test_pdf_v2_api_defaults_auto_and_accepts_explicit_accurate_reparse(
+def test_pdf_v2_api_defaults_pipeline_and_accepts_explicit_gpu_reparse(
     tmp_path: Path,
 ) -> None:
-    provider = FakeDualPdfParserProvider(
+    provider = FakeMineruParserProvider(
         scenarios=(
             FakeParserScenarioV2(),
             FakeParserScenarioV2(preflight_profile="scanned"),
@@ -715,20 +715,20 @@ def test_pdf_v2_api_defaults_auto_and_accepts_explicit_accurate_reparse(
         source_id = upload.json()["source"]["id"]
         first = _wait_source(client, source_id, "parsed")
         assert first["selection_version"] == 1
-        assert provider.created_specs[0].requested_mode == "auto"
+        assert provider.created_specs[0].requested_mode == "pipeline"
         first_jobs = client.get(
             f"/api/wiki/sources/{source_id}/jobs",
             headers=_HEADERS,
         )
         assert first_jobs.status_code == 200
-        assert first_jobs.json()[0]["requested_mode"] == "auto"
+        assert first_jobs.json()[0]["requested_mode"] == "pipeline"
         first_job_id = first_jobs.json()[0]["id"]
         first_attempts = client.get(
             f"/api/wiki/jobs/{first_job_id}/attempts",
             headers=_HEADERS,
         )
         assert first_attempts.status_code == 200
-        assert first_attempts.json()[0]["parser"] == "pymupdf4llm"
+        assert first_attempts.json()[0]["parser"] == "mineru"
         first_revisions = client.get(
             f"/api/wiki/sources/{source_id}/parse-revisions",
             headers=_HEADERS,
@@ -739,7 +739,7 @@ def test_pdf_v2_api_defaults_auto_and_accepts_explicit_accurate_reparse(
         reparse = client.post(
             f"/api/wiki/sources/{source_id}/parse",
             headers=_HEADERS,
-            json={"parse_mode": "accurate"},
+            json={"parse_mode": "gpu-high"},
         )
         assert reparse.status_code == 202
         deadline = time.monotonic() + 5
@@ -752,9 +752,9 @@ def test_pdf_v2_api_defaults_auto_and_accepts_explicit_accurate_reparse(
                 break
             time.sleep(0.01)
         else:
-            raise AssertionError("accurate reparse did not finish")
+            raise AssertionError("GPU reparse did not finish")
         assert len(provider.created_specs) == 2
-        assert provider.created_specs[1].requested_mode == "accurate"
+        assert provider.created_specs[1].requested_mode == "gpu-high"
         revisions = client.get(
             f"/api/wiki/sources/{source_id}/parse-revisions",
             headers=_HEADERS,
@@ -771,7 +771,7 @@ def test_pdf_v2_api_defaults_auto_and_accepts_explicit_accurate_reparse(
 
 
 def test_pdf_v2_upload_accepts_multipart_parse_mode(tmp_path: Path) -> None:
-    provider = FakeDualPdfParserProvider(
+    provider = FakeMineruParserProvider(
         scenarios=(FakeParserScenarioV2(preflight_profile="scanned"),)
     )
     app = _app(tmp_path, provider_v2=provider)
@@ -784,13 +784,13 @@ def test_pdf_v2_upload_accepts_multipart_parse_mode(tmp_path: Path) -> None:
         upload = client.post(
             f"/api/wiki/spaces/{space['id']}/sources",
             headers=_HEADERS,
-            data={"parse_mode": "accurate"},
+            data={"parse_mode": "gpu-medium"},
             files={"file": ("paper.pdf", b"%PDF-1.7\npaper\n", "application/pdf")},
         )
         assert upload.status_code == 201
         source_id = upload.json()["source"]["id"]
         _wait_source(client, source_id, "parsed")
-        assert provider.created_specs[0].requested_mode == "accurate"
+        assert provider.created_specs[0].requested_mode == "gpu-medium"
 
 
 def test_html_rejects_pdf_parse_mode_before_persisting_source(tmp_path: Path) -> None:
@@ -804,7 +804,7 @@ def test_html_rejects_pdf_parse_mode_before_persisting_source(tmp_path: Path) ->
         upload = client.post(
             f"/api/wiki/spaces/{space['id']}/sources",
             headers=_HEADERS,
-            data={"parse_mode": "auto"},
+            data={"parse_mode": "gpu-high"},
             files={"file": ("guide.html", b"<h1>Guide</h1>", "text/html")},
         )
         assert upload.status_code == 400

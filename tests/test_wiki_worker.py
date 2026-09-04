@@ -8,7 +8,7 @@ from pathlib import Path
 from pi_agent_core_py.web.wiki import WikiIngestionService, WikiStore, WikiStoreError
 from pi_agent_core_py.web.wiki.worker import WikiIngestionWorkerManager
 from wiki_parser import (
-    FakeDualPdfParserProvider,
+    FakeMineruParserProvider,
     FakeParserProvider,
     FakeParserScenarioV2,
 )
@@ -96,7 +96,7 @@ async def test_worker_recovers_interrupted_parse_with_new_attempt(tmp_path: Path
         await second.close()
 
 
-async def test_worker_recovery_preserves_v2_accurate_mode(tmp_path: Path) -> None:
+async def test_worker_recovery_preserves_v2_gpu_mode(tmp_path: Path) -> None:
     root = tmp_path / "wiki-v2"
     first = await WikiStore.open(
         root,
@@ -113,7 +113,7 @@ async def test_worker_recovery_preserves_v2_accurate_mode(tmp_path: Path) -> Non
     )
     _parsing, interrupted_job = await first.begin_parse_job(
         source.id,
-        requested_mode="accurate",
+        requested_mode="gpu-high",
     )
     await first.set_job_status(interrupted_job.id, "running")
     await first.close()
@@ -122,7 +122,7 @@ async def test_worker_recovery_preserves_v2_accurate_mode(tmp_path: Path) -> Non
         root,
         job_id_factory=lambda: "job_000000000000000000000002",
     )
-    provider = FakeDualPdfParserProvider(
+    provider = FakeMineruParserProvider(
         scenarios=(FakeParserScenarioV2(preflight_profile="scanned"),)
     )
     worker = WikiIngestionWorkerManager(
@@ -140,12 +140,12 @@ async def test_worker_recovery_preserves_v2_accurate_mode(tmp_path: Path) -> Non
             raise AssertionError("v2 recovered parse did not finish")
 
         assert len(provider.created_specs) == 1
-        assert provider.created_specs[0].requested_mode == "accurate"
+        assert provider.created_specs[0].requested_mode == "gpu-high"
         old_job = await second.get_job(interrupted_job.id)
         new_job = await second.get_job("job_000000000000000000000002")
         assert old_job.status == "failed"
         assert new_job.status == "succeeded"
-        assert new_job.requested_mode == "accurate"
+        assert new_job.requested_mode == "gpu-high"
     finally:
         await worker.stop()
         await second.close()
@@ -170,7 +170,7 @@ async def test_worker_recovery_skips_mode_unsupported_by_reconfigured_provider(
     )
     _parsing, old_job = await first.begin_parse_job(
         source.id,
-        requested_mode="accurate",
+        requested_mode="gpu-high",
     )
     await first.set_job_status(old_job.id, "running")
     await first.close()
@@ -189,7 +189,7 @@ async def test_worker_recovery_skips_mode_unsupported_by_reconfigured_provider(
         jobs = await second.list_parse_jobs(source.id)
         assert len(jobs) == 1
         assert jobs[0].status == "failed"
-        assert jobs[0].requested_mode == "accurate"
+        assert jobs[0].requested_mode == "gpu-high"
     finally:
         await worker.stop()
         await second.close()

@@ -23,9 +23,6 @@ _MANIFEST_NAME: Final = "component-manifest.json"
 _LICENSE_NAME: Final = "LICENSE"
 _NOTICE_NAME: Final = "NOTICE.md"
 _SBOM_NAME: Final = "sbom.spdx.json"
-_OFFICIAL_AGPL_TEXT_SHA256: Final = (
-    "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0"
-)
 _MAX_FILE_COUNT: Final = 512
 _MAX_FILE_BYTES: Final = 16 * 1024 * 1024
 _MAX_TOTAL_BYTES: Final = 64 * 1024 * 1024
@@ -41,10 +38,20 @@ _ALLOWED_ROLES: Final = frozenset(
         "sbom",
         "source",
         "source_offer",
+        "third_party_license",
     }
 )
 _IGNORED_DIRECTORY_NAMES: Final = frozenset(
-    {".mypy_cache", ".pytest_cache", ".ruff_cache", ".venv", "__pycache__", "build", "dist"}
+    {
+        ".mypy_cache",
+        ".pytest_cache",
+        ".pytest-tmp",
+        ".ruff_cache",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+    }
 )
 
 
@@ -247,7 +254,7 @@ class SourceOfferService:
             raise SourceOfferError("source manifest schema version is unsupported")
         if manifest.get("component_id") != _COMPONENT_ID:
             raise SourceOfferError("source manifest component identity is invalid")
-        if manifest.get("license_expression") != "AGPL-3.0-only":
+        if manifest.get("license_expression") != "MIT":
             raise SourceOfferError("source manifest license expression is invalid")
         if not isinstance(manifest.get("name"), str) or not manifest["name"]:
             raise SourceOfferError("source manifest name is invalid")
@@ -295,8 +302,8 @@ class SourceOfferService:
             if total_size > _MAX_TOTAL_BYTES:
                 raise SourceOfferError("source offer exceeds the total size limit")
             content_sha256 = hashlib.sha256(content).hexdigest()
-            if relative_path == _LICENSE_NAME and content_sha256 != _OFFICIAL_AGPL_TEXT_SHA256:
-                raise SourceOfferError("the GNU AGPL license text was modified")
+            if relative_path == _LICENSE_NAME and not content.startswith(b"MIT License"):
+                raise SourceOfferError("the Worker MIT license text was modified")
             files.append(
                 SourceOfferFile(
                     path=relative_path,
@@ -312,7 +319,7 @@ class SourceOfferService:
             component_id=_COMPONENT_ID,
             name=manifest["name"],
             version=manifest["version"],
-            license_expression="AGPL-3.0-only",
+            license_expression="MIT",
             runtime_ready=manifest["runtime_ready"],
             archive_name=manifest["source_archive_name"],
             files=tuple(files),
@@ -377,7 +384,7 @@ def build_about_router(service: SourceOfferService | None) -> APIRouter:
             "component_id": _COMPONENT_ID,
             "name": "pi Wiki Parser Worker",
             "version": __version__,
-            "license_expression": "AGPL-3.0-only",
+            "license_expression": "MIT",
             "runtime_ready": False,
             "source_offer_available": service is not None,
             "source_offer_url": f"/api/about/{_COMPONENT_ID}/source-offer",
@@ -401,8 +408,8 @@ def build_about_router(service: SourceOfferService | None) -> APIRouter:
             },
             "components": [component],
             "legal_notice": (
-                "The AGPL Worker is separate from the MIT main application and is provided "
-                "without warranty."
+                "The MinerU Worker is separately packaged under MIT and uses the separately "
+                "licensed MinerU runtime; both are provided without warranty."
             ),
         }
 

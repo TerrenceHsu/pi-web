@@ -1,7 +1,7 @@
 """Strict versioned routing and quality configuration.
 
 Copyright (C) 2026 Pi Python Port
-SPDX-License-Identifier: AGPL-3.0-only
+SPDX-License-Identifier: MIT
 """
 
 from __future__ import annotations
@@ -22,8 +22,6 @@ class WorkerLimits:
     max_artifact_bytes: int
     max_artifact_files: int
     max_pages: int
-    max_xref_objects: int
-    max_drawings_per_page: int
     max_embedded_images: int
     max_single_image_bytes: int
     max_total_image_bytes: int
@@ -32,17 +30,6 @@ class WorkerLimits:
 @dataclass(frozen=True, slots=True)
 class PreflightThresholds:
     min_text_characters_per_page: int
-    scan_max_text_page_ratio: float
-    image_dominant_page_area_ratio: float
-    multicolumn_min_text_blocks: int
-    multicolumn_min_column_gap_ratio: float
-    table_candidate_min_drawings: int
-    direct_docling_image_page_ratio: float
-    direct_docling_multicolumn_page_ratio: float
-    direct_docling_table_page_ratio: float
-    image_weight: float
-    multicolumn_weight: float
-    table_weight: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,8 +119,6 @@ def load_routing_config(path: Path) -> WorkerRoutingConfig:
             "max_artifact_bytes",
             "max_artifact_files",
             "max_pages",
-            "max_xref_objects",
-            "max_drawings_per_page",
             "max_embedded_images",
             "max_single_image_bytes",
             "max_total_image_bytes",
@@ -142,23 +127,7 @@ def load_routing_config(path: Path) -> WorkerRoutingConfig:
     preflight = _object(
         root["preflight"],
         "preflight",
-        {
-            "min_text_characters_per_page",
-            "scan_max_text_page_ratio",
-            "image_dominant_page_area_ratio",
-            "multicolumn_min_text_blocks",
-            "multicolumn_min_column_gap_ratio",
-            "table_candidate_min_drawings",
-            "direct_docling_image_page_ratio",
-            "direct_docling_multicolumn_page_ratio",
-            "direct_docling_table_page_ratio",
-            "complexity_weights",
-        },
-    )
-    complexity = _object(
-        preflight["complexity_weights"],
-        "complexity_weights",
-        {"image", "multicolumn", "table"},
+        {"min_text_characters_per_page"},
     )
     quality = _object(
         root["quality"],
@@ -187,9 +156,8 @@ def load_routing_config(path: Path) -> WorkerRoutingConfig:
         },
     )
 
-    complexity_values = tuple(_ratio(complexity[key]) for key in complexity)
     quality_weights = tuple(_ratio(weights[key]) for key in weights)
-    if abs(sum(complexity_values) - 1.0) > 1e-9 or abs(sum(quality_weights) - 1.0) > 1e-9:
+    if abs(sum(quality_weights) - 1.0) > 1e-9:
         raise WorkerRuntimeError("invalid_configuration")
 
     parsed_limits = WorkerLimits(
@@ -198,10 +166,6 @@ def load_routing_config(path: Path) -> WorkerRoutingConfig:
         max_artifact_bytes=_integer(limits["max_artifact_bytes"], minimum=1),
         max_artifact_files=_integer(limits["max_artifact_files"], minimum=3),
         max_pages=_integer(limits["max_pages"], minimum=1),
-        max_xref_objects=_integer(limits["max_xref_objects"], minimum=1),
-        max_drawings_per_page=_integer(
-            limits["max_drawings_per_page"], minimum=1
-        ),
         max_embedded_images=_integer(limits["max_embedded_images"]),
         max_single_image_bytes=_integer(limits["max_single_image_bytes"], minimum=1),
         max_total_image_bytes=_integer(limits["max_total_image_bytes"], minimum=1),
@@ -222,31 +186,6 @@ def load_routing_config(path: Path) -> WorkerRoutingConfig:
             min_text_characters_per_page=_integer(
                 preflight["min_text_characters_per_page"], minimum=1
             ),
-            scan_max_text_page_ratio=_ratio(preflight["scan_max_text_page_ratio"]),
-            image_dominant_page_area_ratio=_ratio(
-                preflight["image_dominant_page_area_ratio"]
-            ),
-            multicolumn_min_text_blocks=_integer(
-                preflight["multicolumn_min_text_blocks"], minimum=2
-            ),
-            multicolumn_min_column_gap_ratio=_ratio(
-                preflight["multicolumn_min_column_gap_ratio"]
-            ),
-            table_candidate_min_drawings=_integer(
-                preflight["table_candidate_min_drawings"], minimum=1
-            ),
-            direct_docling_image_page_ratio=_ratio(
-                preflight["direct_docling_image_page_ratio"]
-            ),
-            direct_docling_multicolumn_page_ratio=_ratio(
-                preflight["direct_docling_multicolumn_page_ratio"]
-            ),
-            direct_docling_table_page_ratio=_ratio(
-                preflight["direct_docling_table_page_ratio"]
-            ),
-            image_weight=_ratio(complexity["image"]),
-            multicolumn_weight=_ratio(complexity["multicolumn"]),
-            table_weight=_ratio(complexity["table"]),
         ),
         quality=QualityThresholds(
             pass_threshold=_ratio(quality["pass_threshold"]),

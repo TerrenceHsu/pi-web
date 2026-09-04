@@ -1,7 +1,7 @@
 export type WikiSpaceStatus = "active" | "archived" | "deleting" | "failed"
 export type WikiSourceStatus = "uploaded" | "parsing" | "parsed" | "failed" | "deleting"
 export type WikiSourceMimeType = "application/pdf" | "text/html"
-export type WikiParseMode = "builtin" | "auto" | "fast" | "accurate"
+export type WikiParseMode = "builtin" | "pipeline" | "gpu-medium" | "gpu-high"
 export type WikiArtifactKind =
   "parsed_markdown" | "page_markdown" | "embedded_image" | "table_image" | "manifest"
 export type WikiChangeSetStatus =

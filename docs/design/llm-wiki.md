@@ -1,6 +1,6 @@
 # LLM Wiki 设计
 
-> 状态：阶段 0–10 已实现；页面中心 LLM Wiki、双 Parser OCI Worker、独立 Knowledge 页面、来源保留、Space 生命周期与归档只读门禁均已完成
+> 状态：阶段 0–10 已实现；页面中心 LLM Wiki、MinerU Parser 源码闭环、独立 Knowledge 页面、来源保留、Space 生命周期与归档只读门禁均已完成；新 OCI 真实语料 Gate 待验证
 >
 > 日期：2026-08-28
 >
@@ -39,10 +39,9 @@ Wiki Space
 
 1. 用户必须先创建 Wiki Space，来源、页面、图谱和对话都严格归属于一个 Space。
 2. MVP 上传格式只支持 PDF 和单个 `.html`；DOCX、PPT/PPTX、Excel 后续再设计。
-3. PDF 由独立持久 Worker 处理：PyMuPDF4LLM 负责 fast，Docling 负责 accurate 和 auto 回退；
-   两者始终直接读取同一不可变原始 PDF。
-4. API 支持 `auto | fast | accurate`；生产默认 `auto`。快速结果必须通过版本化质量门禁，失败时
-   只有 `auto` 可以用原始 PDF 回退 Docling。
+3. PDF 由独立持久 MinerU Worker 处理；每个任务始终读取一份经 SHA 校验的不可变原始 PDF。
+4. API 支持 `pipeline | gpu-medium | gpu-high`，默认 `pipeline`；档位映射固定且每个 Job 只有
+   一个 MinerU attempt，不允许解析器回退。
 5. HTML 使用独立的确定性 Parser，不经过 PDF Parser，不访问任何外部网络资源。
 6. 每个来源生成一篇入口 Wiki 页面；Agent 可以在同一 Space 内提出主题子页面。
 7. 删除 Chunk 检索主链路；允许对已批准 Wiki 页面的标题、别名和正文使用 SQLite FTS5。
@@ -124,9 +123,9 @@ Schema v1、Space CRUD、路径/原子镜像恢复和显式旧库 retirement 的
 [`llm-wiki-store-v1.md`](llm-wiki-store-v1.md)。当前产品启动不再打开旧 Knowledge API/Worker；
 历史文件保持原样，只有用户另行要求物理归档时才执行破坏性 retirement 流程。
 
-当前 schema v7 在 selected parse revision 的 v2 基础上依次加入 Summary Draft、Page Proposal、
+当前 schema v8 在 selected parse revision 的 v2 基础上依次加入 Summary Draft、Page Proposal、
 Change Set 发布、页面 FTS5、图谱与 Conversation 合同。旧 v1–v6 都固定返回
-`schema_rebuild_required`，由用户显式重新初始化未发布的新 Wiki 库；不做原地迁移，也不能在
+`schema_rebuild_required`；schema v7 的旧解析档位同样要求重建。由用户显式重新初始化未发布的新 Wiki 库；不做原地迁移，也不能在
 同一 schema version 下误读不同数据合同。
 
 ### 5.1 `wiki_spaces`
@@ -249,16 +248,15 @@ Knowledge 对话的可信绑定。
 
 记录只允许插入，不提供更新路径；同一个来源可以针对不同 selected parse revision 保留多份历史
 Summary Draft。后续页面提案必须显式指定一份 Draft，不能隐式读取“最新”后跨版本发布。
-- 失败 fast attempt 的质量证据可以保留，但正文不得进入 Agent 可读的 selected Raw。
+- 质量拒绝 attempt 的证据可以保留，但正文不得进入 Agent 可读的 selected Raw。
 
 ## 6. Parser Provider
 
-主应用只依赖 provider-neutral 的异步 `ParserProvider` 契约，不 import PyMuPDF、PyMuPDF4LLM、
-Docling、Torch、OCR 或其模型 SDK。发布实现是断外网的持久 OCI Worker，启动时创建并预热
-Docling standard/ocr 两个 Converter；独立 venv 进程只允许作为明确标记的开发降级模式。
+主应用只依赖 provider-neutral 的异步 `ParserProvider` 契约，不 import MinerU、Torch 或其模型
+SDK。发布实现是断外网的持久 OCI Worker；模型在镜像构建期下载，每个 Job 使用独立临时目录。
 
-现行双 Parser 的模式、路由、质量、ParsedDocument v2、parse revision、AGPL-3.0 和模型 Gate
-见 [`llm-wiki-dual-pdf-parser.md`](llm-wiki-dual-pdf-parser.md)。旧 Marker Gate 仅保留历史记录。
+现行 MinerU 模式、路由、质量、ParsedDocument v2、parse revision、许可和模型 Gate
+见 [`llm-wiki-mineru-parser.md`](llm-wiki-mineru-parser.md)。
 
 Provider 最小能力：
 
@@ -281,8 +279,8 @@ destroy(job_id)
 - Contract v2 只接受 manifest、合并 Markdown、逐页 Markdown 和受限图片；拒绝可执行文件、
   未声明文件和任意路径。
 - 取消、超时和异常最终都必须回收任务资源。
-- PyMuPDF4LLM/PyMuPDF 的 AGPL Source Offer、Docling/模型/OCR 许可证、精确版本/hash、离线缓存、
-  CPU/GPU/内存、启动时间和分发方式必须通过独立 Gate 后才能进入发布运行时。
+- MinerU/模型许可证、精确版本/hash、离线缓存、CPU/GPU/内存、启动时间和分发方式必须通过
+  独立 Gate 后才能进入发布运行时。
 
 ## 7. PDF 与 HTML 解析
 
@@ -479,15 +477,15 @@ Knowledge
 
 - **历史完成**：Marker Gate 与 Contract v1 验证了 Provider 隔离、取消、超时、回收和不可信
   artifact 边界；Marker 实施路线现已停止。
-- **已实现 Contract v2**：PyMuPDF4LLM fast + Docling accurate/auto fallback 的 immutable DTO、
-  Protocol、预检/路由/质量/attempt/逐页制品证据与主进程依赖隔离。
-- **已实现离线 Fake v2**：执行 hash-pinned 路由、质量判定、最多一次 auto fallback、逐页
-  Artifact v2 和同一原始 PDF SHA 证据，不加载任何具体 Parser runtime。
+- **已实现 Contract v2**：MinerU 三档固定 profile 的 immutable DTO、Protocol、预检/路由/质量、
+  单 attempt、逐页制品证据与主进程依赖隔离。
+- **已实现离线 Fake v2**：执行 hash-pinned 路由、质量判定、逐页 Artifact v2 和同一原始 PDF
+  SHA 证据，不加载任何具体 Parser runtime。
 - **已实现主应用编排**：Contract v2 不可信 artifact 逐项复核，三种模式贯穿上传、排队与
   崩溃恢复，attempt/route/quality/revision 原子持久化；拒绝制品不切换 selected revision。
-- **已实现并验证 AGPL Worker**：独立 Worker 包、完整许可证/notices/源码 manifest、确定性
-  Source Offer、SPDX SBOM、wheel Gate、About API/UI、版本化路由配置及 PyMuPDF4LLM/Docling
-  adapter；真实 OCI 隔离与代表性 PDF smoke 通过，`runtime_ready=true`。
+- **已实现 MinerU Worker 源码闭环**：独立 MIT Worker 包、MinerU 许可提示、notices/源码 manifest、
+  确定性 Source Offer、SPDX SBOM、完整 hash lock、wheel Gate、About API/UI 与 MinerU adapter；
+  新 OCI 隔离与代表性 CPU/GPU PDF smoke 待验证，`runtime_ready=false`。
 - **可复用**：独立 `wiki_parser` Protocol/固定错误与完全离线 Fake 的生命周期和安全经验。
 
 ### 阶段 2：WikiStore 与新目录
@@ -507,7 +505,7 @@ Knowledge
 - **已完成**：Contract v2，以及 schema v2/Raw 多 attempt/revision、逐页 bundle、selected
   CAS/pointer repair 与旧 flat v1 明确重建门禁。
 - **已完成**：Contract v2 artifact 导入与现有 Wiki Worker/API 原子编排。
-- **已完成**：构建并验证固定版本/hash、断外网的 PyMuPDF4LLM + Docling 持久 OCI Worker。
+- **待验证**：构建固定版本/hash、断外网的 MinerU 持久 OCI Worker，并完成 CPU/GPU 真实语料 Gate。
 - **已完成**：前端支持 Space、Source、状态和 Raw artifact 安全浏览。
 
 ### 阶段 4：Wiki 页面与 Change Set

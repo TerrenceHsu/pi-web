@@ -1,4 +1,4 @@
-"""Offline lifecycle and routing tests for the dual-PDF Contract v2 fake."""
+"""Offline lifecycle tests for the MinerU Contract v2 fake."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from wiki_parser import (
-    FakeDualPdfParserProvider,
+    FakeMineruParserProvider,
     FakeParserAssetV2,
     FakeParserDocumentV2,
     FakeParserScenarioV2,
@@ -23,318 +23,172 @@ from wiki_parser import (
     ParserSourceSpec,
 )
 
-_PDF_BYTES = b"%PDF-1.7\n% completely offline fake source\n%%EOF\n"
-_PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"offline-fake-image"
+_PDF = b"%PDF-1.7\n% offline MinerU fake\n%%EOF\n"
+_PNG = b"\x89PNG\r\n\x1a\n" + b"offline-image"
 
 
 async def _job(
     tmp_path: Path,
-    provider: FakeDualPdfParserProvider,
+    provider: FakeMineruParserProvider,
     *,
-    mode: str = "auto",
-    source_bytes: bytes = _PDF_BYTES,
-) -> tuple[Path, ParserJobHandleV2, ParserJobSpecV2]:
-    source_path = (tmp_path / "source.pdf").resolve()
-    source_path.write_bytes(source_bytes)
+    mode: str = "pipeline",
+) -> tuple[Path, ParserJobHandleV2]:
+    path = (tmp_path / "source.pdf").resolve()
+    path.write_bytes(_PDF)
     probe = await provider.probe()
-    spec = ParserJobSpecV2(
-        job_id="wiki-job-1",
-        source=ParserSourceSpec(
-            source_id="wiki-source-1",
-            display_name="source.pdf",
-            size_bytes=len(source_bytes),
-            sha256=hashlib.sha256(source_bytes).hexdigest(),
-        ),
-        requested_mode=mode,
-        routing_config=probe.routing_config,
+    spec = ParserJobSpecV2.model_validate(
+        {
+            "job_id": "wiki-job-1",
+            "source": {
+                "source_id": "wiki-source-1",
+                "display_name": "source.pdf",
+                "size_bytes": len(_PDF),
+                "sha256": hashlib.sha256(_PDF).hexdigest(),
+            },
+            "requested_mode": mode,
+            "routing_config": probe.routing_config.model_dump(mode="json"),
+        }
     )
-    handle = await provider.create_job(spec, source_path=source_path)
-    return source_path, handle, spec
-
-
-def _manifest(archive_path: Path) -> tuple[ParserArtifactManifestV2, set[str]]:
-    with tarfile.open(archive_path, mode="r:") as archive:
-        members = {member.name for member in archive.getmembers()}
-        stream = archive.extractfile("manifest.json")
-        assert stream is not None
-        manifest = ParserArtifactManifestV2.model_validate_json(stream.read())
-    return manifest, members
+    return path, await provider.create_job(spec, source_path=path)
 
 
 @pytest.mark.asyncio
-async def test_fake_v2_probe_is_offline_and_satisfies_provider_protocol(
-    tmp_path: Path,
-) -> None:
-    provider = FakeDualPdfParserProvider(clock_ms=lambda: 100)
-
+async def test_fake_probe_is_offline_and_rejects_wrong_config(tmp_path: Path) -> None:
+    provider = FakeMineruParserProvider(clock_ms=lambda: 100)
     assert isinstance(provider, ParserProviderV2)
     probe = await provider.probe()
-    assert probe.provider == "fake_dual_pdf"
-    assert probe.license_mode == "not_required"
+    assert probe.provider == "fake_mineru"
     assert probe.capabilities.network_during_job is False
-    assert probe.routing_config.revision == "fake_routing_v1"
 
-    source_path = (tmp_path / "source.pdf").resolve()
-    source_path.write_bytes(_PDF_BYTES)
-    wrong_config = ParserRoutingConfigIdentity(
-        revision="wrong_config",
-        sha256="0" * 64,
-    )
-    spec = ParserJobSpecV2(
-        job_id="wrong-config-job",
+    path = tmp_path / "source.pdf"
+    path.write_bytes(_PDF)
+    wrong = ParserJobSpecV2(
+        job_id="wrong-job",
         source=ParserSourceSpec(
             source_id="wiki-source-1",
             display_name="source.pdf",
-            size_bytes=len(_PDF_BYTES),
-            sha256=hashlib.sha256(_PDF_BYTES).hexdigest(),
+            size_bytes=len(_PDF),
+            sha256=hashlib.sha256(_PDF).hexdigest(),
         ),
-        routing_config=wrong_config,
+        routing_config=ParserRoutingConfigIdentity(
+            revision="wrong_config",
+            sha256="0" * 64,
+        ),
     )
     with pytest.raises(ParserError) as raised:
-        await provider.create_job(spec, source_path=source_path)
+        await provider.create_job(wrong, source_path=path)
     assert raised.value.code == "invalid_configuration"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("mode", "profile", "expected_preset", "expected_reason"),
+    ("mode", "preset", "reason"),
     [
-        ("accurate", "scanned", "docling_ocr", "explicit_accurate"),
-        ("auto", "scanned", "docling_ocr", "scan_text_layer_missing"),
-        ("auto", "complex_table", "docling_standard", "complex_table_dense"),
+        ("pipeline", "mineru_pipeline", "explicit_pipeline"),
+        ("gpu-medium", "mineru_gpu_medium", "explicit_gpu_medium"),
+        ("gpu-high", "mineru_gpu_high", "explicit_gpu_high"),
     ],
 )
-async def test_accurate_and_complex_routes_use_one_direct_docling_attempt(
+async def test_profiles_produce_one_mineru_attempt_and_artifact(
     tmp_path: Path,
     mode: str,
-    profile: str,
-    expected_preset: str,
-    expected_reason: str,
+    preset: str,
+    reason: str,
 ) -> None:
-    scenario = FakeParserScenarioV2(
-        preflight_profile=profile,
-        accurate_document=FakeParserDocumentV2(
-            pages=("# Docling page one\n", "Docling page two\n"),
-        ),
-        fast_document=FakeParserDocumentV2(
-            pages=("# Fast page one\n", "Fast page two\n"),
-        ),
-    )
-    provider = FakeDualPdfParserProvider(scenarios=(scenario,))
-    _source, handle, _spec = await _job(tmp_path, provider, mode=mode)
-
-    status = await provider.wait(handle)
-
-    assert status.state == "succeeded"
-    assert len(status.attempts) == 1
-    assert status.attempts[0].parser == "docling"
-    assert status.attempts[0].preset == expected_preset
-    assert status.route_decision is not None
-    assert status.route_decision.reasons == (expected_reason,)
-    assert status.route_decision.fallback_parser is None
-
-
-@pytest.mark.asyncio
-async def test_auto_simple_fast_success_does_not_run_declared_fallback(
-    tmp_path: Path,
-) -> None:
-    provider = FakeDualPdfParserProvider(
+    provider = FakeMineruParserProvider(
         scenarios=(
             FakeParserScenarioV2(
-                fast_document=FakeParserDocumentV2(
-                    pages=("# Fast selected\n", "Second fast page\n"),
-                    assets=(
-                        FakeParserAssetV2(
-                            content=_PNG_BYTES,
-                            page_number=1,
-                        ),
-                    ),
-                ),
-                accurate_document=FakeParserDocumentV2(
-                    pages=("# Must not run\n", "Unused\n"),
-                ),
+                document=FakeParserDocumentV2(
+                    pages=("# Page one\n", "Page two\n"),
+                    assets=(FakeParserAssetV2(content=_PNG, page_number=1),),
+                )
             ),
         )
     )
-    _source, handle, _spec = await _job(tmp_path, provider)
-
+    _source, handle = await _job(tmp_path, provider, mode=mode)
     status = await provider.wait(handle)
+
     assert status.state == "succeeded"
     assert status.route_decision is not None
-    assert status.route_decision.fallback_parser == "docling"
-    assert [(item.parser, item.state) for item in status.attempts] == [
-        ("pymupdf4llm", "succeeded")
+    assert status.route_decision.initial_preset == preset
+    assert status.route_decision.reasons == (reason,)
+    assert status.route_decision.fallback_parser is None
+    assert [(item.parser, item.preset, item.state) for item in status.attempts] == [
+        ("mineru", preset, "succeeded")
     ]
 
-    archive_path = tmp_path / "fast-artifact.tar"
+    archive_path = tmp_path / f"{mode}.tar"
     receipt = await provider.download_artifact(
         handle,
         local_path=archive_path,
         expected_sha256=status.artifact_sha256,
     )
-    manifest, members = _manifest(archive_path)
-    assert receipt.file_count == 5
-    assert manifest.parser == "pymupdf4llm"
-    assert manifest.selected_attempt_id == status.attempts[0].attempt_id
-    assert [page.path for page in manifest.pages] == [
-        "pages/000001.md",
-        "pages/000002.md",
-    ]
-    assert {"manifest.json", "parsed.md", "pages/000001.md", "pages/000002.md"} < members
-    assert len(manifest.assets) == 1
-
-
-@pytest.mark.asyncio
-async def test_auto_quality_rejection_falls_back_once_using_original_source_snapshot(
-    tmp_path: Path,
-) -> None:
-    original_sha = hashlib.sha256(_PDF_BYTES).hexdigest()
-    provider = FakeDualPdfParserProvider(
-        id_factory=lambda: "fallback-provider-job",
-        scenarios=(
-            FakeParserScenarioV2(
-                fast_outcome="quality_rejected",
-                accurate_outcome="succeeded",
-                fast_document=FakeParserDocumentV2(pages=("Low quality fast\n",)),
-                accurate_document=FakeParserDocumentV2(pages=("# Selected Docling\n",)),
-            ),
-        ),
-    )
-    source_path, handle, _spec = await _job(tmp_path, provider)
-    source_path.write_bytes(b"%PDF-1.7\nchanged after upload\n%%EOF\n")
-
-    status = await provider.wait(handle)
-
-    assert status.state == "succeeded"
-    assert [(item.parser, item.state) for item in status.attempts] == [
-        ("pymupdf4llm", "quality_rejected"),
-        ("docling", "succeeded"),
-    ]
-    first, second = status.attempts
-    assert first.source_sha256 == second.source_sha256 == original_sha
-    assert first.output_sha256 is None
-    assert second.fallback_from_attempt_id == first.attempt_id
-    assert second.route_reasons == ("fast_quality_fallback",)
-
-    archive_path = tmp_path / "fallback-artifact.tar"
-    await provider.download_artifact(
-        handle,
-        local_path=archive_path,
-        expected_sha256=status.artifact_sha256,
-    )
-    manifest, _members = _manifest(archive_path)
-    assert manifest.source_sha256 == original_sha
-    assert manifest.parser == "docling"
-    assert manifest.attempts == status.attempts
     with tarfile.open(archive_path, mode="r:") as archive:
-        parsed = archive.extractfile("parsed.md")
-        assert parsed is not None
-        selected_markdown = parsed.read().decode("utf-8")
-    assert "Selected Docling" in selected_markdown
-    assert "Low quality fast" not in selected_markdown
+        stream = archive.extractfile("manifest.json")
+        assert stream is not None
+        manifest = ParserArtifactManifestV2.model_validate_json(stream.read())
+    assert receipt.file_count == 5
+    assert manifest.parser == "mineru"
+    assert manifest.requested_mode == mode
+    assert len(manifest.attempts) == 1
 
 
 @pytest.mark.asyncio
-async def test_explicit_fast_quality_rejection_is_terminal_without_fallback(
+@pytest.mark.parametrize(
+    ("outcome", "error", "attempt_state"),
+    [
+        ("quality_rejected", "quality_rejected", "quality_rejected"),
+        ("failed", "parsing_failed", "failed"),
+    ],
+)
+async def test_failure_is_terminal_without_fallback(
     tmp_path: Path,
+    outcome: str,
+    error: str,
+    attempt_state: str,
 ) -> None:
-    provider = FakeDualPdfParserProvider(
-        scenarios=(
-            FakeParserScenarioV2(
-                fast_outcome="quality_rejected",
-                accurate_outcome="succeeded",
-            ),
-        )
+    provider = FakeMineruParserProvider(
+        scenarios=(FakeParserScenarioV2.model_validate({"outcome": outcome}),)
     )
-    _source, handle, _spec = await _job(tmp_path, provider, mode="fast")
+    _source, handle = await _job(tmp_path, provider)
 
-    status = await provider.wait(handle)
+    first = await provider.wait(handle)
+    second = await provider.wait(handle)
 
-    assert status.state == "failed"
-    assert status.safe_error_code == "quality_rejected"
-    assert len(status.attempts) == 1
-    assert status.attempts[0].parser == "pymupdf4llm"
-    assert status.attempts[0].state == "quality_rejected"
-    assert status.artifact_sha256 is None
+    assert first.state == second.state == "failed"
+    assert first.safe_error_code == second.safe_error_code == error
+    assert len(first.attempts) == 1
+    assert first.attempts[0].state == attempt_state
+    assert first.attempts[0].fallback_from_attempt_id is None
     with pytest.raises(ParserError) as raised:
         await provider.download_artifact(handle, local_path=tmp_path / "absent.tar")
     assert raised.value.code == "artifact_unavailable"
 
 
 @pytest.mark.asyncio
-async def test_docling_failure_after_fallback_terminates_and_never_loops(
-    tmp_path: Path,
-) -> None:
-    provider = FakeDualPdfParserProvider(
-        scenarios=(
-            FakeParserScenarioV2(
-                fast_outcome="quality_rejected",
-                accurate_outcome="failed",
-            ),
-        )
-    )
-    _source, handle, _spec = await _job(tmp_path, provider)
-
-    first_status = await provider.wait(handle)
-    second_status = await provider.wait(handle)
-
-    assert second_status.observed_at_ms >= first_status.observed_at_ms
-    assert second_status.state == first_status.state
-    assert second_status.phase == first_status.phase
-    assert second_status.attempts == first_status.attempts
-    assert second_status.safe_error_code == first_status.safe_error_code
-    assert first_status.state == "failed"
-    assert first_status.safe_error_code == "parsing_failed"
-    assert [(item.parser, item.state) for item in first_status.attempts] == [
-        ("pymupdf4llm", "quality_rejected"),
-        ("docling", "failed"),
-    ]
-    assert first_status.attempts[1].fallback_from_attempt_id == (
-        first_status.attempts[0].attempt_id
-    )
-
-
-@pytest.mark.asyncio
-async def test_wait_cancellation_and_destroy_are_idempotent(tmp_path: Path) -> None:
+async def test_cancel_and_destroy_are_idempotent(tmp_path: Path) -> None:
     gate = asyncio.Event()
     signal = asyncio.Event()
-    provider = FakeDualPdfParserProvider(completion_gate=gate)
-    _source, handle, _spec = await _job(tmp_path, provider)
-
-    wait_task = asyncio.create_task(provider.wait(handle, signal=signal))
+    provider = FakeMineruParserProvider(completion_gate=gate)
+    _source, handle = await _job(tmp_path, provider)
+    waiting = asyncio.create_task(provider.wait(handle, signal=signal))
     await asyncio.sleep(0)
     signal.set()
-    status = await wait_task
 
-    assert status.state == "cancelled"
-    assert status.safe_error_code == "cancelled"
-    assert status.attempts == ()
-    cancelled_again = await provider.cancel(handle)
-    assert cancelled_again.state == status.state
-    assert cancelled_again.phase == status.phase
-    assert cancelled_again.started_at_ms == status.started_at_ms
-    assert cancelled_again.finished_at_ms == status.finished_at_ms
-    assert cancelled_again.safe_error_code == status.safe_error_code
-    assert cancelled_again.attempts == status.attempts
-    assert cancelled_again.observed_at_ms >= status.observed_at_ms
+    assert (await waiting).state == "cancelled"
+    assert (await provider.cancel(handle)).state == "cancelled"
     await provider.destroy(handle)
     await provider.destroy(handle)
-    destroyed = await provider.status(handle)
-    assert destroyed.state == "destroyed"
-    assert provider.destroyed_provider_job_ids == [handle.provider_job_id]
+    assert (await provider.status(handle)).state == "destroyed"
 
 
-def test_fake_v2_repr_hides_document_and_image_content() -> None:
+def test_fake_repr_hides_document_and_image_content() -> None:
     document = FakeParserDocumentV2(
         pages=("PRIVATE-DOCUMENT-TEXT",),
         assets=(FakeParserAssetV2(content=b"PRIVATE-IMAGE-BYTES"),),
     )
-    scenario = FakeParserScenarioV2(
-        fast_document=document,
-        accurate_document=document,
-    )
+    scenario = FakeParserScenarioV2(document=document)
 
     assert "PRIVATE-DOCUMENT-TEXT" not in repr(document)
     assert "PRIVATE-IMAGE-BYTES" not in repr(document)
     assert "PRIVATE-DOCUMENT-TEXT" not in repr(scenario)
-    assert "PRIVATE-IMAGE-BYTES" not in repr(scenario)

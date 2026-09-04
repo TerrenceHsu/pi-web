@@ -35,7 +35,7 @@ _WORKER_SOURCE_ROOT = (
 @dataclass(frozen=True, slots=True)
 class SmokeCase:
     name: str
-    mode: Literal["fast", "accurate", "auto"]
+    mode: Literal["pipeline", "gpu-medium", "gpu-high"]
     source_path: Path
 
 
@@ -65,7 +65,7 @@ def _parse_cases(values: list[list[str]]) -> tuple[SmokeCase, ...]:
             raise ValueError(f"invalid case name: {name!r}")
         if name in names:
             raise ValueError(f"duplicate case name: {name}")
-        if mode not in {"fast", "accurate", "auto"}:
+        if mode not in {"pipeline", "gpu-medium", "gpu-high"}:
             raise ValueError(f"invalid mode for {name}: {mode}")
         path = Path(source).resolve(strict=True)
         if not path.is_file() or path.suffix.casefold() != ".pdf":
@@ -74,7 +74,7 @@ def _parse_cases(values: list[list[str]]) -> tuple[SmokeCase, ...]:
         result.append(
             SmokeCase(
                 name=name,
-                mode=cast(Literal["fast", "accurate", "auto"], mode),
+                mode=cast(Literal["pipeline", "gpu-medium", "gpu-high"], mode),
                 source_path=path,
             )
         )
@@ -106,7 +106,6 @@ async def _run_case(
     routing: ParserRoutingConfigIdentity,
     output_root: Path,
     timeout_seconds: int,
-    expect_fallback: bool,
 ) -> None:
     source_size = case.source_path.stat().st_size
     source_sha256 = hashlib.sha256(case.source_path.read_bytes()).hexdigest()
@@ -133,12 +132,8 @@ async def _run_case(
             )
         attempt_parsers = [attempt.parser for attempt in status.attempts]
         attempt_states = [attempt.state for attempt in status.attempts]
-        if expect_fallback:
-            if attempt_parsers != ["pymupdf4llm", "docling"] or attempt_states != [
-                "quality_rejected",
-                "succeeded",
-            ]:
-                raise RuntimeError(f"case {case.name} did not exercise auto fallback")
+        if attempt_parsers != ["mineru"] or attempt_states != ["succeeded"]:
+            raise RuntimeError(f"case {case.name} did not run one MinerU attempt")
         artifact_path = output_root / f"{case.name}.tar"
         receipt = await provider.download_artifact(
             handle,
@@ -173,12 +168,6 @@ async def _run_case(
 
 async def _run(arguments: argparse.Namespace) -> None:
     cases = _parse_cases(arguments.case)
-    expected_fallback = set(arguments.expect_fallback)
-    names = {case.name for case in cases}
-    if not expected_fallback <= names:
-        raise ValueError("--expect-fallback must name a declared --case")
-    if any(case.mode != "auto" for case in cases if case.name in expected_fallback):
-        raise ValueError("--expect-fallback is valid only for auto cases")
 
     exchange_root = _reject_worker_source_runtime_path(
         arguments.exchange_root.resolve(strict=True),
@@ -208,7 +197,6 @@ async def _run(arguments: argparse.Namespace) -> None:
             routing=routing,
             output_root=output_root,
             timeout_seconds=arguments.timeout_seconds,
-            expect_fallback=case.name in expected_fallback,
         )
 
 
@@ -219,7 +207,7 @@ def main() -> None:
     parser.add_argument("--routing-config", type=Path, required=True)
     parser.add_argument(
         "--routing-revision",
-        default="dual_pdf_routing_quality_2026_08_24_v1",
+        default="mineru_profiles_2026_09_04_v2",
     )
     parser.add_argument("--timeout-seconds", type=int, default=1800)
     parser.add_argument(
@@ -229,7 +217,6 @@ def main() -> None:
         metavar=("NAME", "MODE", "PDF"),
         required=True,
     )
-    parser.add_argument("--expect-fallback", action="append", default=[])
     arguments = parser.parse_args()
     if not 30 <= arguments.timeout_seconds <= 86_400:
         parser.error("--timeout-seconds must be between 30 and 86400")

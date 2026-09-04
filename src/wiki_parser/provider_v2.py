@@ -1,4 +1,4 @@
-"""Asynchronous provider lifecycle for dual-parser Contract v2."""
+"""Asynchronous provider lifecycle for MinerU Contract v2."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from .contract_v2 import (
 
 @runtime_checkable
 class ParserProviderV2(Protocol):
-    """Uniform lifecycle for Fake v2 and the isolated dual-PDF worker."""
+    """Uniform lifecycle for Fake v2 and the isolated MinerU worker."""
 
     def provider_name(self) -> ParserProviderV2Name:
         """Return the provider identity without contacting the runtime."""

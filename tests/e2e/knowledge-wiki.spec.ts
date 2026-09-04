@@ -174,7 +174,7 @@ test("LLM Wiki supports the source, approval, page, graph and conversation flow"
           selected_attempt_id: "attempt_e2e",
           contract_version: 2,
           artifact_schema: "parsed-document-v2",
-          requested_mode: "auto",
+          requested_mode: "pipeline",
           source_sha256: "a".repeat(64),
           parser: "builtin-html",
           parser_version: "1",

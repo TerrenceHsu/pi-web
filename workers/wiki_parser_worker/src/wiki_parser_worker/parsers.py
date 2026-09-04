@@ -1,17 +1,15 @@
-"""Lazy real parser adapters; concrete runtimes never enter the main app.
-
-Copyright (C) 2026 Pi Python Port
-SPDX-License-Identifier: AGPL-3.0-only
-"""
+"""Pinned MinerU adapter; the concrete runtime stays outside the Web process."""
 
 from __future__ import annotations
 
 import hashlib
 import importlib
 import importlib.metadata
-from collections.abc import Callable
-from pathlib import Path
-from typing import Any, Literal, cast
+import json
+import tempfile
+from collections.abc import Iterable
+from pathlib import Path, PurePosixPath
+from typing import Any, Protocol, cast
 
 from .config import WorkerRoutingConfig
 from .errors import WorkerRuntimeError
@@ -20,32 +18,39 @@ from .models import (
     WorkerParsedDocument,
     WorkerParsedPage,
     WorkerPreflightReport,
+    WorkerRouteDecision,
 )
 from .preflight import verify_source_identity
-from .supply_chain import (
-    verify_distribution_versions,
-    verify_docling_model_artifacts,
-    verify_routing_config_identity,
-)
+from .supply_chain import verify_distribution_versions, verify_routing_config_identity
 
-_EXPECTED_PYMUPDF_VERSION = "1.28.2"
-_EXPECTED_PYMUPDF4LLM_VERSION = "1.28.2"
-_EXPECTED_DOCLING_SLIM_VERSION = "2.119.0"
-_LAYOUT_REVISION = "8f39ad3c0b4c58e9c2d2c84a38465abf757272d8"
+_EXPECTED_MINERU_VERSION = "3.4.5"
+_MIME_BY_SUFFIX = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
 
-_MIME_BY_EXTENSION = {
-    "png": "image/png",
-    "jpg": "image/jpeg",
-    "jpeg": "image/jpeg",
-    "webp": "image/webp",
-}
-_EXTENSION_BY_MIME = {
-    "image/png": "png",
-    "image/jpeg": "jpg",
-    "image/webp": "webp",
-}
-ImageMimeType = Literal["image/png", "image/jpeg", "image/webp"]
-LiteralDoclingPreset = Literal["docling_standard", "docling_ocr"]
+
+class MineruRunner(Protocol):
+    def __call__(
+        self,
+        output_dir: str,
+        pdf_file_names: list[str],
+        pdf_bytes_list: list[bytes],
+        p_lang_list: list[str],
+        **kwargs: object,
+    ) -> None: ...
+
+
+def _load_runner() -> MineruRunner:
+    verify_distribution_versions(("mineru",))
+    try:
+        module = importlib.import_module("mineru.cli.common")
+        runner = module.do_parse
+    except (AttributeError, ImportError) as error:
+        raise WorkerRuntimeError("dependency_unavailable") from error
+    return cast(MineruRunner, runner)
 
 
 def _validate_image(content: bytes, mime_type: str) -> None:
@@ -63,129 +68,128 @@ def _validate_image(content: bytes, mime_type: str) -> None:
         raise WorkerRuntimeError("parser_failed")
 
 
-def _load_module(name: str, distribution: str, expected_version: str) -> Any:
-    try:
-        version = importlib.metadata.version(distribution)
-        module = importlib.import_module(name)
-    except (ImportError, importlib.metadata.PackageNotFoundError) as error:
-        raise WorkerRuntimeError("dependency_unavailable") from error
-    if version != expected_version:
-        raise WorkerRuntimeError("dependency_version_mismatch")
-    return module
-
-
-def _load_pymupdf(injected: object | None) -> Any:
-    if injected is not None:
-        if getattr(injected, "__version__", None) != _EXPECTED_PYMUPDF_VERSION:
-            raise WorkerRuntimeError("dependency_version_mismatch")
-        return injected
-    return _load_module("pymupdf", "PyMuPDF", _EXPECTED_PYMUPDF_VERSION)
-
-
-def extract_embedded_images(
-    path: Path,
-    *,
-    expected_sha256: str,
-    config: WorkerRoutingConfig,
-    pymupdf_module: object | None = None,
-) -> tuple[WorkerParsedAsset, ...]:
-    """Extract only PDF embedded raster images, never rendered page screenshots."""
-
-    identity = verify_source_identity(path, expected_sha256)
-    module = _load_pymupdf(pymupdf_module)
-    try:
-        document = module.open(str(path))
-    except Exception as error:
-        raise WorkerRuntimeError("parser_failed") from error
-
-    assets: dict[str, WorkerParsedAsset] = {}
-    total_bytes = 0
-    try:
-        for page_index in range(document.page_count):
-            page = document.load_page(page_index)
-            images = page.get_images(full=True)
-            if not isinstance(images, list | tuple):
-                continue
-            for item in images:
-                if not isinstance(item, list | tuple) or not item or not isinstance(item[0], int):
-                    continue
-                xref = item[0]
-                if xref <= 0:
-                    continue
-                extracted = document.extract_image(xref)
-                if not isinstance(extracted, dict):
-                    raise WorkerRuntimeError("parser_failed")
-                content = extracted.get("image")
-                extension = extracted.get("ext")
-                if not isinstance(content, bytes) or not isinstance(extension, str):
-                    raise WorkerRuntimeError("parser_failed")
-                mime_type = _MIME_BY_EXTENSION.get(extension.casefold())
-                if mime_type is None:
-                    continue
-                _validate_image(content, mime_type)
-                if len(content) > config.limits.max_single_image_bytes:
-                    raise WorkerRuntimeError("artifact_limit_exceeded")
-                digest = hashlib.sha256(content).hexdigest()
-                if digest in assets:
-                    continue
-                total_bytes += len(content)
-                if (
-                    len(assets) >= config.limits.max_embedded_images
-                    or total_bytes > config.limits.max_total_image_bytes
-                ):
-                    raise WorkerRuntimeError("artifact_limit_exceeded")
-                suffix = _EXTENSION_BY_MIME[mime_type]
-                assets[digest] = WorkerParsedAsset(
-                    path=f"images/{digest}.{suffix}",
-                    mime_type=cast(ImageMimeType, mime_type),
-                    sha256=digest,
-                    size_bytes=len(content),
-                    page_number=page_index + 1,
-                    content=content,
-                )
-    except WorkerRuntimeError:
-        raise
-    except Exception as error:
-        raise WorkerRuntimeError("parser_failed") from error
-    finally:
-        try:
-            document.close()
-        except Exception:
-            pass
-    if verify_source_identity(path, expected_sha256) != identity:
-        raise WorkerRuntimeError("source_changed")
-    return tuple(assets[key] for key in sorted(assets))
-
-
 def _normalize_text(value: str) -> str:
-    normalized = value.replace("\r\n", "\n").replace("\r", "\n")
-    return normalized if not normalized or normalized.endswith("\n") else normalized + "\n"
+    normalized = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    return f"{normalized}\n" if normalized else ""
 
 
-class PyMuPdf4LlmFastParser:
-    """Pinned ``page_chunks=True`` fast parser with OCR forcibly disabled."""
+def _safe_json(path: Path) -> object:
+    if path.is_symlink() or not path.is_file():
+        raise WorkerRuntimeError("parser_failed")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise WorkerRuntimeError("parser_failed") from error
+
+
+def _find_one(root: Path, name: str) -> Path:
+    matches = [path for path in root.rglob(name) if path.is_file() and not path.is_symlink()]
+    if len(matches) != 1:
+        raise WorkerRuntimeError("parser_failed")
+    return matches[0]
+
+
+def _content_items(payload: object) -> Iterable[tuple[int, dict[str, object]]]:
+    if not isinstance(payload, list):
+        raise WorkerRuntimeError("parser_failed")
+    for outer_index, raw in enumerate(payload):
+        candidates = raw if isinstance(raw, list) else [raw]
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                raise WorkerRuntimeError("parser_failed")
+            item = cast(dict[str, object], candidate)
+            raw_page = item.get("page_idx", outer_index)
+            if not isinstance(raw_page, int) or isinstance(raw_page, bool) or raw_page < 0:
+                raise WorkerRuntimeError("parser_failed")
+            yield raw_page, item
+
+
+def _strings(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str)]
+    return []
+
+
+def _item_text(item: dict[str, object]) -> str:
+    parts: list[str] = []
+    for key in (
+        "text",
+        "content",
+        "table_body",
+        "code_body",
+        "image_caption",
+        "image_footnote",
+        "table_caption",
+        "table_footnote",
+        "chart_caption",
+        "chart_footnote",
+        "list_items",
+    ):
+        parts.extend(_strings(item.get(key)))
+    return "\n".join(part.strip() for part in parts if part.strip())
+
+
+def _image_name(item: dict[str, object]) -> str | None:
+    raw = item.get("img_path") or item.get("image_path")
+    if not isinstance(raw, str) or not raw:
+        return None
+    pure = PurePosixPath(raw.replace("\\", "/"))
+    if pure.is_absolute() or ".." in pure.parts:
+        raise WorkerRuntimeError("parser_failed")
+    return pure.name
+
+
+def _render_item(item: dict[str, object], image_paths: dict[str, str]) -> str:
+    kind = item.get("type")
+    kind = kind if isinstance(kind, str) else "text"
+    text = _item_text(item)
+    image_name = _image_name(item)
+    image = image_paths.get(image_name) if image_name is not None else None
+    rendered: list[str] = []
+    if image is not None:
+        rendered.append(f"![MinerU extracted image]({image})")
+    if kind in {"title", "text"}:
+        level = item.get("text_level")
+        if kind == "title" or isinstance(level, int) and level > 0:
+            heading = min(max(level if isinstance(level, int) else 1, 1), 6)
+            rendered.append(f"{'#' * heading} {text}" if text else "")
+        else:
+            rendered.append(text)
+    elif kind == "equation":
+        rendered.append(f"$$\n{text}\n$$" if text else "")
+    elif kind == "code":
+        rendered.append(f"```\n{text}\n```" if text else "")
+    elif kind == "list":
+        rendered.extend(f"- {line}" for line in text.splitlines() if line)
+    else:
+        rendered.append(text)
+    return "\n\n".join(part for part in rendered if part)
+
+
+class MineruParser:
+    """Run one fixed MinerU profile and normalize its structured output."""
 
     def __init__(
         self,
         *,
         config: WorkerRoutingConfig,
-        pymupdf_module: object | None = None,
-        pymupdf4llm_module: object | None = None,
+        runner: MineruRunner | None = None,
+        version: str | None = None,
     ) -> None:
         verify_routing_config_identity(config)
         self._config = config
-        self._pymupdf = _load_pymupdf(pymupdf_module)
-        if pymupdf4llm_module is None:
-            verify_distribution_versions(("pymupdf", "pymupdf-layout", "pymupdf4llm"))
-            self._pymupdf4llm = _load_module(
-                "pymupdf4llm", "pymupdf4llm", _EXPECTED_PYMUPDF4LLM_VERSION
-            )
-            if getattr(self._pymupdf4llm, "_use_layout", None) is not True:
-                raise WorkerRuntimeError("dependency_unavailable")
-        else:
-            if getattr(pymupdf4llm_module, "__version__", None) != _EXPECTED_PYMUPDF4LLM_VERSION:
-                raise WorkerRuntimeError("dependency_version_mismatch")
-            self._pymupdf4llm = pymupdf4llm_module
+        self._runtime_loaded = runner is None
+        self._runner = runner or _load_runner()
+        if version is None:
+            try:
+                version = importlib.metadata.version("mineru")
+            except importlib.metadata.PackageNotFoundError as error:
+                raise WorkerRuntimeError("dependency_unavailable") from error
+        if version != _EXPECTED_MINERU_VERSION:
+            raise WorkerRuntimeError("dependency_version_mismatch")
+        self._version = version
 
     def parse(
         self,
@@ -193,251 +197,157 @@ class PyMuPdf4LlmFastParser:
         *,
         expected_sha256: str,
         preflight: WorkerPreflightReport,
+        route: WorkerRouteDecision,
     ) -> WorkerParsedDocument:
+        if self._runtime_loaded and route.backend == "hybrid-engine":
+            try:
+                torch = importlib.import_module("torch")
+            except ImportError as error:
+                raise WorkerRuntimeError("dependency_unavailable") from error
+            if not bool(torch.cuda.is_available()):
+                raise WorkerRuntimeError("dependency_unavailable")
         identity = verify_source_identity(path, expected_sha256)
         try:
-            chunks = self._pymupdf4llm.to_markdown(
-                str(path),
-                page_chunks=True,
-                use_ocr=False,
-                force_ocr=False,
-                write_images=False,
-                embed_images=False,
-                show_progress=False,
-            )
-        except Exception as error:
-            raise WorkerRuntimeError("parser_failed") from error
-        if not isinstance(chunks, list) or len(chunks) != preflight.page_count:
+            source_bytes = path.read_bytes()
+        except OSError as error:
+            raise WorkerRuntimeError("source_changed") from error
+
+        with tempfile.TemporaryDirectory(prefix="mineru-worker-") as temporary:
+            output_root = Path(temporary)
+            try:
+                self._runner(
+                    str(output_root),
+                    ["source"],
+                    [source_bytes],
+                    ["ch"],
+                    backend=route.backend,
+                    parse_method="auto",
+                    formula_enable=True,
+                    table_enable=True,
+                    f_draw_layout_bbox=False,
+                    f_draw_span_bbox=False,
+                    f_dump_md=True,
+                    f_dump_middle_json=True,
+                    f_dump_model_output=False,
+                    f_dump_orig_pdf=False,
+                    f_dump_content_list=True,
+                    image_analysis=route.effort == "high",
+                    effort=route.effort or "medium",
+                )
+            except WorkerRuntimeError:
+                raise
+            except Exception as error:
+                raise WorkerRuntimeError("parser_failed") from error
+            document = self._read_output(output_root, preflight=preflight, route=route)
+
+        if verify_source_identity(path, expected_sha256) != identity:
+            raise WorkerRuntimeError("source_changed")
+        return document
+
+    def _read_output(
+        self,
+        root: Path,
+        *,
+        preflight: WorkerPreflightReport,
+        route: WorkerRouteDecision,
+    ) -> WorkerParsedDocument:
+        content_path = _find_one(root, "source_content_list.json")
+        middle_path = _find_one(root, "source_middle.json")
+        middle = _safe_json(middle_path)
+        if not isinstance(middle, dict) or not isinstance(middle.get("pdf_info"), list):
+            raise WorkerRuntimeError("parser_failed")
+        if len(middle["pdf_info"]) != preflight.page_count:
+            raise WorkerRuntimeError("parser_failed")
+        items = tuple(_content_items(_safe_json(content_path)))
+        if any(page_index >= preflight.page_count for page_index, _ in items):
             raise WorkerRuntimeError("parser_failed")
 
-        document: Any | None = None
-        try:
-            document = self._pymupdf.open(str(path))
-            pages: list[WorkerParsedPage] = []
-            for page_index, chunk in enumerate(chunks):
-                if not isinstance(chunk, dict) or not isinstance(chunk.get("text"), str):
-                    raise WorkerRuntimeError("parser_failed")
-                raw_plain = document.load_page(page_index).get_text("text")
-                plain = raw_plain if isinstance(raw_plain, str) else ""
-                pages.append(
-                    WorkerParsedPage(
-                        page_number=page_index + 1,
-                        markdown=_normalize_text(chunk["text"]),
-                        plain_text=_normalize_text(plain),
+        image_pages: dict[str, int] = {}
+        for page_index, item in items:
+            name = _image_name(item)
+            if name is not None:
+                image_pages.setdefault(name, page_index + 1)
+        assets, image_paths = self._read_assets(content_path.parent, image_pages)
+        page_parts: list[list[str]] = [[] for _ in range(preflight.page_count)]
+        for page_index, item in items:
+            rendered = _render_item(item, image_paths)
+            if rendered:
+                page_parts[page_index].append(rendered)
+        pages = tuple(
+            WorkerParsedPage(
+                page_number=index + 1,
+                markdown=_normalize_text("\n\n".join(parts)),
+                plain_text=_normalize_text(
+                    "\n".join(
+                        _item_text(item)
+                        for page_index, item in items
+                        if page_index == index and _item_text(item)
                     )
-                )
-        except WorkerRuntimeError:
-            raise
-        except Exception as error:
-            raise WorkerRuntimeError("parser_failed") from error
-        finally:
-            try:
-                if document is not None:
-                    document.close()
-            except Exception:
-                pass
-
-        assets = extract_embedded_images(
-            path,
-            expected_sha256=expected_sha256,
-            config=self._config,
-            pymupdf_module=self._pymupdf,
-        )
-        if verify_source_identity(path, expected_sha256) != identity:
-            raise WorkerRuntimeError("source_changed")
-        return WorkerParsedDocument(
-            parser="pymupdf4llm",
-            parser_version=_EXPECTED_PYMUPDF4LLM_VERSION,
-            preset="pymupdf4llm_fast_no_ocr",
-            pages=tuple(pages),
-            assets=assets,
-        )
-
-
-ConverterFactory = Callable[[Path], tuple[object, object]]
-
-
-def _configure_docling_layout_options(options: Any) -> Any:
-    """Pin Heron and keep inference independent of a runtime C++ toolchain."""
-
-    layout = options.LayoutObjectDetectionOptions.from_preset("layout_heron_default")
-    engine_options = layout.engine_options.model_copy(update={"compile_model": False})
-    configured = layout.model_copy(
-        update={
-            "engine_options": engine_options,
-            "model_spec": layout.model_spec.model_copy(
-                update={"revision": _LAYOUT_REVISION}
-            ),
-        }
-    )
-    if configured.engine_options.compile_model is not False:
-        raise WorkerRuntimeError("invalid_configuration")
-    return configured
-
-
-def _create_docling_converters(model_root: Path) -> tuple[object, object]:
-    verify_distribution_versions(
-        (
-            "docling-core",
-            "docling-ibm-models",
-            "docling-parse",
-            "docling-slim",
-            "onnxruntime",
-            "pypdfium2",
-            "rapidocr",
-            "torch",
-            "torchvision",
-            "transformers",
-        )
-    )
-    verify_docling_model_artifacts(model_root)
-    try:
-        if importlib.metadata.version("docling-slim") != _EXPECTED_DOCLING_SLIM_VERSION:
-            raise WorkerRuntimeError("dependency_version_mismatch")
-        base_models = importlib.import_module("docling.datamodel.base_models")
-        options = importlib.import_module("docling.datamodel.pipeline_options")
-        converter_module = importlib.import_module("docling.document_converter")
-    except importlib.metadata.PackageNotFoundError as error:
-        raise WorkerRuntimeError("dependency_unavailable") from error
-    except ImportError as error:
-        raise WorkerRuntimeError("dependency_unavailable") from error
-
-    input_format = base_models.InputFormat.PDF
-    layout = _configure_docling_layout_options(options)
-    table = options.TableStructureOptions(
-        mode=options.TableFormerMode.ACCURATE,
-        do_cell_matching=True,
-    )
-
-    def build(*, ocr: bool) -> object:
-        pipeline = options.PdfPipelineOptions(
-            artifacts_path=model_root,
-            enable_remote_services=False,
-            allow_external_plugins=False,
-            do_table_structure=True,
-            table_structure_options=table,
-            do_ocr=ocr,
-            ocr_options=options.RapidOcrOptions(
-                backend="onnxruntime",
-                lang=["ch"],
-            ),
-            layout_options=layout,
-            do_code_enrichment=False,
-            do_formula_enrichment=False,
-            do_picture_classification=False,
-            do_picture_description=False,
-        )
-        converter = converter_module.DocumentConverter(
-            allowed_formats=[input_format],
-            format_options={
-                input_format: converter_module.PdfFormatOption(
-                    pipeline_options=pipeline
-                )
-            },
-        )
-        converter.initialize_pipeline(input_format)
-        return converter
-
-    return build(ocr=False), build(ocr=True)
-
-
-class DoclingAccurateParser:
-    """Two startup-initialized Docling converters sharing pinned offline artifacts."""
-
-    def __init__(
-        self,
-        *,
-        config: WorkerRoutingConfig,
-        model_root: Path,
-        pymupdf_module: object | None = None,
-        converter_factory: ConverterFactory | None = None,
-    ) -> None:
-        verify_routing_config_identity(config)
-        if not model_root.is_absolute() or not model_root.is_dir() or model_root.is_symlink():
-            raise WorkerRuntimeError("invalid_configuration")
-        self._config = config
-        self._model_root = model_root
-        self._pymupdf = _load_pymupdf(pymupdf_module)
-        factory = converter_factory or _create_docling_converters
-        try:
-            self._standard_converter, self._ocr_converter = factory(model_root)
-        except WorkerRuntimeError:
-            raise
-        except Exception as error:
-            raise WorkerRuntimeError("dependency_unavailable") from error
-
-    def parse(
-        self,
-        path: Path,
-        *,
-        expected_sha256: str,
-        preflight: WorkerPreflightReport,
-        preset: LiteralDoclingPreset,
-    ) -> WorkerParsedDocument:
-        if preset not in {"docling_standard", "docling_ocr"}:
-            raise WorkerRuntimeError("invalid_configuration")
-        identity = verify_source_identity(path, expected_sha256)
-        converter = (
-            self._standard_converter
-            if preset == "docling_standard"
-            else self._ocr_converter
-        )
-        try:
-            result = cast(Any, converter).convert(
-                path,
-                raises_on_error=True,
-                max_num_pages=self._config.limits.max_pages,
-                max_file_size=path.stat().st_size,
+                ),
             )
-            status = getattr(result.status, "value", result.status)
-            if status != "success":
-                raise WorkerRuntimeError("parser_failed")
-            document = result.document
-            if len(document.pages) != preflight.page_count:
-                raise WorkerRuntimeError("parser_failed")
-            pages = tuple(
-                WorkerParsedPage(
-                    page_number=page_number,
-                    markdown=_normalize_text(
-                        document.export_to_markdown(
-                            page_no=page_number,
-                            traverse_pictures=True,
-                        )
-                    ),
-                    plain_text=_normalize_text(
-                        document.export_to_text(
-                            page_no=page_number,
-                            traverse_pictures=True,
-                        )
-                    ),
-                )
-                for page_number in range(1, preflight.page_count + 1)
-            )
-        except WorkerRuntimeError:
-            raise
-        except Exception as error:
-            raise WorkerRuntimeError("parser_failed") from error
-
-        assets = extract_embedded_images(
-            path,
-            expected_sha256=expected_sha256,
-            config=self._config,
-            pymupdf_module=self._pymupdf,
+            for index, parts in enumerate(page_parts)
         )
-        if verify_source_identity(path, expected_sha256) != identity:
-            raise WorkerRuntimeError("source_changed")
         return WorkerParsedDocument(
-            parser="docling",
-            parser_version=_EXPECTED_DOCLING_SLIM_VERSION,
-            preset=preset,
+            parser="mineru",
+            parser_version=self._version,
+            preset=route.preset,
             pages=pages,
             assets=assets,
         )
 
+    def _read_assets(
+        self,
+        output_dir: Path,
+        image_pages: dict[str, int],
+    ) -> tuple[tuple[WorkerParsedAsset, ...], dict[str, str]]:
+        images_dir = output_dir / "images"
+        if not images_dir.exists():
+            return (), {}
+        if images_dir.is_symlink() or not images_dir.is_dir():
+            raise WorkerRuntimeError("parser_failed")
+        assets: list[WorkerParsedAsset] = []
+        assets_by_digest: dict[str, str] = {}
+        image_paths: dict[str, str] = {}
+        total = 0
+        for path in sorted(images_dir.iterdir(), key=lambda item: item.name):
+            if path.is_symlink() or not path.is_file():
+                raise WorkerRuntimeError("parser_failed")
+            mime = _MIME_BY_SUFFIX.get(path.suffix.casefold())
+            if mime is None:
+                continue
+            try:
+                content = path.read_bytes()
+            except OSError as error:
+                raise WorkerRuntimeError("parser_failed") from error
+            _validate_image(content, mime)
+            digest = hashlib.sha256(content).hexdigest()
+            suffix = ".jpg" if mime == "image/jpeg" else path.suffix.casefold()
+            normalized_path = f"images/{digest}{suffix}"
+            existing_path = assets_by_digest.get(digest)
+            if existing_path is not None:
+                image_paths[path.name] = existing_path
+                continue
+            total += len(content)
+            if (
+                len(content) > self._config.limits.max_single_image_bytes
+                or len(assets) >= self._config.limits.max_embedded_images
+                or total > self._config.limits.max_total_image_bytes
+            ):
+                raise WorkerRuntimeError("artifact_limit_exceeded")
+            page_number = image_pages.get(path.name, 1)
+            assets.append(
+                WorkerParsedAsset(
+                    path=normalized_path,
+                    mime_type=cast(Any, mime),
+                    sha256=digest,
+                    size_bytes=len(content),
+                    page_number=page_number,
+                    content=content,
+                )
+            )
+            assets_by_digest[digest] = normalized_path
+            image_paths[path.name] = normalized_path
+        return tuple(assets), image_paths
 
-__all__ = [
-    "ConverterFactory",
-    "DoclingAccurateParser",
-    "PyMuPdf4LlmFastParser",
-    "extract_embedded_images",
-]
+
+__all__ = ["MineruParser", "MineruRunner"]

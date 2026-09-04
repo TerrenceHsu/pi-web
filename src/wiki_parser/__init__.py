@@ -46,7 +46,7 @@ from .errors import ParserError, ParserErrorCode
 from .fake import FakeParserImage, FakeParserOutput, FakeParserProvider
 from .fake_v2 import (
     FakeAttemptOutcomeV2,
-    FakeDualPdfParserProvider,
+    FakeMineruParserProvider,
     FakeParserAssetV2,
     FakeParserDocumentV2,
     FakeParserScenarioV2,
@@ -87,7 +87,7 @@ __all__ = [
     "FakeParserOutput",
     "FakeParserProvider",
     "FakeAttemptOutcomeV2",
-    "FakeDualPdfParserProvider",
+    "FakeMineruParserProvider",
     "FakeParserAssetV2",
     "FakeParserDocumentV2",
     "FakeParserScenarioV2",

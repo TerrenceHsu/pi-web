@@ -1,0 +1,5 @@
+services:
+  worker:
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all

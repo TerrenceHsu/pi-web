@@ -389,7 +389,7 @@ def create_app(
     wiki_summary_agent: WikiSummaryAgent | None = None,
     wiki_source_retention_seconds: float = 7 * 24 * 60 * 60,
     wiki_source_purge_interval_seconds: float = 5 * 60,
-    # Corresponding Source root for the separately AGPL-licensed PDF Worker.
+    # Source archive root for the separately packaged MinerU PDF Worker.
     # None auto-discovers a source checkout and otherwise reports unavailable.
     # The main application reads compliance assets only; it never imports the
     # Worker package or concrete parser runtime.

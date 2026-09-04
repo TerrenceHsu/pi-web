@@ -1,6 +1,6 @@
-"""Completely offline dual-PDF parser fake for Contract v2.
+"""Completely offline MinerU parser fake for Contract v2.
 
-The fake exercises the production routing and fallback state machine without
+The fake exercises the production preset mapping and job state machine without
 importing a PDF runtime, launching a process, or opening a network connection.
 It snapshots the verified source bytes at job creation so every simulated
 attempt is tied to the same original PDF digest.
@@ -54,8 +54,7 @@ from .contract_v2 import (
 from .errors import ParserError, ParserErrorCode
 
 _FAKE_WORKER_VERSION = "0.1.0"
-_FAKE_FAST_VERSION = "fake-pymupdf4llm-1.0"
-_FAKE_ACCURATE_VERSION = "fake-docling-1.0"
+_FAKE_MINERU_VERSION = "fake-mineru-3.4.5"
 _FAKE_ROUTING_CONFIG = ParserRoutingConfigIdentity(
     revision="fake_routing_v1",
     sha256=hashlib.sha256(b"llm-wiki-fake-routing-v1").hexdigest(),
@@ -124,21 +123,13 @@ class FakeParserDocumentV2(BaseModel):
 
 
 class FakeParserScenarioV2(BaseModel):
-    """One deterministic routing and parser-outcome scenario."""
+    """One deterministic MinerU parser-outcome scenario."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     preflight_profile: FakePreflightProfileV2 = "simple_digital"
-    fast_outcome: FakeAttemptOutcomeV2 = "succeeded"
-    accurate_outcome: FakeAttemptOutcomeV2 = "succeeded"
-    fast_document: FakeParserDocumentV2 = Field(default_factory=FakeParserDocumentV2)
-    accurate_document: FakeParserDocumentV2 = Field(default_factory=FakeParserDocumentV2)
-
-    @model_validator(mode="after")
-    def _validate_page_identity(self) -> FakeParserScenarioV2:
-        if len(self.fast_document.pages) != len(self.accurate_document.pages):
-            raise ValueError("fake parser outputs must describe the same PDF page count")
-        return self
+    outcome: FakeAttemptOutcomeV2 = "succeeded"
+    document: FakeParserDocumentV2 = Field(default_factory=FakeParserDocumentV2)
 
 
 @dataclass(frozen=True)
@@ -169,7 +160,7 @@ class _FakeParserStateV2:
     file_count: int | None = None
 
 
-class FakeDualPdfParserProvider:
+class FakeMineruParserProvider:
     """In-memory Contract v2 provider with real hashing and tar artifacts."""
 
     def __init__(
@@ -192,12 +183,12 @@ class FakeDualPdfParserProvider:
         self.created_specs: list[ParserJobSpecV2] = []
         self.destroyed_provider_job_ids: list[str] = []
 
-    def provider_name(self) -> Literal["fake_dual_pdf"]:
-        return "fake_dual_pdf"
+    def provider_name(self) -> Literal["fake_mineru"]:
+        return "fake_mineru"
 
     async def probe(self) -> ParserProbeV2:
         return ParserProbeV2(
-            provider="fake_dual_pdf",
+            provider="fake_mineru",
             available=True,
             worker_version=_FAKE_WORKER_VERSION,
             license_mode="not_required",
@@ -216,7 +207,7 @@ class FakeDualPdfParserProvider:
             raise ParserError("invalid_configuration", provider=self.provider_name())
         source_bytes = await asyncio.to_thread(self._read_verified_source, source_path, spec)
         handle = ParserJobHandleV2(
-            provider="fake_dual_pdf",
+            provider="fake_mineru",
             provider_job_id=self._id_factory(),
             job_id=spec.job_id,
             source_id=spec.source.source_id,
@@ -285,22 +276,6 @@ class FakeDualPdfParserProvider:
                 reasons=route.reasons,
                 fallback_from_attempt_id=None,
             )
-            first_attempt = state.attempts[-1]
-            if first_attempt.state == "quality_rejected":
-                if state.spec.requested_mode != "auto" or first_attempt.parser != "pymupdf4llm":
-                    return self._mark_failed(state, "quality_rejected")
-                state.phase = "fallback"
-                if route.fallback_parser != "docling" or route.fallback_preset is None:
-                    return self._mark_failed(state, "routing_failed")
-                state.phase = "accurate_parse"
-                selected_output = self._run_attempt(
-                    state,
-                    parser="docling",
-                    preset=route.fallback_preset,
-                    reasons=("fast_quality_fallback",),
-                    fallback_from_attempt_id=first_attempt.attempt_id,
-                )
-
             selected_attempt = state.attempts[-1]
             if selected_attempt.state != "succeeded" or selected_output is None:
                 return self._mark_failed(
@@ -368,7 +343,7 @@ class FakeDualPdfParserProvider:
     async def destroy(self, handle: ParserJobHandleV2) -> None:
         state = self._states.get(handle.provider_job_id)
         if state is None:
-            if handle.provider != "fake_dual_pdf":
+            if handle.provider != "fake_mineru":
                 raise ParserError("invalid_configuration", provider=self.provider_name())
             return
         if state.handle != handle:
@@ -387,7 +362,7 @@ class FakeDualPdfParserProvider:
         self.destroyed_provider_job_ids.append(handle.provider_job_id)
 
     def _build_preflight(self, state: _FakeParserStateV2) -> ParserPreflightReport:
-        page_count = len(state.scenario.fast_document.pages)
+        page_count = len(state.scenario.document.pages)
         profile = state.scenario.preflight_profile
         text_pages = 0 if profile == "scanned" else page_count
         image_pages = page_count if profile == "scanned" else 0
@@ -414,47 +389,19 @@ class FakeDualPdfParserProvider:
         preflight: ParserPreflightReport,
         profile: FakePreflightProfileV2,
     ) -> ParserRouteDecision:
+        del profile
         digest = canonical_preflight_sha256(preflight)
-        if spec.requested_mode == "fast":
-            return ParserRouteDecision(
-                requested_mode="fast",
-                initial_parser="pymupdf4llm",
-                initial_preset="pymupdf4llm_fast_no_ocr",
-                reasons=("explicit_fast",),
-                preflight_sha256=digest,
-            )
-        if spec.requested_mode == "accurate":
-            return ParserRouteDecision(
-                requested_mode="accurate",
-                initial_parser="docling",
-                initial_preset="docling_ocr" if profile == "scanned" else "docling_standard",
-                reasons=("explicit_accurate",),
-                preflight_sha256=digest,
-            )
-        if profile == "scanned":
-            return ParserRouteDecision(
-                requested_mode="auto",
-                initial_parser="docling",
-                initial_preset="docling_ocr",
-                reasons=("scan_text_layer_missing",),
-                preflight_sha256=digest,
-            )
-        if profile == "complex_table":
-            return ParserRouteDecision(
-                requested_mode="auto",
-                initial_parser="docling",
-                initial_preset="docling_standard",
-                reasons=("complex_table_dense",),
-                preflight_sha256=digest,
-            )
+        preset, reason = {
+            "pipeline": ("mineru_pipeline", "explicit_pipeline"),
+            "gpu-medium": ("mineru_gpu_medium", "explicit_gpu_medium"),
+            "gpu-high": ("mineru_gpu_high", "explicit_gpu_high"),
+        }[spec.requested_mode]
         return ParserRouteDecision(
-            requested_mode="auto",
-            initial_parser="pymupdf4llm",
-            initial_preset="pymupdf4llm_fast_no_ocr",
-            reasons=("simple_digital",),
+            requested_mode=spec.requested_mode,
+            initial_parser="mineru",
+            initial_preset=cast(ParserPresetName, preset),
+            reasons=(cast(ParserRouteReason, reason),),
             preflight_sha256=digest,
-            fallback_parser="docling",
-            fallback_preset="docling_standard",
         )
 
     def _run_attempt(
@@ -470,16 +417,8 @@ class FakeDualPdfParserProvider:
         ordinal = len(state.attempts) + 1
         attempt_id = self._attempt_id(state.handle.provider_job_id, ordinal)
         started_at = self._clock_ms()
-        outcome = (
-            state.scenario.fast_outcome
-            if parser == "pymupdf4llm"
-            else state.scenario.accurate_outcome
-        )
-        document = (
-            state.scenario.fast_document
-            if parser == "pymupdf4llm"
-            else state.scenario.accurate_document
-        )
+        outcome = state.scenario.outcome
+        document = state.scenario.document
         parser_version = self._parser_version(parser)
         if outcome == "failed":
             finished_at = self._clock_ms()
@@ -813,7 +752,7 @@ class FakeDualPdfParserProvider:
         return None
 
     def _state_for_status(self, handle: ParserJobHandleV2) -> _FakeParserStateV2:
-        if handle.provider != "fake_dual_pdf":
+        if handle.provider != "fake_mineru":
             raise ParserError("invalid_configuration", provider=self.provider_name())
         state = self._states.get(handle.provider_job_id)
         if state is None or state.handle != handle:
@@ -829,28 +768,28 @@ class FakeDualPdfParserProvider:
     @staticmethod
     def _read_verified_source(path: Path, spec: ParserJobSpecV2) -> bytes:
         if not path.is_absolute():
-            raise ParserError("invalid_source", provider="fake_dual_pdf")
+            raise ParserError("invalid_source", provider="fake_mineru")
         try:
             before = path.stat(follow_symlinks=False)
             if not stat.S_ISREG(before.st_mode) or path.is_symlink():
-                raise ParserError("invalid_source", provider="fake_dual_pdf")
+                raise ParserError("invalid_source", provider="fake_mineru")
             if before.st_size > spec.limits.max_source_bytes:
-                raise ParserError("source_too_large", provider="fake_dual_pdf")
+                raise ParserError("source_too_large", provider="fake_mineru")
             source_bytes = path.read_bytes()
             after = path.stat(follow_symlinks=False)
         except ParserError:
             raise
         except OSError as exc:
-            raise ParserError("invalid_source", provider="fake_dual_pdf") from exc
+            raise ParserError("invalid_source", provider="fake_mineru") from exc
         before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
         after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
         if before_identity != after_identity:
-            raise ParserError("invalid_source", provider="fake_dual_pdf")
+            raise ParserError("invalid_source", provider="fake_mineru")
         if (
             len(source_bytes) != spec.source.size_bytes
             or hashlib.sha256(source_bytes).hexdigest() != spec.source.sha256
         ):
-            raise ParserError("invalid_source", provider="fake_dual_pdf")
+            raise ParserError("invalid_source", provider="fake_mineru")
         return source_bytes
 
     @staticmethod
@@ -859,7 +798,7 @@ class FakeDualPdfParserProvider:
             len(state.source_bytes) != state.spec.source.size_bytes
             or hashlib.sha256(state.source_bytes).hexdigest() != state.spec.source.sha256
         ):
-            raise ParserError("invalid_source", provider="fake_dual_pdf")
+            raise ParserError("invalid_source", provider="fake_mineru")
 
     @staticmethod
     def _parsed_page(page_number: int, markdown: str) -> ParserParsedPage:
@@ -899,11 +838,13 @@ class FakeDualPdfParserProvider:
 
     @staticmethod
     def _parser_version(parser: ParserEngineName) -> str:
-        return _FAKE_FAST_VERSION if parser == "pymupdf4llm" else _FAKE_ACCURATE_VERSION
+        del parser
+        return _FAKE_MINERU_VERSION
 
     @staticmethod
     def _phase_for_parser(parser: ParserEngineName) -> ParserJobPhaseV2:
-        return "fast_parse" if parser == "pymupdf4llm" else "accurate_parse"
+        del parser
+        return "mineru_parse"
 
     @staticmethod
     def _attempt_id(provider_job_id: str, ordinal: int) -> str:
@@ -939,14 +880,14 @@ class FakeDualPdfParserProvider:
     def __repr__(self) -> str:
         active = sum(state.state != "destroyed" for state in self._states.values())
         return (
-            "FakeDualPdfParserProvider("
+            "FakeMineruParserProvider("
             f"active={active}, queued_scenarios={len(self._scenarios)})"
         )
 
 
 __all__ = [
     "FakeAttemptOutcomeV2",
-    "FakeDualPdfParserProvider",
+    "FakeMineruParserProvider",
     "FakeParserAssetV2",
     "FakeParserDocumentV2",
     "FakeParserScenarioV2",
