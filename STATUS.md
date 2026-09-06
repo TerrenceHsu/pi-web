@@ -20,7 +20,19 @@
 
 ## 当前交付状态
 
-**阶段 3：安全制品与独立确认发布已实现（随本次提交归档）**。独立 Bash 成功且有安全文件变更时，
+**阶段 4：后台清理、共享配额、管理员执行界面与 Telemetry 已实现（随本次提交归档）**。
+Auth gateway 向账号应用注入同一 SQLite 执行账本，默认每账号 2 / 全局 4 个并行任务，
+CPU 总额 8、内存总额 8192 MiB；同一 Workspace 互斥，准备/批准不创建容器。
+后台回收过期或失联任务，按 namespace + operation + image 核验孤儿容器；无法确认清理时暂停新执行。
+每分钟扫描受限缓存，30 天 TTL，保护活跃快照和待审签名制品；每账号缓存 2 GiB，准备前保守预留空间。
+管理员 Telemetry 页面新增执行状态、预算、只读探针、撤销、清理重试和命令观测；
+Workspace 提供账号私有 Coding/Plan/Bash 命令历史，完整 Bash 输入与有界输出不进入通用 Telemetry。
+清理/心跳不依赖聊天协程，缓存 IO 不阻塞心跳；重启只对账和清理，不恢复执行权限。
+相关验证及限制见 [阶段 4 记录](docs/validation/workspace-bash-stage4-2026-09-06.md)。
+阶段 4 邻接后端 275 passed；最终授权/维护补测 114 passed，前端 232 passed，Chromium 26 passed（无重试）；
+真实 Docker 分别 4 项与 2 项通过，静态检查、Evals 和生产构建通过。不同批次不累加为全量覆盖率。
+
+**阶段 3：安全制品与独立确认发布已提交 `5ec6622`**。独立 Bash 成功且有安全文件变更时，
 生成 `pi-agent-bash-artifact/v1`，明确使用 `bash-output-integrity/v1`，不冒充功能验证。
 Docker Coding/Plan 仍使用固定验证的 Coding v1 制品，不会因为调用 Bash 而降低验证要求。
 两条路径均在确认计算资源已回收后开放发布；前端 Changes 审阅精确制品，单独确认写回 Workspace。
@@ -48,17 +60,16 @@ Workspace 增加 revision-CAS 后端选择；选择变更/撤销、Stop、到期
 
 本地 Docker 需部署者显式配置固定镜像/CLI 并由用户选择，**本轮未修改真实部署配置或自动启用**；
 没有静默迁移 E2B，也不向 E2B 装配 Bash；Python 分析原有逐次授权不变。
-本轮相关后端回归 243 passed / 12 skipped，前端 228 passed、Chromium 26 passed；
+阶段 3 相关后端回归 243 passed / 12 skipped，前端 228 passed、Chromium 26 passed；
 真实 Docker 9 项（含安全负例）、静态检查、生产构建和 Evals 通过。没有重跑完整后端覆盖率。
 收尾补测及证据边界详见 [阶段 3 记录](docs/validation/workspace-bash-stage3-2026-09-06.md)，不跨批次累加数字。
 
-**仍待完成（阶段 4–5）**：
-后台孤儿/TTL 与快照缓存回收、Coding/Plan 私有运行全文记录、跨账号全局配额、管理员执行前端与执行 Telemetry。
-Bash 历史上限为每账号 200 条、终态 30 天（新运行时裁剪，列表展示当前 Session 最近 100 条）。
+**仍待完成（阶段 5）**：完整后端覆盖率门禁及最终交付整理。
+Bash 历史上限为每账号 200 条、终态 30 天（后台与新运行时裁剪，列表展示当前 Session 最近 100 条）。
 重启不恢复执行；未知资源保留清理债务，不假装已清理。
 Docker 数据仍位于 `D:\DockerData\DockerDesktopWSL`；没有重启业务解析容器。
-最新提交 `79d273d` 为阶段 2F；`a4a628b` 为阶段 2E，`297a81a` 为阶段 2C/2D。
-阶段 3 随本次提交归档；未推送。
+最新提交 `5ec6622` 为阶段 3；`79d273d` 为阶段 2F。
+阶段 4 随本次提交归档，未推送；本轮未修改部署配置或重启业务服务。
 
 新增 **Web Context Compaction**：按持久化视图、工具输出外置、结构化自动摘要、
 Web/Telemetry/Evals 四步实现。原始 SQLite 消息与来源 ID 不变，Memory 不由压缩改写；

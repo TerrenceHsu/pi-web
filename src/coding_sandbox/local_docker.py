@@ -633,6 +633,61 @@ class LocalDockerSandboxBackend:
         self._validate(handle)
         await self._remove(handle)
 
+    async def reconcile_operation(self, operation_id: str) -> None:
+        """Destroy only this deployment's exact durable operation; never attach/run."""
+        now = self._clock()
+        handle = SandboxHandle(
+            provider="local_docker",
+            sandbox_id=self._name(operation_id),
+            operation_id=operation_id,
+            runtime_id=self._config.image_id or "",
+            created_at_ms=now,
+            expires_at_ms=now + 1000,
+        )
+        await self.destroy(handle)
+
+    async def managed_operations(self) -> tuple[tuple[str, str], ...]:
+        """Read only this namespace's labelled containers, including old image versions."""
+        reply = await self._checked(
+            (
+                "container",
+                "ls",
+                "--all",
+                "--filter",
+                f"label={_LABEL}=1",
+                "--filter",
+                f"label={_NAMESPACE}={self._config.namespace}",
+                "--format",
+                "{{.Names}}",
+            )
+        )
+        names = reply.stdout.decode("utf-8", "strict").splitlines()
+        if len(names) > 256:
+            raise SandboxError("protocol_error", provider="local_docker")
+        found = []
+        for name in names:
+            if not name.startswith(f"pi-bash-{self._config.namespace}-"):
+                raise SandboxError("permission_denied", provider="local_docker")
+            info = _object(
+                (
+                    await self._checked(("container", "inspect", "--format", "{{json .}}", name))
+                ).stdout
+            )
+            labels = _mapping(_mapping(info.get("Config")).get("Labels"))
+            operation, runtime = labels.get(_OPERATION), info.get("Image")
+            if (
+                not isinstance(operation, str)
+                or not 1 <= len(operation) <= 128
+                or name != self._name(operation)
+                or not isinstance(runtime, str)
+                or _IMAGE.fullmatch(runtime) is None
+                or labels.get(_LABEL) != "1"
+                or labels.get(_NAMESPACE) != self._config.namespace
+            ):
+                raise SandboxError("permission_denied", provider="local_docker")
+            found.append((operation, runtime))
+        return tuple(found)
+
     async def _cleanup(self, handle: SandboxHandle) -> None:
         try:
             await self._remove(handle)

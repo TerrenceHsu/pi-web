@@ -18,6 +18,8 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from coding_agent_app.execution.control import ExecutionControl
+
 from ... import __version__
 from ..app import _FALLBACK_HTML, _STATIC_DIR
 from ..credentials.api import CredentialBodyLimitMiddleware, build_credential_router
@@ -60,6 +62,7 @@ class WorkspaceManager:
         self._apps: dict[str, FastAPI] = {}
         self._stack = AsyncExitStack()
         self._lock = asyncio.Lock()
+        self.execution_control = ExecutionControl(self._user_data_root / "execution-control.sqlite")
 
     def workspace_root_for(self, user: AuthUser) -> Path:
         candidate = (self._user_data_root / user.id).resolve()
@@ -80,6 +83,7 @@ class WorkspaceManager:
             root = self.workspace_root_for(user)
             await asyncio.to_thread(root.mkdir, parents=True, exist_ok=True)
             app = self._factory(user, root)
+            app.state.execution_control = self.execution_control
             await self._stack.enter_async_context(app.router.lifespan_context(app))
             self._apps[user.id] = app
             return app
@@ -87,6 +91,7 @@ class WorkspaceManager:
     async def close(self) -> None:
         await self._stack.aclose()
         self._apps.clear()
+        await self.execution_control.close()
 
 
 class _GatewayRuntime:
@@ -297,6 +302,7 @@ def create_authenticated_app(
         await asyncio.to_thread(auth_path.parent.mkdir, parents=True, exist_ok=True)
         await asyncio.to_thread(data_root.mkdir, parents=True, exist_ok=True)
         store = await AuthStore.open(str(auth_path))
+        await manager.execution_control.init()
         service = AuthService(store, session_ttl_seconds=session_ttl_seconds)
         try:
             # Login state belongs to this backend process lifetime. Accounts and

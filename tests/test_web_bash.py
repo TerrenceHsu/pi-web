@@ -527,7 +527,8 @@ def test_real_bash_unsafe_failed_or_unchanged_output_has_no_publication(tmp_path
             client.app.state.execution_runtime.runtime.store.get, prepared.scope.identity
         )
         assert grant.state == "closed" and not grant.cleanup_pending
-        assert len(backends) == 1 and len(backends[0].created) == len(backends[0].destroyed) == 1
+        executed = [b for b in backends if b.created]
+        assert len(executed) == 1 and len(executed[0].created) == len(executed[0].destroyed) == 1
         assert not unused.created_specs
         assert (
             client.portal.call(client.app.state.web.file_store.inspect_workspace_revision, sid)

@@ -348,6 +348,8 @@ def main() -> None:
             allow_prompt_preview=True,
             event_buffer_max_size=buffer_max_size,
             enable_trusted_host=True,
+            credential_extra_hosts=(host, "localhost", "testserver"),
+            credential_extra_ui_origins=(f"http://{host}:{port}",),
             enable_builtin_ddgs=False,
         )
 

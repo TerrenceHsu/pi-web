@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 const request = vi.hoisted(() => vi.fn())
 vi.mock("../../src/api/client", () => ({ requestJson: request }))
+// History has its own request/isolation tests; keep this unit focused on selection.
+vi.mock("../../src/components/workspace/ExecutionHistory.vue", () => ({ default: { template: "<div />" } }))
 import WorkspaceExecution from "../../src/components/workspace/WorkspaceExecution.vue"
 
 const snapshot = {

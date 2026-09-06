@@ -2,12 +2,14 @@
 import { ref, watch } from "vue"
 
 import { requestJson } from "../../api/client"
+import ExecutionHistory from "./ExecutionHistory.vue"
 
 type Backend = "disabled" | "e2b" | "local_docker"
 interface Capability {
   backend: Backend
   revision: number
   backends: { id: Backend; label: string; available: boolean }[]
+  admission_paused?: boolean
 }
 const props = defineProps<{ sessionId: string }>()
 const emit = defineEmits<{ changed: [] }>()
@@ -79,6 +81,8 @@ async function select(event: Event) {
       Planner/Verifier cannot execute it. Task files still require validation and freeze;
       publishing requires approval of the exact frozen artifact.</p>
     <p v-if="error" role="alert">{{ error }}</p>
+    <p v-if="state?.admission_paused" role="alert">New execution is paused until cleanup is confirmed. Contact the administrator.</p>
+    <ExecutionHistory :session-id="sessionId" />
   </section>
 </template>
 

@@ -1,6 +1,7 @@
 # Web API Reference
 
-> 当前基线：P1-D2 Regenerate FROZEN @ `d53f331`（2026-07-16）。
+> 本文包含历史冻结接口与后续增补；当前产品状态以 [STATUS](../../STATUS.md) 为准。
+> 历史基线：P1-D2 Regenerate FROZEN @ `d53f331`（2026-07-16）。
 > 已发布最新 tag：`v0.0.26-export-markdown`（P1-D1 Export Markdown）。
 > 详见 [CHANGELOG](../../CHANGELOG.md) / [STATUS](../../STATUS.md)。
 > P0 MVP 的 release notes 见 [v0.0.23-web-claude-p0-mvp](../releases/v0.0.23-web-claude-p0-mvp.md)；
@@ -1476,7 +1477,7 @@ Connection: keep-alive
 
 ---
 
-## 已知限制（HEAD `d53f331`，P1-D2 后）
+## 历史限制（`d53f331`，不代表当前版本）
 
 - **Request registry 内存态**——server 重启后 active request 丢失；已持久化的 final messages 不丢
 - **Single harness / single active request**——不支持多 session 并行执行
@@ -1487,3 +1488,27 @@ Connection: keep-alive
 - **`view_file` 大文本自动截断到 `max_bytes`**（默认 8KB）
 - **Regenerate 仅支持最新 assistant**——不支持历史 message regenerate / 手动切换 revision 为 active
 - **无鉴权 / 无多用户 / 无 rate limit**——仅 localhost 使用
+
+## Workspace 执行维护 API（阶段 4）
+
+下列 API 均要求 `X-PI-Agent-UI: 1`，若存在 Origin 必须精确匹配可信配置；产品网关要求登录。
+`/api/admin/local-execution/*` 额外要求 admin。所有响应 `Cache-Control: no-store`。
+
+| 方法 / 路径 | 用途 |
+|---|---|
+| `GET /api/admin/local-execution/status` | 全账号资源槽位/CPU/内存额度、清理债务、活跃及最近已释放任务；不含脚本/文件名/输出 |
+| `POST /api/admin/local-execution/probe` | 只读 daemon/image 检查；不创建容器、不拉镜像、不授予执行权 |
+| `POST /api/admin/local-execution/cleanup` | 返回 `{"cleanup_requested":true}`，后台异步重试已过期/已撤销资源及孤儿清理；不删除活跃任务 |
+| `POST /api/admin/local-execution/tasks/{task_id}/revoke` | 持久停止标志；由后台回收，不能把返回成功当作已确认资源消失 |
+| `GET /api/sessions/{session_id}/execution-tasks` | 当前账号/Session 最近 100 个任务状态、命令数与耗时预算 |
+| `GET /api/sessions/{session_id}/execution-tasks/{task_id}` | 当前账号私有命令与有界输入/输出；完整 Bash 输入、无结果明确标记未知 |
+| `POST /api/sessions/{session_id}/execution-tasks/{task_id}/revoke` | 撤销本人任务，取消仍在等待的执行确认，不发布文件 |
+
+任务不存在或不属于此 Session 返回 404；非管理员请求管理接口返回 403；缺少 UI header 返回 400；
+未登录产品网关返回 401。没有通用 execute、任意清理路径、强制清除未知债务或发布绕过接口。
+`GET /api/workspaces/{session_id}/execution` 增加 `quota`、`admission_paused` 和 `cleanup_pending`；
+这些是资源状态投影，不替代每请求执行确认或制品发布确认。
+
+默认并行上限账号 2 / 全局 4、总 CPU 8 / 内存 8192 MiB；账号缓存 2 GiB，准备时保守预留归档空间。
+每个 Web 安装的实际 Docker namespace 由配置前缀与控制账本路径摘要共同确定，防止不同安装/测试实例相互清理。
+已落盘任务恢复使用原 namespace 回执。控制面仅在本机 Web 进程运行时工作，重启只清理、绝不重放命令。

@@ -235,12 +235,13 @@ def test_real_task_bash_reuses_copy_after_failure_and_cannot_downgrade_evidence(
         assert card["arguments"]["task_bash_enabled"] is True
         task = client.app.state.execution_runtime._tasks[rid]
         identity = task.prepared.scope.identity
-        assert not backends  # even the backend is resolved only after approval
+        assert not any(b.created for b in backends)  # cleanup probes do not create compute
         assert resolve(client, rid, card).status_code == 200
         outcome = terminal(client, rid)
         assert outcome["status"] == ("completed" if valid else "error"), outcome
-        assert len(backends) == 1 and not unused.created_specs
-        backend = backends[0]
+        execution_backends = [b for b in backends if b.created]
+        assert len(execution_backends) == 1 and not unused.created_specs
+        backend = execution_backends[0]
         assert len(backend.created) == len(backend.destroyed) == 1
         assert len(backend.bash_calls) == 2
         assert [item[2].exit_code for item in backend.bash_calls] == [7, 0]

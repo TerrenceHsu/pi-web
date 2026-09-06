@@ -83,6 +83,14 @@ class BashHistory:
                 raise ExecutionDenied("bash_call_replay_or_invalid_session") from None
         return run_id
 
+    async def prune(self) -> None:
+        async with self._database.transaction():
+            await self._db.execute(
+                "DELETE FROM web_bash_runs WHERE status NOT IN ('pending','approved','running') "
+                "AND created_at_ms < ?",
+                (int(time.time() * 1000) - 30 * 86400_000,),
+            )
+
     async def finish(
         self,
         session_id: str,

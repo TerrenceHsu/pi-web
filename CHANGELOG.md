@@ -8,6 +8,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Workspace execution maintenance, quotas and administration（2026-09-06）
+
+- 先将阶段 3 提交为 `5ec6622`，然后实施阶段 4；阶段 4 随本次提交归档，未推送。
+- 新增跨账号共享 SQLite 执行账本，原子限制账号/全局并发和 CPU/内存；同 Workspace 互斥。
+  租约在容器创建前落盘，撤销/到期/失联后只清理，不恢复或重放。失联心跳不能恢复过期许可。
+- 本机 Docker 根据 namespace、operation 和固定镜像核验后清理；未知结果保留清理债务，
+  暂停新执行。重启使用持久 namespace 回执，避免配置变更后误将另一 namespace 的“缺席”当作清理完成。
+- 缓存回收与心跳分离：受限目录、普通文件、30 天 TTL、签名待审引用保护、账号缓存预算。
+  私有命令日志覆盖 Coding/Plan/Bash；有界输入/输出、终态全文裁剪，日志失败不跳过执行清理。
+- 管理员 Telemetry 页面增加执行预算/状态、只读探针、撤销和异步清理重试；Workspace 增加私有任务历史。
+  通用观测只记录任务/命令 ID、阶段、预算、时长、退出/终止分类、字节数和发布/清理事件，不记录全文。
+- 完整浏览器回归修复测试账号应用缺失精确 Origin 配置的问题；不放宽产品鉴权或 Origin 校验。
+  证据与范围见 [阶段 4 验证](docs/validation/workspace-bash-stage4-2026-09-06.md)。
+
 ### Workspace Bash safe artifacts and explicit publication（2026-09-06）
 
 - 阶段 3：独立 Bash 成功输出使用 `pi-agent-bash-artifact/v1` / `bash-output-integrity/v1`；

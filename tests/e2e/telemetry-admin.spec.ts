@@ -29,6 +29,15 @@ test("admin can inspect a content-free Agent request trace", async ({ page }) =>
   await page.locator("[data-testid='telemetry-button']").click()
   await expect(page).toHaveURL(/\/telemetry$/)
   await expect(page.locator("[data-testid='telemetry-dashboard']")).toBeVisible()
+  const execution = page.locator("[data-testid='execution-admin']")
+  await expect(execution).toBeVisible()
+  await expect(execution).toContainText("Per account 2")
+  await expect(execution).toContainText("Tasks 0 / 4")
+  const cleanup = page.waitForResponse(response =>
+    response.url().endsWith("/api/admin/local-execution/cleanup") && response.request().method() === "POST",
+  )
+  await execution.getByRole("button", { name: "Retry safe cleanup" }).click()
+  expect((await cleanup).status()).toBe(200)
   await expect(page.getByText("Content and credentials are not collected")).toBeVisible()
 
   const row = page.locator("[data-testid='telemetry-span-row']").first()

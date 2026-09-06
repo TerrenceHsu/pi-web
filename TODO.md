@@ -29,7 +29,10 @@
   签名恢复胶囊、精确审批回执、受保护路径/purpose、严格基线、提交中断恢复与幂等闭环已接入。
   资源回收未确认则不开启发布；Plan 在进入待发布状态前关闭执行许可，避免 watchdog 收尾竞态。
   [验证记录](docs/validation/workspace-bash-stage3-2026-09-06.md)；随本次提交归档。
-- [ ] 阶段 4：Web 管理/运行/恢复/撤销、任务预算和 Telemetry。
+- [x] 阶段 4：Web 管理/运行/恢复/撤销、任务预算和 Telemetry。
+  共享 SQLite 配额、后台租约/孤儿清理、缓存 TTL 与待审制品保护；管理员状态/探针/撤销/清理重试，
+  Coding/Plan/Bash 私有历史和脱敏执行 Telemetry。默认每账号 2 / 全局 4，并发启动互不借权。
+  [验证记录](docs/validation/workspace-bash-stage4-2026-09-06.md)；随本次提交归档。
 - [ ] 阶段 5：完整后端/前端/E2E/Evals/真实 Docker 门禁及最终交付。
   见 [`实施方案`](docs/design/workspace-bash-tool.md) 和 [`阶段 2F 记录`](docs/validation/workspace-bash-stage2f-2026-09-06.md)。
 

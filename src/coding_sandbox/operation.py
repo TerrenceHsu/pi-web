@@ -490,6 +490,7 @@ class SandboxOperation(CodingWorkspace):
             command,
             kind="validation" if validation else ("bash" if bash else "argv"),
             script_sha256=None if bash is None else bash.sha256,
+            private_input=command.model_dump_json() if bash is None else bash.model_dump_json(),
             operation_revision=self._workspace_revision,
             invoke=invoke,
         )

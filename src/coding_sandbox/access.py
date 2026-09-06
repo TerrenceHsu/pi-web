@@ -22,6 +22,7 @@ class OperationExecutionGuard(Protocol):
         *,
         kind: Literal["argv", "bash", "validation"],
         script_sha256: str | None,
+        private_input: str,
         operation_revision: int,
         invoke: Invocation,
     ) -> SandboxCommandResult: ...

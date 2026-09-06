@@ -53,6 +53,7 @@ class GrantedOperationAccess:
         script_sha256: str | None,
         operation_revision: int,
         invoke: Invocation,
+        private_input: str = "",
     ) -> SandboxCommandResult:
         context = self._context(handle, writing=True)
         grant = await self._service.check(context)
@@ -80,7 +81,7 @@ class GrantedOperationAccess:
             copy_revision=grant.copy_revision,
             timeout_ms=command.timeout_seconds * 1000,
         )
-        return await self._service.execute(context, intent, run=invoke)
+        return await self._service.execute(context, intent, run=invoke, private_input=private_input)
 
     async def mutate(
         self,
@@ -118,5 +119,10 @@ class GrantedOperationAccess:
                 command_id=identifier, started_at_ms=started, finished_at_ms=int(time.time() * 1000)
             )
 
-        await self._service.execute(context, intent, run=run)
+        await self._service.execute(
+            context,
+            intent,
+            run=run,
+            private_input=payload[:65536].decode("utf-8", errors="replace"),
+        )
         return result[0]

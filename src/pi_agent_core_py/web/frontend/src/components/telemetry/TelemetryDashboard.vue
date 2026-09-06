@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, watch } from "vue"
 
 import { useTelemetryStore } from "../../stores/telemetryStore"
 import type { TelemetrySpanSummary } from "../../types/telemetry"
+import ExecutionAdmin from "./ExecutionAdmin.vue"
 
 const emit = defineEmits<{ (event: "close"): void }>()
 const telemetry = useTelemetryStore()
@@ -91,6 +92,7 @@ onBeforeUnmount(() => {
     </header>
 
     <main class="telemetry-body">
+      <ExecutionAdmin />
       <div v-if="telemetry.error" class="telemetry-error" role="alert">
         <span>{{ telemetry.error }}</span>
         <button type="button" aria-label="Dismiss Telemetry error" @click="telemetry.error = null">

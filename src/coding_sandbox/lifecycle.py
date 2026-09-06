@@ -836,6 +836,22 @@ class ManagedSandboxLifecycle:
             interrupted.append(record.operation_id)
         return tuple(interrupted)
 
+    async def retained_cache_paths(self) -> set[Path]:
+        """Fail closed on an unreadable live receipt: callers must skip sweeping."""
+        records = await self._store.active_records()
+        active = {record.operation_id for record in records}
+        protected = {
+            live.snapshot.archive_path.resolve()
+            for identifier, live in self._live.items()
+            if identifier in active
+        }
+        for record in records:
+            if record.status in {"awaiting_approval", "publish_conflict", "publishing"}:
+                retained = await self._retained(record)
+                protected.add(retained.snapshot.archive_path.resolve())
+                protected.add(retained.artifact.archive_path.resolve())
+        return protected
+
     async def start(self, session_id: str) -> ManagedSandboxOperationRecord:
         if self._require_execution_approval:
             raise SandboxLifecycleError("approval_required")

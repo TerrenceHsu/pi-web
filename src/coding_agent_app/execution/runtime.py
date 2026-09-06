@@ -43,6 +43,7 @@ from coding_sandbox.workspace_models import SandboxFileEntry
 
 from ..planning.store import PlanStore
 from .context import bind_execution_context
+from .control import ExecutionControl
 from .models import (
     Digest,
     ExecutionContext,
@@ -142,6 +143,9 @@ class ExecutionTaskRuntime:
         plan_store: PlanStore | None = None,
         reconcile_runtime: ReconcileRuntime | None = None,
         startup_timeout_seconds: float = 120,
+        control: ExecutionControl | None = None,
+        namespace: str = "pi-local",
+        preparation_check: Callable[[ExecutionProfile], Awaitable[None]] | None = None,
     ) -> None:
         if not staging_root.is_absolute() or not 0 < startup_timeout_seconds <= 120:
             raise ValueError("absolute staging root and bounded startup timeout required")
@@ -150,6 +154,8 @@ class ExecutionTaskRuntime:
             existing_parent = existing_parent.parent
         require_plain_path(existing_parent, directory=True)
         self.store = store
+        self._control, self._namespace = control, namespace
+        self._preparation_check = preparation_check
         self._profiles, self._baselines = profile_provider, baseline_provider
         self._version, self._resolve = baseline_version, backend_resolver
         self._enabled, self._signer = scope_enabled, artifact_signer
@@ -210,6 +216,10 @@ class ExecutionTaskRuntime:
             profile = await self._profiles(request)
             if not profile.enabled:
                 raise ExecutionDenied("execution_disabled")
+            if self._preparation_check is not None:
+                if len(self._preparing) > 2:
+                    raise ExecutionDenied("execution_preparation_busy")
+                await self._preparation_check(profile)
             if bash is not None and (
                 profile.backend != "local_docker"
                 or bash.timeout_seconds > profile.limits.command_timeout_seconds
@@ -306,6 +316,8 @@ class ExecutionTaskRuntime:
         )
 
     async def _active_scope(self, scope: ExecutionScope) -> bool:
+        if self._control is not None and not await self._control.allowed(scope.identity):
+            return False
         if (
             self._closing
             or not await self._request_allowed(self._request(scope.identity))
@@ -373,6 +385,8 @@ class ExecutionTaskRuntime:
                     raise ExecutionDenied("approval_stale")
                 policy = SnapshotPolicy.from_limits(profile.limits)
                 await asyncio.to_thread(self._validate_snapshot, prepared.baseline, policy)
+                if self._control is not None:
+                    await self._control.reserve(scope, profile.limits, namespace=self._namespace)
                 await self.store.activate(context, current_scope=scope)
                 activated = True
                 resource.backend = await self._resolve(profile)
@@ -457,6 +471,8 @@ class ExecutionTaskRuntime:
                 and exc.code in {"execution_busy", "cleanup_pending"}
             ):
                 await asyncio.shield(self.store.terminate(scope.identity, state="interrupted"))
+            if self._control is not None and not resource.create_attempted:
+                await asyncio.shield(self._control.update(scope.identity, released=True))
             raise
 
     @asynccontextmanager
@@ -479,6 +495,8 @@ class ExecutionTaskRuntime:
 
     async def cancel(self, identity: ExecutionIdentity) -> None:
         await self.store.terminate(identity)
+        if self._control is not None:
+            await self._control.update(identity, stop=True)
         job = self._starting.get(identity.task_id)
         if job is not None and job is not asyncio.current_task():
             job.cancel()
@@ -487,8 +505,17 @@ class ExecutionTaskRuntime:
         resource = self._resources.get(identity.task_id)
         if resource is not None and not resource.create_attempted:
             resource.closed = True
+        grant = await self.store.get(identity)
+        if self._control is not None and not grant.cleanup_pending:
+            await self._control.update(identity, released=True)
 
     async def _cleanup(self, identity: ExecutionIdentity) -> bool:
+        clean = await self._cleanup_resource(identity)
+        if clean and self._control is not None:
+            await self._control.update(identity, released=True)
+        return clean
+
+    async def _cleanup_resource(self, identity: ExecutionIdentity) -> bool:
         grant = await self.store.get(identity)
         resource = self._resources.get(identity.task_id)
         if resource is not None:

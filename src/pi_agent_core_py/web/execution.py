@@ -3,18 +3,26 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import aiosqlite
 from pydantic import BaseModel, ConfigDict, Field
 
 from agent_workspace.store import WorkspaceStore
 from coding_agent_app.execution.automation import ApprovedCodingAutomation, approval_arguments
-from coding_agent_app.execution.models import ExecutionDenied, ExecutionScope, digest_json
+from coding_agent_app.execution.cache import sweep_cache
+from coding_agent_app.execution.control import ExecutionControl
+from coding_agent_app.execution.models import (
+    ExecutionDenied,
+    ExecutionIdentity,
+    ExecutionScope,
+    digest_json,
+)
 from coding_agent_app.execution.runtime import (
     ExecutionProfile,
     ExecutionRequest,
@@ -29,13 +37,22 @@ from coding_sandbox import ArtifactSigner
 from coding_sandbox.admin.service import SandboxAdminService
 from coding_sandbox.backend import SandboxBackend
 from coding_sandbox.lifecycle import ManagedSandboxLifecycle
-from coding_sandbox.local_docker import LocalDockerExecutionConfig
+from coding_sandbox.local_docker import LocalDockerExecutionConfig, LocalDockerSandboxBackend
+from coding_sandbox.models import SandboxHandle
 from coding_sandbox.publication import WORKSPACE_PUBLISH_POLICY_SHA256
 
 from ..agent.messages import ToolCall
 from ..agent.tooling import AgentTool
 from ..policy import ToolApprovalContext, ToolPermissionDecision
 from ..session_backends.sqlite.database import database_for
+from ..telemetry import (
+    NOOP_TELEMETRY_CONTEXT,
+    SpanAttributes,
+    SpanOptions,
+    SpanStatus,
+    TelemetryContext,
+    TelemetrySpan,
+)
 from .approvals import ToolApprovalManager
 from .extension_store import ExtensionSQLiteStore
 
@@ -66,12 +83,29 @@ class WebExecutionRuntime:
         approvals: ToolApprovalManager,
         local_config: LocalDockerExecutionConfig | None = None,
         local_backend_factory: LocalBackendFactory | None = None,
+        control: ExecutionControl | None = None,
+        telemetry: TelemetryContext = NOOP_TELEMETRY_CONTEXT,
     ) -> None:
         self._db, self._database = connection, database_for(connection)
         self._account, self._extensions = account_id, extensions
         self._admin, self._lifecycle, self._plans = admin, lifecycle, plans
         self._local = local_config or LocalDockerExecutionConfig()
         self._local_backend = local_backend_factory
+        self.control = control or ExecutionControl(staging_root.parent / "execution-control.sqlite")
+        self._legacy_local = self._local
+        self._local = self._local.model_copy(
+            update={
+                "namespace": self.control.namespace(self._local.namespace),
+            }
+        )
+        self._owns_control = control is None
+        self._telemetry = telemetry
+        self._staging_root = staging_root
+        self._maintenance: asyncio.Task[None] | None = None
+        self._cache_job: asyncio.Task[None] | None = None
+        self._last_cache_ms = 0
+        self._maintenance_lock = asyncio.Lock()
+        self.cache_status: dict[str, Any] = {"bytes": 0, "removed_bytes": 0, "removed_files": 0}
         self._approvals = approvals
         self._tasks: dict[str, ApprovedCodingAutomation] = {}
         self.bash_tasks: dict[str, PreparedExecution] = {}
@@ -89,7 +123,11 @@ class WebExecutionRuntime:
             return scope.kind != "bash" or "run_bash" in selected.tool_names
 
         self.runtime = ExecutionTaskRuntime(
-            store=ExecutionStore(connection),
+            store=ExecutionStore(
+                connection,
+                account_limit=self.control.quota.account_tasks,
+                global_limit=self.control.quota.global_tasks,
+            ),
             profile_provider=self._profile,
             baseline_provider=baseline,
             baseline_version=version,
@@ -99,9 +137,22 @@ class WebExecutionRuntime:
             artifact_signer=signer,
             staging_root=staging_root,
             plan_store=plans,
+            control=self.control,
+            namespace=self._local.namespace,
+            reconcile_runtime=self._reconcile,
+            preparation_check=self._check_preparation,
         )
 
     async def init(self) -> None:
+        if self._owns_control:
+            await self.control.init()
+        self.control.register(
+            self._account,
+            self.revoke_task,
+            self._local_backend,
+            self._local,
+            observer=self._record_cleanup,
+        )
         async with self._database.operation():
             await self._db.execute(
                 "CREATE TABLE IF NOT EXISTS web_execution_selection ("
@@ -112,7 +163,170 @@ class WebExecutionRuntime:
             await self._db.commit()
         await self.runtime.store.init()
         await self.runtime.recover_startup()
+        await self.control.maintain()
         self._watcher = asyncio.create_task(self._watch(), name="web_execution_revocation")
+        self._maintenance = asyncio.create_task(
+            self._maintain_loop(), name="web_execution_maintenance"
+        )
+
+    async def _reconcile(self, scope: ExecutionScope, handle: SandboxHandle | None) -> bool:
+        if scope.backend != "local_docker" or self._local_backend is None:
+            return False
+        lease = await self.control.recovery_lease(scope.identity)
+        if lease is not None:
+            if lease.scope != scope:
+                return False
+            config = LocalDockerExecutionConfig(
+                image_id=scope.runtime_id,
+                namespace=lease.namespace,
+                limits=lease.limits,
+            )
+        else:
+            # Legacy grants lack a namespace receipt. Only an unchanged trusted
+            # profile can establish which deployment must be reconciled.
+            config = self._local
+            for candidate in (self._local, self._legacy_local):
+                profile = await self._profile(
+                    self.runtime._request(scope.identity),
+                    local_override=candidate,
+                )
+                if digest_json(profile.model_dump(mode="json")) == scope.policy_sha256:
+                    config = candidate
+                    break
+            else:
+                return False
+        backend = self._local_backend(config)
+        if not isinstance(backend, LocalDockerSandboxBackend):
+            return False
+        await backend.reconcile_operation(scope.identity.operation_id)
+        return True
+
+    async def _check_preparation(self, profile: ExecutionProfile) -> None:
+        grants = await self.runtime.store.list_grants()
+        if sum(g.state in {"pending", "approved", "active"} for g in grants) >= 2:
+            raise ExecutionDenied("execution_preparation_busy")
+        try:
+            usage = await asyncio.to_thread(
+                sweep_cache,
+                self._staging_root.parent,
+                set(),
+                ttl_seconds=2**40,
+            )
+        except Exception:
+            raise ExecutionDenied("execution_cache_unavailable") from None
+        # Reserve conservative headroom for two preparations plus two output
+        # archives, including concurrent writers not yet reflected in disk usage.
+        headroom = profile.limits.max_upload_bytes * 4
+        if usage["bytes"] + headroom > self.control.quota.account_cache_bytes:
+            raise ExecutionDenied("execution_cache_quota_exceeded")
+
+    async def probe(self) -> dict[str, Any]:
+        if self._local_backend is None:
+            return {"configured": False, "environment_ready": False, "error_code": "bash_disabled"}
+        backend = self._local_backend(self._local)
+        if not isinstance(backend, LocalDockerSandboxBackend):
+            return {
+                "configured": self._local.enabled,
+                "environment_ready": False,
+                "error_code": "probe_unavailable",
+            }
+        return (await backend.probe()).model_dump()
+
+    async def _record_cleanup(self, attributes: dict[str, object]) -> None:
+        await self._telemetry.start_span(
+            SpanOptions(name="execution.cleanup", attributes=cast(SpanAttributes, attributes)),
+            lambda span: span.set_status(
+                SpanStatus(
+                    status="error" if attributes.get("phase") == "cleanup_pending" else "ok",
+                )
+            ),
+        )
+
+    async def maintain(self) -> None:
+        async with self._maintenance_lock:
+            now = time.time_ns() // 1_000_000
+            grants = await self.runtime.store.list_grants()
+            for grant in grants:
+                identity = grant.scope.identity
+                deadline = (
+                    grant.approval_deadline_ms
+                    if grant.state == "pending"
+                    else grant.queue_deadline_ms
+                    if grant.state == "approved"
+                    else grant.expires_at_ms
+                )
+                if grant.state in {"pending", "approved", "active"}:
+                    if deadline is not None and deadline <= now:
+                        await self.runtime.store.terminate(identity, state="expired")
+                        await self._approvals.cancel_request(identity.request_id)
+                        await self.runtime.cancel(identity)
+                    elif grant.state == "active":
+                        if await self.control.allowed(identity):
+                            await self.control.update(identity, heartbeat=True)
+                        else:
+                            await self.runtime.cancel(identity)
+                elif grant.cleanup_pending:
+                    await self.runtime.cancel(identity)
+                await self.control.update(identity, grant=await self.runtime.store.get(identity))
+            # Export only an explicit content-free projection; no grant/script serialization.
+            for identifier, attributes in await self.runtime.store.observations():
+
+                def record(span: TelemetrySpan, phase: object = attributes.get("phase")) -> None:
+                    if phase in {"failed", "interrupted", "revoked", "expired"}:
+                        span.set_status(SpanStatus(status="error"))
+
+                await self._telemetry.start_span(
+                    SpanOptions(
+                        name="execution.command"
+                        if "command_id" in attributes
+                        else "execution.task",
+                        attributes=cast(
+                            SpanAttributes, {**attributes, "observation_id": identifier}
+                        ),
+                    ),
+                    record,
+                )
+                await self.runtime.store.acknowledge_observation(identifier)
+            await self.runtime.store.prune_history()
+            from .bash import BashHistory
+
+            await BashHistory(self._db).prune()
+            if (
+                self._cache_job is None or self._cache_job.done()
+            ) and now - self._last_cache_ms >= 60_000:
+                self._last_cache_ms = now
+                self._cache_job = asyncio.create_task(
+                    self._sweep_cache(), name="execution_cache_cleanup"
+                )
+
+    async def _sweep_cache(self) -> None:
+        # Slow disk IO must not delay grant heartbeats, revocation or expiration.
+        try:
+            protected = await self._lifecycle.retained_cache_paths()
+            for grant in await self.runtime.store.list_grants():
+                if grant.state in {"pending", "approved", "active"} or grant.cleanup_pending:
+                    protected.add(
+                        (
+                            self._staging_root
+                            / "snapshots"
+                            / f"{grant.scope.identity.operation_id}.tar.gz"
+                        ).resolve()
+                    )
+            self.cache_status = await asyncio.to_thread(
+                sweep_cache,
+                self._staging_root.parent,
+                protected,
+            )
+        except Exception:
+            self.cache_status["error_code"] = "cache_cleanup_failed"
+
+    async def _maintain_loop(self) -> None:
+        while True:
+            await asyncio.sleep(5)
+            try:
+                await self.maintain()
+            except Exception:
+                self.cache_status["error_code"] = "execution_maintenance_failed"
 
     async def selection(self, session_id: str) -> dict[str, Any]:
         async with self._database.operation():
@@ -133,6 +347,7 @@ class WebExecutionRuntime:
 
     async def capability(self, session_id: str) -> dict[str, Any]:
         config = (await self._admin.get_config()).config
+        admission = await self.control.summary()
         return {
             **await self.selection(session_id),
             "backends": [
@@ -149,6 +364,9 @@ class WebExecutionRuntime:
                 },
             ],
             "approval_required": True,
+            "admission_paused": admission["admission_paused"],
+            "cleanup_pending": admission["cleanup_pending"],
+            "quota": admission["quota"],
             "bash_tool_enabled": (await self.bash_capability(session_id))["available"],
         }
 
@@ -283,14 +501,19 @@ class WebExecutionRuntime:
         await self.revoke_session(session_id)
         return await self.capability(session_id)
 
-    async def _profile(self, request: ExecutionRequest) -> ExecutionProfile:
+    async def _profile(
+        self,
+        request: ExecutionRequest,
+        *,
+        local_override: LocalDockerExecutionConfig | None = None,
+    ) -> ExecutionProfile:
         selection = await self.selection(request.session_id)
         extensions = await self._extensions.get_workspace_extension_selection(request.session_id)
         choice = selection["backend"]
         if choice == "disabled":
             raise ExecutionDenied("execution_disabled")
         if choice == "local_docker":
-            config = self._local
+            config = local_override or self._local
             if not config.enabled or config.image_id is None or self._local_backend is None:
                 raise ExecutionDenied("execution_disabled")
             return ExecutionProfile(
@@ -375,6 +598,11 @@ class WebExecutionRuntime:
                 await self._approvals.cancel_request(identity.request_id)
                 await self.runtime.cancel(identity)
 
+    async def revoke_task(self, identity: ExecutionIdentity) -> None:
+        await self.runtime.store.get(identity)
+        await self.runtime.cancel(identity)
+        await self._approvals.cancel_request(identity.request_id)
+
     async def cancel_request(self, request_id: str) -> None:
         task = self._tasks.get(request_id)
         if task is not None and task.prepared is not None:
@@ -416,9 +644,17 @@ class WebExecutionRuntime:
                     await self.runtime.cancel(scope.identity)
 
     async def shutdown(self) -> None:
+        if self._maintenance is not None:
+            self._maintenance.cancel()
+            await asyncio.gather(self._maintenance, return_exceptions=True)
+        if self._cache_job is not None:
+            await self._cache_job
         if self._watcher is not None:
             self._watcher.cancel()
             await asyncio.gather(self._watcher, return_exceptions=True)
         for request_id in tuple(self._tasks):
             await self.close_task(request_id)
         await self.runtime.shutdown()
+        self.control.unregister(self._account)
+        if self._owns_control:
+            await self.control.close()

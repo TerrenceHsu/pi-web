@@ -1111,6 +1111,26 @@ def create_app(
                         )
 
                     async def _sandbox_event_sink(event: Any) -> None:
+                        if event.event_type in {
+                            "sandbox_publish_finished", "sandbox_publish_conflict",
+                            "sandbox_execution_released", "sandbox_approval_required",
+                        }:
+                            try:
+                                await coding_agent_services.telemetry.start_span(
+                                    SpanOptions(name="execution.publication", attributes={
+                                        "operation_id": event.operation_id,
+                                        "session_id": event.session_id,
+                                        "phase": event.event_type,
+                                        "changed_count": len(
+                                            event.payload.get("changed_paths", [])
+                                        ),
+                                        "deleted_count": len(
+                                            event.payload.get("deleted_paths", [])
+                                        ),
+                                    }), lambda span: None,
+                                )
+                            except Exception:
+                                pass  # Observation failure never changes publication.
                         await _emit_web_payload(
                             {
                                 "type": event.event_type,
@@ -1279,6 +1299,8 @@ def create_app(
                                 plans=state.plan_store, request_allowed=_execution_request_allowed,
                                 approvals=approval_manager, local_config=local_docker_config,
                                 local_backend_factory=local_docker_backend_factory,
+                                control=getattr(_app.state, "execution_control", None),
+                                telemetry=coding_agent_services.telemetry,
                             )
                             await execution_runtime.init()
                             _app.state.execution_runtime = execution_runtime
@@ -1552,6 +1574,8 @@ def create_app(
         extra_ui_origins=credential_extra_ui_origins,
     )
     app.include_router(build_telemetry_router(telemetry_security_config))
+    from .execution_api import build_execution_router
+    app.include_router(build_execution_router(telemetry_security_config))
     from .source_offer import (
         SourceOfferError,
         build_about_router,

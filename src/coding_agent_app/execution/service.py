@@ -7,6 +7,7 @@ All callbacks are trusted composition ports, not values accepted from an Agent.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 
 from coding_sandbox.models import SandboxCommandResult
@@ -75,7 +76,12 @@ class ExecutionService:
             pass
 
     async def execute(
-        self, context: ExecutionContext, intent: CommandIntent, *, run: RunCommand
+        self,
+        context: ExecutionContext,
+        intent: CommandIntent,
+        *,
+        run: RunCommand,
+        private_input: str = "",
     ) -> SandboxCommandResult:
         # Invalid role/identity/hash never revokes or affects somebody else's grant.
         try:
@@ -90,10 +96,13 @@ class ExecutionService:
         signal = asyncio.Event()
         self._signals[context.identity.task_id] = signal
         job: asyncio.Task[SandboxCommandResult] | None = None
+        logged = False
         try:
             if not await self._scope_check(grant.scope):
                 raise ExecutionDenied("grant_scope_mismatch")
             await self.store.claim(context, intent)
+            await self.store.private_input(context.identity, intent.command_id, private_input)
+            logged = True
             await self.store.start(context, intent)
             # Durable running CAS precedes effects. Never retry an unknown outcome.
             async with asyncio.timeout(intent.timeout_ms / 1000):
@@ -111,6 +120,21 @@ class ExecutionService:
             if result.command_id != intent.command_id:
                 # Output from another command cannot be attributed to this call.
                 raise ExecutionDenied("execution_interrupted")
+            await self.store.private_result(
+                context.identity,
+                intent.command_id,
+                json.dumps(
+                    {
+                        **result.model_dump(exclude={"stdout", "stderr"}),
+                        "stdout": result.stdout.encode("utf-8")[:32768].decode("utf-8", "ignore"),
+                        "stderr": result.stderr.encode("utf-8")[:32768].decode("utf-8", "ignore"),
+                        "history_truncated": len(result.stdout.encode("utf-8")) > 32768
+                        or len(result.stderr.encode("utf-8")) > 32768,
+                        "stdout_bytes": len(result.stdout.encode("utf-8")),
+                        "stderr_bytes": len(result.stderr.encode("utf-8")),
+                    }
+                ),
+            )
             if result.termination_reason != "exited" or result.exit_code is None:
                 raise CommandInterrupted(result)
             await self.store.finish(context, intent, exit_code=result.exit_code)
@@ -119,6 +143,36 @@ class ExecutionService:
             signal.set()
             if job is not None and not job.done():
                 job.cancel()
+            if logged and not isinstance(exc, CommandInterrupted):
+                code = (
+                    "command_timeout" if isinstance(exc, TimeoutError) else "execution_interrupted"
+                )
+                if isinstance(exc, ExecutionDenied) and exc.code in {
+                    "grant_revoked",
+                    "grant_expired",
+                    "grant_scope_mismatch",
+                    "task_budget_exhausted",
+                }:
+                    code = exc.code
+                try:
+                    await asyncio.shield(
+                        self.store.private_result(
+                            context.identity,
+                            intent.command_id,
+                            json.dumps(
+                                {
+                                    "error_code": code,
+                                    "termination_reason": "cancelled"
+                                    if isinstance(exc, asyncio.CancelledError)
+                                    else "timeout"
+                                    if isinstance(exc, TimeoutError)
+                                    else "interrupted",
+                                }
+                            ),
+                        )
+                    )
+                except Exception:
+                    pass  # Log storage failure must never skip revocation/cleanup below.
             # Revoke before waiting for transport teardown, including caller cancellation.
             await asyncio.shield(self.store.terminate(context.identity, state="interrupted"))
             await asyncio.shield(self._reconcile(context.identity))

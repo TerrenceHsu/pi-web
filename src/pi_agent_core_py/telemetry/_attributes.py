@@ -25,6 +25,13 @@ _CONTENT_KEY_SUFFIXES = (
     "output",
     "response",
     "text",
+    "script",
+    "stdout",
+    "stderr",
+    "filename",
+    "cwd",
+    "argv",
+    "diff",
 )
 
 
