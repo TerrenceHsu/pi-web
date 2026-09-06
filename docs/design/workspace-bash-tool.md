@@ -1,19 +1,19 @@
 # Workspace Bash 工具实现方案
 
-> 状态：阶段 2B 执行边界与 Plan 原子适配已实现，20 项真实 Docker 检查通过；Web 产品接入及阶段 3–5 待完成。
+> 状态：阶段 2D Coding/Plan Web 审批与调度已接入，两条真实 Docker Web 链路通过；独立 Bash、Docker 发布及阶段 4–5 待完成。
 > 日期：2026-09-05；实施进度更新：2026-09-06。
 > 范围：本机 Web Agent；Coding/Plan 统一任务执行授权，本地 Docker Workspace 副本中的 Bash 工具。
 > 本次修订：Coding/Plan 每任务授权并复用任务副本；独立 Bash 逐次确认；发布仍需单独批准。
 
-当前事实：新增本地 Backend、固定镜像源码、独立 revisioned 配置、只读探针和显式 smoke 脚本，
-但未注册 `run_bash`，也未启用或改变现有 Coding/Plan/Python 的授权。
+当前事实：新增本地 Backend、固定镜像源码、独立 revisioned 配置、只读探针和显式 smoke 脚本。
+阶段 2D 已将 Web Coding/Plan 纳入每请求执行许可，尚未注册 `run_bash`，Python 授权行为不变。
 初查 PATH 未找到 Docker；随后依据用户提供的非标准安装路径找到 CLI 29.7.2。
 Desktop 曾因旧 socket 无法访问而退出；获准保留并重建运行目录后已恢复，WSL 数据通过官方设置
 迁至 `D:\DockerData\DockerDesktopWSL`。见 [迁移记录](../validation/docker-data-migration-2026-09-06.md)。
-固定 Bash 镜像已构建，真实隔离/复用/冻结/清理及许可适配检查 20 项通过；公共 Operation 已可装配 ExecutionGrant，
-PlanStore 原子适配和 RunBashTool 薄定义已完成，但工具注册、Web 审批及运行生命周期尚未装配。
-不得将后端可行性等同于 Web 已可用。见 [阶段 1 验证记录](../validation/workspace-bash-stage1-2026-09-06.md)
-和 [阶段 2B 记录](../validation/workspace-bash-stage2b-2026-09-06.md)。
+固定 Bash 镜像已构建；阶段 2C 的 25 项后端 smoke 为历史证据。本轮新增 Coding/Plan 两条真实 Docker
+Web 链路，验证批准后启动、固定验证/冻结、回收计算资源后仍可审阅 diff。E2B 原发布流程保留，
+Docker 发布和独立 Bash 仍不可用。本轮未自动启用真实部署配置。见
+[阶段 2D 记录](../validation/workspace-bash-stage2d-2026-09-06.md)。
 
 ## 1. 结论与首版边界
 
@@ -429,6 +429,19 @@ argv/Bash/编辑/固定验证共享许可与预算，角色和任务上下文只
 已绑定计划不能走旧批准接口或切换 operation。20 项真实 Docker 检查通过，见阶段 2B 记录。
 下一步是 Web/Coding/Plan 的“准备快照 → 明确批准 → 激活并启动”生命周期和三类审批 UI/请求上下文；
 现有 Web E2B 仍是旧装配，不能宣称已受新许可保护。尚未开放 Docker 发布或工具注册，阶段 2 仍未完整交付。
+
+2026-09-06 阶段 2C：新增内部 `ExecutionTaskRuntime`，复用现有 Workspace
+BaselineProvider、Snapshot、Operation、ExecutionStore 与 PlanStore；不另建 Workspace 事实源。
+准备和批准均不启动容器，启动前复核请求/配置/选择/计划与 Workspace revision/SHA，固定快照播种后开放工具。
+提供任务与角色绑定、关闭/取消、启动超时、并发一次启动和不重放的保守恢复；未确认运行资源消失时保留清理债务。
+新增 26 项专项、398 项相关回归及 25 项真实 Docker 检查通过。下一步 2D 是将这些端口连接到现有 Web
+审批和 Coding/Plan 调度，处理冻结制品向旧 Managed 生命周期的交接；本轮未启用工具，也不新增发布旁路。
+
+2026-09-06 阶段 2D：Coding 每请求执行范围确认与 Plan 原子合并审批已接入 Web；可信账户/请求、
+后端/Workspace 选择、角色上下文与固定快照共同约束调度。旧直接启动、独立计划批准与手动执行验证入口
+不再构成旁路。固定验证/冻结完成后销毁运行环境，保留制品供原有审阅/独立发布使用。
+Workspace 提供后端选择，部署者可显式配置本地 Docker，不静默迁移 E2B。独立 Bash 确认/注册尚未实现；
+Docker 发布仍关闭。完整交付边界和验证见阶段 2D 记录。
 
 ### 阶段 3：安全制品与确认发布
 

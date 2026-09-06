@@ -9,6 +9,15 @@ from .models import ExecutionContext, ExecutionDenied
 _current: ContextVar[ExecutionContext | None] = ContextVar("execution_request", default=None)
 
 
+@contextmanager
+def clear_execution_context() -> Iterator[None]:
+    token = _current.set(None)
+    try:
+        yield
+    finally:
+        _current.reset(token)
+
+
 def current_execution_context() -> ExecutionContext:
     value = _current.get()
     if value is None:

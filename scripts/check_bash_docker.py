@@ -19,6 +19,7 @@ from uuid import uuid4
 
 import aiosqlite
 
+from agent_workspace.store import WorkspaceStore
 from coding_agent_app.execution.context import bind_execution_context
 from coding_agent_app.execution.models import (
     ExecutionContext,
@@ -27,8 +28,15 @@ from coding_agent_app.execution.models import (
     ExecutionScope,
 )
 from coding_agent_app.execution.operation import GrantedOperationAccess
+from coding_agent_app.execution.runtime import (
+    ExecutionProfile,
+    ExecutionRequest,
+    ExecutionTaskRuntime,
+)
 from coding_agent_app.execution.service import ExecutionService
 from coding_agent_app.execution.store import ExecutionStore
+from coding_agent_app.sandbox.workspace import WorkspaceSandboxBaselineProvider
+from coding_sandbox.artifact import HMACSHA256ArtifactSigner
 from coding_sandbox.bash import BashRequest
 from coding_sandbox.docker_transport import DockerCLITransport
 from coding_sandbox.errors import SandboxError
@@ -41,6 +49,138 @@ from coding_sandbox.models import (
 )
 from coding_sandbox.operation import SandboxOperation
 from coding_sandbox.validation import parse_sandbox_validation_config
+from pi_agent_core_py.tools.bash import RunBashTool
+
+
+async def task_lifecycle_checks(
+    backend: LocalDockerSandboxBackend,
+    transport: DockerCLITransport,
+    spec: SandboxCreateSpec,
+    root: Path,
+) -> list[str]:
+    """Trusted test approval, using a temporary real Workspace and SQLite only."""
+    workspace = WorkspaceStore(root / "runtime-workspace")
+    await workspace.init()
+    await workspace.ensure_session_workspace("probe")
+    await workspace.write_text("probe", "input.txt", "unchanged source\n")
+    baseline = WorkspaceSandboxBaselineProvider(
+        workspace, materialization_root=root / "materialized"
+    )
+    request = ExecutionRequest(
+        account_id="probe", session_id="probe", request_id=uuid4().hex, workspace_id="probe"
+    )
+    profile = ExecutionProfile(
+        enabled=True,
+        backend="local_docker",
+        runtime_id=spec.runtime_id,
+        config_revision=1,
+        selection_sha256="a" * 64,
+        publish_policy_sha256="b" * 64,
+        limits=spec.limits,
+    )
+
+    async def selected(_request: ExecutionRequest) -> ExecutionProfile:
+        return profile
+
+    async def version(call: ExecutionRequest) -> tuple[int, str]:
+        return await baseline.current_version(call.session_id)
+
+    async def resolve(_profile: ExecutionProfile) -> LocalDockerSandboxBackend:
+        return backend
+
+    async def enabled(scope: ExecutionScope) -> bool:
+        return scope.identity.request_id == request.request_id
+
+    async def allowed(call: ExecutionRequest) -> bool:
+        return call == request
+
+    async def no_container(identity: ExecutionIdentity) -> None:
+        reply = await transport.call(
+            (
+                "container",
+                "ls",
+                "--all",
+                "--filter",
+                f"label=io.pi-agent.operation={identity.operation_id}",
+                "--format",
+                "{{.Names}}",
+            )
+        )
+        if reply.returncode or reply.stdout.strip() or reply.truncated:
+            raise SandboxError("sandbox_not_ready", provider="local_docker")
+
+    checks: list[str] = []
+    async with aiosqlite.connect(root / "runtime-grants.db", isolation_level=None) as db:
+        store = ExecutionStore(db)
+        await store.init()
+        runtime = ExecutionTaskRuntime(
+            store=store,
+            profile_provider=selected,
+            baseline_provider=baseline,
+            baseline_version=version,
+            backend_resolver=resolve,
+            scope_enabled=enabled,
+            request_allowed=allowed,
+            artifact_signer=HMACSHA256ArtifactSigner(key_id="probe", secret=b"probe-only-" * 4),
+            staging_root=root / "runtime-stage",
+        )
+        try:
+            prepared = await runtime.prepare(request, goal="inspect task copy")
+            identity = prepared.scope.identity
+            before = await baseline.current_version("probe")
+            await no_container(identity)
+            try:
+                await runtime.start(identity)
+            except ExecutionDenied as exc:
+                if exc.code != "approval_required":
+                    raise
+            else:
+                raise SandboxError("permission_denied", provider="local_docker")
+            await no_container(identity)
+            await runtime.approve(identity, expected_scope_sha256=prepared.scope.sha256)
+            await no_container(identity)
+            checks.append("task_prepare_and_approval_create_no_container")
+            async with runtime.task(identity) as operation:
+                if (await operation.read_file("input.txt")).content != "unchanged source\n":
+                    raise SandboxError("protocol_error", provider="local_docker")
+                await operation.write_file("scripts/result.txt", "copy-only\n")
+                result = await RunBashTool().execute(
+                    "probe", {"script": "cat scripts/result.txt", "timeout_seconds": 10}
+                )
+                if (
+                    result.is_error
+                    or result.details is None
+                    or result.details["stdout"] != "copy-only\n"
+                ):
+                    raise SandboxError("protocol_error", provider="local_docker")
+                checks.append("approved_snapshot_seeded_and_default_tool_context_bound")
+                async with runtime.bind(identity, role="verifier"):
+                    rejected = await RunBashTool().execute("denied", {"script": "true"})
+                    if rejected.details != {"error_code": "execution_role_denied"}:
+                        raise SandboxError("permission_denied", provider="local_docker")
+                checks.append("nested_verifier_binding_cannot_execute")
+            grant = await store.get(identity)
+            if grant.state != "closed" or grant.cleanup_pending or grant.commands_used != 2:
+                raise SandboxError("protocol_error", provider="local_docker")
+            await no_container(identity)
+            if await baseline.current_version("probe") != before:
+                raise SandboxError("permission_denied", provider="local_docker")
+            checks.append("task_completion_cleans_runtime_without_workspace_publication")
+            stale = await runtime.prepare(request, goal="stale check")
+            await runtime.approve(stale.scope.identity, expected_scope_sha256=stale.scope.sha256)
+            await workspace.write_text("probe", "external.txt", "changed after approval")
+            try:
+                await runtime.start(stale.scope.identity)
+            except ExecutionDenied as exc:
+                if exc.code != "approval_stale":
+                    raise
+            else:
+                raise SandboxError("permission_denied", provider="local_docker")
+            await no_container(stale.scope.identity)
+            checks.append("approval_to_start_workspace_change_creates_no_container")
+        finally:
+            await runtime.shutdown()
+    return checks
 
 
 async def granted_operation_checks(
@@ -555,6 +695,7 @@ async def check(executable: Path, image_id: str, *, verify: bool) -> dict[str, o
             await backend.destroy(child_handle)
         results.extend(await extended_checks(backend, transport, spec, root))
         results.extend(await granted_operation_checks(backend, transport, spec, root))
+        results.extend(await task_lifecycle_checks(backend, transport, spec, root))
         return {
             "environment_ready": True,
             "execution_verified": True,
@@ -580,8 +721,10 @@ def main() -> int:
         return 2
     try:
         result = asyncio.run(check(Path(located), args.image_id, verify=args.verify))
-    except (SandboxError, ValueError, OSError, TimeoutError) as exc:
-        code = exc.code if isinstance(exc, SandboxError) else "runtime_check_failed"
+    except (SandboxError, ExecutionDenied, ValueError, OSError, TimeoutError) as exc:
+        code = (
+            exc.code if isinstance(exc, (SandboxError, ExecutionDenied)) else "runtime_check_failed"
+        )
         print(json.dumps({"available": False, "error_code": code}))
         return 2
     print(json.dumps(result, ensure_ascii=False, indent=2))

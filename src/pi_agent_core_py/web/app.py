@@ -78,6 +78,8 @@ from coding_agent_app.core import (
     create_coding_agent_services,
     create_coding_agent_session,
 )
+from coding_agent_app.execution.models import ExecutionDenied
+from coding_agent_app.execution.runtime import ExecutionRequest
 from coding_agent_app.intent_router import (
     READ_ONLY_SYSTEM_PROMPT,
     IntentDecision,
@@ -112,6 +114,7 @@ from .checkpointer import (
     recover_checkpointer_operations,
 )
 from .content_integrity import summarize_content_integrity
+from .execution import ExecutionSelectionPut, LocalBackendFactory, WebExecutionRuntime
 from .local_web_security import default_web_security_config
 from .providers.runtime import (
     ProviderInitializationError,
@@ -144,6 +147,7 @@ if TYPE_CHECKING:
     from coding_agent_app.planning.models import PlanRunResult
     from coding_sandbox import ArtifactSigner
     from coding_sandbox.admin import SandboxBackendFactory
+    from coding_sandbox.local_docker import LocalDockerExecutionConfig
     from wiki_parser import ParserProvider, ParserProviderV2
 
     from .wiki.summary import WikiSummaryAgent
@@ -369,6 +373,8 @@ def create_app(
     enable_coding_sandbox_api: bool | None = None,
     coding_sandbox_backend_factory: SandboxBackendFactory | None = None,
     coding_sandbox_artifact_signer: ArtifactSigner | None = None,
+    local_docker_config: LocalDockerExecutionConfig | None = None,
+    local_docker_backend_factory: LocalBackendFactory | None = None,
     # Low-level embedders opt in explicitly; the coding-agent product entrypoint
     # enables this by default. Requires a Session Workspace.
     enable_auto_memory: bool = False,
@@ -446,7 +452,6 @@ def create_app(
         "ws_clients": set(),
         "coding_sandbox_tool_names": set(),
         "continuity_tasks": set(),
-        "plan_approval_events": {},
         "coding_agent_session_ids": {},
         "coding_agent_request_reservations": set(),
         "coding_agent_template_session_id": None,
@@ -1244,20 +1249,45 @@ def create_app(
                         publisher_state_root=(database_path.parent / "coding-sandbox-publisher"),
                         staging_root=sandbox_staging_root,
                         event_sink=_sandbox_event_sink,
+                        require_execution_approval=True,
                     )
                     _app.state.coding_sandbox_runtime = await sandbox_runtime_cm.__aenter__()
                     lifecycle = _app.state.coding_sandbox_runtime.lifecycle
                     if lifecycle is not None:
+                        if state.file_store is not None and state.extension_store is not None:
+                            async def _execution_request_allowed(call: ExecutionRequest) -> bool:
+                                owner = state.active_requests.get(call.request_id)
+                                return (
+                                    call.account_id == (telemetry_account_id or "local")
+                                    and call.workspace_id == call.session_id
+                                    and owner is not None and owner.status == "running"
+                                    and owner.abort_reason is None
+                                    and owner.session_id == call.session_id
+                                    and await _session_exists_cb(call.session_id)
+                                )
+
+                            execution_runtime = WebExecutionRuntime(
+                                connection=session_connection,
+                                account_id=telemetry_account_id or "local",
+                                workspace=state.file_store, extensions=state.extension_store,
+                                admin=_app.state.coding_sandbox_runtime.service,
+                                lifecycle=lifecycle, signer=artifact_signer,
+                                staging_root=sandbox_staging_root / "execution",
+                                plans=state.plan_store, request_allowed=_execution_request_allowed,
+                                approvals=approval_manager, local_config=local_docker_config,
+                                local_backend_factory=local_docker_backend_factory,
+                            )
+                            await execution_runtime.init()
+                            _app.state.execution_runtime = execution_runtime
                         from ..tools.coding_sandbox import (
                             create_coding_sandbox_tools,
                             create_coding_validation_tool,
                         )
 
                         def _coding_workspace() -> Any:
-                            session_id = (
-                                tool_session_context.get() or state.current_request_session_id
-                            )
-                            return lifecycle.workspace_for_session(session_id)
+                            from coding_sandbox.operation import get_current_coding_workspace
+
+                            return get_current_coding_workspace()
 
                         coding_tools = create_coding_sandbox_tools(
                             workspace_getter=_coding_workspace
@@ -1319,6 +1349,10 @@ def create_app(
                     async with _wiki_runtime_context():
                         yield
             finally:
+                closing_execution = getattr(_app.state, "execution_runtime", None)
+                if closing_execution is not None:
+                    await closing_execution.shutdown()
+                _app.state.execution_runtime = None
                 registered_names = container["coding_sandbox_tool_names"]
                 for tool_name in tuple(registered_names):
                     harness.agent.tools.unregister(tool_name)
@@ -1484,6 +1518,7 @@ def create_app(
     # P1-E1-4A: credential_runtime placeholder——lifespan 启动时填入
     app.state.credential_runtime = None
     app.state.coding_sandbox_runtime = None
+    app.state.execution_runtime = None
     # P1-E2-3B1: provider_config_runtime placeholder——lifespan 启动时填入
     app.state.provider_config_runtime = None
     # M1-5: request_provider_runtime placeholder——仅 cred + pc runtime 都启用时填入
@@ -3226,10 +3261,7 @@ def create_app(
             PlanOrchestrator,
         )
         from coding_agent_app.planning.store import PlanStore
-        from coding_agent_app.sandbox.automation import (
-            CodingSandboxAutomation,
-            CodingSandboxAutomationError,
-        )
+        from coding_agent_app.sandbox.automation import CodingSandboxAutomationError
 
         from ..agent.messages import AssistantMessage, TextContent, Usage, UserMessage
 
@@ -3258,26 +3290,11 @@ def create_app(
             )
 
         cancelled = abort_requested or (lambda: False)
-        approval_events = cast(dict[str, asyncio.Event], container["plan_approval_events"])
-
-        async def wait_for_approval(run_id: str) -> None:
-            event = approval_events.setdefault(run_id, asyncio.Event())
-            try:
-                while True:
-                    if cancelled():
-                        raise PlanOrchestrationError(
-                            "plan_cancelled", "Plan run was cancelled."
-                        )
-                    current = await plan_store.get_run(run_id)
-                    if current.status == "executing":
-                        return
-                    try:
-                        await asyncio.wait_for(event.wait(), timeout=0.1)
-                    except TimeoutError:
-                        continue
-                    event.clear()
-            finally:
-                approval_events.pop(run_id, None)
+        execution = cast(WebExecutionRuntime | None, app.state.execution_runtime)
+        if execution is None or request_id_context.get() != request_id:
+            raise PromptRuntimeError(
+                409, "An active request is required for execution approval.", "approval_required",
+            )
 
         async def notify(event_type: str, run: Any) -> None:
             await _emit_web_payload(
@@ -3307,6 +3324,9 @@ def create_app(
                 "workspace_context_unavailable",
             ) from None
 
+        automation = execution.task(
+            session_id=session_id, request_id=request_id, goal=validated.text,
+        )
         result_client = request_harness.agent.client
         async def run_bound_plan() -> PlanRunResult:
             nonlocal result_client
@@ -3331,12 +3351,13 @@ def create_app(
                 orchestrator = PlanOrchestrator(
                     store=plan_store,
                     client=request_harness.agent.client,
-                    automation=CodingSandboxAutomation(lifecycle),
+                    automation=automation,
                     read_tools=read_tools,
                     coding_tools=coding_tools,
-                    wait_for_approval=wait_for_approval,
+                    wait_for_approval=automation.request_approval,
                     notify=notify,
                     cancelled=cancelled,
+                    role_context=automation.role_context,
                 )
                 result_client = request_harness.agent.client
                 return await orchestrator.run(
@@ -3347,18 +3368,25 @@ def create_app(
                 )
             except CodingSandboxAutomationError as exc:
                 raise PromptRuntimeError(409, str(exc), exc.code) from None
+            except ExecutionDenied as exc:
+                raise PromptRuntimeError(
+                    409, "Execution approval is denied, stale or unavailable.", exc.code,
+                ) from None
             except PlanOrchestrationError as exc:
                 status_code = 409 if exc.code == "plan_cancelled" else 500
                 raise PromptRuntimeError(status_code, str(exc), exc.code) from None
 
-        plan_result = cast(
-            "PlanRunResult",
-            await _execute_prompt(
-                validated,
-                manage_running_state=False,
-                provider_bound_operation=run_bound_plan,
-            ),
-        )
+        try:
+            plan_result = cast(
+                "PlanRunResult",
+                await _execute_prompt(
+                    validated,
+                    manage_running_state=False,
+                    provider_bound_operation=run_bound_plan,
+                ),
+            )
+        finally:
+            await asyncio.shield(execution.close_task(request_id))
 
         history = list(await session_store.list_messages(session_id))
         user_message = UserMessage(
@@ -3451,10 +3479,7 @@ def create_app(
                     request_harness.agent.state.messages = validated.original_messages
                 _refresh_running_state()
 
-        from coding_agent_app.sandbox.automation import (
-            CodingSandboxAutomation,
-            CodingSandboxAutomationError,
-        )
+        from coding_agent_app.sandbox.automation import CodingSandboxAutomationError
 
         runtime = getattr(app.state, "coding_sandbox_runtime", None)
         lifecycle = None if runtime is None else runtime.lifecycle
@@ -3467,9 +3492,18 @@ def create_app(
                 "coding_sandbox_unavailable",
             )
 
-        automation = CodingSandboxAutomation(lifecycle)
+        execution = cast(WebExecutionRuntime | None, app.state.execution_runtime)
+        request_id = request_id_context.get()
+        if execution is None or request_id is None:
+            raise PromptRuntimeError(
+                409, "An active request is required for execution approval.", "approval_required",
+            )
+        automation = execution.task(
+            session_id=validated.session_id, request_id=request_id, goal=validated.text,
+        )
         operation_id: str | None = None
         try:
+            await automation.request_approval()
             operation = await automation.prepare(
                 validated.session_id,
                 cancelled=abort_requested,
@@ -3506,6 +3540,10 @@ def create_app(
                 abort_requested=abort_requested,
             )
             return result
+        except ExecutionDenied as exc:
+            raise PromptRuntimeError(
+                409, "Execution approval is denied, stale or unavailable.", exc.code,
+            ) from None
         except CodingSandboxAutomationError as exc:
             if exc.code == "coding_request_aborted":
                 await automation.cancel_if_possible(exc.operation_id or operation_id)
@@ -3531,6 +3569,7 @@ def create_app(
             await automation.cancel_if_possible(operation_id)
             raise
         finally:
+            await asyncio.shield(execution.close_task(request_id))
             if not model_persisted and validated.original_messages is not None:
                 request_harness.agent.state.messages = validated.original_messages
             _refresh_running_state()
@@ -5196,6 +5235,8 @@ def create_app(
     ) -> dict[str, Any]:
         """abort 共享逻辑——POST /api/abort 别名 + POST /api/requests/{id}/abort 都走这里。"""
         reason_str = reason or "user_requested"
+        if req.status in {"queued", "running"}:
+            req.abort_reason = reason_str
         request_harness = (
             await _get_session_harness(req.session_id)
             if req.session_id is not None
@@ -5203,6 +5244,9 @@ def create_app(
         )
         # Wake every suspended approval handler before waiting for Agent abort.
         await approval_manager.cancel_request(req.id)
+        execution = cast(WebExecutionRuntime | None, app.state.execution_runtime)
+        if execution is not None:
+            await execution.cancel_request(req.id)
 
         if req.status == "queued":
             # task 尚未进 running 状态（理论上 create_task 立即调度；保险起见支持）
@@ -8239,7 +8283,31 @@ def create_app(
             skill_names=list(raw_skills),
             tool_names=raw_tools,
         )
+        execution = cast(WebExecutionRuntime | None, app.state.execution_runtime)
+        if execution is not None:
+            await execution.revoke_session(session_id)
         return await _workspace_extensions_payload(session_id)
+
+    @app.get("/api/workspaces/{session_id}/execution", response_model=None)
+    async def get_workspace_execution(session_id: str) -> dict[str, Any]:
+        await _require_workspace_session(session_id)
+        execution = cast(WebExecutionRuntime | None, app.state.execution_runtime)
+        if execution is None:
+            return {"backend": "disabled", "revision": 0, "backends": [], "approval_required": True}
+        return await execution.capability(session_id)
+
+    @app.put("/api/workspaces/{session_id}/execution", response_model=None)
+    async def put_workspace_execution(
+        session_id: str, payload: ExecutionSelectionPut,
+    ) -> dict[str, Any]:
+        await _require_workspace_session(session_id)
+        execution = cast(WebExecutionRuntime | None, app.state.execution_runtime)
+        if execution is None:
+            raise HTTPException(409, "Execution is unavailable")
+        try:
+            return await execution.select(session_id, payload)
+        except ExecutionDenied as exc:
+            raise HTTPException(409, exc.code) from None
 
     from .data_analysis import register_analysis_routes
 
@@ -9545,41 +9613,11 @@ def create_app(
 
     @app.post("/api/plan-runs/{run_id}/approve", response_model=None)
     async def approve_plan_run(run_id: str) -> dict[str, object] | JSONResponse:
-        from coding_agent_app.planning.store import (
-            PlanConflictError,
-            PlanNotFoundError,
-        )
-
-        if state.plan_store is None:
-            return JSONResponse(status_code=404, content={"detail": "Plan mode is disabled"})
-        try:
-            pending = await state.plan_store.get_run(run_id)
-            owner = state.active_requests.get(pending.request_id)
-            if owner is None or owner.status != "running":
-                return JSONResponse(
-                    status_code=409,
-                    content={"detail": "Plan run no longer has an active request"},
-                )
-            run, idempotent = await state.plan_store.approve(run_id)
-        except PlanNotFoundError:
-            return JSONResponse(status_code=404, content={"detail": "Plan run not found"})
-        except PlanConflictError as exc:
-            return JSONResponse(status_code=409, content={"detail": str(exc)})
-
-        approval_events = cast(dict[str, asyncio.Event], container["plan_approval_events"])
-        event = approval_events.get(run_id)
-        if event is not None:
-            event.set()
-        await _emit_web_payload(
-            {"type": "plan_approved", "plan": run.model_dump(mode="json")},
-            run.request_id,
-            run.session_id,
-        )
-        return {
-            "ok": True,
-            "idempotent": idempotent,
-            "plan": run.model_dump(mode="json"),
-        }
+        # The combined exact-scope approval card commits Plan+grant atomically.
+        # Never let an old client approve a plan in the save-to-bind window.
+        return JSONResponse(status_code=409, content={
+            "detail": "Use the execution approval card to approve this plan and execution scope.",
+        })
 
     # ========================================================================
     # Actions: prompt / abort / reset

@@ -20,20 +20,23 @@
 
 ## 当前交付状态
 
-**Workspace Bash 实施中，Web 尚不可用**：阶段 2B 已实现受保护 Bash 脚本投递、
-`SandboxOperation` 公共执行/编辑/固定验证门禁、服务端角色上下文，以及真实 PlanStore 的绑定/原子审批适配。
-薄 `RunBashTool` 已定义但未注册；本地 Operation 没有许可适配器时默认拒绝。
-固定 Python 检查/导出辅助程序改用 `-I -S -B`，避免执行 Workspace 同名模块。
-真实 Docker 20 项检查通过；新增专项 57 项，最终相关回归 314 passed / 2 skipped，静态检查及 Evals 见
-[阶段 2B 记录](docs/validation/workspace-bash-stage2b-2026-09-06.md)。
-Docker 数据仍位于 `D:\DockerData\DockerDesktopWSL`，原解析容器健康，测试容器已回收。
-**尚未接入** Web/Coding 请求审批及启动生命周期、Plan Web 合并审批、独立 Bash 完整脚本确认、
-Docker 制品发布、后台清理器和 Telemetry；阶段 2 整体及阶段 3–5 未完成。
-现有 Web E2B 未装配新许可，不应描述为已受新门禁保护；Python 产品行为未改变，Bash 默认关闭。
-阶段 2B 与前置上传/分析/记忆/压缩改动一起纳入本地开发基线；本次提交不表示 Bash 已对 Web 开放。
-此前阶段 1/2A 的后端全量 2463 passed、coverage 77.18% 是历史基线；本次未重跑全量后端或前端/E2E。
-历史证据见 [阶段 1](docs/validation/workspace-bash-stage1-2026-09-06.md) 与
-[阶段 2A](docs/validation/workspace-bash-stage2a-2026-09-06.md)。
+**阶段 2D：Web Coding/Plan 已接入任务审批与调度**。Coding 每请求确认执行范围，Plan 以一次确认
+原子批准精确计划版本与执行许可；准备/批准不创建容器，启动前复核原快照、请求、配置与资源选择。
+任务内工具共用获准副本，Planner/Verifier 不获得执行权限；旧直接启动/计划单独批准入口拒绝绕过，
+验证与冻结由请求调度器执行，运行期 UI diff 只获得只读上下文。
+任务结束回收计算资源，冻结制品仍交给原有 Changes 审阅；E2B 保留独立确认发布，Docker 发布暂不可用。
+Workspace 增加 revision-CAS 后端选择；选择变更/撤销、Stop、到期和能力变更使许可失效，不跨请求复用。
+
+本地 Docker 需部署者显式配置固定镜像/CLI 并由用户选择，**本轮未修改真实部署配置或自动启用**；
+没有静默迁移 E2B，也没有启用独立 `run_bash`。Python 分析原有逐次授权不变。
+新增 11 项离线 Web 专项、2 条真实 Docker Web Coding/Plan 链路和前端全量 221 项通过；
+最终门禁见 [阶段 2D 记录](docs/validation/workspace-bash-stage2d-2026-09-06.md)。
+阶段 2C 的 398 项相关回归与 25 项后端 Docker smoke 保留为历史证据，不与本轮两条 Web 链路合并计数。
+
+**仍待完成**：独立 Bash 完整脚本确认及注册、Docker 发布、后台孤儿/TTL 与快照缓存回收、私有运行记录、
+跨账号全局配额、管理员执行前端与执行 Telemetry。重启不恢复执行；未知资源保留清理债务，不假装已清理。
+Docker 数据仍位于 `D:\DockerData\DockerDesktopWSL`；没有重启业务解析容器。
+`9518499` 是前置功能/阶段 2B 本地提交；随后阶段 2C 和本轮 2D 改动均尚未提交、未推送。
 
 新增 **Web Context Compaction**：按持久化视图、工具输出外置、结构化自动摘要、
 Web/Telemetry/Evals 四步实现。原始 SQLite 消息与来源 ID 不变，Memory 不由压缩改写；
@@ -102,7 +105,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用隔离 MinerU Worker 与三档固�
 | `0.0.29` Release metadata 与许可证 | ✅ 完成 | Python/API/前端/Worker 统一版本；主 wheel 与 Worker 携带 MIT，Worker 另附 MinerU 第三方许可、Notice 与 SBOM |
 | 当前发布前浏览器/联网门禁 | ✅ 完成 | 精简 Playwright 19/19、0 retry/flaky；真实 E2B Managed Sandbox/审批/WorkspaceStore 回写 PASS；此前 DDGS + GLM 真实 smoke 3/3 |
 | Managed Coding Sandbox P0 0–10 | ✅ 完成 | 独立包、快照、E2B、代码工具、固定验证、签名制品、本机事务 Publisher、Web 生命周期/状态恢复/审批发布 UI，以及真实 E2B、完整 CI、攻击矩阵和 Browser E2E 验收 |
-| 自动 Coding 请求编排 | ✅ 完成 | Chat `Code` 模式自动创建/复用 Sandbox，本轮仅暴露 9 个 `coding_*` 工具；Agent 结束后 Backend 独立重验并冻结到 `awaiting_approval`，绝不自动发布；验证失败保留可修复状态 |
+| 自动 Coding 请求编排 | ✅ 已接入任务审批 | Chat `Code` 每请求批准精确范围后才启动隔离副本，仅暴露 9 个 `coding_*` 工具；任务内可修复重试，结束后独立重验/冻结并释放执行资源，绝不自动发布或跨请求复用执行许可 |
 | 三类意图路由 | ✅ 完成 | 产品入口确定性路由 `read_only/coding/knowledge`；Knowledge 由 Conversation binding 强制决定，Coding 复用 Sandbox 状态机，只读路线裁剪 mutation/execute 工具；API/Context Budget/Turn 卡公开决策审计并支持显式覆盖 |
 | Planner–Executor–Verifier Plan Mode | ✅ 完成 | Plan 是 Coding 路由的执行方式；PlanStore 持久化 DAG/版本/任务/事件，Planner 只提交结构化计划，Executor 复用单一 Session Sandbox，Verifier 按真实 diff 验收；最终仍停在签名 Artifact 用户审批门禁 |
 | Sandbox 审阅与发布冲突恢复 | ✅ 完成 | 冻结文件可在发布前逐项预览/下载；`publish_conflict` 保留签名制品并支持重新冻结或在冲突解除后重试发布；空变更不再生成可批准 Artifact，自动 Coding 可执行一次修复重试 |
@@ -163,8 +166,8 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用隔离 MinerU Worker 与三档固�
 - Compaction 默认按完整 user→assistant/tool-result turn 切分；token 目标不拆最新 turn，压缩前后 token/window 可审计，旧摘要按 pi-compatible envelope 迭代折叠，瞬时摘要错误可按不可变输入重试
 - Web 消息序列化会递归检测 `U+FFFD` 并附加 `content_warnings`，`/api/messages` 同时返回 Session 汇总；前端在对应消息/工具卡标记疑似编码损坏和 JSON 字段路径，检测过程只读且明确不可自动恢复
 - Managed Coding Sandbox 使用顶层独立 `coding_sandbox` 包；主应用从 Session WorkspaceStore revision 物化不含存储 metadata 的逻辑树，再由 Agent 通过 provider-neutral 工具修改云端副本，固定验证通过后冻结并签名不可变制品
-- Chat 输入区可显式启用 `Code`：请求开始前自动准备 Session Sandbox，并把本轮工具/权限收窄为 9 个隔离 `coding_*` 工具；模型结束后服务端独立重跑固定验证并自动冻结，右栏切到完整 Changes，等待用户批准，不会自动发布
-- Chat 输入区可显式启用 `Plan`：Planner 提交结构化 DAG 后停在批准点；批准后 Executor/Verifier 以受限角色复用同一 Sandbox，失败原因与重试次数持久化，全部任务通过后复用 Validation→Freeze 屏障
+- Chat 输入区可显式启用 `Code`：先准备精确快照并显示任务范围，用户批准后才创建请求专属副本；本轮工具/权限收窄为 9 个隔离 `coding_*` 工具，结束后服务端重验/冻结并释放计算资源，Changes 中另行审阅和批准发布
+- Chat 输入区可显式启用 `Plan`：Planner 提交结构化 DAG 后，通过一张审批卡原子批准精确计划版本及执行范围；Executor/Verifier 使用同一获准副本但分别受执行/只读角色约束，失败原因与重试次数持久化，全部任务通过后经过 Validation→Freeze 屏障
 - 待批准或发布冲突的冻结 Artifact 可直接在 Workspace 树中预览/下载；目标 Workspace 冲突不会丢弃制品，用户可按冲突类型选择重新冻结或重试发布
 - 本机 Publisher 在项目级跨进程锁内复核完整 baseline 和签名制品，以备份、原子替换、hash-chained journal、失败回滚和启动恢复发布；Sandbox 永不挂载真实工作区
 - 每个 Session 最多一个活跃 Managed Sandbox operation；创建、验证、冻结、审批发布、取消和丢弃均由 Backend 单一转换表驱动，REST 返回版本化 `allowed_actions`/`allowed_transitions`，SQLite 完整旧记录 CAS 防止并发状态覆盖，并保存有界事件日志通过统一 WS 实时推送
@@ -188,7 +191,27 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用隔离 MinerU Worker 与三档固�
 | Agent Telemetry | `.pi-agent-data/telemetry.sqlite`；跨账号集中存储结构化运行元数据，默认 30 天且最多 50,000 spans；正文与凭证不采集 |
 | Active request / pending approval / event subscribers | 当前后端进程内存；后端重启不恢复执行 |
 
-## 2026-09-06 Bash 阶段 2B 验证
+## 2026-09-06 Bash 阶段 2D 验证
+
+- 最终相关合并复核：**209 passed / 3 skipped**，含 Wiki API 全部初跑失败项与本轮执行路径。
+- Frontend **221 passed**、Chromium 24 个用例最终状态 passed、Ruff、strict Mypy **286 files**、生产构建与 Evals 通过。
+- 实机 Docker Web Coding/Plan **2 passed**；测试容器已回收，未启用真实部署或发布到用户 Workspace。
+- 全量初跑 **2551 passed / 7 failed / 9 skipped / 9 deselected**：6 项深临时路径问题用短路径复核，
+  1 项旧拒绝错误码断言对齐新审批契约。最终合并复核通过，但 Wiki 产品长路径兼容仍列入 TODO。
+- 累计 coverage **78.09%** 为全量初跑与增量的合并诊断值；不是收尾后同一快照的单次全量发布门禁。
+
+详细结果与边界见 [阶段 2D 验证记录](docs/validation/workspace-bash-stage2d-2026-09-06.md)。
+
+## 2026-09-06 Bash 阶段 2C 验证（历史阶段）
+
+- 最终相关回归：**398 passed / 2 skipped**，53.94 秒；新增生命周期专项 26 项。
+- Ruff、strict Mypy **283 source files**、6 suites / 10 配对案例 Evals candidate gate 通过。
+- 原固定镜像真实 Docker **25 项**通过，无新安装/镜像构建；测试容器回收，未发布到真实 Workspace。
+- 该阶段未跑全量后端/coverage 或前端/E2E，当时 Web 尚未接线；随后阶段 2D 已接通 Coding/Plan，最终验证以阶段 2D 记录为准。
+
+见 [阶段 2C 验证记录](docs/validation/workspace-bash-stage2c-2026-09-06.md)。
+
+### 阶段 2B 历史基线
 
 - 最终相关回归：**314 passed / 2 skipped**，31.78 秒；其中新增 Bash/公共许可/Plan 原子适配专项 57 项。
 - Ruff、strict Mypy **282 source files**、6 suites / 10 配对案例 Evals candidate gate 通过。
@@ -331,7 +354,7 @@ LLM Wiki 阶段 0–10、Session Workspace 阶段 1–7 与 Coding Agent Workspa
 
 ## 建议下一步
 
-1. 继续 Workspace Bash 阶段 2：接入快照准备、明确审批后创建运行副本的生命周期，以及 Coding/Plan/独立 Bash 三类审批与服务端请求/角色上下文；完成门禁后再注册工具，保持发布单独确认。
+1. 完成阶段 2D 剩余的独立 `run_bash`：接入完整脚本/cwd/预算确认及可信工具上下文，覆盖拒绝、Stop、过期与刷新不重放，再显式注册；已有 Coding/Plan 任务审批和调度无需重做，发布保持单独确认。
 2. 此后按计划实施 Docker 制品发布、Web/Admin/Telemetry/后台清理和完整门禁。本项目不追随 pi 的 `client/protocol/server/tui` 产品形态。
 3. 如需发布到远端，先配置 Git remote 再单独授权 push；Modal 与图片能力继续按既有决定暂缓。
 

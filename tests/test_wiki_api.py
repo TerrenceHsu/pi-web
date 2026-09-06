@@ -554,7 +554,9 @@ def test_intent_router_exposes_and_enforces_all_three_routes(tmp_path: Path) -> 
             json={"session_id": session_id, "text": "帮我写一个 PPO 源码"},
         )
         assert coding_response.status_code == 409
-        assert coding_response.json()["error_type"] == "coding_sandbox_disabled"
+        # A synchronous prompt has no live async request to own an execution
+        # approval. It must fail closed before any backend is resolved.
+        assert coding_response.json()["error_type"] == "execution_request_denied"
 
         space = client.post(
             "/api/wiki/spaces",

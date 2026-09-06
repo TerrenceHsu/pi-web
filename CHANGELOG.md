@@ -8,6 +8,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Web Coding/Plan execution approval（2026-09-06）
+
+- Web 以可信账户/活跃 request/Workspace 组合 ExecutionTaskRuntime；Coding 任务范围确认、Plan 精确版本与
+  执行许可同事务合并确认，恢复确认卡不重放执行，旧直接启动和单独批准计划入口拒绝绕过。
+- 每请求独立副本与许可，服务端绑定 Executor/Planner/Verifier/只读 diff 上下文；结束回收运行环境，
+  已冻结签名制品保留给既有审阅/单独发布流程，不自动写回。Docker 发布继续关闭。
+- Workspace 后端选择新增持久 CAS；E2B 配置保留，本地 Docker 通过部署环境变量显式启用，选择不等于授权。
+  Stop 覆盖启动播种窗口，选择/配置撤销由运行期检查终止；本机 Python 与独立 Bash 权限不变。
+- 修复启动检查器误取消尚未初始化完成的运行环境，以及 Windows 长路径导致制品导出失败。
+  发布与请求收尾并发时幂等释放计算资源，保留签名制品和缓存 diff，不取消已批准发布。
+  本轮未自动启用部署环境、未构建镜像、未提交或推送。详见
+  [阶段 2D 验证](docs/validation/workspace-bash-stage2d-2026-09-06.md)。
+
+### Workspace Bash two-phase task lifecycle（2026-09-06）
+
+- 先将前置功能及 Bash 阶段 2B 提交为本地基线 `9518499`，不推送远端。
+- 新增内部 ExecutionTaskRuntime：准备快照和明确批准均不调用执行后端；激活前复核请求、配置、
+  选择、计划内容与 Workspace revision/SHA，固定原快照播种后才进入可执行状态。
+- 统一任务/角色与 CodingWorkspace 工具上下文；同任务失败修复不换副本，结束关闭许可并回收运行环境，
+  不自动发布。取消覆盖播种和 SQLite 提交返回窗口；未知创建结果保留 cleanup_pending，重启不重放。
+- Workspace 增加不重新物化副本的 revision/SHA 检查；Plan 增加持续的语义版本检查。
+- 修复 Windows 8.3 临时路径与规范快照路径不一致的问题。相关回归 398 passed / 2 skipped，
+  25 项真实 Docker 检查、Ruff、Mypy 与 Evals 通过。Web 审批/调度尚未装配，详见
+  [阶段 2C 验证](docs/validation/workspace-bash-stage2c-2026-09-06.md)。
+
 ### Workspace Bash protected execution / Plan atomic adapter（2026-09-06）
 
 - 增加严格 Bash 输入和薄 RunBashTool（暂未注册）；脚本按精确 UTF-8 字节哈希并投递到固定控制路径，

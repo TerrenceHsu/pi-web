@@ -247,6 +247,19 @@ class PlanStore:
             await self._db.commit()
             return await self._get_run_locked(run_id), False
 
+    @serialized_operation
+    async def execution_plan_spec(self, run_id: str) -> tuple[int, PlanSpec]:
+        """Read the exact immutable version to display and bind for approval."""
+        row = await self._run_row_locked(run_id)
+        async with self._db.execute(
+            "SELECT spec_json FROM plan_versions WHERE run_id=? AND version=?",
+            (run_id, row["plan_version"]),
+        ) as cursor:
+            version = await cursor.fetchone()
+        if version is None:
+            raise PlanConflictError("plan version is unavailable")
+        return int(row["plan_version"]), PlanSpec.model_validate_json(version[0])
+
     async def _check_execution_scope(
         self, connection: aiosqlite.Connection, scope: ExecutionScope
     ) -> aiosqlite.Row:
@@ -279,6 +292,39 @@ class PlanStore:
                 "INSERT INTO plan_execution_bindings VALUES (?, ?, ?, ?)",
                 (scope.plan_id, scope.identity.task_id, scope.sha256, scope.plan_version),
             )
+
+    @serialized_operation
+    async def execution_scope_matches(self, scope: ExecutionScope) -> bool:
+        """Read-only semantic/version check for preparation and active task calls."""
+        if scope.kind != "plan" or scope.plan_id is None:
+            return False
+        try:
+            row = await self._run_row_locked(scope.plan_id)
+        except PlanNotFoundError:
+            return False
+        if (
+            row["status"] not in {"awaiting_plan_approval", "executing", "verifying"}
+            or row["session_id"] != scope.identity.session_id
+            or row["request_id"] != scope.identity.request_id
+            or int(row["plan_version"]) != scope.plan_version
+            or hashlib.sha256(str(row["goal"]).encode()).hexdigest() != scope.request_sha256
+        ):
+            return False
+        async with self._db.execute(
+            "SELECT spec_json FROM plan_versions WHERE run_id=? AND version=?",
+            (scope.plan_id, scope.plan_version),
+        ) as cursor:
+            version = await cursor.fetchone()
+        if version is None or digest_json(json.loads(version[0])) != scope.plan_sha256:
+            return False
+        async with self._db.execute(
+            "SELECT task_id,scope_sha256,version FROM plan_execution_bindings WHERE run_id=?",
+            (scope.plan_id,),
+        ) as cursor:
+            binding = await cursor.fetchone()
+        if binding is None:
+            return str(row["status"]) == "awaiting_plan_approval"
+        return tuple(binding) == (scope.identity.task_id, scope.sha256, scope.plan_version)
 
     async def approve_execution(
         self, connection: aiosqlite.Connection, scope: ExecutionScope

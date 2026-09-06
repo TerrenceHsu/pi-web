@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable, Iterable
+from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from typing import Literal
 
@@ -41,6 +42,7 @@ from .tools import (
 ApprovalWaiter = Callable[[str], Awaitable[None]]
 PlanNotifier = Callable[[str, PlanRunView], Awaitable[None]]
 Cancelled = Callable[[], bool]
+Role = Literal["executor", "planner", "verifier", "read_only"]
 
 _READ_ONLY_CODING_TOOLS = frozenset(
     {"coding_list_files", "coding_read_file", "coding_search", "coding_diff"}
@@ -96,6 +98,7 @@ class PlanOrchestrator:
         notify: PlanNotifier,
         cancelled: Cancelled,
         config: PlanOrchestratorConfig | None = None,
+        role_context: Callable[[Role], AbstractAsyncContextManager[None]] | None = None,
     ) -> None:
         self._store = store
         self._client = client
@@ -106,6 +109,7 @@ class PlanOrchestrator:
         self._notify = notify
         self._cancelled = cancelled
         self._config = config or PlanOrchestratorConfig()
+        self._role_context = role_context
 
     async def run(
         self,
@@ -123,6 +127,7 @@ class PlanOrchestrator:
                 [*self._read_tools, create_planner_submission_tool(plan_box)]
             )
             await self._run_role(
+                role="planner",
                 system_prompt=PLANNER_SYSTEM_PROMPT,
                 prompt=(
                     f"User goal:\n{goal}"
@@ -274,6 +279,7 @@ class PlanOrchestrator:
             )
             prompt = self._executor_prompt(goal, current, feedback)
             await self._run_role(
+                role="executor",
                 system_prompt=EXECUTOR_SYSTEM_PROMPT,
                 prompt=prompt,
                 tools=executor_tools,
@@ -304,6 +310,7 @@ class PlanOrchestrator:
                 ]
             )
             await self._run_role(
+                role="verifier",
                 system_prompt=VERIFIER_SYSTEM_PROMPT,
                 prompt=self._verifier_prompt(current, execution),
                 tools=verifier_tools,
@@ -338,6 +345,13 @@ class PlanOrchestrator:
         return False
 
     async def _run_role(
+        self, *, role: Role, system_prompt: str, prompt: str, tools: ToolRegistry,
+    ) -> None:
+        context = nullcontext() if self._role_context is None else self._role_context(role)
+        async with context:
+            await self._run_role_inner(system_prompt=system_prompt, prompt=prompt, tools=tools)
+
+    async def _run_role_inner(
         self,
         *,
         system_prompt: str,

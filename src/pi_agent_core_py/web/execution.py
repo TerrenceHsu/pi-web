@@ -1,0 +1,331 @@
+"""Trusted Web composition for request-scoped Coding/Plan execution approval."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any, Literal
+
+import aiosqlite
+from pydantic import BaseModel, ConfigDict, Field
+
+from agent_workspace.store import WorkspaceStore
+from coding_agent_app.execution.automation import ApprovedCodingAutomation, approval_arguments
+from coding_agent_app.execution.models import ExecutionDenied, digest_json
+from coding_agent_app.execution.runtime import (
+    ExecutionProfile,
+    ExecutionRequest,
+    ExecutionTaskRuntime,
+    PreparedExecution,
+)
+from coding_agent_app.execution.store import ExecutionStore
+from coding_agent_app.planning.models import PlanSpec
+from coding_agent_app.planning.store import PlanStore
+from coding_agent_app.sandbox.workspace import WorkspaceSandboxBaselineProvider
+from coding_sandbox import ArtifactSigner
+from coding_sandbox.admin.service import SandboxAdminService
+from coding_sandbox.backend import SandboxBackend
+from coding_sandbox.lifecycle import ManagedSandboxLifecycle
+from coding_sandbox.local_docker import LocalDockerExecutionConfig
+
+from ..agent.messages import ToolCall
+from ..policy import ToolApprovalContext, ToolPermissionDecision
+from ..session_backends.sqlite.database import database_for
+from .approvals import ToolApprovalManager
+from .extension_store import ExtensionSQLiteStore
+
+BackendChoice = Literal["disabled", "e2b", "local_docker"]
+LocalBackendFactory = Callable[[LocalDockerExecutionConfig], SandboxBackend]
+
+
+class ExecutionSelectionPut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    backend: BackendChoice
+    expected_revision: int = Field(ge=0)
+
+
+class WebExecutionRuntime:
+    def __init__(
+        self,
+        *,
+        connection: aiosqlite.Connection,
+        account_id: str,
+        workspace: WorkspaceStore,
+        extensions: ExtensionSQLiteStore,
+        admin: SandboxAdminService,
+        lifecycle: ManagedSandboxLifecycle,
+        signer: ArtifactSigner,
+        staging_root: Path,
+        plans: PlanStore | None,
+        request_allowed: Callable[[ExecutionRequest], Awaitable[bool]],
+        approvals: ToolApprovalManager,
+        local_config: LocalDockerExecutionConfig | None = None,
+        local_backend_factory: LocalBackendFactory | None = None,
+    ) -> None:
+        self._db, self._database = connection, database_for(connection)
+        self._account, self._extensions = account_id, extensions
+        self._admin, self._lifecycle, self._plans = admin, lifecycle, plans
+        self._local = local_config or LocalDockerExecutionConfig()
+        self._local_backend = local_backend_factory
+        self._approvals = approvals
+        self._tasks: dict[str, ApprovedCodingAutomation] = {}
+        self._watcher: asyncio.Task[None] | None = None
+        baseline = WorkspaceSandboxBaselineProvider(
+            workspace,
+            materialization_root=staging_root / "materializations",
+        )
+
+        async def version(request: ExecutionRequest) -> tuple[int, str]:
+            return await baseline.current_version(request.session_id)
+
+        async def enabled(_scope: object) -> bool:
+            return True  # Full request/profile/selection checks are mandatory runtime ports.
+
+        self.runtime = ExecutionTaskRuntime(
+            store=ExecutionStore(connection),
+            profile_provider=self._profile,
+            baseline_provider=baseline,
+            baseline_version=version,
+            backend_resolver=self._backend,
+            scope_enabled=enabled,
+            request_allowed=request_allowed,
+            artifact_signer=signer,
+            staging_root=staging_root,
+            plan_store=plans,
+        )
+
+    async def init(self) -> None:
+        async with self._database.operation():
+            await self._db.execute(
+                "CREATE TABLE IF NOT EXISTS web_execution_selection ("
+                "session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, "
+                "backend TEXT NOT NULL CHECK(backend IN ('disabled','e2b','local_docker')), "
+                "revision INTEGER NOT NULL CHECK(revision > 0))"
+            )
+            await self._db.commit()
+        await self.runtime.store.init()
+        await self.runtime.recover_startup()
+        self._watcher = asyncio.create_task(self._watch(), name="web_execution_revocation")
+
+    async def selection(self, session_id: str) -> dict[str, Any]:
+        async with self._database.operation():
+            async with self._db.execute(
+                "SELECT backend,revision FROM web_execution_selection WHERE session_id=?",
+                (session_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        # Keep the existing E2B backend choice, but never its old implicit authorization.
+        return (
+            {"backend": "e2b", "revision": 0}
+            if row is None
+            else {
+                "backend": str(row[0]),
+                "revision": int(row[1]),
+            }
+        )
+
+    async def capability(self, session_id: str) -> dict[str, Any]:
+        config = (await self._admin.get_config()).config
+        return {
+            **await self.selection(session_id),
+            "backends": [
+                {"id": "disabled", "available": True, "label": "Disabled"},
+                {
+                    "id": "e2b",
+                    "available": config.enabled,
+                    "label": "E2B · remote copy · approve each task",
+                },
+                {
+                    "id": "local_docker",
+                    "available": self._local.enabled and self._local_backend is not None,
+                    "label": "Local Docker · no network · task approval · publication unavailable",
+                },
+            ],
+            "approval_required": True,
+            "bash_tool_enabled": False,
+        }
+
+    async def select(self, session_id: str, value: ExecutionSelectionPut) -> dict[str, Any]:
+        capabilities = await self.capability(session_id)
+        if not any(
+            item["id"] == value.backend and item["available"] for item in capabilities["backends"]
+        ):
+            raise ExecutionDenied("execution_disabled")
+        async with self._database.transaction():
+            current = await self.selection(session_id)
+            if current["revision"] != value.expected_revision:
+                raise ExecutionDenied("approval_stale")
+            await self._db.execute(
+                "INSERT INTO web_execution_selection VALUES (?,?,?) "
+                "ON CONFLICT(session_id) DO UPDATE SET "
+                "backend=excluded.backend,revision=excluded.revision",
+                (session_id, value.backend, value.expected_revision + 1),
+            )
+        await self.revoke_session(session_id)
+        return await self.capability(session_id)
+
+    async def _profile(self, request: ExecutionRequest) -> ExecutionProfile:
+        selection = await self.selection(request.session_id)
+        extensions = await self._extensions.get_workspace_extension_selection(request.session_id)
+        choice = selection["backend"]
+        if choice == "disabled":
+            raise ExecutionDenied("execution_disabled")
+        if choice == "local_docker":
+            config = self._local
+            if not config.enabled or config.image_id is None or self._local_backend is None:
+                raise ExecutionDenied("execution_disabled")
+            return ExecutionProfile(
+                enabled=True,
+                backend="local_docker",
+                runtime_id=config.image_id,
+                config_revision=1,
+                limits=config.limits,
+                selection_sha256=digest_json(
+                    [selection, asdict(extensions), config.model_dump(mode="json")]
+                ),
+                publish_policy_sha256=digest_json({"publication": "disabled"}),
+            )
+        record = await self._admin.get_config()
+        limits = record.config.limits.model_copy(
+            update={
+                "command_timeout_seconds": min(300, record.config.limits.command_timeout_seconds),
+                "lifetime_seconds": min(1800, record.config.limits.lifetime_seconds),
+            }
+        )
+        return ExecutionProfile(
+            enabled=record.config.enabled,
+            backend="e2b",
+            runtime_id=record.config.runtime_id,
+            config_revision=record.revision,
+            limits=limits,
+            network=record.config.network,
+            selection_sha256=digest_json([selection, asdict(extensions)]),
+            publish_policy_sha256=digest_json({"publisher": "workspace-signed-v1"}),
+        )
+
+    async def _backend(self, profile: ExecutionProfile) -> SandboxBackend:
+        if profile.backend == "local_docker":
+            if self._local_backend is None:
+                raise ExecutionDenied("execution_disabled")
+            return self._local_backend(self._local)
+        record = await self._admin.get_config()
+        if record.revision != profile.config_revision:
+            raise ExecutionDenied("approval_stale")
+        return await self._admin.resolve_operation_backend(record.config)
+
+    def task(self, *, session_id: str, request_id: str, goal: str) -> ApprovedCodingAutomation:
+        if request_id in self._tasks:
+            raise ExecutionDenied("execution_busy")
+        request = ExecutionRequest(
+            account_id=self._account,
+            workspace_id=session_id,
+            session_id=session_id,
+            request_id=request_id,
+        )
+
+        async def approve(prepared: PreparedExecution, plan: PlanSpec | None) -> bool:
+            async def commit_approval() -> None:
+                await self.runtime.approve(
+                    prepared.scope.identity,
+                    expected_scope_sha256=prepared.scope.sha256,
+                )
+
+            arguments = approval_arguments(prepared, plan)
+            grant = await self.runtime.store.get(prepared.scope.identity)
+            return await self._approvals.request_approval(
+                request_id=request_id,
+                session_id=session_id,
+                context=ToolApprovalContext(
+                    tool_call=ToolCall(
+                        id=prepared.scope.identity.task_id, name="execution_task", arguments={}
+                    ),
+                    tool=None,
+                    decision=ToolPermissionDecision(
+                        decision="require_approval",
+                        policy_name="execution_task",
+                        reason=(
+                            "Approve this exact plan/version and isolated scope for this request. "
+                            "The Agent chooses future commands within these limits. "
+                            "Input files may be sent to the displayed backend. "
+                            "Real Workspace publication requires separate approval."
+                        ),
+                    ),
+                ),
+                exact_arguments=arguments,
+                on_approve=commit_approval,
+                timeout_seconds=max(1, (grant.approval_deadline_ms - grant.created_at_ms) / 1000),
+            )
+
+        task = ApprovedCodingAutomation(
+            self._lifecycle,
+            runtime=self.runtime,
+            request=request,
+            goal=goal,
+            approve=approve,
+            plan_store=self._plans,
+        )
+        self._tasks[request_id] = task
+        return task
+
+    async def close_task(self, request_id: str) -> None:
+        task = self._tasks.pop(request_id, None)
+        if task is not None:
+            try:
+                await self._approvals.cancel_request(request_id)
+            finally:
+                await task.close()
+
+    async def revoke_session(self, session_id: str) -> None:
+        for task in tuple(self._tasks.values()):
+            if task.request.session_id == session_id and task.prepared is not None:
+                await self._approvals.cancel_request(task.request.request_id)
+                await self.runtime.cancel(task.prepared.scope.identity)
+
+    async def cancel_request(self, request_id: str) -> None:
+        task = self._tasks.get(request_id)
+        if task is not None and task.prepared is not None:
+            await self.runtime.cancel(task.prepared.scope.identity)
+
+    @asynccontextmanager
+    async def read_operation(self, operation_id: str) -> AsyncIterator[None]:
+        """UI reads may inspect their live task but never gain execution authority."""
+        for task in tuple(self._tasks.values()):
+            if (
+                task.prepared is not None
+                and task.prepared.scope.identity.operation_id == operation_id
+            ):
+                async with task.role_context("read_only"):
+                    yield
+                return
+        yield  # After release, lifecycle serves only the retained signed artifact/diff.
+
+    async def _watch(self) -> None:
+        while True:
+            await asyncio.sleep(0.25)
+            for task in tuple(self._tasks.values()):
+                if task.prepared is None:
+                    continue
+                scope = task.prepared.scope
+                try:
+                    grant = await self.runtime.store.get(scope.identity)
+                    # Activation is durable before seed; cleanup_pending is also
+                    # its startup barrier. start() owns checks/cancellation there.
+                    if grant.state == "active" and not grant.cleanup_pending:
+                        await self.runtime.service.check(
+                            self.runtime.context(scope.identity, scope.sha256)
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    await self.runtime.cancel(scope.identity)
+
+    async def shutdown(self) -> None:
+        if self._watcher is not None:
+            self._watcher.cancel()
+            await asyncio.gather(self._watcher, return_exceptions=True)
+        for request_id in tuple(self._tasks):
+            await self.close_task(request_id)
+        await self.runtime.shutdown()

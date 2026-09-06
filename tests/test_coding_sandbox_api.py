@@ -115,7 +115,7 @@ def test_app_mounts_revisioned_config_and_offline_connection_probe(tmp_path: Pat
             json={"session_id": session_id},
         )
         assert disabled_start.status_code == 409
-        assert disabled_start.json()["error"]["code"] == "sandbox_disabled"
+        assert disabled_start.json()["error"]["code"] == "approval_required"
 
         missing_operation = client.get(
             "/api/coding-sandbox/operations/sandbox-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

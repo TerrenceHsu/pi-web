@@ -6,6 +6,8 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -42,6 +44,30 @@ from pi_agent_core_py.web.files import (
     WorkspaceStore,
     WorkspaceVersionConflictError,
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status", ["awaiting_approval", "publishing", "publish_conflict", "published"]
+)
+async def test_execution_release_preserves_artifact_when_publication_races(status):
+    """Request completion may overlap the separately approved publication action."""
+    diff = SandboxDiffResult(entries=())
+    record = SimpleNamespace(status=status, allowed_actions=("cancel",), diff=diff)
+    operation = SimpleNamespace(output_artifact=object(), diff=AsyncMock())
+    live = SimpleNamespace(
+        operation=operation, execution_released=False, close_runtime=AsyncMock(),
+    )
+    lifecycle = SimpleNamespace(
+        get=AsyncMock(return_value=record), _live={"op": live}, cancel=AsyncMock(),
+    )
+    await ManagedSandboxLifecycle.release_execution(lifecycle, "op")
+    await ManagedSandboxLifecycle.release_execution(lifecycle, "op")
+    live.close_runtime.assert_awaited_once()
+    lifecycle.cancel.assert_not_awaited()
+    assert live.execution_released
+    assert await ManagedSandboxLifecycle.diff(lifecycle, "op") is diff
+    operation.diff.assert_not_awaited()
 
 
 def _helper(result: dict[str, object]) -> SandboxCommandResult:

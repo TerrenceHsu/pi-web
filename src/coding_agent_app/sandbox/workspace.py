@@ -46,6 +46,10 @@ class WorkspaceSandboxBaselineProvider:
         self._store = store
         self._materialization_root = materialization_root.resolve(strict=False)
 
+    async def current_version(self, session_id: str) -> tuple[int, str]:
+        """Activation-time revision/hash check; does not create a fresh input copy."""
+        return await self._store.inspect_workspace_revision(session_id)
+
     async def __call__(
         self,
         session_id: str,

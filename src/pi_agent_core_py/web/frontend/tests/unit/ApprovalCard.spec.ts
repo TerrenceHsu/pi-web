@@ -30,6 +30,28 @@ beforeEach(() => {
 })
 
 describe("ApprovalCard", () => {
+  it("displays a full execution scope and requires one explicit combined Plan approval", async () => {
+    const resolve = vi.spyOn(useChatStore(), "resolveToolApproval").mockResolvedValue()
+    const goal = "review ".repeat(100) + "<script>unsafe()</script>"
+    const wrapper = mount(ApprovalCard, { props: { item: {
+      ...pendingItem(), policyName: "execution_task", toolName: "execution_task",
+      arguments: { kind: "plan", goal, plan_version: 3, backend: "e2b",
+        data_location: "remote E2B", workspace_revision: 7,
+        input_paths: ["upload/private.csv"], scope_sha256: "a".repeat(64) },
+    } } })
+    expect(wrapper.get('[data-testid="approval-arguments"]').text()).toContain(goal)
+    expect(wrapper.get('[data-testid="execution-scope-warning"]').text()).toContain("remote E2B")
+    expect(wrapper.find("script").exists()).toBe(false)
+    expect(resolve).not.toHaveBeenCalled()
+    const button = wrapper.get('[data-testid="approval-approve"]')
+    expect(button.text()).toContain("Approve this plan and isolated execution")
+    await button.trigger("click")
+    await flushPromises()
+    expect(resolve).toHaveBeenCalledOnce()
+    expect(resolve).toHaveBeenCalledWith("approval-1", "approve")
+    wrapper.unmount()
+  })
+
   it("shows complete Python code as text without executing or auto-approving", () => {
     const resolve = vi.spyOn(useChatStore(), "resolveToolApproval").mockResolvedValue()
     const code = "# <script>alert(1)</script>\n" + "# review this line\n".repeat(80) + "print('end')"

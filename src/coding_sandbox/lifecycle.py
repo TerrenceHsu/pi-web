@@ -694,6 +694,8 @@ class _LiveOperation:
     artifact_signer: ArtifactSigner
     publish_root: Path | None
     cancel_event: asyncio.Event
+    close_runtime: Callable[[], Awaitable[None]] | None = None
+    execution_released: bool = False
 
 
 @dataclass(frozen=True)
@@ -726,6 +728,7 @@ class ManagedSandboxLifecycle:
         artifact_publisher: SandboxArtifactPublisher | None = None,
         event_sink: SandboxLifecycleEventSink | None = None,
         now_ms: Callable[[], int] | None = None,
+        require_execution_approval: bool = False,
     ) -> None:
         self._store = store
         self._config_provider = config_provider
@@ -746,6 +749,7 @@ class ManagedSandboxLifecycle:
         self._actions: dict[str, asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
         self._closing = False
+        self._require_execution_approval = require_execution_approval
 
     async def recover_startup(self) -> tuple[str, ...]:
         """Mark old live records interrupted; never replay model or commands."""
@@ -761,6 +765,8 @@ class ManagedSandboxLifecycle:
         return tuple(interrupted)
 
     async def start(self, session_id: str) -> ManagedSandboxOperationRecord:
+        if self._require_execution_approval:
+            raise SandboxLifecycleError("approval_required")
         if self._closing:
             raise SandboxLifecycleError("operation_conflict")
         if not await self._session_exists(session_id):
@@ -801,6 +807,71 @@ class ManagedSandboxLifecycle:
             self._actions[operation_id] = task
             task.add_done_callback(partial(self._action_done, operation_id))
         return record
+
+    async def adopt_approved_operation(
+        self,
+        *,
+        session_id: str,
+        operation: SandboxOperation,
+        baseline: SandboxBaseline,
+        config_revision: int,
+        close_runtime: Callable[[], Awaitable[None]],
+        publish_available: bool,
+    ) -> ManagedSandboxOperationRecord:
+        """Trusted task-runtime handoff; never creates or refreshes a runtime.
+
+        The caller owns the execution grant. This lifecycle retains the signed
+        artifact after execution ends, so existing review/publication stays separate.
+        """
+        if self._closing or not await self._session_exists(session_id):
+            raise SandboxLifecycleError("operation_conflict")
+        async with self._lock:
+            previous = await self._store.latest_for_session(session_id)
+            if previous is not None and not previous.terminal:
+                raise SandboxLifecycleError("operation_conflict")
+            now = self._now_ms()
+            record = ManagedSandboxOperationRecord(
+                operation_id=operation.operation_id,
+                session_id=session_id,
+                status="ready",
+                config_revision=config_revision,
+                created_at_ms=now,
+                updated_at_ms=now,
+                baseline_archive_sha256=baseline.snapshot.archive_sha256,
+                baseline_manifest_sha256=baseline.snapshot.manifest.manifest_sha256,
+                baseline_workspace_revision=baseline.source_workspace_revision,
+                baseline_workspace_sha256=baseline.source_workspace_sha256,
+                publish_available=publish_available and self._artifact_publisher is not None,
+            )
+            await self._store.create(record)
+            self._live[record.operation_id] = _LiveOperation(
+                operation, baseline.snapshot, self._artifact_signer, baseline.publish_root,
+                asyncio.Event(), close_runtime=close_runtime,
+            )
+            self._session_operation[session_id] = record.operation_id
+        await self._emit(record, "sandbox_operation_ready", {})
+        return record
+
+    async def release_execution(self, operation_id: str) -> None:
+        """Close compute but retain the already frozen artifact for explicit review."""
+        record = await self.get(operation_id)
+        live = self._live.get(operation_id)
+        if live is None or live.execution_released:
+            return
+        # The user may already have approved publication when the request's
+        # finally block runs. Releasing compute must not cancel publication or
+        # strand a retained conflict diff behind a now-closed execution grant.
+        if record.status not in {
+            "awaiting_approval", "publishing", "publish_conflict", "published",
+        } or live.operation.output_artifact is None:
+            if "cancel" in record.allowed_actions:
+                await self.cancel(operation_id)
+            return
+        if live.close_runtime is not None:
+            await live.close_runtime()
+        else:
+            await live.operation.close()
+        live.execution_released = True
 
     async def get(self, operation_id: str) -> ManagedSandboxOperationRecord:
         record = await self._record(operation_id)
@@ -993,7 +1064,7 @@ class ManagedSandboxLifecycle:
     async def diff(self, operation_id: str) -> SandboxDiffResult:
         record = await self.get(operation_id)
         live = self._live.get(operation_id)
-        if live is None:
+        if live is None or live.execution_released:
             if record.diff is not None:
                 return record.diff
             raise SandboxLifecycleError(
@@ -1605,7 +1676,10 @@ class ManagedSandboxLifecycle:
     async def _close_live(self, operation_id: str) -> None:
         live = self._live.pop(operation_id, None)
         if live is not None:
-            await _close_quietly(live.operation)
+            if live.close_runtime is not None:
+                await live.close_runtime()
+            else:
+                await _close_quietly(live.operation)
 
     def _release_session(self, record: ManagedSandboxOperationRecord) -> None:
         if self._session_operation.get(record.session_id) == record.operation_id:

@@ -83,6 +83,7 @@ async def sandbox_runtime_context(
     publisher_state_root: Path | None = None,
     staging_root: Path | None = None,
     event_sink: Callable[[ManagedSandboxEvent], Awaitable[None]] | None = None,
+    require_execution_approval: bool = False,
 ) -> AsyncIterator[SandboxRuntimeState]:
     store = await SQLiteSandboxConfigStore.open(database_path)
     operation_store = None
@@ -121,6 +122,7 @@ async def sandbox_runtime_context(
                 baseline_provider=baseline_provider,
                 artifact_publisher=artifact_publisher,
                 event_sink=event_sink,
+                require_execution_approval=require_execution_approval,
             )
             await lifecycle.recover_startup()
         yield SandboxRuntimeState(

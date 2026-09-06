@@ -8,8 +8,8 @@ import hashlib
 import json
 import os
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar, Token
 from pathlib import Path, PurePosixPath
 from typing import Any, TypeVar, cast
@@ -595,7 +595,9 @@ class SandboxOperation(CodingWorkspace):
         # Fail closed: once a verified workspace starts export, no command or file
         # mutation may run again even when transfer/signing later fails.
         self._frozen = True
-        local_download = self._new_staging_path(f"sandbox-artifact-{artifact_id}.download")
+        # The signed manifest binds artifact_id; repeating it in this temporary
+        # filename needlessly exceeds Windows MAX_PATH under user data roots.
+        local_download = self._new_staging_path("artifact-download")
         try:
             remote = await self._export_remote_artifact_unlocked(
                 request_bytes,
@@ -1532,6 +1534,16 @@ class SandboxOperationManager:
         else:
             _CURRENT_WORKSPACE.reset(token)
             await operation.close()
+
+
+@contextmanager
+def bind_coding_workspace(workspace: CodingWorkspace) -> Iterator[None]:
+    """Server-only binding shared by scoped tools; always restore the caller."""
+    token = _CURRENT_WORKSPACE.set(workspace)
+    try:
+        yield
+    finally:
+        _CURRENT_WORKSPACE.reset(token)
 
 
 def get_current_coding_workspace() -> CodingWorkspace:

@@ -97,6 +97,7 @@ class ToolApprovalRecord:
     created_at: str
     resolved_at: str | None = None
     future: asyncio.Future[ApprovalStatus] | None = None
+    on_approve: Callable[[], Awaitable[None]] | None = None
 
     def public(self) -> dict[str, Any]:
         return {
@@ -132,9 +133,18 @@ class ToolApprovalManager:
         request_id: str,
         session_id: str | None,
         context: ToolApprovalContext,
+        on_approve: Callable[[], Awaitable[None]] | None = None,
+        exact_arguments: dict[str, Any] | None = None,
+        timeout_seconds: float | None = None,
     ) -> bool:
         if context.signal is not None and context.signal.is_set():
             return False
+        # Only trusted product composition supplies this exact scope. Never truncate
+        # a task or script and then allow the unseen remainder to execute.
+        if exact_arguments is not None and len(
+            json.dumps(exact_arguments, ensure_ascii=False).encode("utf-8")
+        ) > 256 * 1024:
+            raise ValueError("execution approval scope exceeds display limit")
 
         loop = asyncio.get_running_loop()
         resolution_future: asyncio.Future[ApprovalStatus] = loop.create_future()
@@ -147,7 +157,8 @@ class ToolApprovalManager:
             tool_label=(
                 getattr(context.tool, "label", None) or context.tool_call.name
             ),
-            arguments=(dict(context.tool_call.arguments)
+            arguments=(dict(exact_arguments) if exact_arguments is not None else
+                       dict(context.tool_call.arguments)
                        if context.decision.policy_name == "python_execution"
                        else _safe_arguments(dict(context.tool_call.arguments))),
             reason=context.decision.reason,
@@ -156,15 +167,19 @@ class ToolApprovalManager:
             status="pending",
             created_at=_now_iso(),
             future=resolution_future,
+            on_approve=on_approve,
         )
         async with self._lock:
             self._records[record.id] = record
             self._order.append(record.id)
             self._prune_unlocked()
 
-        await self._emit("tool_approval_requested", record)
         try:
-            resolution = await resolution_future
+            await self._emit("tool_approval_requested", record)
+            resolution = await asyncio.wait_for(resolution_future, timeout_seconds)
+        except TimeoutError:
+            await self._cancel_record(record.id)
+            return False
         except asyncio.CancelledError:
             await self._cancel_record(record.id)
             raise
@@ -210,6 +225,18 @@ class ToolApprovalManager:
                 return record.public(), True
             if record.status != "pending":
                 raise ValueError(f"approval already resolved as {record.status}")
+            if desired == "approved" and record.on_approve is not None:
+                try:
+                    await record.on_approve()
+                except Exception:
+                    record.status = "cancelled"
+                    record.resolved_at = _now_iso()
+                    if record.future is not None and not record.future.done():
+                        record.future.set_result("cancelled")
+                    await self._emit("tool_approval_resolved", record)
+                    raise ValueError(
+                        "Execution approval is stale or unavailable; start a new request."
+                    ) from None
             record.status = desired
             record.resolved_at = _now_iso()
             future = record.future

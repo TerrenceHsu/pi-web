@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import mimetypes
 from collections.abc import Callable, Coroutine
+from contextlib import nullcontext
 from typing import Annotated, Any, cast
 from urllib.parse import quote
 
@@ -273,13 +274,17 @@ def build_coding_sandbox_router(config: WebSecurityConfig) -> APIRouter:
 
     @router.get(f"{_API_PREFIX}/operations/{{operation_id}}/diff")
     async def get_operation_diff(
+        request: Request,
         operation_id: str,
         lifecycle: Annotated[
             ManagedSandboxLifecycle,
             Depends(get_sandbox_lifecycle),
         ],
     ) -> JSONResponse:
-        result = await lifecycle.diff(operation_id)
+        execution = getattr(request.app.state, "execution_runtime", None)
+        context = nullcontext() if execution is None else execution.read_operation(operation_id)
+        async with context:
+            result = await lifecycle.diff(operation_id)
         return JSONResponse(content=result.model_dump(mode="json"))
 
     @router.get(f"{_API_PREFIX}/operations/{{operation_id}}/artifact-file")
@@ -324,22 +329,28 @@ def build_coding_sandbox_router(config: WebSecurityConfig) -> APIRouter:
 
     @router.post(f"{_API_PREFIX}/operations/{{operation_id}}/validate")
     async def validate_operation(
+        request: Request,
         operation_id: str,
         lifecycle: Annotated[
             ManagedSandboxLifecycle,
             Depends(get_sandbox_lifecycle),
         ],
     ) -> JSONResponse:
+        if getattr(request.app.state, "execution_runtime", None) is not None:
+            return _error(409, "approval_required", "Validation belongs to the approved request.")
         return await _accepted_action(operation_id, lifecycle, "validate")
 
     @router.post(f"{_API_PREFIX}/operations/{{operation_id}}/prepare-publish")
     async def prepare_operation_publish(
+        request: Request,
         operation_id: str,
         lifecycle: Annotated[
             ManagedSandboxLifecycle,
             Depends(get_sandbox_lifecycle),
         ],
     ) -> JSONResponse:
+        if getattr(request.app.state, "execution_runtime", None) is not None:
+            return _error(409, "approval_required", "Freezing belongs to the approved request.")
         return await _accepted_action(operation_id, lifecycle, "prepare-publish")
 
     @router.post(f"{_API_PREFIX}/operations/{{operation_id}}/publish")

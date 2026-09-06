@@ -16,9 +16,6 @@ const sessionStore = useSessionStore()
 const approvalConfirmed = ref(false)
 
 const operation = computed(() => sandboxStore.operation)
-const canStart = computed(
-  () => !!sessionStore.activeSessionId && (!operation.value || operation.value.terminal),
-)
 
 function hasAction(action: ManagedSandboxAction): boolean {
   const current = operation.value
@@ -33,13 +30,11 @@ function hasAction(action: ManagedSandboxAction): boolean {
   return !["published", "publishing", "cancelled", "discarded"].includes(current.status)
 }
 
-const canValidate = computed(() => hasAction("validate"))
 const canDiff = computed(() =>
   ["ready", "validation_failed", "validated", "awaiting_approval", "publish_conflict"].includes(
     operation.value?.status ?? "",
   ),
 )
-const canPreparePublish = computed(() => hasAction("prepare_publish"))
 const canPublish = computed(() => hasAction("publish"))
 const canCancel = computed(() => hasAction("cancel"))
 const canDiscard = computed(() => hasAction("discard"))
@@ -99,21 +94,13 @@ function eventDetail(event: ManagedSandboxEvent): string {
     </div>
 
     <div v-else-if="!sandboxStore.available" class="empty-card">
-      Managed Sandbox is unavailable. Enable it and configure an E2B credential in the local server
-      configuration.
+      Managed Sandbox is unavailable. Configure an execution backend on the local server.
     </div>
 
     <div v-else-if="!operation" class="empty-card">
       <p>No Sandbox operation exists for this session.</p>
-      <button
-        type="button"
-        class="primary"
-        data-testid="sandbox-start"
-        :disabled="sandboxStore.actionRunning || !sessionStore.activeSessionId"
-        @click="sandboxStore.start"
-      >
-        Start Sandbox
-      </button>
+      <p>Send a Coding or Plan request and review its execution approval card.
+        A copy is created only after approval.</p>
     </div>
 
     <template v-else>
@@ -135,15 +122,6 @@ function eventDetail(event: ManagedSandboxEvent): string {
 
       <div class="actions" aria-label="Sandbox actions">
         <button
-          v-if="canStart"
-          type="button"
-          data-testid="sandbox-start-new"
-          :disabled="sandboxStore.busy"
-          @click="sandboxStore.start"
-        >
-          Start new
-        </button>
-        <button
           type="button"
           data-testid="sandbox-diff"
           :disabled="sandboxStore.busy || !canDiff"
@@ -151,22 +129,7 @@ function eventDetail(event: ManagedSandboxEvent): string {
         >
           Refresh diff
         </button>
-        <button
-          type="button"
-          data-testid="sandbox-validate"
-          :disabled="sandboxStore.busy || !canValidate"
-          @click="sandboxStore.validate"
-        >
-          Validate
-        </button>
-        <button
-          type="button"
-          data-testid="sandbox-prepare-publish"
-          :disabled="sandboxStore.busy || !canPreparePublish"
-          @click="sandboxStore.preparePublish"
-        >
-          Freeze for review
-        </button>
+        <span>Validation and freezing run automatically inside the approved task.</span>
         <button
           v-if="canCancel"
           type="button"

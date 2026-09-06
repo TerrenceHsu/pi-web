@@ -14,13 +14,16 @@
 - [x] 阶段 2B：保护脚本投递、公共 Operation 执行/编辑/验证门禁、服务端角色上下文、真实 PlanStore 同事务绑定/审批；
   定义未注册的 RunBashTool，固定 Python 辅助程序隔离启动；20 项真实 Docker 检查与 57 项新增专项通过。
 - [ ] 阶段 2：ExecutionGrant、Coding/Plan 按任务授权、独立 Bash 逐次确认与统一执行入口。
-  下一步拆分“准备精确快照/许可 → 用户批准 → 激活并创建运行副本”，接入 Coding 任务确认、Plan Web 合并审批、
-  独立 Bash 完整脚本确认和 Web request/Executor/Verifier 上下文；每次新请求创建新任务，不复用 Session 旧授权。
-  生命周期装配并完成拒绝/取消/重启测试后再注册工具；现有 Web E2B/Coding/Plan 尚未受新许可保护。
+- [x] 阶段 2C 内部两段式生命周期：精确快照准备、显式批准后启动、启动前再次检查、工具上下文、
+  请求结束清理和保守恢复；26 项新测试、398 项相关回归及 25 项真实 Docker 检查通过。
+- [x] 阶段 2D Coding/Plan Web 装配：精确范围确认、Plan 原子合并审批、每请求独立运行副本，
+  任务/Executor/Verifier/只读 UI 上下文、停止与撤销；冻结制品交回现有审阅并回收计算资源。
+  Workspace 后端选择 CAS、真实 Docker Coding/Plan 两条 Web 链路通过；E2B 已装配统一许可。
+- [ ] 阶段 2D 剩余：独立 Bash 完整脚本确认与运行记录；完成专用证据闭环后才注册 `run_bash`。
 - [ ] 阶段 3：独立 Bash 证据、Coding 固定验证、冻结审阅与确认发布。
 - [ ] 阶段 4：Web 管理/运行/恢复/撤销、任务预算和 Telemetry。
 - [ ] 阶段 5：完整后端/前端/E2E/Evals/真实 Docker 门禁及最终交付。
-  见 [`实施方案`](docs/design/workspace-bash-tool.md) 和 [`阶段 1 记录`](docs/validation/workspace-bash-stage1-2026-09-06.md)。
+  见 [`实施方案`](docs/design/workspace-bash-tool.md) 和 [`阶段 2D 记录`](docs/validation/workspace-bash-stage2d-2026-09-06.md)。
 
 ## 会话历史与 Memory
 
@@ -31,6 +34,8 @@
 
 ## Workspace 上传与媒体解析
 
+- [ ] Wiki Windows 长路径兼容：过深的数据/测试根目录可能使 Raw parse 原子临时文件创建失败；
+  本轮以短测试根复核，不将测试路径调整视为产品长路径能力已修复。
 - [x] Agent 调用独立本机 Python：`.venv-analysis`、逐次完整代码确认、pandas/NumPy/Matplotlib、错误反馈、结果预览保存；不使用 Docker，明确本机权限与非安全沙箱边界。见 [`python-data-analysis.md`](docs/design/python-data-analysis.md)。
 
 - [x] 按顺序完成可选 Data Analysis：Workspace 工具选择、结构化契约、本机受限进程、统计/图表、独立结果保存、前端及恢复链路；详见 [`data-analysis.md`](docs/design/data-analysis.md)。

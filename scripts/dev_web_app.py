@@ -154,6 +154,33 @@ def main() -> None:
     )
 
     def _workspace_app(user: AuthUser, workspace_root: Path) -> FastAPI:
+        from coding_sandbox.docker_transport import DockerCLITransport
+        from coding_sandbox.local_docker import (
+            LocalDockerExecutionConfig,
+            LocalDockerSandboxBackend,
+        )
+
+        # Deployment opt-in only. No image pulls/builds, daemon calls or task
+        # creation when selecting a Workspace or merely starting the Web server.
+        local_enabled = os.environ.get("PI_LOCAL_DOCKER_ENABLED") == "1"
+        local_config = LocalDockerExecutionConfig(
+            enabled=local_enabled,
+            image_id=os.environ.get("PI_LOCAL_DOCKER_IMAGE_ID") if local_enabled else None,
+            namespace="pi-web-" + hashlib.sha256(user.id.encode()).hexdigest()[:16],
+        )
+
+        def local_backend(config: LocalDockerExecutionConfig) -> LocalDockerSandboxBackend:
+            executable = Path(os.environ.get("PI_LOCAL_DOCKER_EXE", ""))
+            if not executable.is_absolute():
+                raise ValueError("PI_LOCAL_DOCKER_EXE must be an absolute deployment path")
+            config_dir = workspace_root / "local-docker-client"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            return LocalDockerSandboxBackend(config=config, transport=DockerCLITransport(
+                executable=executable, config_directory=config_dir,
+                endpoint=("npipe:////./pipe/dockerDesktopLinuxEngine" if os.name == "nt"
+                          else "unix:///var/run/docker.sock"),
+            ))
+
         return create_app(
             _build_harness(),
             db_path=str(workspace_root / "workspace.sqlite"),
@@ -173,6 +200,8 @@ def main() -> None:
             enable_code_continuity=True,
             enable_intent_routing=True,
             enable_plan_mode=True,
+            local_docker_config=local_config,
+            local_docker_backend_factory=local_backend if local_enabled else None,
         )
 
     app = create_authenticated_app(

@@ -110,7 +110,11 @@ async function installSandboxApi(
   sessionId: string,
   options: { failValidation?: boolean } = {},
 ): Promise<{ starts: () => number; publishes: () => number }> {
-  let operation: SandboxOperation | null = null;
+  // The request scheduler already obtained execution approval and ran validation.
+  // This fixture tests retained review state, not a manual runtime-creation shortcut.
+  let operation: SandboxOperation | null = operationFor(
+    sessionId, options.failValidation ? "validation_failed" : "awaiting_approval",
+  );
   let starts = 0;
   let publishes = 0;
   let sequence = 0;
@@ -229,23 +233,18 @@ test("Sandbox refresh restores state without replay and publish requires approva
   const api = await installSandboxApi(page, sessionId);
   await openSandbox(page, sessionId);
 
-  await page.locator("[data-testid='sandbox-start']").click();
-  await expect(page.getByText("ready", { exact: true })).toBeVisible();
-  await page.locator("[data-testid='sandbox-validate']").click();
-  await expect(page.getByText("validated", { exact: true })).toBeVisible();
+  await expect(page.locator("[data-testid='sandbox-start']")).toHaveCount(0);
+  await expect(page.getByText("awaiting approval", { exact: true })).toBeVisible();
   await expect(page.getByText("Passed in 42 ms")).toBeVisible();
   await expect(
     page.getByText("src/accepted.py", { exact: true }),
   ).toBeVisible();
-  expect(api.starts()).toBe(1);
+  expect(api.starts()).toBe(0);
 
   await page.reload();
   await expect(page.locator("[data-testid='new-chat-button']")).toBeVisible();
   await page.locator("[data-testid='coding-sandbox-button']").click();
-  await expect(page.getByText("validated", { exact: true })).toBeVisible();
-  expect(api.starts()).toBe(1);
-
-  await page.locator("[data-testid='sandbox-prepare-publish']").click();
+  expect(api.starts()).toBe(0);
   await expect(
     page.getByText("awaiting approval", { exact: true }),
   ).toBeVisible();
@@ -269,8 +268,6 @@ test("failed validation blocks publish and remains cancellable", async ({
   await installSandboxApi(page, sessionId, { failValidation: true });
   await openSandbox(page, sessionId);
 
-  await page.locator("[data-testid='sandbox-start']").click();
-  await page.locator("[data-testid='sandbox-validate']").click();
   await expect(
     page.getByText("validation failed", { exact: true }),
   ).toBeVisible();
@@ -279,9 +276,10 @@ test("failed validation blocks publish and remains cancellable", async ({
   ).toBeVisible();
   await expect(
     page.locator("[data-testid='sandbox-prepare-publish']"),
-  ).toBeDisabled();
+  ).toHaveCount(0);
+  await expect(page.locator("[data-testid='sandbox-publish']")).toHaveCount(0);
 
   await page.locator("[data-testid='sandbox-cancel']").click();
   await expect(page.getByText("cancelled", { exact: true })).toBeVisible();
-  await expect(page.locator("[data-testid='sandbox-start-new']")).toBeVisible();
+  await expect(page.locator("[data-testid='sandbox-start-new']")).toHaveCount(0);
 });

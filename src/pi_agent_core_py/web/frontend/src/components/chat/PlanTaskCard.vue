@@ -1,15 +1,7 @@
 <script setup lang="ts">
-import { computed } from "vue"
-
 import type { PlanRunItem, PlanTask } from "../../types"
-import { useChatStore } from "../../stores/chatStore"
 
-const props = defineProps<{ item: PlanRunItem }>()
-const chatStore = useChatStore()
-
-const canApprove = computed(
-  () => props.item.plan.status === "awaiting_plan_approval" && !props.item.submitting,
-)
+defineProps<{ item: PlanRunItem }>()
 
 function taskIcon(task: PlanTask): string {
   if (task.status === "passed") return "✓"
@@ -22,14 +14,6 @@ function statusLabel(status: string): string {
   return status.replaceAll("_", " ")
 }
 
-async function approve(): Promise<void> {
-  if (!canApprove.value) return
-  try {
-    await chatStore.approvePlan(props.item.plan.id)
-  } catch {
-    // Store owns the browser-safe error shown on this card.
-  }
-}
 </script>
 
 <template>
@@ -95,16 +79,13 @@ async function approve(): Promise<void> {
 
     <footer v-if="item.plan.status === 'awaiting_plan_approval' || item.error">
       <span v-if="item.error" class="card-error">{{ item.error }}</span>
-      <button
+      <p
         v-if="item.plan.status === 'awaiting_plan_approval'"
-        type="button"
-        class="approve-btn"
-        data-testid="approve-plan-button"
-        :disabled="!canApprove"
-        @click="approve"
+        data-testid="plan-execution-approval-hint"
       >
-        {{ item.submitting ? "Approving…" : "Approve and execute" }}
-      </button>
+        Review the execution approval card below. It binds this plan version, input snapshot,
+        backend and limits in one confirmation. Approving does not publish changes.
+      </p>
     </footer>
   </section>
 </template>

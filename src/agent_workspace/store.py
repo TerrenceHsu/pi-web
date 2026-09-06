@@ -1333,6 +1333,32 @@ class WorkspaceStore:
         async with self._session_lock(session_id):
             return await self._ensure_workspace_state_unlocked(session_id)
 
+    async def inspect_workspace_revision(self, session_id: str) -> tuple[int, str]:
+        """Verify the canonical current tree without creating another materialized copy."""
+        async with self._session_lock(session_id):
+            state = await self._ensure_workspace_state_unlocked(session_id)
+            refs = await self.list_session(session_id)
+            entries: list[WorkspaceMaterializationEntry] = []
+            for ref in sorted(refs, key=lambda item: item.logical_path):
+                if ref.session_id != session_id:
+                    raise FileAccessDeniedError("cross-session Workspace file")
+                source = self._resolve_and_check(
+                    Path(ref.path), expect_under=self._file_dir(session_id, ref.id)
+                )
+                await asyncio.to_thread(
+                    _verify_workspace_file, source, expected_size=ref.size,
+                    expected_sha256=ref.sha256,
+                )
+                entries.append(WorkspaceMaterializationEntry(
+                    logical_path=ref.logical_path, size=ref.size, sha256=ref.sha256,
+                ))
+            current = self._read_workspace_state_unlocked(session_id)
+            if current is None or current.revision != state.revision:
+                raise WorkspaceVersionConflictError(
+                    state.revision, -1 if current is None else current.revision
+                )
+            return state.revision, _workspace_materialization_digest(tuple(entries))
+
     async def mark_code_continuity_current(
         self,
         session_id: str,

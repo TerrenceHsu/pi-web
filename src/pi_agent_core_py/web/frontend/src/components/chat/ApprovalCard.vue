@@ -6,6 +6,9 @@ import { useChatStore } from "../../stores/chatStore"
 
 const props = defineProps<{ item: ToolApprovalItem }>()
 const chatStore = useChatStore()
+const executionTask = computed(() => props.item.policyName === "execution_task")
+const approvalLabel = computed(() => !executionTask.value ? "Approve once"
+  : props.item.arguments.kind === "plan" ? "Approve this plan and isolated execution" : "Allow this Coding task to execute")
 const pythonCode = computed(() => props.item.policyName === "python_execution"
   && typeof props.item.arguments.code === "string" ? props.item.arguments.code : null)
 
@@ -50,12 +53,17 @@ async function decide(decision: ToolApprovalDecision) {
     </header>
 
     <p v-if="item.reason" class="reason">{{ item.reason }}</p>
+    <p v-if="executionTask" class="reason" data-testid="execution-scope-warning">
+      {{ item.arguments.data_location }} · {{ item.arguments.backend }} · input revision {{ item.arguments.workspace_revision }}.
+      This request only. Future commands are chosen by the Agent within the displayed limits.
+      No automatic writeback; publishing changes requires separate approval.
+    </p>
     <details v-if="pythonCode !== null" open>
       <summary>Complete Python code · review before execution</summary>
       <pre data-testid="approval-python-code">{{ pythonCode }}</pre>
     </details>
     <details open>
-      <summary>Arguments</summary>
+      <summary>{{ executionTask ? "Complete execution scope, input files and plan" : "Arguments" }}</summary>
       <pre data-testid="approval-arguments">{{ argumentsJson }}</pre>
     </details>
 
@@ -77,7 +85,7 @@ async function decide(decision: ToolApprovalDecision) {
         :disabled="item.submitting"
         @click="decide('approve')"
       >
-        {{ item.submitting ? "Submitting…" : "Approve once" }}
+        {{ item.submitting ? "Submitting…" : approvalLabel }}
       </button>
     </div>
   </section>
