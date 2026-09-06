@@ -30,6 +30,22 @@ beforeEach(() => {
 })
 
 describe("ApprovalCard", () => {
+  it.each(["coding", "plan"])("shows shared Bash scope for %s without a second script approval", async (kind) => {
+    const resolve = vi.spyOn(useChatStore(), "resolveToolApproval").mockResolvedValue()
+    const wrapper = mount(ApprovalCard, { props: { item: {
+      ...pendingItem(), policyName: "execution_task", toolName: "execution_task", arguments: {
+        kind, task_bash_enabled: true, backend: "local_docker", data_location: "local Docker",
+      },
+    } } })
+    expect(wrapper.get('[data-testid="execution-scope-warning"]').text()).toContain("share this task's copy and budget")
+    expect(wrapper.text()).toContain("Fixed validation and freeze still apply")
+    expect(wrapper.find('[data-testid="approval-bash-script"]').exists()).toBe(false)
+    expect(resolve).not.toHaveBeenCalled()
+    await wrapper.get('[data-testid="approval-approve"]').trigger("click")
+    await flushPromises()
+    expect(resolve).toHaveBeenCalledOnce()
+    wrapper.unmount()
+  })
   it("shows the complete Bash script and exact scope without automatic approval", async () => {
     const resolve = vi.spyOn(useChatStore(), "resolveToolApproval").mockResolvedValue()
     const script = "# <script>unsafe()</script>\n" + "# 审阅\n".repeat(1500) + "echo end"

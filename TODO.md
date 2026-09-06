@@ -13,7 +13,7 @@
 - [x] 阶段 2A 内部授权基础：ExecutionGrant、SQLite 原子批准/激活、命令 CAS、身份/角色/预算、撤销与重启失效；41 项离线测试。
 - [x] 阶段 2B：保护脚本投递、公共 Operation 执行/编辑/验证门禁、服务端角色上下文、真实 PlanStore 同事务绑定/审批；
   定义未注册的 RunBashTool，固定 Python 辅助程序隔离启动；20 项真实 Docker 检查与 57 项新增专项通过。
-- [ ] 阶段 2：ExecutionGrant、Coding/Plan 按任务授权、独立 Bash 逐次确认与统一执行入口。
+- [x] 阶段 2：ExecutionGrant、Coding/Plan 按任务授权、独立 Bash 逐次确认与统一执行入口。
 - [x] 阶段 2C 内部两段式生命周期：精确快照准备、显式批准后启动、启动前再次检查、工具上下文、
   请求结束清理和保守恢复；26 项新测试、398 项相关回归及 25 项真实 Docker 检查通过。
 - [x] 阶段 2D Coding/Plan Web 装配：精确范围确认、Plan 原子合并审批、每请求独立运行副本，
@@ -22,11 +22,13 @@
 - [x] 阶段 2C/2D 提交：`297a81a`，未推送。
 - [x] 阶段 2E 独立 Bash：可选工具注册、独立意图路由、完整脚本一次确认、停止/失效回收、
   有界私有 SQLite 历史和 Web 查询。只返回输出和变更摘要，副本文件丢弃，不创建可发布制品。
-- [ ] 阶段 2 剩余：为 Coding/Plan Executor 装配复用任务许可的 `run_bash` 薄适配；当前仍使用 `coding_run`。
+- [x] 阶段 2E 提交：`a4a628b`，未推送。
+- [x] 阶段 2F：Coding/Plan Executor 的 `run_bash` 与 `coding_run`、编辑、固定验证共用任务许可和副本；
+  不额外逐脚本审批，保留默认未选中/仅 Local Docker、角色与请求隔离及原固定验证/冻结屏障。
 - [ ] 阶段 3：独立 Bash 专用文件证据与冻结、Docker 制品审阅/确认发布；Coding 已有固定验证不可降级。
 - [ ] 阶段 4：Web 管理/运行/恢复/撤销、任务预算和 Telemetry。
 - [ ] 阶段 5：完整后端/前端/E2E/Evals/真实 Docker 门禁及最终交付。
-  见 [`实施方案`](docs/design/workspace-bash-tool.md) 和 [`阶段 2E 记录`](docs/validation/workspace-bash-stage2e-2026-09-06.md)。
+  见 [`实施方案`](docs/design/workspace-bash-tool.md) 和 [`阶段 2F 记录`](docs/validation/workspace-bash-stage2f-2026-09-06.md)。
 
 ## 会话历史与 Memory
 

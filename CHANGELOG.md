@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Coding/Plan task-bound Bash reuse（2026-09-06）
+
+- 先将独立 Bash 阶段提交为 `a4a628b`；阶段 2F 与本条记录共同归档，未推送。
+- Workspace 已选 Bash 且使用 Local Docker 时，Coding/Plan Executor 改装配请求绑定的薄 RunBashTool，
+  复用当前 ExecutionGrant、SandboxOperation、文件副本与预算，不经过独立 Bash 确认/历史/容器路径。
+- 同任务允许 `run_bash`、`coding_run`、编辑和固定验证混合使用；非零退出不重置许可或副本。
+  Planner/Verifier/read-only 无 Bash，旧请求适配器和预览不能借用另一请求上下文；E2B 不提供 Bash。
+- 审批卡与 Workspace 说明区分任务授权和独立逐脚本批准；普通 Bash 仍按原逐次确认并丢弃副本文件。
+  Coding/Plan 的固定验证/签名冻结不可被 Bash 输出替代，Docker 发布仍关闭，Python 权限不变。
+- 相关后端 174 passed / 5 skipped，前端 226 passed、Chromium 26 passed；真实 Docker、静态检查、
+  Evals 和生产构建通过。未重跑全仓覆盖率，详见 [阶段 2F 验证](docs/validation/workspace-bash-stage2f-2026-09-06.md)。
+
 ### Standalone Web Bash approval and private history（2026-09-06）
 
 - 先将阶段 2C/2D 提交为 `297a81a`，然后实现阶段 2E；新改动尚未提交，没有推送。

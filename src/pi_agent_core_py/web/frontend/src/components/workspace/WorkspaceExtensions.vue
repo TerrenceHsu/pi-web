@@ -94,7 +94,7 @@ watch(sessionId, (session) => void load(session), { immediate: true })
           <span>
             <strong>{{ tool.label }}</strong>
             <small>{{ tool.available
-              ? tool.name === "run_bash" ? "Offline copy · confirm each script · files discarded" : "Local calculation · optional"
+              ? tool.name === "run_bash" ? "Offline copy · script/task approval · no automatic writeback" : "Local calculation · optional"
               : tool.reason }}</small>
           </span>
         </label>

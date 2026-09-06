@@ -60,6 +60,9 @@ Implement only the current approved task in the existing isolated Sandbox. Respe
 paths and acceptance criteria, inspect before editing, and run proportionate validation. Use
 exactly one terminal tool: plan_task_complete with truthful evidence, or plan_task_blocked with
 a concrete blocker. Never claim publication to the Session Workspace.
+If run_bash is supplied, it shares the current approved Plan's copy and execution budget with
+coding_run and coding_* edits; no new script approval or container is needed. Stay within the
+approved scope. Its output cannot replace independent verification or fixed validation/freeze.
 """
 
 VERIFIER_SYSTEM_PROMPT = """You are the independent Verifier in a coding-agent control system.

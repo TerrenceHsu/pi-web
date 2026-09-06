@@ -19,9 +19,9 @@ from pi_agent_core_py.ai.tooling import ToolDef
 
 AUTOMATED_CODING_PROMPT = """Automated Coding mode is active for this request.
 
-Work only through the available coding_* tools. First call coding_list_files once. Your next
-action MUST be coding_write_file or coding_apply_patch on scripts/**; create the requested
-file before any coding_run, package inspection, dependency installation, or coding_validate.
+Work only through the available coding_* tools and optional run_bash. First call coding_list_files
+once. Your next action MUST be coding_write_file or coding_apply_patch on scripts/**; create the
+requested file before coding_run, run_bash, package inspection, installation, or coding_validate.
 Do not install dependencies unless the user explicitly asks for installation. Dependency-heavy
 source can be syntax-checked without importing optional packages. Do not draft the requested
 source code only in reasoning or chat. Put non-code deliverables in artifacts/** or shared notes
@@ -32,13 +32,16 @@ fails, diagnose the output, repair the files, and validate again. A Coding turn 
 is a failure. Do not write directly to the Session Workspace and do not claim that changes were
 published. After your turn, the server will run an independent fixed validation and freeze the
 exact artifact for the user's explicit approval.
+If run_bash is supplied, it shares this approved task's copy and execution budget with coding_run.
+It does not start a new copy or request another script approval. Use it only within the approved
+scope. Bash output never replaces the fixed Coding validation/freeze or authorizes publication.
 """
 
 AUTOMATED_CODING_REPAIR_PROMPT = """# Automatic no-change repair
 
 The preceding attempt ended without changing any Sandbox file. This is the only automatic
-repair attempt. Do not inspect packages, install dependencies, call coding_run, or explain the
-failure first. Immediately call coding_write_file or coding_apply_patch to implement the user's
+repair attempt. Do not inspect packages, install dependencies, call coding_run/run_bash, or explain
+the failure first. Immediately call coding_write_file or coding_apply_patch to implement the user's
 original request under scripts/**. Keep the first written file concise and valid; add more files
 or details with later tool calls. Then validate the written files.
 """

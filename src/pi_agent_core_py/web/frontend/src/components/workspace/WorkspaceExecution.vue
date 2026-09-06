@@ -73,6 +73,10 @@ async function select(event: Event) {
       Python Analysis permission is independent. For standalone Bash, choose Local Docker,
       select the optional Bash tool, then ask “run_bash …” in normal chat with Code/Plan off.
       Each script needs confirmation. Copy changes are discarded; output may reach your model.</p>
+    <p>With the Bash tool selected, Local Docker Coding/Plan Executor also gets run_bash.
+      It shares the approved task's copy and budget with coding_run, with no extra script prompt.
+      Planner/Verifier cannot execute it. Task files still require validation and freeze;
+      Docker publication is not available yet.</p>
     <p v-if="error" role="alert">{{ error }}</p>
   </section>
 </template>

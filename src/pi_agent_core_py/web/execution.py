@@ -32,6 +32,7 @@ from coding_sandbox.lifecycle import ManagedSandboxLifecycle
 from coding_sandbox.local_docker import LocalDockerExecutionConfig
 
 from ..agent.messages import ToolCall
+from ..agent.tooling import AgentTool
 from ..policy import ToolApprovalContext, ToolPermissionDecision
 from ..session_backends.sqlite.database import database_for
 from .approvals import ToolApprovalManager
@@ -166,6 +167,39 @@ class WebExecutionRuntime:
             session_id=session_id, request_id=request_id,
         )
 
+    async def coding_bash_tool(
+        self, session_id: str, request_id: str | None,
+    ) -> AgentTool | None:
+        """Request-local adapter, never another approval, history or runtime owner."""
+        from coding_agent_app.execution.context import current_execution_context
+        from coding_sandbox.operation import get_current_coding_workspace
+
+        from ..tools.bash import RunBashTool
+
+        selected = await self._extensions.get_workspace_extension_selection(session_id)
+        if "run_bash" not in selected.tool_names or not (
+            await self.bash_capability(session_id)
+        )["available"]:
+            return None
+
+        def workspace() -> object:
+            # Preview may construct an adapter, but it can never execute. A
+            # captured adapter cannot borrow a later request's execution context.
+            task = self._tasks.get(request_id or "")
+            if task is None or task.prepared is None or task.request.session_id != session_id:
+                raise ExecutionDenied("execution_request_denied")
+            scope = task.prepared.scope
+            context = current_execution_context()
+            if (
+                scope.kind not in {"coding", "plan"} or scope.backend != "local_docker"
+                or context.identity != scope.identity or context.scope_sha256 != scope.sha256
+                or context.role != "executor"
+            ):
+                raise ExecutionDenied("execution_role_or_scope_denied")
+            return get_current_coding_workspace()
+
+        return RunBashTool(workspace)
+
     async def approve_execution(
         self, prepared: PreparedExecution, plan: PlanSpec | None = None,
         *, signal: asyncio.Event | None = None,
@@ -176,6 +210,11 @@ class WebExecutionRuntime:
             await self.runtime.approve(identity, expected_scope_sha256=prepared.scope.sha256)
 
         arguments = approval_arguments(prepared, plan)
+        selected = await self._extensions.get_workspace_extension_selection(identity.session_id)
+        arguments["task_bash_enabled"] = (
+            prepared.scope.kind in {"coding", "plan"}
+            and prepared.profile.backend == "local_docker" and "run_bash" in selected.tool_names
+        )
         reason = (
             "Approve this exact plan/version and isolated scope for this request. "
             "The Agent chooses future commands within these limits. "

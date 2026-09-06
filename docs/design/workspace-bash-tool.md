@@ -1,15 +1,16 @@
 # Workspace Bash 工具实现方案
 
-> 状态：阶段 2E 独立 Bash 逐次审批、执行与私有历史已接入；副本文件丢弃，Docker 发布及阶段 4–5 待完成。
+> 状态：阶段 2F Coding/Plan 内 Bash 复用已接入；独立 Bash 仍逐次审批并丢弃副本文件，Docker 发布及阶段 4–5 待完成。
 > 日期：2026-09-05；实施进度更新：2026-09-06。
 > 范围：本机 Web Agent；Coding/Plan 统一任务执行授权，本地 Docker Workspace 副本中的 Bash 工具。
 > 本次修订：Coding/Plan 每任务授权并复用任务副本；独立 Bash 逐次确认；发布仍需单独批准。
 
 当前事实：新增本地 Backend、固定镜像源码、独立 revisioned 配置、只读探针和显式 smoke 脚本。
 阶段 2D 已将 Web Coding/Plan 纳入每请求执行许可；阶段 2E 注册独立 `run_bash`，Python 授权行为不变。
-当前仅普通聊天的明确 Bash 路由暴露新工具；Coding/Plan 继续通过 `coding_run` 使用任务许可。
+阶段 2F 同时向选中本地 Bash 的 Coding/Plan Executor 提供请求绑定适配器，与 `coding_run`
+共用当前任务许可、预算和文件副本；不逐脚本弹窗，不启动另一容器，也不借用独立 Bash 执行路径。
 阶段 2E 是输出型最小闭环：只留 stdout/stderr、退出结果与变更摘要，副本文件丢弃。
-下文冻结/证据/发布及任务内 Bash 复用为后续目标，不表示本轮已经实施。
+下文独立 Bash 文件冻结/证据及 Docker 发布为后续目标；Coding/Plan 保持已有固定验证和冻结审阅。
 初查 PATH 未找到 Docker；随后依据用户提供的非标准安装路径找到 CLI 29.7.2。
 Desktop 曾因旧 socket 无法访问而退出；获准保留并重建运行目录后已恢复，WSL 数据通过官方设置
 迁至 `D:\DockerData\DockerDesktopWSL`。见 [迁移记录](../validation/docker-data-migration-2026-09-06.md)。
@@ -17,7 +18,8 @@ Desktop 曾因旧 socket 无法访问而退出；获准保留并重建运行目�
 Web 链路，验证批准后启动、固定验证/冻结、回收计算资源后仍可审阅 diff。E2B 原发布流程保留，
 Docker 发布仍不可用。阶段 2E 另通过真实 Web→精确脚本审批→Docker→回收链路；
 本轮未自动启用真实部署配置。见 [阶段 2D 记录](../validation/workspace-bash-stage2d-2026-09-06.md)
-和 [阶段 2E 记录](../validation/workspace-bash-stage2e-2026-09-06.md)。
+和 [阶段 2E 记录](../validation/workspace-bash-stage2e-2026-09-06.md)。阶段 2F 的任务内混合执行验证见
+[阶段 2F 记录](../validation/workspace-bash-stage2f-2026-09-06.md)。
 
 ## 1. 结论与首版边界
 
@@ -456,6 +458,13 @@ Docker 发布仍关闭。完整交付边界和验证见阶段 2D 记录。
 重启标记旧未终结历史 interrupted，但不将其当作资源已清理；清理债务仍由执行服务管理。
 仍未在 Coding/Plan 内注册 `run_bash`，也未创建独立 Bash 文件证据/冻结/发布功能。
 详见 [阶段 2E 验证](../validation/workspace-bash-stage2e-2026-09-06.md)。
+
+2026-09-06 阶段 2F：复用现有 `tools/bash.py` 薄适配，通过 Web 服务端请求 ID、任务身份、
+当前 Executor ContextVar 与 Workspace 选择装配；预览使用相同工具定义但不能执行。
+`run_bash`、argv、编辑和固定验证进入同一 Operation/Grant；失败修复、Plan 连续任务不换副本，
+关闭请求后旧适配器不能借用新请求。没有独立脚本审批/第二个容器/独立 Bash 历史条目。
+审批卡明确任务内 Bash 复用，Planner/Verifier 不获得 Bash，未选择或 E2B/disabled 不提供此工具。
+固定验证、冻结证据与发布门禁不变；详见 [阶段 2F 验证](../validation/workspace-bash-stage2f-2026-09-06.md)。
 
 ### 阶段 3：安全制品与确认发布
 

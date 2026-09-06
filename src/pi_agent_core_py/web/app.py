@@ -3373,6 +3373,14 @@ def create_app(
                         "coding_tools_unavailable",
                         "Automated Coding tools are unavailable.",
                     )
+                # The outer request replaced standalone Bash with a task-bound
+                # adapter. Only the Executor receives it; role readers stay fixed.
+                from ..tools.bash import RunBashTool
+
+                coding_tools.extend(
+                    tool for tool in request_harness.agent.tools.list()
+                    if isinstance(tool, RunBashTool)
+                )
                 read_tools = [
                     tool
                     for tool in request_harness.agent.tools.list()
@@ -4205,6 +4213,11 @@ def create_app(
                         if tool.name in registered_names or tool.name == "read_tool_output"
                     ]
                 )
+                execution = cast(WebExecutionRuntime | None, app.state.execution_runtime)
+                if execution is not None:
+                    task_bash = await execution.coding_bash_tool(session_id, None)
+                    if task_bash is not None:
+                        tool_registry.register(task_bash)
             elif intent is not None and intent.route == "bash":
                 tool_registry = ToolRegistry([
                     t for t in resource_snapshot.tools
@@ -4500,6 +4513,17 @@ def create_app(
                         stack.callback(container["bash_route_requests"].discard, rid)
                 else:
                     request_tools = tuple(t for t in request_tools if t.name != "run_bash")
+                    if (validated.coding_mode and validated.session_id is not None
+                            and validated.knowledge_conversation is None
+                            and checkpoint_source is None):
+                        execution = cast(WebExecutionRuntime | None, app.state.execution_runtime)
+                        if execution is not None:
+                            task_bash = await execution.coding_bash_tool(
+                                validated.session_id, request_id_context.get(),
+                            )
+                            if task_bash is not None:
+                                request_tools = (*request_tools, task_bash)
+                                coding_tool_names.add(task_bash.name)
                 request_resources = CodingAgentResourceSnapshot(
                     skills=(
                         base_resources.skills
@@ -8270,7 +8294,7 @@ def create_app(
                 "name": "run_python_analysis", "label": "Python Data Analysis · confirm each run",
                 **python_capability, "selected": "run_python_analysis" in selection.tool_names,
             }, {
-                "name": "run_bash", "label": "Bash · Local Docker · confirm each script",
+                "name": "run_bash", "label": "Bash · Local Docker · script/task approval",
                 **(await app.state.execution_runtime.bash_capability(session_id)
                    if app.state.execution_runtime is not None
                    else {"available": False, "reason": "Execution is not configured."}),

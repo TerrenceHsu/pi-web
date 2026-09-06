@@ -65,6 +65,10 @@ async function decide(decision: ToolApprovalDecision) {
       <template v-else>
         This request only. Future commands are chosen by the Agent within the displayed limits.
         No automatic writeback; publishing changes requires separate approval.
+        <template v-if="item.arguments.task_bash_enabled">
+          run_bash and coding_run share this task's copy and budget, without another script approval.
+          Fixed validation and freeze still apply.
+        </template>
       </template>
     </p>
     <details v-if="bashScript !== null" open>

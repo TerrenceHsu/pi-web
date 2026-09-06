@@ -172,7 +172,8 @@ async def test_readonly_role_cannot_execute_or_edit(guarded: Any, role: str) -> 
     operation, driver, _store, call = guarded
     before = len(driver.calls)
     with bind_execution_context(call.model_copy(update={"role": role})):
-        for action in (lambda: operation.run(("true",)), lambda: operation.write_file("x", "x")):
+        for action in (lambda: operation.run(("true",)), lambda: operation.write_file("x", "x"),
+                       lambda: operation.run_bash(BashRequest(script="true"))):
             with pytest.raises(ExecutionDenied, match="execution_role_denied"):
                 await action()
     assert len(driver.calls) == before

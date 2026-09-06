@@ -9,6 +9,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from coding_agent_app.execution.models import ExecutionDenied
+from coding_agent_app.execution.service import CommandInterrupted
 from coding_sandbox.bash import BashRequest, BashWorkspace
 from coding_sandbox.operation import get_current_coding_workspace
 from coding_sandbox.workspace_models import SandboxWorkspaceError
@@ -19,10 +20,13 @@ from ..ai.messages import TextContent
 
 class RunBashTool(AgentTool):
     name = "run_bash"
-    label = "Bash · Local Docker"
+    label = "Bash · current Coding/Plan task"
     description = (
-        "Run an exact Bash script in this approved local Docker task copy. "
-        "Requires execution approval; never runs on the host or publishes Workspace changes."
+        "Run Bash in the CURRENT approved local Docker Coding/Plan task copy. "
+        "Shares files, execution grant and budget with coding_run and coding_* edits. "
+        "No additional script approval or new container; commands may change within task scope. "
+        "Offline, no host fallback. File changes require the existing Coding validation/freeze "
+        "and separate publication; Bash output is not validation evidence."
     )
     parameters = BashRequest.model_json_schema()
     execution_mode = "sequential"
@@ -52,6 +56,17 @@ class RunBashTool(AgentTool):
                 content=[TextContent(text=result.stdout + result.stderr)],
                 details={**result.model_dump(mode="json"), "published": False},
                 is_error=not result.succeeded,
+            )
+        except asyncio.CancelledError:
+            if signal is None or not signal.is_set():
+                raise
+            code = "execution_cancelled"
+        except CommandInterrupted as exc:
+            return ToolResult(
+                tool_call_id=tool_call_id, name=self.name, is_error=True,
+                content=[TextContent(text=exc.code)],
+                details={**exc.result.model_dump(mode="json"), "error_code": exc.code,
+                         "published": False},
             )
         except ValidationError:
             code = "invalid_bash_request"

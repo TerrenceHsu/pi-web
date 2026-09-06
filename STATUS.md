@@ -20,7 +20,12 @@
 
 ## 当前交付状态
 
-**阶段 2E：独立 `run_bash` Web 最小闭环已接入**。Workspace 选择已配置的 Local Docker 并勾选
+**阶段 2F：Coding/Plan 内 Bash 复用已接入**。Workspace 勾选 Bash 且后端为 Local Docker 时，
+Coding 和 Plan Executor 的 `run_bash` 与 `coding_run`、编辑工具共享当前请求的许可、预算及副本。
+不再逐脚本弹窗，也不创建第二个容器；Planner/Verifier/read-only/Knowledge 没有 Bash。
+任务范围确认卡明确展示 Bash 复用；后续固定验证、签名冻结和独立发布门禁不变。
+
+阶段 2E 的独立 `run_bash` 路径保持不变。Workspace 选择已配置的 Local Docker 并勾选
 Bash 工具后，可在普通聊天明确请求 `run_bash`（Code/Plan 关闭）。每条脚本单独审阅完整代码、
 cwd、SHA、输入快照及预算；默认权限策略只弹一次精确确认，显式拒绝优先，AllowAll 也不能跳过。
 每次批准后创建新离线副本，执行完回收容器和许可，只保留有界输出与变更摘要，**副本文件全部丢弃**。
@@ -34,18 +39,17 @@ cwd、SHA、输入快照及预算；默认权限策略只弹一次精确确认�
 Workspace 增加 revision-CAS 后端选择；选择变更/撤销、Stop、到期和能力变更使许可失效，不跨请求复用。
 
 本地 Docker 需部署者显式配置固定镜像/CLI 并由用户选择，**本轮未修改真实部署配置或自动启用**；
-没有静默迁移 E2B。Python 分析原有逐次授权不变；`run_bash` 仅在独立 Bash 路由装配，
-Coding/Plan Executor 当前仍用 `coding_run`，read-only/Planner/Verifier/Knowledge 不获得 Bash。
-本轮相关后端回归 179 passed / 3 skipped，收尾专项 73 passed / 1 skipped；前端 224 passed、
-Chromium 26 项最终状态通过、真实 Docker 独立 Bash 链路通过。数字不跨轮累加，也未重跑完整后端覆盖率。
-详见 [阶段 2E 记录](docs/validation/workspace-bash-stage2e-2026-09-06.md)；阶段 2C/2D 证据保留在原记录中。
+没有静默迁移 E2B，也不向 E2B 装配 Bash；Python 分析原有逐次授权不变。
+本轮相关后端回归 174 passed / 5 skipped，前端 226 passed、Chromium 26 passed；
+真实 Docker 混合执行、静态检查、生产构建和 Evals 通过。没有重跑完整后端覆盖率，数字不跨轮累加。
+详见 [阶段 2F 记录](docs/validation/workspace-bash-stage2f-2026-09-06.md)；阶段 2C–2E 证据保留在原记录中。
 
-**仍待完成**：Coding/Plan 内 `run_bash` 便捷适配、独立 Bash 文件证据/冻结与 Docker 发布、
+**仍待完成**：独立 Bash 文件证据/冻结与 Docker 发布、
 后台孤儿/TTL 与快照缓存回收、Coding/Plan 私有运行全文记录、跨账号全局配额、管理员执行前端与执行 Telemetry。
 Bash 历史上限为每账号 200 条、终态 30 天（新运行时裁剪，列表展示当前 Session 最近 100 条）。
 重启不恢复执行；未知资源保留清理债务，不假装已清理。
 Docker 数据仍位于 `D:\DockerData\DockerDesktopWSL`；没有重启业务解析容器。
-`297a81a` 已提交阶段 2C/2D；本轮阶段 2E 为其后的未提交改动，没有推送。
+`a4a628b` 已提交阶段 2E（此前 `297a81a` 提交阶段 2C/2D）；阶段 2F 随本次提交归档，没有推送。
 
 新增 **Web Context Compaction**：按持久化视图、工具输出外置、结构化自动摘要、
 Web/Telemetry/Evals 四步实现。原始 SQLite 消息与来源 ID 不变，Memory 不由压缩改写；
