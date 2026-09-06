@@ -16,6 +16,7 @@ from coding_agent_app.execution.models import ExecutionDenied
 from coding_agent_app.execution.runtime import ExecutionRequest, PreparedExecution
 from coding_agent_app.execution.service import CommandInterrupted
 from coding_sandbox.bash import BashRequest
+from coding_sandbox.publication import PublicationBinding
 from coding_sandbox.workspace_models import SandboxWorkspaceError
 
 from ..agent.tooling import AgentTool, ToolResult, ToolUpdateCallback
@@ -45,7 +46,10 @@ class BashHistory:
             )
 
     async def create(
-        self, request: ExecutionRequest, tool_call_id: str, bash: BashRequest,
+        self,
+        request: ExecutionRequest,
+        tool_call_id: str,
+        bash: BashRequest,
     ) -> str:
         run_id, now = f"bash-run-{uuid4().hex}", int(time.time() * 1000)
         async with self._database.transaction():
@@ -63,16 +67,28 @@ class BashHistory:
             try:
                 await self._db.execute(
                     "INSERT INTO web_bash_runs VALUES (?,?,?,?,?,?,?)",
-                    (run_id, request.session_id, request.request_id, tool_call_id, "pending", now,
-                     json.dumps({**bash.model_dump(), "script_sha256": bash.sha256},
-                                ensure_ascii=False)),
+                    (
+                        run_id,
+                        request.session_id,
+                        request.request_id,
+                        tool_call_id,
+                        "pending",
+                        now,
+                        json.dumps(
+                            {**bash.model_dump(), "script_sha256": bash.sha256}, ensure_ascii=False
+                        ),
+                    ),
                 )
             except aiosqlite.IntegrityError:
                 raise ExecutionDenied("bash_call_replay_or_invalid_session") from None
         return run_id
 
     async def finish(
-        self, session_id: str, run_id: str, status: str, result: dict[str, Any],
+        self,
+        session_id: str,
+        run_id: str,
+        status: str,
+        result: dict[str, Any],
     ) -> None:
         async with self._database.transaction():
             async with self._db.execute(
@@ -105,17 +121,24 @@ class BashHistory:
             async with self._db.execute(
                 "SELECT run_id,request_id,status,created_at_ms,payload FROM web_bash_runs "
                 "WHERE session_id=? AND (? IS NULL OR run_id=?) "
-                "ORDER BY created_at_ms DESC,run_id DESC LIMIT 100", (session_id, run_id, run_id),
+                "ORDER BY created_at_ms DESC,run_id DESC LIMIT 100",
+                (session_id, run_id, run_id),
             ) as cursor:
                 rows = await cursor.fetchall()
         records = []
         for row in rows:
             payload = json.loads(str(row[4]))
-            records.append({
-                "run_id": row[0], "request_id": row[1], "status": row[2],
-                "created_at_ms": row[3], "script_sha256": payload["script_sha256"],
-                "cwd": payload["cwd"], **(payload if run_id is not None else {}),
-            })
+            records.append(
+                {
+                    "run_id": row[0],
+                    "request_id": row[1],
+                    "status": row[2],
+                    "created_at_ms": row[3],
+                    "script_sha256": payload["script_sha256"],
+                    "cwd": payload["cwd"],
+                    **(payload if run_id is not None else {}),
+                }
+            )
         return records
 
 
@@ -132,14 +155,20 @@ class WebBashTool(AgentTool):
     execution_mode = "sequential"
 
     def __init__(
-        self, execution: WebExecutionRuntime, history: BashHistory,
+        self,
+        execution: WebExecutionRuntime,
+        history: BashHistory,
         context: Callable[[], ExecutionRequest],
     ) -> None:
         self.execution, self.history, self._context = execution, history, context
 
     async def execute(
-        self, tool_call_id: str, args: dict[str, Any], *,
-        signal: asyncio.Event | None = None, on_update: ToolUpdateCallback | None = None,
+        self,
+        tool_call_id: str,
+        args: dict[str, Any],
+        *,
+        signal: asyncio.Event | None = None,
+        on_update: ToolUpdateCallback | None = None,
     ) -> ToolResult:
         try:
             bash = BashRequest.model_validate(args)
@@ -151,7 +180,8 @@ class WebBashTool(AgentTool):
             try:
                 if stopped is not None:
                     done, _ = await asyncio.wait(
-                        (job, stopped), return_when=asyncio.FIRST_COMPLETED,
+                        (job, stopped),
+                        return_when=asyncio.FIRST_COMPLETED,
                     )
                     if stopped in done:
                         raise asyncio.CancelledError
@@ -161,10 +191,13 @@ class WebBashTool(AgentTool):
                     job.cancel()
                 if stopped is not None:
                     stopped.cancel()
-                await asyncio.gather(job, *(() if stopped is None else (stopped,)),
-                                     return_exceptions=True)
+                await asyncio.gather(
+                    job, *(() if stopped is None else (stopped,)), return_exceptions=True
+                )
             return ToolResult(
-                tool_call_id=tool_call_id, name=self.name, details=details,
+                tool_call_id=tool_call_id,
+                name=self.name,
+                details=details,
                 is_error=details["status"] != "succeeded",
                 content=[TextContent(text=json.dumps(details, ensure_ascii=False))],
             )
@@ -181,12 +214,18 @@ class WebBashTool(AgentTool):
         except Exception:
             code = "bash_execution_failed"
         return ToolResult(
-            tool_call_id=tool_call_id, name=self.name, is_error=True,
-            content=[TextContent(text=code)], details={"error_code": code},
+            tool_call_id=tool_call_id,
+            name=self.name,
+            is_error=True,
+            content=[TextContent(text=code)],
+            details={"error_code": code},
         )
 
     async def _run(
-        self, request: ExecutionRequest, tool_call_id: str, bash: BashRequest,
+        self,
+        request: ExecutionRequest,
+        tool_call_id: str,
+        bash: BashRequest,
         signal: asyncio.Event | None,
     ) -> dict[str, Any]:
         if request.request_id in self.execution.bash_tasks:
@@ -201,25 +240,38 @@ class WebBashTool(AgentTool):
             await asyncio.shield(self.history.interrupt_call(request, tool_call_id))
             raise
         prepared: PreparedExecution | None = None
+        adopted = False
         details: dict[str, Any] = {
-            "run_id": run_id, "status": "interrupted", "published": False,
-            "publish_required": False, "file_changes_saved": False,
-            "command_id": None, "exit_code": None, "termination_reason": None,
+            "run_id": run_id,
+            "status": "interrupted",
+            "published": False,
+            "publish_required": False,
+            "file_changes_saved": False,
+            "command_id": None,
+            "exit_code": None,
+            "termination_reason": None,
         }
         try:
             prepared = await self.execution.runtime.prepare(
-                request, goal=bash.reason or "Bash", bash=bash,
+                request,
+                goal=bash.reason or "Bash",
+                bash=bash,
             )
             self.execution.bash_tasks[request.request_id] = prepared
             identity = prepared.scope.identity
-            details.update(execution_task_id=identity.task_id, operation_id=identity.operation_id,
-                           baseline_revision=prepared.scope.baseline_revision,
-                           baseline_sha256=prepared.scope.baseline_sha256,
-                           input_sha256=prepared.scope.input_sha256,
-                           scope_sha256=prepared.scope.sha256,
-                           backend=prepared.profile.backend, runtime_id=prepared.profile.runtime_id,
-                           script_sha256=bash.sha256, cwd=bash.cwd,
-                           timeout_seconds=bash.timeout_seconds)
+            details.update(
+                execution_task_id=identity.task_id,
+                operation_id=identity.operation_id,
+                baseline_revision=prepared.scope.baseline_revision,
+                baseline_sha256=prepared.scope.baseline_sha256,
+                input_sha256=prepared.scope.input_sha256,
+                scope_sha256=prepared.scope.sha256,
+                backend=prepared.profile.backend,
+                runtime_id=prepared.profile.runtime_id,
+                script_sha256=bash.sha256,
+                cwd=bash.cwd,
+                timeout_seconds=bash.timeout_seconds,
+            )
             if not await self.execution.approve_execution(prepared, signal=signal):
                 await self.execution.runtime.store.terminate(identity, state="denied")
                 details.update(status="denied", error_code="execution_denied")
@@ -249,9 +301,48 @@ class WebBashTool(AgentTool):
                     changed_paths=changed_paths,
                     changes_truncated=len(changed_paths) < len(diff.entries),
                 )
+                if result.succeeded and diff.entries:
+
+                    async def close_runtime() -> None:
+                        await self.execution.runtime.finish(identity)
+
+                    lifecycle = self.execution._lifecycle
+                    await lifecycle.adopt_approved_operation(
+                        session_id=request.session_id,
+                        operation=operation,
+                        baseline=prepared.baseline,
+                        config_revision=prepared.profile.config_revision,
+                        close_runtime=close_runtime,
+                        publish_available=True,
+                        publication=PublicationBinding(
+                            session_id=request.session_id,
+                            purpose="bash",
+                            backend="local_docker",
+                            scope_sha256=prepared.scope.sha256,
+                            policy_sha256=prepared.scope.publish_policy_sha256,
+                        ),
+                    )
+                    adopted = True
+                    await lifecycle.prepare_bash_publish(identity.operation_id)
+                    frozen = await lifecycle.join_action(identity.operation_id)
+                    if frozen.status != "awaiting_approval":
+                        details.update(
+                            status="failed", error_code=frozen.error_code or "artifact_invalid"
+                        )
+                    else:
+                        details.update(
+                            publish_required=True,
+                            file_changes_saved=True,
+                            artifact_id=frozen.artifact_id,
+                            artifact_sha256=frozen.artifact_sha256,
+                            evidence_kind="bash-output-integrity/v1",
+                        )
             details["notice"] = (
-                "Only stdout/stderr and this change summary are retained. "
-                "All copy files are discarded; no publication artifact was created."
+                "Frozen files are available in Changes for separate publication approval. "
+                "Bash output integrity is not functional validation."
+                if details["file_changes_saved"]
+                else "No publication artifact was created. Copy files are discarded; "
+                "private output is retained."
             )
             return details
         except asyncio.CancelledError:
@@ -268,19 +359,41 @@ class WebBashTool(AgentTool):
             details.update(status="interrupted", error_code="bash_execution_failed")
             return details
         finally:
+
             async def finalize() -> None:
                 if prepared is not None:
                     try:
+                        if adopted:
+                            await self.execution._lifecycle.release_execution(
+                                prepared.scope.identity.operation_id
+                            )
                         await self.execution.runtime.finish(prepared.scope.identity)
                         grant = await self.execution.runtime.store.get(prepared.scope.identity)
                         details["cleanup_pending"] = grant.cleanup_pending
                         details["commands_used"] = grant.commands_used
                         details["charged_ms"] = grant.charged_ms
                         details["remaining_execution_ms"] = max(
-                            0, grant.scope.max_execution_ms - grant.charged_ms,
+                            0,
+                            grant.scope.max_execution_ms - grant.charged_ms,
                         )
-                        if grant.cleanup_pending:
-                            details.update(status="interrupted", error_code="cleanup_pending")
+                        if grant.cleanup_pending or (adopted and grant.state != "closed"):
+                            if adopted:
+                                record = await self.execution._lifecycle.get(
+                                    prepared.scope.identity.operation_id,
+                                )
+                                if "cancel" in record.allowed_actions:
+                                    await self.execution._lifecycle.cancel(record.operation_id)
+                            details.update(publish_required=False, file_changes_saved=False)
+                            details.update(
+                                status="interrupted",
+                                error_code="cleanup_pending"
+                                if grant.cleanup_pending
+                                else "grant_revoked",
+                            )
+                        elif adopted:
+                            await self.execution._lifecycle.confirm_execution_released(
+                                prepared.scope.identity.operation_id,
+                            )
                     finally:
                         self.execution.bash_tasks.pop(request.request_id, None)
                 await self.history.finish(request.session_id, run_id, details["status"], details)

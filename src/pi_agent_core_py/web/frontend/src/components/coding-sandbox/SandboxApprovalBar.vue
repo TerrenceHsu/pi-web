@@ -18,7 +18,9 @@ const visible = computed(() =>
         {{
           operation?.status === "publish_conflict"
             ? "发布遇到冲突，冻结文件已保留"
-            : "代码已验证，等待批准发布"
+            : operation?.bash_evidence
+              ? "Bash 输出已冻结，等待审阅发布（未经功能验证）"
+              : "代码已验证，等待批准发布"
         }}
       </strong>
       <span>
@@ -32,6 +34,7 @@ const visible = computed(() =>
       </button>
       <template v-if="operation?.status === 'publish_conflict'">
         <button
+          v-if="operation?.allowed_actions?.includes('refreeze')"
           type="button"
           :disabled="sandboxStore.busy"
           data-testid="sandbox-chat-refreeze"
@@ -42,7 +45,7 @@ const visible = computed(() =>
         <button
           type="button"
           class="primary"
-          :disabled="sandboxStore.busy"
+          :disabled="sandboxStore.busy || operation?.publish_available === false || operation?.execution_released === false"
           data-testid="sandbox-chat-retry-publish"
           @click="sandboxStore.retryPublish"
         >
@@ -53,7 +56,7 @@ const visible = computed(() =>
         v-else
         type="button"
         class="primary"
-        :disabled="sandboxStore.busy"
+        :disabled="sandboxStore.busy || operation?.publish_available === false || operation?.execution_released === false"
         data-testid="sandbox-chat-publish"
         @click="sandboxStore.publish"
       >

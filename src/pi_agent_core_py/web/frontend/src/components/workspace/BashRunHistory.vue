@@ -39,7 +39,8 @@ watch(() => props.sessionId, refresh, { immediate: true })
   <section data-testid="bash-history" class="bash-history">
     <h3>Standalone Bash runs <button type="button" @click="refresh">Refresh runs</button></h3>
     <p>Private script/output history: up to 200 runs per account, 30 days (pruned on new runs).
-      Refresh only reads history; it never executes a script. Copy files are not retained.</p>
+      Refresh only reads history; it never executes a script. Frozen successful output is available
+      in Changes for separate publication approval. Integrity does not mean functional validation.</p>
     <p v-if="error" role="alert">{{ error }}</p>
     <p v-if="!runs.length">No retained Bash runs.</p>
     <ul>

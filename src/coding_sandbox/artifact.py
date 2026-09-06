@@ -14,8 +14,11 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .models import validate_sandbox_path
+from .output_evidence import BashOutputIntegrityEvidence
 from .validation import SandboxValidationEvidence
 from .workspace_models import SandboxFileEntry, validate_workspace_relative_path
+
+OutputEvidence = SandboxValidationEvidence | BashOutputIntegrityEvidence
 
 ARTIFACT_SCHEMA_VERSION: Literal["pi-agent-coding-artifact/v1"] = "pi-agent-coding-artifact/v1"
 ARTIFACT_SIGNATURE_CONTEXT: Literal["pi-agent-coding-artifact-signature/v1"] = (
@@ -139,7 +142,9 @@ class SandboxArtifactManifest(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal["pi-agent-coding-artifact/v1"] = ARTIFACT_SCHEMA_VERSION
+    schema_version: Literal["pi-agent-coding-artifact/v1", "pi-agent-bash-artifact/v1"] = (
+        ARTIFACT_SCHEMA_VERSION
+    )
     artifact_id: str = Field(pattern=r"^artifact-[0-9a-f]{32}$")
     operation_id: str = Field(min_length=1, max_length=128)
     workspace_revision: int = Field(ge=0)
@@ -194,7 +199,7 @@ class SandboxArtifactContents(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     manifest: SandboxArtifactManifest
-    validation_evidence: SandboxValidationEvidence
+    validation_evidence: OutputEvidence
 
 
 class SandboxArtifactSignature(BaseModel):
@@ -219,11 +224,12 @@ class SandboxOutputArtifact(BaseModel):
     archive_size: int = Field(ge=0)
     archive_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     manifest: SandboxArtifactManifest
-    validation_evidence: SandboxValidationEvidence
+    validation_evidence: OutputEvidence
     signature: SandboxArtifactSignature
 
     @model_validator(mode="after")
     def _validate_links(self) -> SandboxOutputArtifact:
+        _validate_evidence_kind(self.manifest, self.validation_evidence)
         if (
             self.signature.archive_sha256 != self.archive_sha256
             or self.signature.manifest_sha256 != self.manifest.manifest_sha256
@@ -303,8 +309,16 @@ def baseline_manifest_digest(entries: tuple[SandboxFileEntry, ...]) -> str:
     return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
 
-def validation_evidence_bytes(evidence: SandboxValidationEvidence) -> bytes:
+def validation_evidence_bytes(evidence: OutputEvidence) -> bytes:
     return canonical_json_bytes(evidence.model_dump(mode="json"))
+
+
+def _validate_evidence_kind(manifest: SandboxArtifactManifest, evidence: OutputEvidence) -> None:
+    bash = manifest.schema_version == "pi-agent-bash-artifact/v1"
+    if bash != isinstance(evidence, BashOutputIntegrityEvidence):
+        raise ValueError("artifact purpose and evidence kind differ")
+    if isinstance(evidence, SandboxValidationEvidence) and not evidence.passed:
+        raise ValueError("coding artifact requires successful fixed validation")
 
 
 def create_artifact_signature(
@@ -378,6 +392,8 @@ def validate_sandbox_artifact_archive(
             seen_names: set[str] = set()
             for member in archive:
                 _validate_member(member)
+                if len(members) >= max_file_count + 4:
+                    raise ValueError("artifact has too many members")
                 folded = member.name.casefold()
                 if folded in seen_names:
                     raise ValueError("artifact archive has duplicate members")
@@ -396,7 +412,12 @@ def validate_sandbox_artifact_archive(
                 members,
                 ARTIFACT_VALIDATION_PATH,
             )
-            evidence = SandboxValidationEvidence.model_validate_json(evidence_bytes)
+            evidence: OutputEvidence = (
+                BashOutputIntegrityEvidence.model_validate_json(evidence_bytes)
+                if manifest.schema_version == "pi-agent-bash-artifact/v1"
+                else SandboxValidationEvidence.model_validate_json(evidence_bytes)
+            )
+            _validate_evidence_kind(manifest, evidence)
             if validation_evidence_bytes(evidence) != evidence_bytes:
                 raise ValueError("artifact validation evidence is not canonical")
             binary_bytes = _read_metadata_member(
@@ -453,7 +474,6 @@ def validate_sandbox_artifact_archive(
     evidence_digest = hashlib.sha256(evidence_bytes).hexdigest()
     if (
         evidence_digest != manifest.validation_evidence_sha256
-        or not evidence.passed
         or evidence.operation_id != manifest.operation_id
         or evidence.workspace_revision != manifest.workspace_revision
         or evidence.workspace_sha256_after != manifest.workspace_sha256
@@ -564,6 +584,7 @@ def _validate_member(member: tarfile.TarInfo) -> None:
     path = PurePosixPath(member.name)
     if (
         not member.isfile()
+        or member.sparse is not None
         or not member.name
         or path.is_absolute()
         or ".." in path.parts
@@ -573,6 +594,10 @@ def _validate_member(member: tarfile.TarInfo) -> None:
         or any(ord(char) < 32 or ord(char) == 127 for char in member.name)
     ):
         raise ValueError("artifact archive member is unsafe")
+    try:
+        validate_workspace_relative_path(member.name)
+    except Exception as exc:
+        raise ValueError("artifact archive member is unsafe") from exc
 
 
 def _read_metadata_member(

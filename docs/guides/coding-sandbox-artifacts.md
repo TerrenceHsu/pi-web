@@ -4,7 +4,7 @@
 
 ## 冻结顺序
 
-`SandboxOperation.freeze_output_artifact()` 只使用 operation 内部保存的最后一次成功验证证据，并按以下顺序执行：
+Coding/Plan 的 `SandboxOperation.freeze_output_artifact()` 只使用 operation 内部保存的最后一次成功固定验证证据，并按以下顺序执行：
 
 1. 重新校验 `.pi-agent/sandbox.toml`、workspace revision 和完整工作区摘要。
 2. 将 operation 标记为 frozen。此后 `run`、验证、write、patch 和 delete 全部返回固定错误 `operation_frozen`。
@@ -16,12 +16,23 @@
 
 导出开始后采用 fail-closed 语义：即使下载、校验或签名失败，operation 仍保持 frozen，不能继续修改后复用旧验证证据。需要修改时必须销毁该 Sandbox 并从可信项目快照创建新 operation。
 
-## Archive v1
+## 独立 Bash 与恢复（阶段 3）
+
+只有服务端构造的独立 Bash operation 能使用 `pi-agent-bash-artifact/v1`，证据为
+`bash-output-integrity/v1`。证据绑定获准 Session/request/task/scope、脚本 SHA、cwd、实际成功命令 ID / result SHA、
+原 Workspace revision/tree SHA、冻结副本摘要与发布策略；它没有 `passed` / `checks`，不宣称功能验证。
+Coding/Plan 无论最后执行哪个工具，都不能改用此证据。schema 与证据类型不匹配会被拒绝。
+失败、无变更、受保护输出或链接/特殊文件不生成可发布制品；复制回主 Workspace 之前仍须单独确认。
+
+回收计算资源与保留制品分离：私有 SQLite 保存服务端签名的恢复胶囊，绑定签名制品与原 baseline。
+它不保存可执行句柄或重放许可。资源已确认回收的冻结制品可在重启后继续审阅；回收未确认则 fail closed。
+
+## Archive v1（Coding 与 Bash 共用成员布局）
 
 固定成员如下：
 
 - `metadata/manifest.json`：规范 JSON manifest，自带 `manifest_sha256`。
-- `metadata/validation-evidence.json`：operation 内部保存的完整验证证据。
+- `metadata/validation-evidence.json`：按 manifest schema 选择固定验证证据或独立 Bash 输出完整性证据。
 - `metadata/binary-diff.json`：二进制新增、替换和删除的 before/after size 与 SHA；新增或修改后的原始字节仍位于 `files/`。
 - `metadata/deleted-files.json`：删除路径、baseline size/SHA 和二进制分类。
 - `files/<relative-path>`：所有新增及修改文件的精确字节；未包含未变文件和已删除文件。

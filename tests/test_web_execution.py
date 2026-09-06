@@ -427,7 +427,7 @@ def test_real_docker_web_execution_retains_frozen_diff_after_cleanup(tmp_path, p
         operation = client.get(f"/api/coding-sandbox/sessions/{sid}/operation").json()["operation"]
         assert operation["status"] == "awaiting_approval", operation
         assert operation["changed_paths"] == ["scripts/main.py"]
-        assert operation["publish_available"] is False
+        assert operation["publish_available"] is True
         assert not backend.created_specs  # Never fell back to E2B.
         grant = client.portal.call(client.app.state.execution_runtime.runtime.store.get, identity)
         assert grant.state == "closed" and not grant.cleanup_pending

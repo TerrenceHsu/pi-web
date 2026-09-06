@@ -150,12 +150,16 @@ def scan(root, max_files, max_file_bytes, max_total_bytes):
             )
             relative(relative_path)
             if stat.S_ISLNK(info.st_mode):
-                continue
+                fail("artifact_invalid")
             if stat.S_ISDIR(info.st_mode):
                 pending.append(relative_path)
                 continue
             if not stat.S_ISREG(info.st_mode):
-                continue
+                fail("artifact_invalid")
+            if info.st_nlink != 1 or (
+                hasattr(info, "st_blocks") and info.st_blocks * 512 < info.st_size
+            ):
+                fail("artifact_invalid")
             descriptor, opened = secure_file(root, relative_path)
             try:
                 size, digest = digest_descriptor(descriptor, max_file_bytes)
@@ -301,7 +305,9 @@ def validate_request(value):
         "max_total_bytes",
         "max_archive_bytes",
     }
-    if set(value) != expected or value["schema_version"] != "pi-agent-artifact-export/v1":
+    if set(value) != expected or value["schema_version"] not in (
+        "pi-agent-artifact-export/v1", "pi-agent-bash-export/v1"
+    ):
         fail("artifact_invalid")
     artifact_id = value["artifact_id"]
     if (
@@ -360,7 +366,12 @@ def validate_request(value):
     evidence = value["validation_evidence"]
     if (
         not isinstance(evidence, dict)
-        or evidence.get("passed") is not True
+        or (value["schema_version"] == "pi-agent-artifact-export/v1"
+            and evidence.get("passed") is not True)
+        or (value["schema_version"] == "pi-agent-bash-export/v1" and (
+            evidence.get("schema_version") != "bash-output-integrity/v1"
+            or evidence.get("exit_code") != 0
+            or evidence.get("termination_reason") != "exited"))
         or evidence.get("operation_id") != operation_id
         or evidence.get("workspace_revision") != value["workspace_revision"]
         or evidence.get("workspace_sha256_after") != value["expected_workspace_sha256"]
@@ -569,7 +580,9 @@ def export(root, request, output_path):
     binary = binary_diff(changed, deleted)
     evidence_bytes = canonical(request["validation_evidence"])
     core = {
-        "schema_version": "pi-agent-coding-artifact/v1",
+        "schema_version": ("pi-agent-bash-artifact/v1"
+            if request["schema_version"] == "pi-agent-bash-export/v1"
+            else "pi-agent-coding-artifact/v1"),
         "artifact_id": request["artifact_id"],
         "operation_id": request["operation_id"],
         "workspace_revision": request["workspace_revision"],

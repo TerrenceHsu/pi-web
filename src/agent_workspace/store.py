@@ -33,6 +33,7 @@ import shutil
 import stat
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Literal, Protocol, TypeAlias
 
@@ -487,6 +488,13 @@ class _WorkspacePublishIntentChange(BaseModel):
     before_ref: FileRef | None
     after_ref: FileRef
     staged_path: str
+
+
+class _WorkspaceSandboxReceipt(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    result: WorkspacePublishResult
+    baseline_sha256: str
+    changes: tuple[WorkspaceMaterializationEntry, ...]
 
 
 class _WorkspacePublishIntentDelete(BaseModel):
@@ -1579,6 +1587,7 @@ class WorkspaceStore:
         expected_workspace_sha256: str,
         changes: tuple[WorkspacePublishChange, ...],
         deleted_paths: tuple[str, ...],
+        revalidate: Callable[[], None] | None = None,
     ) -> WorkspacePublishResult:
         """Atomically commit an approved Sandbox change set into one Workspace.
 
@@ -1596,6 +1605,9 @@ class WorkspaceStore:
             state = await self._ensure_workspace_state_unlocked(session_id)
             self._check_workspace_revision(state, expected_workspace_revision)
             refs = await self.list_session(session_id)
+            if revalidate is not None:
+                # Recheck signed artifact/purpose/policy while holding the mutation lock.
+                revalidate()
             return self._publish_workspace_changes_unlocked(
                 state,
                 refs,
@@ -1606,6 +1618,50 @@ class WorkspaceStore:
                 publish_kind="sandbox",
                 document_root=None,
             )
+
+    async def find_sandbox_publication(
+        self, session_id: str, *, transaction_id: str, baseline_revision: int,
+        baseline_sha256: str, changes: tuple[WorkspaceMaterializationEntry, ...],
+        deleted_paths: tuple[str, ...], revalidate: Callable[[], None],
+    ) -> WorkspacePublishResult | None:
+        """Read the durable commit receipt; never reapply a previously committed artifact."""
+        if re.fullmatch(r"publish-[0-9a-f]{32}", transaction_id) is None:
+            raise FileStoreError("invalid publication identity")
+        await self.ensure_session_workspace(session_id)
+        async with self._session_lock(session_id):
+            state = await self._ensure_workspace_state_unlocked(session_id)
+            root = self._session_dir(session_id)
+            path = self._resolve_and_check(
+                root / ".workspace-published" / (transaction_id + ".json"), expect_under=root,
+            )
+            if not path.exists():
+                return None
+            if path.is_symlink() or path.stat().st_size > 32 * 1024 * 1024:
+                raise FileStoreError("invalid publication receipt")
+            receipt = _WorkspaceSandboxReceipt.model_validate_json(path.read_bytes())
+            if (
+                receipt.result.transaction_id != transaction_id
+                or receipt.result.previous_revision != baseline_revision
+                or receipt.baseline_sha256 != baseline_sha256
+                or receipt.changes != changes or receipt.result.deleted_paths != deleted_paths
+                or state.revision < receipt.result.revision
+            ):
+                raise WorkspaceTreeConflictError("publication receipt mismatch")
+            revalidate()
+            refs = {ref.logical_path: ref for ref in await self.list_session(session_id)}
+            for entry in changes:
+                ref = refs.get(entry.logical_path)
+                if ref is None or ref.size != entry.size or ref.sha256 != entry.sha256:
+                    raise WorkspaceTreeConflictError("published output changed")
+                source = self._resolve_and_check(
+                    Path(ref.path), expect_under=self._file_dir(session_id, ref.id),
+                )
+                _verify_workspace_file(
+                    source, expected_size=entry.size, expected_sha256=entry.sha256,
+                )
+            if any(path in refs for path in deleted_paths):
+                raise WorkspaceTreeConflictError("deleted output was recreated")
+            return receipt.result
 
     async def publish_document_conversion(
         self,
@@ -1736,6 +1792,11 @@ class WorkspaceStore:
             if normalized != logical_path or folded in requested_paths:
                 raise WorkspacePublishPolicyError("Workspace publish paths are not unique")
             allowed = _publish_path_allowed(publish_kind, document_root, normalized)
+            existing_ref = refs_by_path.get(folded)
+            if publish_kind == "sandbox" and existing_ref is not None:
+                allowed = allowed and workspace_path_policy(
+                    normalized, purpose=existing_ref.purpose,
+                ).sandbox_publishable
             if not allowed:
                 actor = "Sandbox" if publish_kind == "sandbox" else "document converter"
                 raise WorkspacePublishPolicyError(
@@ -2026,6 +2087,27 @@ class WorkspaceStore:
         intent: _WorkspacePublishIntent,
         transaction_root: Path,
     ) -> None:
+        if intent.publish_kind == "sandbox":
+            root = self._session_dir(intent.session_id)
+            receipts = self._resolve_and_check(root / ".workspace-published", expect_under=root)
+            _ensure_plain_directory(receipts)
+            _write_model_atomic(
+                receipts / (intent.transaction_id + ".json"),
+                _WorkspaceSandboxReceipt(
+                    result=WorkspacePublishResult(
+                        transaction_id=intent.transaction_id,
+                        previous_revision=intent.before_state.revision,
+                        revision=intent.after_state.revision,
+                        changed_paths=tuple(change.logical_path for change in intent.changes),
+                        deleted_paths=tuple(deletion.logical_path for deletion in intent.deletions),
+                    ),
+                    baseline_sha256=intent.expected_tree_sha256,
+                    changes=tuple(WorkspaceMaterializationEntry(
+                        logical_path=change.logical_path, size=change.after_ref.size,
+                        sha256=change.after_ref.sha256,
+                    ) for change in intent.changes),
+                ),
+            )
         for change in intent.changes:
             if change.before_ref is None:
                 continue

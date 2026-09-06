@@ -103,6 +103,24 @@ def validate_workspace_relative_path(value: str, *, allow_root: bool = False) ->
         or ".." in path.parts
         or str(path) != value
         or not path.parts
+        or any(
+            any(char in part for char in ':<>"|?*')
+            or part.endswith((".", " "))
+            or part.split(".", 1)[0].upper()
+            in {
+                "CON",
+                "PRN",
+                "AUX",
+                "NUL",
+                "CONIN$",
+                "CONOUT$",
+                *(f"COM{i}" for i in range(1, 10)),
+                *(f"LPT{i}" for i in range(1, 10)),
+                *(f"COM{i}" for i in "¹²³"),
+                *(f"LPT{i}" for i in "¹²³"),
+            }
+            for part in path.parts
+        )
     ):
         raise SandboxWorkspaceError("unsafe_path")
     return value

@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from pydantic import Field, model_validator
 
+from agent_workspace.store import is_sandbox_publishable_workspace_path
 from coding_sandbox.artifact import ArtifactSigner, hash_regular_file
 from coding_sandbox.backend import SandboxBackend
 from coding_sandbox.bash import BashRequest
@@ -35,6 +36,7 @@ from coding_sandbox.models import (
     SandboxNetworkPolicy,
 )
 from coding_sandbox.operation import SandboxOperation, bind_coding_workspace
+from coding_sandbox.output_evidence import BashArtifactScope
 from coding_sandbox.snapshot import SnapshotPolicy, read_snapshot_file, validate_snapshot_archive
 from coding_sandbox.validation import SandboxValidationPlan, load_sandbox_validation_plan
 from coding_sandbox.workspace_models import SandboxFileEntry
@@ -228,9 +230,13 @@ class ExecutionTaskRuntime:
             ):
                 raise ExecutionDenied("baseline_required")
             await asyncio.to_thread(self._validate_snapshot, baseline, policy)
-            if bash is not None and bash.cwd != "." and not any(
-                entry.path.startswith(bash.cwd + "/")
-                for entry in baseline.snapshot.manifest.entries
+            if (
+                bash is not None
+                and bash.cwd != "."
+                and not any(
+                    entry.path.startswith(bash.cwd + "/")
+                    for entry in baseline.snapshot.manifest.entries
+                )
             ):
                 raise ExecutionDenied("bash_cwd_unavailable")
             validation = load_sandbox_validation_plan(baseline.snapshot, policy=policy)
@@ -417,6 +423,23 @@ class ExecutionTaskRuntime:
                     artifact_signer=self._signer,
                     snapshot_policy=policy,
                     execution_guard=GrantedOperationAccess(self.service, scope),
+                    output_path_allowed=is_sandbox_publishable_workspace_path,
+                    bash_artifact_scope=(
+                        BashArtifactScope(
+                            account_id=scope.identity.account_id,
+                            session_id=scope.identity.session_id,
+                            request_id=scope.identity.request_id,
+                            task_id=scope.identity.task_id,
+                            scope_sha256=scope.sha256,
+                            script_sha256=scope.script_sha256 or "",
+                            cwd=scope.cwd or ".",
+                            baseline_revision=scope.baseline_revision,
+                            baseline_sha256=scope.baseline_sha256,
+                            publish_policy_sha256=scope.publish_policy_sha256,
+                        )
+                        if scope.kind == "bash"
+                        else None
+                    ),
                 )
                 resource.operation = operation
                 await operation.seed_from_snapshot(prepared.baseline.snapshot)

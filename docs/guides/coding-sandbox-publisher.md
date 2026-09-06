@@ -2,6 +2,18 @@
 
 `LocalTransactionalPublisher` 是不可变 Sandbox 制品与真实工作区之间唯一允许写入的边界。它只接收服务端持有的 `ProjectSnapshot`、签名后的 `SandboxOutputArtifact` 和对应 `ArtifactSigner`；Agent、Sandbox、Web 请求和制品内字段都不能直接提供本机目标哈希、备份路径或发布结果。
 
+## Web Workspace 发布确认（阶段 3）
+
+新的 Coding/Plan/Bash 操作在计算资源确认回收后才允许发布。Web 确认绑定 artifact ID、archive SHA 和
+签名 review SHA；恢复胶囊还绑定 Session、purpose、scope、policy 与原始 baseline，不接受模型提供的发布清单。
+独立 Bash 完整性证据不能作为 Coding 固定验证证据。界面把两者区分展示。
+
+`WorkspaceSandboxArtifactPublisher` 先在隔离镜像里复用下面的 LocalTransactionalPublisher，再在
+Session mutation lock 内复核制品签名/用途/当前策略、完整 Workspace 基线与保护路径/purpose，原子提交整个批次。
+新的任务绑定制品即使只遇到未触及文件的 Workspace 升版，也返回冲突；不自动 rebase 或重新执行。
+提交成功后保存私有 `.workspace-published/` 回执（不进入用户文件列表或 Sandbox 输入），覆盖提交成功但响应丢失的窗口。
+重启后再次批准同一制品时只核对既有提交与最终文件，返回已有事务，不重复写入；未提交事务仍按原 journal 回滚。
+
 ## 固定发布顺序
 
 一次 `publish()` 在项目级跨进程锁内执行以下步骤：

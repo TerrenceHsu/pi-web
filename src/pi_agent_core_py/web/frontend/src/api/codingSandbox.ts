@@ -70,16 +70,18 @@ function action(
     | "retry-publish"
     | "cancel"
     | "discard",
+  approval?: { artifact_id: string; artifact_sha256: string; review_sha256: string },
 ): Promise<ManagedSandboxOperation> {
   return requestJson(`${BASE}/operations/${encodeURIComponent(operationId)}/${name}`, {
     method: "POST",
+    body: approval,
   })
 }
 
 export const validateSandboxOperation = (operationId: string) => action(operationId, "validate")
 export const prepareSandboxPublish = (operationId: string) => action(operationId, "prepare-publish")
-export const publishSandboxOperation = (operationId: string) => action(operationId, "publish")
+export const publishSandboxOperation = (operationId: string, approval?: Parameters<typeof action>[2]) => action(operationId, "publish", approval)
 export const refreezeSandboxOperation = (operationId: string) => action(operationId, "refreeze")
-export const retrySandboxPublish = (operationId: string) => action(operationId, "retry-publish")
+export const retrySandboxPublish = (operationId: string, approval?: Parameters<typeof action>[2]) => action(operationId, "retry-publish", approval)
 export const cancelSandboxOperation = (operationId: string) => action(operationId, "cancel")
 export const discardSandboxOperation = (operationId: string) => action(operationId, "discard")

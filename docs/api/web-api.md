@@ -9,6 +9,39 @@
 > ⚠️ Web app **仅 localhost 使用**——当前已有本地账号登录、Cookie 网关与账号工作区隔离，但无 TLS / RBAC / OAuth / 公网部署加固；
 > **Localhost-first, authenticated local workspaces, not suitable for public exposure.**
 
+## Workspace Bash / 冻结制品发布（2026-09-06，阶段 3）
+
+默认不启用 Docker 或 Bash。`GET/PUT /api/workspaces/{sid}/execution` 提供后端选择及 revision-CAS；
+`GET/PUT /api/workspaces/{sid}/extensions` 选择 `run_bash`，不影响 HTTP MCP、Skill 或 Python 独立授权。
+独立 Bash 由普通聊天明确意图触发并逐次确认完整脚本；Coding/Plan 复用任务执行许可。
+私有历史只读接口为 `GET /api/workspaces/{sid}/bash-runs` 和 `GET .../bash-runs/{run_id}`；
+成功结果可包含 `file_changes_saved=true`、`publish_required=true`、`artifact_id`、`artifact_sha256`、
+`evidence_kind=bash-output-integrity/v1`，不表示已写回 Workspace。历史刷新不会执行或重新批准脚本。
+
+`GET /api/coding-sandbox/sessions/{sid}/operation` 返回当前操作。新增：
+
+- `publication`：服务端绑定的 purpose（coding/plan/bash）、backend、scope/policy SHA 与 Session。
+- `bash_evidence`：独立 Bash 的输出完整性证据；Coding/Plan 则仍使用非空 `validation` 的固定验证结果。
+- `execution_released`：计算资源已确认回收；false 时不能发布，不会在重启时恢复可发布状态。
+- `review_sha256`：签名恢复胶囊的回执，绑定完整制品、基线、用途与策略。
+
+对新的任务绑定操作，`POST /api/coding-sandbox/operations/{operation_id}/publish` 和
+`POST .../retry-publish` 必须提交当前审阅回执：
+
+```json
+{
+  "artifact_id": "artifact-<32 hex>",
+  "artifact_sha256": "<64 hex>",
+  "review_sha256": "<64 hex>"
+}
+```
+
+接受返回 202；缺少/过期确认或资源未回收返回 409。之后读取 operation 的 `published` / `publish_conflict` /
+`failed` 状态确认结果；202 不代表发布成功。同一已提交制品重复确认返回同一事务，不重复写入。
+严格检查原始完整 Workspace revision/tree SHA，不支持自动 rebase、强制覆盖或从已回收容器重新冻结。
+受保护路径/purpose 或任一冲突使整批变更零写入。老的非任务绑定操作保留其兼容确认协议。
+所有访问仍由当前登录账号和 Session 归属校验；浏览器不能提交路径、脚本或修改证据以替换发布内容。
+
 ## 可选 Data Analysis（2026-09-05）
 
 扩展工具目录还提供 `run_python_analysis`，独立选择并探测专用本机解释器。此工具仅从聊天调用：

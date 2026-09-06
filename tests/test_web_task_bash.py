@@ -279,7 +279,8 @@ def test_real_task_bash_reuses_copy_after_failure_and_cannot_downgrade_evidence(
             assert any(c["status"] == "failed" for c in evidence["checks"])
             assert "shared.txt" not in client.get(f"/api/sessions/{sid}/files").text
             return
-        assert record["status"] == "awaiting_approval" and not record["publish_available"]
+        assert record["status"] == "awaiting_approval" and record["publish_available"]
+        assert record["bash_evidence"] is None
         assert set(record["changed_paths"]) == {"scripts/main.py", "artifacts/shared.txt"}
         assert record["artifact_id"]
         assert evidence["operation_id"] == identity.operation_id
@@ -296,5 +297,11 @@ def test_real_task_bash_reuses_copy_after_failure_and_cannot_downgrade_evidence(
             else:
                 assert {"run_bash", "coding_run"} <= names
         assert client.post(
-            f"/api/coding-sandbox/operations/{identity.operation_id}/discard",
-        ).status_code == 200
+            f"/api/coding-sandbox/operations/{identity.operation_id}/publish",
+            json={k: record[k] for k in ("artifact_id", "artifact_sha256", "review_sha256")},
+        ).status_code == 202
+        published = client.portal.call(
+            client.app.state.execution_runtime._lifecycle.join_action, identity.operation_id,
+        )
+        assert published.status == "published", published
+        assert "shared.txt" in client.get(f"/api/sessions/{sid}/files").text

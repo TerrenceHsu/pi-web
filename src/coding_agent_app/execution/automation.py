@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Literal, TypeVar
 
 from coding_sandbox.lifecycle import ManagedSandboxLifecycle, ManagedSandboxOperationRecord
+from coding_sandbox.publication import PublicationBinding
 
 from ..planning.models import PlanSpec
 from ..planning.store import PlanStore
@@ -82,8 +83,14 @@ class ApprovedCodingAutomation(CodingSandboxAutomation):
             baseline=prepared.baseline,
             config_revision=prepared.profile.config_revision,
             close_runtime=finish,
-            # Docker publication has a separate stage-3 gate. Retain its diff for review.
-            publish_available=prepared.profile.backend == "e2b",
+            publish_available=True,
+            publication=PublicationBinding(
+                session_id=session_id,
+                purpose=prepared.scope.kind,
+                backend=prepared.profile.backend,
+                scope_sha256=prepared.scope.sha256,
+                policy_sha256=prepared.scope.publish_policy_sha256,
+            ),
         )
         self._adopted = True
         return record
@@ -126,7 +133,16 @@ class ApprovedCodingAutomation(CodingSandboxAutomation):
         cancelled: Callable[[], bool] | None = None,
     ) -> AutomatedCodingResult:
         async with self.role_context("executor"):
-            return await super().validate_and_freeze(operation_id, cancelled=cancelled)
+            result = await super().validate_and_freeze(operation_id, cancelled=cancelled)
+        # Close execution while Plan is still executing/verifying. The caller may
+        # now mark it awaiting artifact approval without racing the active-scope watchdog.
+        await self.close()
+        if (
+            self.prepared is not None
+            and (await self.runtime.store.get(self.prepared.scope.identity)).state != "closed"
+        ):
+            raise ExecutionDenied("grant_revoked")
+        return result
 
     async def close(self) -> None:
         if self.prepared is None:
@@ -136,6 +152,20 @@ class ApprovedCodingAutomation(CodingSandboxAutomation):
                 await self._lifecycle.release_execution(self.prepared.scope.identity.operation_id)
         finally:
             await asyncio.shield(self.runtime.finish(self.prepared.scope.identity))
+        grant = await self.runtime.store.get(self.prepared.scope.identity)
+        if grant.cleanup_pending:
+            # A cleanup debt is not proof that compute is gone. Do not leave a
+            # publishable artifact behind when runtime destruction was unconfirmed.
+            if self._adopted:
+                await self.cancel_if_possible(self.prepared.scope.identity.operation_id)
+            raise ExecutionDenied("cleanup_pending")
+        if self._adopted and grant.state != "closed":
+            await self.cancel_if_possible(self.prepared.scope.identity.operation_id)
+            return
+        if self._adopted:
+            await self._lifecycle.confirm_execution_released(
+                self.prepared.scope.identity.operation_id
+            )
 
 
 def approval_arguments(prepared: PreparedExecution, plan: PlanSpec | None) -> dict[str, object]:
@@ -165,5 +195,5 @@ def approval_arguments(prepared: PreparedExecution, plan: PlanSpec | None) -> di
         "plan": None if plan is None else plan.model_dump(mode="json"),
         "publication": "Separate signed-artifact approval required; no automatic writeback.",
         "publish_paths": "scripts/**, artifacts/**, ordinary Markdown; protected paths excluded",
-        "docker_publication_enabled": False,
+        "docker_publication_enabled": True,
     }

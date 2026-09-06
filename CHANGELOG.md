@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Workspace Bash safe artifacts and explicit publication（2026-09-06）
+
+- 阶段 3：独立 Bash 成功输出使用 `pi-agent-bash-artifact/v1` / `bash-output-integrity/v1`；
+  无变更、失败、保护路径、软/硬链接及不安全制品不开放发布。Coding/Plan 固定验证证据链不变。
+- Docker 复用已有受限导出、签名冻结、Changes 审阅和 Workspace 事务发布；发布确认绑定 artifact ID、
+  archive SHA 与签名 review receipt。目标锁内复核完整基线、签名、policy 与路径/purpose，冲突整批零写入。
+- 私有签名恢复胶囊不包含运行句柄或执行许可；计算资源确认回收后才能发布及恢复待审阅状态。
+  持久提交回执支持“Workspace 已提交、响应丢失”后再次确认同一制品而不重复写入。
+- 修复 Plan 完成冻结后、切换待审阅状态时被后台许可检查误撤销的竞态；前端明确完整性≠功能验证。
+- 定向后端、Frontend、Chromium、Evals 和真实 Docker 验证见
+  [阶段 3 验证](docs/validation/workspace-bash-stage3-2026-09-06.md)。随本次提交归档；未自动启用部署配置，未推送。
+
 ### Coding/Plan task-bound Bash reuse（2026-09-06）
 
 - 先将独立 Bash 阶段提交为 `a4a628b`；阶段 2F 与本条记录共同归档，未推送。

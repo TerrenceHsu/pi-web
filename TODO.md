@@ -25,7 +25,10 @@
 - [x] 阶段 2E 提交：`a4a628b`，未推送。
 - [x] 阶段 2F：Coding/Plan Executor 的 `run_bash` 与 `coding_run`、编辑、固定验证共用任务许可和副本；
   不额外逐脚本审批，保留默认未选中/仅 Local Docker、角色与请求隔离及原固定验证/冻结屏障。
-- [ ] 阶段 3：独立 Bash 专用文件证据与冻结、Docker 制品审阅/确认发布；Coding 已有固定验证不可降级。
+- [x] 阶段 3：独立 Bash 专用文件证据与冻结、Docker 制品审阅/确认发布；Coding 固定验证不可降级。
+  签名恢复胶囊、精确审批回执、受保护路径/purpose、严格基线、提交中断恢复与幂等闭环已接入。
+  资源回收未确认则不开启发布；Plan 在进入待发布状态前关闭执行许可，避免 watchdog 收尾竞态。
+  [验证记录](docs/validation/workspace-bash-stage3-2026-09-06.md)；随本次提交归档。
 - [ ] 阶段 4：Web 管理/运行/恢复/撤销、任务预算和 Telemetry。
 - [ ] 阶段 5：完整后端/前端/E2E/Evals/真实 Docker 门禁及最终交付。
   见 [`实施方案`](docs/design/workspace-bash-tool.md) 和 [`阶段 2F 记录`](docs/validation/workspace-bash-stage2f-2026-09-06.md)。

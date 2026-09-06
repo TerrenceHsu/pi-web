@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import os
 import shutil
+import time
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
@@ -19,8 +20,10 @@ from agent_workspace.store import (
     WorkspaceVersionConflictError,
     is_sandbox_publishable_workspace_path,
 )
-from coding_sandbox.artifact import ArtifactSigner, SandboxOutputArtifact
+from coding_sandbox.artifact import ArtifactSigner, SandboxOutputArtifact, verify_output_artifact
 from coding_sandbox.lifecycle import SandboxBaseline
+from coding_sandbox.output_evidence import BashOutputIntegrityEvidence
+from coding_sandbox.publication import WORKSPACE_PUBLISH_POLICY_SHA256, PublicationBinding
 from coding_sandbox.publisher import (
     LocalTransactionalPublisher,
     PublisherError,
@@ -119,7 +122,73 @@ class WorkspaceSandboxArtifactPublisher:
         session_id: str,
         expected_workspace_revision: int,
         expected_workspace_sha256: str,
+        publication: PublicationBinding | None = None,
     ) -> PublisherResult:
+        def revalidate() -> None:
+            verify_output_artifact(
+                artifact,
+                signer,
+                max_archive_bytes=baseline.policy.max_total_bytes,
+                max_file_bytes=baseline.policy.max_file_bytes,
+                max_file_count=baseline.policy.max_file_count,
+            )
+            evidence = artifact.validation_evidence
+            if publication is None:
+                if isinstance(evidence, BashOutputIntegrityEvidence):
+                    raise PublisherError("artifact_invalid")
+                return
+            if (
+                publication.session_id != session_id
+                or publication.policy_sha256 != WORKSPACE_PUBLISH_POLICY_SHA256
+                or (publication.purpose == "bash")
+                != isinstance(evidence, BashOutputIntegrityEvidence)
+            ):
+                raise PublisherError("artifact_invalid")
+            if isinstance(evidence, BashOutputIntegrityEvidence) and (
+                publication.backend != "local_docker"
+                or evidence.session_id != session_id
+                or evidence.scope_sha256 != publication.scope_sha256
+                or evidence.publish_policy_sha256 != publication.policy_sha256
+                or evidence.baseline_revision != expected_workspace_revision
+                or evidence.baseline_sha256 != expected_workspace_sha256
+            ):
+                raise PublisherError("artifact_invalid")
+
+        revalidate()
+        transaction_id = (
+            "publish-"
+            + hashlib.sha256((session_id + ":" + artifact.archive_sha256).encode()).hexdigest()[:32]
+        )
+        if publication is not None:
+            prior = await self._store.find_sandbox_publication(
+                session_id,
+                transaction_id=transaction_id,
+                baseline_revision=expected_workspace_revision,
+                baseline_sha256=expected_workspace_sha256,
+                changes=tuple(
+                    WorkspaceMaterializationEntry(
+                        logical_path=entry.path,
+                        size=entry.after_size,
+                        sha256=entry.after_sha256,
+                    )
+                    for entry in artifact.manifest.changed_files
+                ),
+                deleted_paths=tuple(entry.path for entry in artifact.manifest.deleted_files),
+                revalidate=revalidate,
+            )
+            if prior is not None:
+                now = int(time.time() * 1000)
+                return PublisherResult(
+                    status="already_published",
+                    transaction_id=transaction_id,
+                    artifact_id=artifact.manifest.artifact_id,
+                    artifact_sha256=artifact.archive_sha256,
+                    changed_paths=prior.changed_paths,
+                    deleted_paths=prior.deleted_paths,
+                    workspace_revision=prior.revision,
+                    started_at_ms=now,
+                    finished_at_ms=now,
+                )
         for changed_entry in artifact.manifest.changed_files:
             if not is_sandbox_publishable_workspace_path(changed_entry.path):
                 raise PublisherError("unsafe_path", relative_path=changed_entry.path)
@@ -148,6 +217,11 @@ class WorkspaceSandboxArtifactPublisher:
                 raise PublisherError("publish_conflict") from exc
             if _snapshot_workspace_digest(baseline) != expected_workspace_sha256:
                 raise PublisherError("baseline_invalid")
+            if publication is not None and (
+                current.revision != expected_workspace_revision
+                or current.tree_sha256 != expected_workspace_sha256
+            ):
+                raise PublisherError("publish_conflict")
             if current.revision < expected_workspace_revision or (
                 current.revision == expected_workspace_revision
                 and current.tree_sha256 != expected_workspace_sha256
@@ -176,15 +250,19 @@ class WorkspaceSandboxArtifactPublisher:
             )
             store_result = await self._store.publish_workspace_changes(
                 session_id,
-                transaction_id=local_result.transaction_id,
+                transaction_id=(
+                    transaction_id if publication is not None else local_result.transaction_id
+                ),
                 expected_workspace_revision=current.revision,
                 expected_workspace_sha256=current.tree_sha256,
                 changes=changes,
                 deleted_paths=local_result.deleted_paths,
+                revalidate=revalidate,
             )
             return local_result.model_copy(
                 update={
                     "workspace_revision": store_result.revision,
+                    "transaction_id": store_result.transaction_id,
                 }
             )
         except PublisherError:
@@ -195,7 +273,7 @@ class WorkspaceSandboxArtifactPublisher:
             raise PublisherError("unsafe_path") from exc
         except SnapshotError as exc:
             raise PublisherError("baseline_invalid") from exc
-        except (FileStoreError, OSError) as exc:
+        except (FileStoreError, OSError, ValueError) as exc:
             raise PublisherError("io_failure") from exc
         finally:
             await asyncio.to_thread(shutil.rmtree, run_root, ignore_errors=True)

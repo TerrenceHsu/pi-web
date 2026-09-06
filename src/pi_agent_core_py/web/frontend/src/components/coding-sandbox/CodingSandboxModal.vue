@@ -48,7 +48,7 @@ watch(
 )
 
 watch(
-  () => operation.value?.artifact_id,
+  () => [operation.value?.artifact_id, operation.value?.artifact_sha256, operation.value?.review_sha256],
   () => {
     approvalConfirmed.value = false
   },
@@ -188,6 +188,10 @@ function eventDetail(event: ManagedSandboxEvent): string {
 
       <section v-if="operation.status === 'awaiting_approval'" class="approval-panel">
         <h3>Publish approval</h3>
+        <p v-if="operation.bash_evidence" data-testid="bash-integrity-notice">
+          Bash output integrity only: the approved command exited successfully and output files
+          were checked for safe import. This is not functional validation or trusted content.
+        </p>
         <p>
           The artifact is frozen. Publishing applies exactly the reviewed paths transactionally to
           the managed local project.
@@ -203,7 +207,7 @@ function eventDetail(event: ManagedSandboxEvent): string {
           </p>
           <label>
             <input v-model="approvalConfirmed" type="checkbox" />
-            I reviewed the validation result and complete diff.
+            I reviewed the evidence type and complete diff; apply this exact artifact.
           </label>
           <button
             type="button"

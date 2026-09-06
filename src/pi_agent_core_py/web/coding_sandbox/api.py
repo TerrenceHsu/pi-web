@@ -30,6 +30,7 @@ from coding_sandbox.lifecycle import (
     SandboxLifecycleError,
     SandboxOperationStoreError,
 )
+from coding_sandbox.publication import PublicationApproval
 
 from ..credentials.api import (
     CredentialBodyLimitMiddleware,
@@ -360,8 +361,10 @@ def build_coding_sandbox_router(config: WebSecurityConfig) -> APIRouter:
             ManagedSandboxLifecycle,
             Depends(get_sandbox_lifecycle),
         ],
+        approval: PublicationApproval | None = None,
     ) -> JSONResponse:
-        return await _accepted_action(operation_id, lifecycle, "publish")
+        record = await lifecycle.publish(operation_id, approval=approval)
+        return JSONResponse(status_code=202, content=_operation_payload(record))
 
     @router.post(f"{_API_PREFIX}/operations/{{operation_id}}/refreeze")
     async def refreeze_operation(
@@ -380,8 +383,10 @@ def build_coding_sandbox_router(config: WebSecurityConfig) -> APIRouter:
             ManagedSandboxLifecycle,
             Depends(get_sandbox_lifecycle),
         ],
+        approval: PublicationApproval | None = None,
     ) -> JSONResponse:
-        return await _accepted_action(operation_id, lifecycle, "retry-publish")
+        record = await lifecycle.retry_publish(operation_id, approval=approval)
+        return JSONResponse(status_code=202, content=_operation_payload(record))
 
     @router.post(f"{_API_PREFIX}/operations/{{operation_id}}/cancel")
     async def cancel_operation(

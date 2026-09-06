@@ -69,6 +69,10 @@ export interface ManagedSandboxOperation {
   baseline_workspace_revision?: number | null
   baseline_workspace_sha256?: string | null
   publish_available?: boolean
+  execution_released?: boolean
+  publication?: { purpose: "bash" | "coding" | "plan"; backend: string } | null
+  review_sha256?: string | null
+  bash_evidence?: { schema_version: "bash-output-integrity/v1"; command_id: string; exit_code: 0 } | null
   validation: SandboxValidationEvidence | null
   diff: SandboxDiff | null
   artifact_id: string | null

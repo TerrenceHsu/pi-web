@@ -171,9 +171,19 @@ export const useCodingSandboxStore = defineStore("codingSandbox", () => {
 
   const validate = () => runAction(sandboxApi.validateSandboxOperation)
   const preparePublish = () => runAction(sandboxApi.prepareSandboxPublish)
-  const publish = () => runAction(sandboxApi.publishSandboxOperation)
+  function publishReviewed(retry = false): Promise<void> {
+    // Capture the displayed immutable receipt before any asynchronous refresh.
+    const reviewed = operation.value
+    const approval = reviewed?.artifact_id && reviewed.artifact_sha256 && reviewed.review_sha256
+      ? { artifact_id: reviewed.artifact_id, artifact_sha256: reviewed.artifact_sha256,
+          review_sha256: reviewed.review_sha256 }
+      : undefined
+    const action = retry ? sandboxApi.retrySandboxPublish : sandboxApi.publishSandboxOperation
+    return runAction(id => approval ? action(id, approval) : action(id))
+  }
+  const publish = () => publishReviewed()
   const refreeze = () => runAction(sandboxApi.refreezeSandboxOperation)
-  const retryPublish = () => runAction(sandboxApi.retrySandboxPublish)
+  const retryPublish = () => publishReviewed(true)
   const cancel = () => runAction(sandboxApi.cancelSandboxOperation)
   const discard = () => runAction(sandboxApi.discardSandboxOperation)
 

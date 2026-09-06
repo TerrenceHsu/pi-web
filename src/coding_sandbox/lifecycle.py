@@ -22,12 +22,16 @@ from .admin.models import SandboxAdminConfig, SandboxConfigRecord
 from .artifact import (
     ArtifactSigner,
     SandboxOutputArtifact,
+    canonical_json_bytes,
     hash_regular_file,
     verify_artifact_signature,
+    verify_output_artifact,
 )
 from .backend import SandboxBackend
 from .models import SandboxCreateSpec, SandboxHandle, SandboxOutputChunk
 from .operation import SandboxOperation
+from .output_evidence import BashOutputIntegrityEvidence
+from .publication import PublicationApproval, PublicationBinding
 from .publisher import LocalTransactionalPublisher, PublisherError, PublisherResult
 from .snapshot import (
     ProjectSnapshot,
@@ -112,7 +116,9 @@ _ALLOWED_STATUS_TRANSITIONS: dict[
     frozenset[ManagedOperationStatus],
 ] = {
     "creating": frozenset({"ready", "cancelling", "discarding", "failed", "interrupted"}),
-    "ready": frozenset({"validating", "cancelling", "discarding", "failed", "interrupted"}),
+    "ready": frozenset(
+        {"validating", "freezing", "cancelling", "discarding", "failed", "interrupted"}
+    ),
     "validating": frozenset(
         {
             "validated",
@@ -268,6 +274,10 @@ class ManagedSandboxOperationRecord(BaseModel):
         pattern=r"^[0-9a-f]{64}$",
     )
     publish_available: bool = True
+    execution_released: bool = True
+    publication: PublicationBinding | None = None
+    review_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    bash_evidence: BashOutputIntegrityEvidence | None = None
     validation: SandboxValidationEvidence | None = None
     diff: SandboxDiffResult | None = None
     artifact_id: str | None = Field(
@@ -310,6 +320,15 @@ class ManagedSandboxOperationRecord(BaseModel):
     @property
     def allowed_actions(self) -> tuple[SandboxOperationAction, ...]:
         actions = allowed_sandbox_actions(self.status)
+        if self.publication is not None:
+            if not self.execution_released:
+                actions = tuple(a for a in actions if a not in {"publish", "retry_publish"})
+            # Request-bound compute is already destroyed after freeze. Never refreeze/rebase it.
+            actions = tuple(action for action in actions if action != "refreeze")
+            if self.publication.purpose == "bash":
+                actions = tuple(
+                    action for action in actions if action not in {"validate", "prepare_publish"}
+                )
         if self.publish_available:
             return actions
         return tuple(action for action in actions if action not in {"publish", "retry_publish"})
@@ -579,6 +598,23 @@ class SQLiteSandboxOperationStore:
             gap=first is not None and after_sequence > 0 and after_sequence < first - 1,
         )
 
+    async def save_retained(self, operation_id: str, payload: str, signature: str) -> None:
+        _require_payload_size(payload, 64 * 1024 * 1024)
+        await self._connection.execute(
+            "INSERT INTO web_coding_sandbox_retained VALUES (?, ?, ?) "
+            "ON CONFLICT(operation_id) DO UPDATE SET "
+            "payload=excluded.payload, signature=excluded.signature",
+            (operation_id, payload, signature),
+        )
+
+    async def load_retained(self, operation_id: str) -> tuple[str, str] | None:
+        async with self._connection.execute(
+            "SELECT payload, signature FROM web_coding_sandbox_retained WHERE operation_id=?",
+            (operation_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return None if row is None else (str(row[0]), str(row[1]))
+
     async def close(self) -> None:
         if self._closed:
             return
@@ -588,6 +624,10 @@ class SQLiteSandboxOperationStore:
 
     async def _initialize(self) -> None:
         await self._connection.execute("PRAGMA busy_timeout=5000")
+        await self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS web_coding_sandbox_retained ("
+            "operation_id TEXT PRIMARY KEY, payload TEXT NOT NULL, signature TEXT NOT NULL)"
+        )
         await self._connection.execute(
             "CREATE TABLE IF NOT EXISTS web_coding_sandbox_operation_schema "
             "(key TEXT PRIMARY KEY, value INTEGER NOT NULL)"
@@ -684,7 +724,26 @@ class SandboxArtifactPublisher(Protocol):
         session_id: str,
         expected_workspace_revision: int,
         expected_workspace_sha256: str,
+        publication: PublicationBinding | None = None,
     ) -> PublisherResult: ...
+
+
+class RetainedSandboxArtifact(BaseModel):
+    """Private signed recovery capsule. Contains no grant or executable runtime handle."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    session_id: str
+    artifact: SandboxOutputArtifact
+    snapshot: ProjectSnapshot
+    publish_root: Path | None
+    publication: PublicationBinding | None
+    baseline_revision: int | None
+    baseline_sha256: str | None
+
+    def signing_bytes(self) -> bytes:
+        return b"pi-agent-retained-artifact/v1\0" + canonical_json_bytes(
+            self.model_dump(mode="json")
+        )
 
 
 @dataclass
@@ -755,6 +814,19 @@ class ManagedSandboxLifecycle:
         """Mark old live records interrupted; never replay model or commands."""
         interrupted: list[str] = []
         for record in await self._store.active_records():
+            if record.status in {"awaiting_approval", "publish_conflict", "publishing"}:
+                try:
+                    if record.publication is not None and not record.execution_released:
+                        raise SandboxLifecycleError("artifact_unavailable")
+                    await self._retained(record)
+                    if record.status == "publishing":
+                        await self._update(
+                            record, status="publish_conflict", error_code="publication_interrupted"
+                        )
+                    self._session_operation[record.session_id] = record.operation_id
+                    continue
+                except (ValueError, OSError, SandboxLifecycleError):
+                    pass  # Corrupt/missing receipts fail closed; never recreate compute.
             updated = await self._update(
                 record,
                 status="interrupted",
@@ -817,6 +889,7 @@ class ManagedSandboxLifecycle:
         config_revision: int,
         close_runtime: Callable[[], Awaitable[None]],
         publish_available: bool,
+        publication: PublicationBinding | None = None,
     ) -> ManagedSandboxOperationRecord:
         """Trusted task-runtime handoff; never creates or refreshes a runtime.
 
@@ -842,11 +915,17 @@ class ManagedSandboxLifecycle:
                 baseline_workspace_revision=baseline.source_workspace_revision,
                 baseline_workspace_sha256=baseline.source_workspace_sha256,
                 publish_available=publish_available and self._artifact_publisher is not None,
+                execution_released=False,
+                publication=publication,
             )
             await self._store.create(record)
             self._live[record.operation_id] = _LiveOperation(
-                operation, baseline.snapshot, self._artifact_signer, baseline.publish_root,
-                asyncio.Event(), close_runtime=close_runtime,
+                operation,
+                baseline.snapshot,
+                self._artifact_signer,
+                baseline.publish_root,
+                asyncio.Event(),
+                close_runtime=close_runtime,
             )
             self._session_operation[session_id] = record.operation_id
         await self._emit(record, "sandbox_operation_ready", {})
@@ -861,9 +940,16 @@ class ManagedSandboxLifecycle:
         # The user may already have approved publication when the request's
         # finally block runs. Releasing compute must not cancel publication or
         # strand a retained conflict diff behind a now-closed execution grant.
-        if record.status not in {
-            "awaiting_approval", "publishing", "publish_conflict", "published",
-        } or live.operation.output_artifact is None:
+        if (
+            record.status
+            not in {
+                "awaiting_approval",
+                "publishing",
+                "publish_conflict",
+                "published",
+            }
+            or live.operation.output_artifact is None
+        ):
             if "cancel" in record.allowed_actions:
                 await self.cancel(operation_id)
             return
@@ -872,6 +958,20 @@ class ManagedSandboxLifecycle:
         else:
             await live.operation.close()
         live.execution_released = True
+
+    async def confirm_execution_released(self, operation_id: str) -> None:
+        """Trusted adapter confirms cleanup debt is cleared before enabling publication."""
+        record = await self.get(operation_id)
+        if record.execution_released or record.status not in {
+            "awaiting_approval",
+            "publish_conflict",
+        }:
+            return
+        live = self._live.get(operation_id)
+        if live is None or not live.execution_released:
+            raise SandboxLifecycleError("operation_not_ready", operation_id=operation_id)
+        updated = await self._update(record, execution_released=True)
+        await self._emit(updated, "sandbox_execution_released", {})
 
     async def get(self, operation_id: str) -> ManagedSandboxOperationRecord:
         record = await self._record(operation_id)
@@ -920,24 +1020,14 @@ class ManagedSandboxLifecycle:
                 "artifact_unavailable",
                 operation_id=operation_id,
             )
-        live = self._live.get(operation_id)
-        artifact = None if live is None else live.operation.output_artifact
-        if (
-            live is None
-            or artifact is None
-            or record.artifact_id != artifact.manifest.artifact_id
-            or record.artifact_sha256 != artifact.archive_sha256
-        ):
-            raise SandboxLifecycleError(
-                "artifact_unavailable",
-                operation_id=operation_id,
-            )
+        retained = await self._retained(record)
+        artifact = retained.artifact
         try:
             normalized = validate_workspace_relative_path(logical_path)
             return await asyncio.to_thread(
                 _read_frozen_artifact_file,
                 artifact,
-                live.artifact_signer,
+                self._artifact_signer,
                 normalized,
             )
         except KeyError as exc:
@@ -1007,8 +1097,57 @@ class ManagedSandboxLifecycle:
             action=self._run_freeze,
         )
 
-    async def publish(self, operation_id: str) -> ManagedSandboxOperationRecord:
+    async def prepare_bash_publish(self, operation_id: str) -> ManagedSandboxOperationRecord:
+        """Trusted standalone route only; freeze uses the operation's actual successful result."""
         record = await self.get(operation_id)
+        live = self._live.get(operation_id)
+        if record.status != "ready" or live is None or not live.operation.standalone_bash:
+            raise SandboxLifecycleError("operation_not_ready", operation_id=operation_id)
+        diff = await self.diff(operation_id)
+        if not diff.entries:
+            raise SandboxLifecycleError("no_changes", operation_id=operation_id)
+        record = await self.get(operation_id)
+        return await self._launch_action(
+            record,
+            status="freezing",
+            event_type="sandbox_freeze_started",
+            action=self._run_freeze,
+        )
+
+    async def join_action(self, operation_id: str) -> ManagedSandboxOperationRecord:
+        task = self._actions.get(operation_id)
+        if task is not None:
+            await asyncio.shield(task)
+        return await self.get(operation_id)
+
+    def _check_publication_approval(
+        self,
+        record: ManagedSandboxOperationRecord,
+        approval: PublicationApproval | None,
+    ) -> None:
+        if (record.publication is not None or approval is not None) and (
+            approval is None
+            or approval.artifact_id != record.artifact_id
+            or approval.artifact_sha256 != record.artifact_sha256
+            or approval.review_sha256 != record.review_sha256
+        ):
+            raise SandboxLifecycleError("approval_required", operation_id=record.operation_id)
+        live = self._live.get(record.operation_id)
+        if record.publication is not None and (
+            not record.execution_released or live is not None and not live.execution_released
+        ):
+            raise SandboxLifecycleError("operation_not_ready", operation_id=record.operation_id)
+
+    async def publish(
+        self,
+        operation_id: str,
+        *,
+        approval: PublicationApproval | None = None,
+    ) -> ManagedSandboxOperationRecord:
+        record = await self.get(operation_id)
+        self._check_publication_approval(record, approval)
+        if record.status == "published":
+            return record
         if not record.publish_available:
             raise SandboxLifecycleError(
                 "publisher_unavailable",
@@ -1019,11 +1158,11 @@ class ManagedSandboxLifecycle:
                 "approval_required",
                 operation_id=operation_id,
             )
-        return await self._launch_action(
+        return await self._launch_job(
             record,
             status="publishing",
             event_type="sandbox_publish_started",
-            action=self._run_publish,
+            action=lambda updated: self._run_publish(updated, self._live.get(operation_id)),
         )
 
     async def refreeze(self, operation_id: str) -> ManagedSandboxOperationRecord:
@@ -1041,9 +1180,17 @@ class ManagedSandboxLifecycle:
             action=self._run_refreeze,
         )
 
-    async def retry_publish(self, operation_id: str) -> ManagedSandboxOperationRecord:
+    async def retry_publish(
+        self,
+        operation_id: str,
+        *,
+        approval: PublicationApproval | None = None,
+    ) -> ManagedSandboxOperationRecord:
         """Retry the exact retained artifact without invoking the coding Agent."""
         record = await self.get(operation_id)
+        self._check_publication_approval(record, approval)
+        if record.status == "published":
+            return record
         if not record.publish_available:
             raise SandboxLifecycleError(
                 "publisher_unavailable",
@@ -1054,11 +1201,11 @@ class ManagedSandboxLifecycle:
                 "operation_not_ready",
                 operation_id=operation_id,
             )
-        return await self._launch_action(
+        return await self._launch_job(
             record,
             status="publishing",
             event_type="sandbox_publish_retry_started",
-            action=self._run_publish,
+            action=lambda updated: self._run_publish(updated, self._live.get(operation_id)),
         )
 
     async def diff(self, operation_id: str) -> SandboxDiffResult:
@@ -1154,7 +1301,12 @@ class ManagedSandboxLifecycle:
         for operation_id in tuple(self._live):
             await self._close_live(operation_id)
         for record in await self._store.active_records():
-            if record.status in {"publishing", "published"}:
+            if record.status in {
+                "publishing",
+                "published",
+                "awaiting_approval",
+                "publish_conflict",
+            }:
                 continue
             updated = await self._update(
                 record,
@@ -1341,6 +1493,7 @@ class ManagedSandboxLifecycle:
         try:
             artifact = await live.operation.freeze_output_artifact()
             diff = await live.operation.diff()
+            review_sha256 = await self._save_retained(record, live, artifact)
             self._detach_current_action(record.operation_id)
             updated = await self._update(
                 record,
@@ -1350,6 +1503,12 @@ class ManagedSandboxLifecycle:
                 diff=diff,
                 artifact_id=artifact.manifest.artifact_id,
                 artifact_sha256=artifact.archive_sha256,
+                review_sha256=review_sha256,
+                bash_evidence=(
+                    artifact.validation_evidence
+                    if isinstance(artifact.validation_evidence, BashOutputIntegrityEvidence)
+                    else None
+                ),
                 changed_paths=tuple(entry.path for entry in artifact.manifest.changed_files),
                 deleted_paths=tuple(entry.path for entry in artifact.manifest.deleted_files),
                 error_code=None,
@@ -1395,25 +1554,20 @@ class ManagedSandboxLifecycle:
     async def _run_publish(
         self,
         record: ManagedSandboxOperationRecord,
-        live: _LiveOperation,
+        live: _LiveOperation | None,
     ) -> None:
-        artifact = live.operation.output_artifact
-        if artifact is None:
-            await self._fail(record, "approval_required", "MissingArtifact")
-            return
-        if live.publish_root is None and self._artifact_publisher is None:
-            await self._fail(record, "publisher_unavailable", "MissingPublisher")
-            return
         try:
-            if live.publish_root is not None:
+            retained = await self._retained(record)
+            artifact = retained.artifact
+            if retained.publish_root is not None:
                 publisher = LocalTransactionalPublisher(
-                    project_root=live.publish_root,
+                    project_root=retained.publish_root,
                     state_root=self._state_root,
                 )
                 result = await publisher.publish(
                     artifact,
-                    baseline=live.snapshot,
-                    signer=live.artifact_signer,
+                    baseline=retained.snapshot,
+                    signer=self._artifact_signer,
                 )
             else:
                 if (
@@ -1424,11 +1578,16 @@ class ManagedSandboxLifecycle:
                     raise PublisherError("baseline_invalid")
                 result = await self._artifact_publisher.publish(
                     artifact,
-                    baseline=live.snapshot,
-                    signer=live.artifact_signer,
+                    baseline=retained.snapshot,
+                    signer=self._artifact_signer,
                     session_id=record.session_id,
                     expected_workspace_revision=record.baseline_workspace_revision,
                     expected_workspace_sha256=record.baseline_workspace_sha256,
+                    **(
+                        {"publication": retained.publication}
+                        if retained.publication is not None
+                        else {}
+                    ),
                 )
             self._detach_current_action(record.operation_id)
             updated = await self._update(
@@ -1471,6 +1630,7 @@ class ManagedSandboxLifecycle:
         try:
             artifact = await live.operation.refreeze_output_artifact()
             diff = await live.operation.diff()
+            review_sha256 = await self._save_retained(record, live, artifact)
             self._detach_current_action(record.operation_id)
             updated = await self._update(
                 record,
@@ -1480,6 +1640,7 @@ class ManagedSandboxLifecycle:
                 diff=diff,
                 artifact_id=artifact.manifest.artifact_id,
                 artifact_sha256=artifact.archive_sha256,
+                review_sha256=review_sha256,
                 changed_paths=tuple(entry.path for entry in artifact.manifest.changed_files),
                 deleted_paths=tuple(entry.path for entry in artifact.manifest.deleted_files),
                 error_code=None,
@@ -1548,19 +1709,34 @@ class ManagedSandboxLifecycle:
                 "operation_not_ready",
                 operation_id=record.operation_id,
             )
+        live.cancel_event = asyncio.Event()
+        return await self._launch_job(
+            record,
+            status=status,
+            event_type=event_type,
+            action=lambda updated: action(updated, live),
+        )
+
+    async def _launch_job(
+        self,
+        record: ManagedSandboxOperationRecord,
+        *,
+        status: ManagedOperationStatus,
+        event_type: str,
+        action: Callable[[ManagedSandboxOperationRecord], Awaitable[None]],
+    ) -> ManagedSandboxOperationRecord:
         current_task = self._actions.get(record.operation_id)
         if current_task is not None and not current_task.done():
             raise SandboxLifecycleError(
                 "operation_conflict",
                 operation_id=record.operation_id,
             )
-        live.cancel_event = asyncio.Event()
         updated = await self._update(record, status=status, error_code=None)
         start_gate = asyncio.Event()
 
         async def run_action() -> None:
             await start_gate.wait()
-            await action(updated, live)
+            await action(updated)
 
         task: asyncio.Task[None] = asyncio.create_task(
             run_action(),
@@ -1576,6 +1752,64 @@ class ManagedSandboxLifecycle:
             raise
         start_gate.set()
         return updated
+
+    async def _save_retained(
+        self,
+        record: ManagedSandboxOperationRecord,
+        live: _LiveOperation,
+        artifact: SandboxOutputArtifact,
+    ) -> str:
+        retained = RetainedSandboxArtifact(
+            session_id=record.session_id,
+            artifact=artifact,
+            snapshot=live.snapshot,
+            publish_root=live.publish_root,
+            publication=record.publication,
+            baseline_revision=record.baseline_workspace_revision,
+            baseline_sha256=record.baseline_workspace_sha256,
+        )
+        signature = self._artifact_signer.sign(retained.signing_bytes())
+        await self._store.save_retained(record.operation_id, retained.model_dump_json(), signature)
+        return signature
+
+    async def _retained(self, record: ManagedSandboxOperationRecord) -> RetainedSandboxArtifact:
+        try:
+            return await self._verify_retained(record)
+        except (ValueError, OSError) as exc:
+            raise SandboxLifecycleError(
+                "artifact_unavailable",
+                operation_id=record.operation_id,
+            ) from exc
+
+    async def _verify_retained(
+        self, record: ManagedSandboxOperationRecord
+    ) -> RetainedSandboxArtifact:
+        stored = await self._store.load_retained(record.operation_id)
+        if stored is None:
+            raise SandboxLifecycleError("artifact_unavailable", operation_id=record.operation_id)
+        retained = RetainedSandboxArtifact.model_validate_json(stored[0])
+        artifact = retained.artifact
+        if (
+            not self._artifact_signer.verify(retained.signing_bytes(), stored[1])
+            or record.review_sha256 != stored[1]
+            or retained.session_id != record.session_id
+            or retained.publication != record.publication
+            or retained.baseline_revision != record.baseline_workspace_revision
+            or retained.baseline_sha256 != record.baseline_workspace_sha256
+            or artifact.manifest.operation_id != record.operation_id
+            or artifact.manifest.artifact_id != record.artifact_id
+            or artifact.archive_sha256 != record.artifact_sha256
+        ):
+            raise SandboxLifecycleError("artifact_unavailable", operation_id=record.operation_id)
+        await asyncio.to_thread(
+            verify_output_artifact,
+            artifact,
+            self._artifact_signer,
+            max_archive_bytes=retained.snapshot.policy.max_total_bytes,
+            max_file_bytes=retained.snapshot.policy.max_file_bytes,
+            max_file_count=retained.snapshot.policy.max_file_count,
+        )
+        return retained
 
     async def _update(
         self,

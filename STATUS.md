@@ -20,36 +20,45 @@
 
 ## 当前交付状态
 
-**阶段 2F：Coding/Plan 内 Bash 复用已接入**。Workspace 勾选 Bash 且后端为 Local Docker 时，
+**阶段 3：安全制品与独立确认发布已实现（随本次提交归档）**。独立 Bash 成功且有安全文件变更时，
+生成 `pi-agent-bash-artifact/v1`，明确使用 `bash-output-integrity/v1`，不冒充功能验证。
+Docker Coding/Plan 仍使用固定验证的 Coding v1 制品，不会因为调用 Bash 而降低验证要求。
+两条路径均在确认计算资源已回收后开放发布；前端 Changes 审阅精确制品，单独确认写回 Workspace。
+保护路径/purpose、完整基线冲突、签名/内容复验均 fail closed；发布回执持久化并幂等。
+重启只恢复已回收计算资源的冻结制品，绝不恢复容器或执行许可；未确认回收的操作标记中断。
+
+阶段 2F 的任务内复用保持不变。Workspace 勾选 Bash 且后端为 Local Docker 时，
 Coding 和 Plan Executor 的 `run_bash` 与 `coding_run`、编辑工具共享当前请求的许可、预算及副本。
 不再逐脚本弹窗，也不创建第二个容器；Planner/Verifier/read-only/Knowledge 没有 Bash。
 任务范围确认卡明确展示 Bash 复用；后续固定验证、签名冻结和独立发布门禁不变。
 
-阶段 2E 的独立 `run_bash` 路径保持不变。Workspace 选择已配置的 Local Docker 并勾选
+独立 `run_bash` 的逐次执行确认保持不变。Workspace 选择已配置的 Local Docker 并勾选
 Bash 工具后，可在普通聊天明确请求 `run_bash`（Code/Plan 关闭）。每条脚本单独审阅完整代码、
 cwd、SHA、输入快照及预算；默认权限策略只弹一次精确确认，显式拒绝优先，AllowAll 也不能跳过。
-每次批准后创建新离线副本，执行完回收容器和许可，只保留有界输出与变更摘要，**副本文件全部丢弃**。
+每次批准后创建新离线副本，执行完回收容器和许可。成功且有变更时保留签名制品；失败、无变更、
+保护路径/不安全输出或回收无法确认时不开放发布。stdout/stderr 与脚本仍仅进入有界私有历史。
 新增按账号/Session 隔离的 SQLite 私有历史及前端查询；刷新/重启只读，不重放命令。
 
 阶段 2D 的 Coding/Plan 任务审批保持不变：Coding 每请求确认执行范围，Plan 以一次确认
 原子批准精确计划版本与执行许可；准备/批准不创建容器，启动前复核原快照、请求、配置与资源选择。
 任务内工具共用获准副本，Planner/Verifier 不获得执行权限；旧直接启动/计划单独批准入口拒绝绕过，
 验证与冻结由请求调度器执行，运行期 UI diff 只获得只读上下文。
-任务结束回收计算资源，冻结制品仍交给原有 Changes 审阅；E2B 保留独立确认发布，Docker 发布暂不可用。
+任务结束回收计算资源，冻结制品交给 Changes 审阅；E2B 与 Docker 均单独确认当前制品后才可发布。
 Workspace 增加 revision-CAS 后端选择；选择变更/撤销、Stop、到期和能力变更使许可失效，不跨请求复用。
 
 本地 Docker 需部署者显式配置固定镜像/CLI 并由用户选择，**本轮未修改真实部署配置或自动启用**；
 没有静默迁移 E2B，也不向 E2B 装配 Bash；Python 分析原有逐次授权不变。
-本轮相关后端回归 174 passed / 5 skipped，前端 226 passed、Chromium 26 passed；
-真实 Docker 混合执行、静态检查、生产构建和 Evals 通过。没有重跑完整后端覆盖率，数字不跨轮累加。
-详见 [阶段 2F 记录](docs/validation/workspace-bash-stage2f-2026-09-06.md)；阶段 2C–2E 证据保留在原记录中。
+本轮相关后端回归 243 passed / 12 skipped，前端 228 passed、Chromium 26 passed；
+真实 Docker 9 项（含安全负例）、静态检查、生产构建和 Evals 通过。没有重跑完整后端覆盖率。
+收尾补测及证据边界详见 [阶段 3 记录](docs/validation/workspace-bash-stage3-2026-09-06.md)，不跨批次累加数字。
 
-**仍待完成**：独立 Bash 文件证据/冻结与 Docker 发布、
+**仍待完成（阶段 4–5）**：
 后台孤儿/TTL 与快照缓存回收、Coding/Plan 私有运行全文记录、跨账号全局配额、管理员执行前端与执行 Telemetry。
 Bash 历史上限为每账号 200 条、终态 30 天（新运行时裁剪，列表展示当前 Session 最近 100 条）。
 重启不恢复执行；未知资源保留清理债务，不假装已清理。
 Docker 数据仍位于 `D:\DockerData\DockerDesktopWSL`；没有重启业务解析容器。
-`a4a628b` 已提交阶段 2E（此前 `297a81a` 提交阶段 2C/2D）；阶段 2F 随本次提交归档，没有推送。
+最新提交 `79d273d` 为阶段 2F；`a4a628b` 为阶段 2E，`297a81a` 为阶段 2C/2D。
+阶段 3 随本次提交归档；未推送。
 
 新增 **Web Context Compaction**：按持久化视图、工具输出外置、结构化自动摘要、
 Web/Telemetry/Evals 四步实现。原始 SQLite 消息与来源 ID 不变，Memory 不由压缩改写；
@@ -118,10 +127,10 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用隔离 MinerU Worker 与三档固�
 | `0.0.29` Release metadata 与许可证 | ✅ 完成 | Python/API/前端/Worker 统一版本；主 wheel 与 Worker 携带 MIT，Worker 另附 MinerU 第三方许可、Notice 与 SBOM |
 | 当前发布前浏览器/联网门禁 | ✅ 完成 | 精简 Playwright 19/19、0 retry/flaky；真实 E2B Managed Sandbox/审批/WorkspaceStore 回写 PASS；此前 DDGS + GLM 真实 smoke 3/3 |
 | Managed Coding Sandbox P0 0–10 | ✅ 完成 | 独立包、快照、E2B、代码工具、固定验证、签名制品、本机事务 Publisher、Web 生命周期/状态恢复/审批发布 UI，以及真实 E2B、完整 CI、攻击矩阵和 Browser E2E 验收 |
-| 自动 Coding 请求编排 | ✅ 已接入任务审批 | Chat `Code` 每请求批准精确范围后才启动隔离副本，仅暴露 9 个 `coding_*` 工具；任务内可修复重试，结束后独立重验/冻结并释放执行资源，绝不自动发布或跨请求复用执行许可 |
-| 三类意图路由 | ✅ 完成 | 产品入口确定性路由 `read_only/coding/knowledge`；Knowledge 由 Conversation binding 强制决定，Coding 复用 Sandbox 状态机，只读路线裁剪 mutation/execute 工具；API/Context Budget/Turn 卡公开决策审计并支持显式覆盖 |
+| 自动 Coding 请求编排 | ✅ 已接入任务审批 | Chat `Code` 每请求批准范围后才启动副本；基础 9 个 `coding_*` 工具，选中本地 Bash 时 Executor 额外获得任务绑定 `run_bash`；结束后固定验证/冻结/回收，绝不自动发布或跨请求复用许可 |
+| 意图路由 | ✅ 完成 | 产品入口路由 `read_only/coding/knowledge/bash`；独立 Bash 需明确执行意图，Knowledge 由 Conversation binding 强制决定；只读路线不获得 mutation/execute 工具 |
 | Planner–Executor–Verifier Plan Mode | ✅ 完成 | Plan 是 Coding 路由的执行方式；PlanStore 持久化 DAG/版本/任务/事件，Planner 只提交结构化计划，Executor 复用单一 Session Sandbox，Verifier 按真实 diff 验收；最终仍停在签名 Artifact 用户审批门禁 |
-| Sandbox 审阅与发布冲突恢复 | ✅ 完成 | 冻结文件可在发布前逐项预览/下载；`publish_conflict` 保留签名制品并支持重新冻结或在冲突解除后重试发布；空变更不再生成可批准 Artifact，自动 Coding 可执行一次修复重试 |
+| Sandbox 审阅与发布冲突恢复 | ✅ 完成 | 冻结文件可预览/下载；任务绑定制品不重新冻结或自动 rebase，只对同一制品另行确认，严格基线冲突零写入；已提交回执可幂等恢复，旧非任务绑定流程保留兼容操作 |
 | Workspace / Chat 交互收敛 | ✅ 完成 | 聊天区直接显示 Sandbox 审批条；Workspace 文件树合并待发布冻结文件并支持 Python 安全高亮；桌面三栏和 Workspace 上下分区可拖拽并持久化；Thinking 在首段正文前也能流式展示 |
 | Coding Sandbox 阶段 4A 状态机/TOCTOU | ✅ 完成 | Backend 单一转换表与公开 actions/transitions、SQLite 完整记录 CAS、UI 动作投影；Validation→Freeze 屏障前 stale 可重验，屏障后 `artifact_stale` fail-closed 终止 |
 | Coding Sandbox 阶段 4B Workspace baseline | ✅ 完成 | WorkspaceStore mutation lock 内按 logical path 物化 revision-bound 树，逐文件稳定 stat/SHA 校验；operation 记录源 revision/tree SHA，主应用不再以独立项目目录作为输入事实源；4C 前发布 fail closed |
@@ -179,7 +188,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用隔离 MinerU Worker 与三档固�
 - Compaction 默认按完整 user→assistant/tool-result turn 切分；token 目标不拆最新 turn，压缩前后 token/window 可审计，旧摘要按 pi-compatible envelope 迭代折叠，瞬时摘要错误可按不可变输入重试
 - Web 消息序列化会递归检测 `U+FFFD` 并附加 `content_warnings`，`/api/messages` 同时返回 Session 汇总；前端在对应消息/工具卡标记疑似编码损坏和 JSON 字段路径，检测过程只读且明确不可自动恢复
 - Managed Coding Sandbox 使用顶层独立 `coding_sandbox` 包；主应用从 Session WorkspaceStore revision 物化不含存储 metadata 的逻辑树，再由 Agent 通过 provider-neutral 工具修改云端副本，固定验证通过后冻结并签名不可变制品
-- Chat 输入区可显式启用 `Code`：先准备精确快照并显示任务范围，用户批准后才创建请求专属副本；本轮工具/权限收窄为 9 个隔离 `coding_*` 工具，结束后服务端重验/冻结并释放计算资源，Changes 中另行审阅和批准发布
+- Chat 输入区可启用 `Code`：先准备精确快照并显示任务范围，批准后才创建请求副本；基础 9 个 `coding_*` 工具，选中本地 Bash 时额外装配任务绑定 `run_bash`；结束后固定验证/冻结/回收，Changes 中另行审阅并批准发布
 - Chat 输入区可显式启用 `Plan`：Planner 提交结构化 DAG 后，通过一张审批卡原子批准精确计划版本及执行范围；Executor/Verifier 使用同一获准副本但分别受执行/只读角色约束，失败原因与重试次数持久化，全部任务通过后经过 Validation→Freeze 屏障
 - 待批准或发布冲突的冻结 Artifact 可直接在 Workspace 树中预览/下载；目标 Workspace 冲突不会丢弃制品，用户可按冲突类型选择重新冻结或重试发布
 - 本机 Publisher 在项目级跨进程锁内复核完整 baseline 和签名制品，以备份、原子替换、hash-chained journal、失败回滚和启动恢复发布；Sandbox 永不挂载真实工作区

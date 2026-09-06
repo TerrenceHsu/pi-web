@@ -46,6 +46,7 @@ vi.mock("../../src/api/websocket", () => ({
 }))
 
 import CodingSandboxModal from "../../src/components/coding-sandbox/CodingSandboxModal.vue"
+import SandboxApprovalBar from "../../src/components/coding-sandbox/SandboxApprovalBar.vue"
 import { useCodingSandboxStore } from "../../src/stores/codingSandboxStore"
 import { useSessionStore } from "../../src/stores/sessionStore"
 
@@ -124,6 +125,43 @@ describe("coding Sandbox state recovery", () => {
 })
 
 describe("coding Sandbox publish approval", () => {
+  it("distinguishes Bash integrity and submits the displayed artifact receipt", async () => {
+    const awaiting = operation({
+      status: "awaiting_approval", publish_available: true,
+      publication: { purpose: "bash", backend: "local_docker" },
+      artifact_id: "artifact-" + "b".repeat(32), artifact_sha256: "c".repeat(64),
+      review_sha256: "d".repeat(64),
+      bash_evidence: { schema_version: "bash-output-integrity/v1", command_id: "bash-one", exit_code: 0 },
+      allowed_actions: ["publish", "discard"],
+    })
+    api.getLatestSandboxOperation.mockResolvedValue({ operation: awaiting })
+    api.publishSandboxOperation.mockResolvedValue(operation({ status: "publishing" }))
+    const store = useCodingSandboxStore()
+    await store.restoreSession("session-one")
+    const wrapper = mount(SandboxApprovalBar)
+    expect(wrapper.text()).toContain("未经功能验证")
+    expect(wrapper.text()).not.toContain("代码已验证")
+    expect(api.publishSandboxOperation).not.toHaveBeenCalled()
+    await wrapper.get('[data-testid="sandbox-chat-publish"]').trigger("click")
+    expect(api.publishSandboxOperation).toHaveBeenCalledWith(awaiting.operation_id, {
+      artifact_id: awaiting.artifact_id, artifact_sha256: awaiting.artifact_sha256,
+      review_sha256: awaiting.review_sha256,
+    })
+    wrapper.unmount()
+  })
+
+  it("does not offer refreeze or enable a disabled publisher", async () => {
+    api.getLatestSandboxOperation.mockResolvedValue({ operation: operation({
+      status: "publish_conflict", publish_available: false,
+      allowed_actions: ["discard"],
+    }) })
+    await useCodingSandboxStore().restoreSession("session-one")
+    const wrapper = mount(SandboxApprovalBar)
+    expect(wrapper.find('[data-testid="sandbox-chat-refreeze"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="sandbox-chat-retry-publish"]').attributes("disabled")).toBeDefined()
+    wrapper.unmount()
+  })
+
   it("keeps publish disabled until the reviewed diff is explicitly confirmed", async () => {
     const awaiting = operation({
       status: "awaiting_approval",

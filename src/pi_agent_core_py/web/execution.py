@@ -30,6 +30,7 @@ from coding_sandbox.admin.service import SandboxAdminService
 from coding_sandbox.backend import SandboxBackend
 from coding_sandbox.lifecycle import ManagedSandboxLifecycle
 from coding_sandbox.local_docker import LocalDockerExecutionConfig
+from coding_sandbox.publication import WORKSPACE_PUBLISH_POLICY_SHA256
 
 from ..agent.messages import ToolCall
 from ..agent.tooling import AgentTool
@@ -144,7 +145,7 @@ class WebExecutionRuntime:
                 {
                     "id": "local_docker",
                     "available": self._local.enabled and self._local_backend is not None,
-                    "label": "Local Docker · no network · task approval · publication unavailable",
+                    "label": "Local Docker · offline · separate execution/publication approvals",
                 },
             ],
             "approval_required": True,
@@ -153,7 +154,8 @@ class WebExecutionRuntime:
 
     async def bash_capability(self, session_id: str) -> dict[str, Any]:
         available = (
-            self._local.enabled and self._local_backend is not None
+            self._local.enabled
+            and self._local_backend is not None
             and (await self.selection(session_id))["backend"] == "local_docker"
         )
         return {
@@ -163,12 +165,16 @@ class WebExecutionRuntime:
 
     def request_identity(self, session_id: str, request_id: str) -> ExecutionRequest:
         return ExecutionRequest(
-            account_id=self._account, workspace_id=session_id,
-            session_id=session_id, request_id=request_id,
+            account_id=self._account,
+            workspace_id=session_id,
+            session_id=session_id,
+            request_id=request_id,
         )
 
     async def coding_bash_tool(
-        self, session_id: str, request_id: str | None,
+        self,
+        session_id: str,
+        request_id: str | None,
     ) -> AgentTool | None:
         """Request-local adapter, never another approval, history or runtime owner."""
         from coding_agent_app.execution.context import current_execution_context
@@ -177,9 +183,10 @@ class WebExecutionRuntime:
         from ..tools.bash import RunBashTool
 
         selected = await self._extensions.get_workspace_extension_selection(session_id)
-        if "run_bash" not in selected.tool_names or not (
-            await self.bash_capability(session_id)
-        )["available"]:
+        if (
+            "run_bash" not in selected.tool_names
+            or not (await self.bash_capability(session_id))["available"]
+        ):
             return None
 
         def workspace() -> object:
@@ -191,8 +198,10 @@ class WebExecutionRuntime:
             scope = task.prepared.scope
             context = current_execution_context()
             if (
-                scope.kind not in {"coding", "plan"} or scope.backend != "local_docker"
-                or context.identity != scope.identity or context.scope_sha256 != scope.sha256
+                scope.kind not in {"coding", "plan"}
+                or scope.backend != "local_docker"
+                or context.identity != scope.identity
+                or context.scope_sha256 != scope.sha256
                 or context.role != "executor"
             ):
                 raise ExecutionDenied("execution_role_or_scope_denied")
@@ -201,8 +210,11 @@ class WebExecutionRuntime:
         return RunBashTool(workspace)
 
     async def approve_execution(
-        self, prepared: PreparedExecution, plan: PlanSpec | None = None,
-        *, signal: asyncio.Event | None = None,
+        self,
+        prepared: PreparedExecution,
+        plan: PlanSpec | None = None,
+        *,
+        signal: asyncio.Event | None = None,
     ) -> bool:
         identity = prepared.scope.identity
 
@@ -213,7 +225,8 @@ class WebExecutionRuntime:
         selected = await self._extensions.get_workspace_extension_selection(identity.session_id)
         arguments["task_bash_enabled"] = (
             prepared.scope.kind in {"coding", "plan"}
-            and prepared.profile.backend == "local_docker" and "run_bash" in selected.tool_names
+            and prepared.profile.backend == "local_docker"
+            and "run_bash" in selected.tool_names
         )
         reason = (
             "Approve this exact plan/version and isolated scope for this request. "
@@ -223,25 +236,31 @@ class WebExecutionRuntime:
         )
         if prepared.bash is not None:
             arguments.update(
-                **prepared.bash.model_dump(), script_sha256=prepared.bash.sha256,
-                publication="Unavailable: copy changes are discarded after execution.",
+                **prepared.bash.model_dump(),
+                script_sha256=prepared.bash.sha256,
+                publication="Successful safe output may be frozen; separate approval required.",
             )
             reason = (
                 "Review the COMPLETE Bash script, cwd and input scope. Approve this script once "
                 "in a fresh local, offline Docker copy. Output may be sent to your model. "
-                "Copy changes will be discarded; no file publication or host execution."
+                "Output requires separate review and publication approval; no host execution."
             )
         grant = await self.runtime.store.get(identity)
         return await self._approvals.request_approval(
-            request_id=identity.request_id, session_id=identity.session_id,
+            request_id=identity.request_id,
+            session_id=identity.session_id,
             context=ToolApprovalContext(
                 tool_call=ToolCall(id=identity.task_id, name="execution_task", arguments={}),
-                tool=None, signal=signal,
+                tool=None,
+                signal=signal,
                 decision=ToolPermissionDecision(
-                    decision="require_approval", policy_name="execution_task", reason=reason,
+                    decision="require_approval",
+                    policy_name="execution_task",
+                    reason=reason,
                 ),
             ),
-            exact_arguments=arguments, on_approve=commit_approval,
+            exact_arguments=arguments,
+            on_approve=commit_approval,
             timeout_seconds=max(1, (grant.approval_deadline_ms - grant.created_at_ms) / 1000),
         )
 
@@ -283,7 +302,7 @@ class WebExecutionRuntime:
                 selection_sha256=digest_json(
                     [selection, asdict(extensions), config.model_dump(mode="json")]
                 ),
-                publish_policy_sha256=digest_json({"publication": "disabled"}),
+                publish_policy_sha256=WORKSPACE_PUBLISH_POLICY_SHA256,
             )
         record = await self._admin.get_config()
         limits = record.config.limits.model_copy(
@@ -300,7 +319,7 @@ class WebExecutionRuntime:
             limits=limits,
             network=record.config.network,
             selection_sha256=digest_json([selection, asdict(extensions)]),
-            publish_policy_sha256=digest_json({"publisher": "workspace-signed-v1"}),
+            publish_policy_sha256=WORKSPACE_PUBLISH_POLICY_SHA256,
         )
 
     async def _backend(self, profile: ExecutionProfile) -> SandboxBackend:

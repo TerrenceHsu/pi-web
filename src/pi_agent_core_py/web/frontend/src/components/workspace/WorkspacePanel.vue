@@ -560,6 +560,10 @@ onBeforeUnmount(() => {
           <strong>Validation {{ operation.validation.passed ? "passed" : "failed" }}</strong>
           <span>{{ operation.validation.duration_ms }} ms</span>
         </div>
+        <div v-if="operation.bash_evidence" class="sandbox-card" data-testid="bash-output-evidence">
+          <strong>Bash output integrity · exit 0</strong>
+          <span>输出完整性校验，不代表功能验证。请审阅 Changes 后单独批准发布。</span>
+        </div>
         <ol v-if="sandboxStore.events.length" class="sandbox-events">
           <li v-for="event in sandboxStore.events.slice(-8)" :key="event.sequence">
             <span>{{ event.event_type }}</span>

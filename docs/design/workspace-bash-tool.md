@@ -1,6 +1,6 @@
 # Workspace Bash 工具实现方案
 
-> 状态：阶段 2F Coding/Plan 内 Bash 复用已接入；独立 Bash 仍逐次审批并丢弃副本文件，Docker 发布及阶段 4–5 待完成。
+> 状态：阶段 3 安全制品与独立确认发布已实现；阶段 4–5 待完成，本轮未提交。
 > 日期：2026-09-05；实施进度更新：2026-09-06。
 > 范围：本机 Web Agent；Coding/Plan 统一任务执行授权，本地 Docker Workspace 副本中的 Bash 工具。
 > 本次修订：Coding/Plan 每任务授权并复用任务副本；独立 Bash 逐次确认；发布仍需单独批准。
@@ -9,14 +9,14 @@
 阶段 2D 已将 Web Coding/Plan 纳入每请求执行许可；阶段 2E 注册独立 `run_bash`，Python 授权行为不变。
 阶段 2F 同时向选中本地 Bash 的 Coding/Plan Executor 提供请求绑定适配器，与 `coding_run`
 共用当前任务许可、预算和文件副本；不逐脚本弹窗，不启动另一容器，也不借用独立 Bash 执行路径。
-阶段 2E 是输出型最小闭环：只留 stdout/stderr、退出结果与变更摘要，副本文件丢弃。
-下文独立 Bash 文件冻结/证据及 Docker 发布为后续目标；Coding/Plan 保持已有固定验证和冻结审阅。
+阶段 2E 曾只保留 stdout/stderr 与摘要；阶段 3 已接入独立 Bash 的专用文件证据和签名冻结，
+同时启用 Docker 制品的单独确认发布。Coding/Plan 保持固定验证，完整性证据不能替代测试证据。
 初查 PATH 未找到 Docker；随后依据用户提供的非标准安装路径找到 CLI 29.7.2。
 Desktop 曾因旧 socket 无法访问而退出；获准保留并重建运行目录后已恢复，WSL 数据通过官方设置
 迁至 `D:\DockerData\DockerDesktopWSL`。见 [迁移记录](../validation/docker-data-migration-2026-09-06.md)。
 固定 Bash 镜像已构建；阶段 2C 的 25 项后端 smoke 为历史证据。本轮新增 Coding/Plan 两条真实 Docker
 Web 链路，验证批准后启动、固定验证/冻结、回收计算资源后仍可审阅 diff。E2B 原发布流程保留，
-Docker 发布仍不可用。阶段 2E 另通过真实 Web→精确脚本审批→Docker→回收链路；
+上述历史阶段的 Docker 发布尚未开放；阶段 3 已补齐。阶段 2E 另通过真实 Web→脚本审批→Docker→回收链路；
 本轮未自动启用真实部署配置。见 [阶段 2D 记录](../validation/workspace-bash-stage2d-2026-09-06.md)
 和 [阶段 2E 记录](../validation/workspace-bash-stage2e-2026-09-06.md)。阶段 2F 的任务内混合执行验证见
 [阶段 2F 记录](../validation/workspace-bash-stage2f-2026-09-06.md)。
@@ -467,6 +467,15 @@ Docker 发布仍关闭。完整交付边界和验证见阶段 2D 记录。
 固定验证、冻结证据与发布门禁不变；详见 [阶段 2F 验证](../validation/workspace-bash-stage2f-2026-09-06.md)。
 
 ### 阶段 3：安全制品与确认发布
+
+**已实现**。独立 Bash 使用独立 schema `pi-agent-bash-artifact/v1` 和 `bash-output-integrity/v1`；
+Coding/Plan 保留 `pi-agent-coding-artifact/v1`。两类共享 metadata 成员布局与签名/导出/事务实现，
+按 manifest schema 严格选择证据类型，拒绝混用。内部胶囊签名绑定 Session、用途、执行范围、发布策略、
+原始 baseline 和 artifact；Web 发布提交 artifact ID / archive SHA / review SHA，拒绝空或过期确认。
+签名制品已生成但计算资源未确认回收时，发布仍拒绝；重启时只恢复回收已确认的审阅制品，不恢复执行。
+Workspace 持久提交回执覆盖“提交成功但生命周期状态未落盘”窗口，重试不重放命令、也不再次提升 revision。
+保护路径/purpose、严格完整基线冲突、链接/特殊文件/稀疏 tar/跨平台危险路径都 fail closed。
+实现与测试见 [阶段 3 验证](../validation/workspace-bash-stage3-2026-09-06.md)。
 
 实现独立 Bash 的专用证据类型，以及 Docker Coding/Plan 的固定验证和原有证据链；
 复用受限归档导入、冻结签名、完整 diff、发布确认和原子提交。

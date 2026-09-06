@@ -21,6 +21,7 @@ from .access import OperationExecutionGuard
 from .artifact import (
     MAX_ARTIFACT_METADATA_BYTES,
     ArtifactSigner,
+    OutputEvidence,
     SandboxArtifactContents,
     SandboxOutputArtifact,
     SandboxRemoteArtifactReceipt,
@@ -44,6 +45,7 @@ from .models import (
     SandboxOutputCallback,
     validate_sandbox_path,
 )
+from .output_evidence import BashArtifactScope, BashOutputIntegrityEvidence
 from .remote_artifact_helper import REMOTE_ARTIFACT_HELPER
 from .remote_workspace_helper import REMOTE_WORKSPACE_HELPER
 from .snapshot import (
@@ -122,6 +124,8 @@ class SandboxOperation(CodingWorkspace):
         clock_ms: Callable[[], int] | None = None,
         execution_guard: OperationExecutionGuard | None = None,
         require_execution_grant: bool = False,
+        bash_artifact_scope: BashArtifactScope | None = None,
+        output_path_allowed: Callable[[str], bool] | None = None,
     ) -> None:
         resolved_staging = staging_root.resolve(strict=False)
         if not resolved_staging.is_absolute():
@@ -153,6 +157,9 @@ class SandboxOperation(CodingWorkspace):
             raise SandboxWorkspaceError("validation_config_invalid")
         self._validation_plan = validation_plan
         self._last_validation_evidence: SandboxValidationEvidence | None = None
+        self._bash_artifact_scope = bash_artifact_scope
+        self._bash_result: tuple[BashRequest, SandboxCommandResult, int] | None = None
+        self._output_path_allowed = output_path_allowed
         self._artifact_signer = artifact_signer
         self._frozen = False
         self._output_artifact: SandboxOutputArtifact | None = None
@@ -196,6 +203,10 @@ class SandboxOperation(CodingWorkspace):
     @property
     def output_artifact(self) -> SandboxOutputArtifact | None:
         return self._output_artifact
+
+    @property
+    def standalone_bash(self) -> bool:
+        return self._bash_artifact_scope is not None
 
     async def list_files(
         self,
@@ -434,9 +445,11 @@ class SandboxOperation(CodingWorkspace):
             raise SandboxWorkspaceError("resource_limit")
         async with self._lock:
             self._ensure_mutable()
-            return await self._execute_user_command(
+            result = await self._execute_user_command(
                 command, signal=signal, on_output=on_output, bash=request
             )
+            self._bash_result = (request, result, self._workspace_revision)
+            return result
 
     async def _execute_user_command(
         self,
@@ -580,7 +593,35 @@ class SandboxOperation(CodingWorkspace):
         signer = self._artifact_signer
         if signer is None:
             raise SandboxWorkspaceError("artifact_signing_unavailable")
-        evidence = await self._require_current_validation_unlocked()
+        evidence: OutputEvidence
+        if self._bash_artifact_scope is not None:
+            await self._check_access(writing=True)
+            scope = self._bash_artifact_scope
+            recorded = self._bash_result
+            if recorded is None:
+                raise SandboxWorkspaceError("validation_stale")
+            request, result, revision = recorded
+            if (
+                not result.succeeded
+                or revision != self._workspace_revision
+                or request.sha256 != scope.script_sha256
+                or request.cwd != scope.cwd
+                or self._handle.provider != "local_docker"
+            ):
+                raise SandboxWorkspaceError("validation_stale")
+            fingerprint = await self._workspace_fingerprint_unlocked()
+            evidence = BashOutputIntegrityEvidence(
+                **scope.model_dump(),
+                operation_id=self.operation_id,
+                command_id=result.command_id,
+                workspace_revision=revision,
+                workspace_sha256_after=fingerprint.sha256,
+                result_sha256=hashlib.sha256(
+                    canonical_json_bytes(result.model_dump(mode="json"))
+                ).hexdigest(),
+            )
+        else:
+            evidence = await self._require_current_validation_unlocked()
         artifact_id = f"artifact-{uuid4().hex}"
         created_at_ms = self._clock_ms()
         (
@@ -650,7 +691,9 @@ class SandboxOperation(CodingWorkspace):
                 expected_baseline_binary=expected_baseline_binary,
                 expected_manifest_sha256=remote.manifest_sha256,
             )
-            if not await self._validation_source_matches_unlocked():
+            if isinstance(evidence, SandboxValidationEvidence) and not (
+                await self._validation_source_matches_unlocked()
+            ):
                 self._last_validation_evidence = None
                 raise SandboxWorkspaceError("artifact_stale")
             try:
@@ -661,6 +704,8 @@ class SandboxOperation(CodingWorkspace):
             if final_fingerprint.sha256 != evidence.workspace_sha256_after:
                 self._last_validation_evidence = None
                 raise SandboxWorkspaceError("artifact_stale")
+            if self._execution_guard is not None:
+                await self._check_access(writing=True)
             signature = create_artifact_signature(
                 signer,
                 archive_sha256=local_sha256,
@@ -694,7 +739,7 @@ class SandboxOperation(CodingWorkspace):
         *,
         artifact_id: str,
         created_at_ms: int,
-        evidence: SandboxValidationEvidence,
+        evidence: OutputEvidence,
     ) -> tuple[bytes, dict[str, SandboxFileEntry], dict[str, bool]]:
         current_list = await self._list_files_unlocked(
             ".",
@@ -702,6 +747,13 @@ class SandboxOperation(CodingWorkspace):
         )
         if current_list.truncated:
             raise SandboxWorkspaceError("resource_limit")
+        if self._output_path_allowed is not None:
+            raw_current = {entry.path: entry for entry in current_list.files}
+            for path in set(self._baseline) | set(raw_current):
+                if self._baseline.get(path) != raw_current.get(path) and not (
+                    self._output_path_allowed(path)
+                ):
+                    raise SandboxWorkspaceError("unsafe_path", relative_path=path)
         current = {
             entry.path: entry
             for entry in current_list.files
@@ -746,7 +798,11 @@ class SandboxOperation(CodingWorkspace):
                 }
             )
         payload = {
-            "schema_version": "pi-agent-artifact-export/v1",
+            "schema_version": (
+                "pi-agent-bash-export/v1"
+                if isinstance(evidence, BashOutputIntegrityEvidence)
+                else "pi-agent-artifact-export/v1"
+            ),
             "artifact_id": artifact_id,
             "operation_id": self.operation_id,
             "workspace_revision": evidence.workspace_revision,
@@ -848,7 +904,7 @@ class SandboxOperation(CodingWorkspace):
         *,
         artifact_id: str,
         created_at_ms: int,
-        evidence: SandboxValidationEvidence,
+        evidence: OutputEvidence,
         expected_current: dict[str, SandboxFileEntry],
         expected_baseline_binary: dict[str, bool],
         expected_manifest_sha256: str,
