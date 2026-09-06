@@ -18,7 +18,7 @@ from coding_agent_app.execution.models import (
     ExecutionIdentity,
     ExecutionScope,
 )
-from coding_agent_app.execution.service import ExecutionService
+from coding_agent_app.execution.service import CommandInterrupted, ExecutionService
 from coding_agent_app.execution.store import ExecutionStore
 from coding_sandbox.models import SandboxCommandResult
 
@@ -448,6 +448,36 @@ async def test_two_connections_cannot_approve_or_claim_twice(tmp_path: Path) -> 
         )
         assert sum(not isinstance(item, BaseException) for item in claims) == 1
         assert (await right.get(value.identity)).commands_used == 1
+
+
+@pytest.mark.parametrize("command_id", ["command", "other"])
+async def test_interrupted_result_requires_matching_command_identity(
+    store: ExecutionStore, command_id: str,
+) -> None:
+    call = await active(store)
+
+    async def check(value: ExecutionScope) -> bool:
+        return True
+
+    async def cleanup(identity: ExecutionIdentity) -> bool:
+        return True
+
+    async def run(signal: asyncio.Event) -> SandboxCommandResult:
+        return SandboxCommandResult(
+            command_id=command_id, exit_code=None, termination_reason="timed_out",
+            stdout="bounded partial output", started_at_ms=1, finished_at_ms=2,
+        )
+
+    with pytest.raises(ExecutionDenied, match="execution_interrupted") as caught:
+        await ExecutionService(store, scope_check=check, cleanup=cleanup).execute(
+            call, intent(), run=run,
+        )
+    assert isinstance(caught.value, CommandInterrupted) is (command_id == "command")
+    if isinstance(caught.value, CommandInterrupted):
+        assert caught.value.result.termination_reason == "timed_out"
+        assert caught.value.result.stdout == "bounded partial output"
+    grant = await store.get(call.identity)
+    assert grant.state == "interrupted" and not grant.cleanup_pending
 
 
 @pytest.mark.parametrize("mode", ["capability_revoked", "caller_cancelled", "timeout"])

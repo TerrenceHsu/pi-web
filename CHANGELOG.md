@@ -8,6 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Standalone Web Bash approval and private history（2026-09-06）
+
+- 先将阶段 2C/2D 提交为 `297a81a`，然后实现阶段 2E；新改动尚未提交，没有推送。
+- Workspace 的可选 `run_bash` 仅在明确 Bash 请求中装配，要求已配置/选中 Local Docker；
+  完整脚本、cwd、SHA、快照及预算逐次确认，默认策略不重复弹通用卡，显式 deny 优先。
+- 每条脚本使用新离线副本，输出、非零退出、超时/中断与有界变更摘要可查询，容器和许可终结回收；
+  所有副本文件丢弃，不签发文件制品、不自动发布、不使用宿主执行或 E2B 回退。
+- 增加账号/Session 绑定 SQLite 历史（上限 200 条、终态 30 天、新运行时裁剪）及只读前端；
+  刷新/重启不重放，未结束记录标记 interrupted，清理债务仍以执行服务为准。
+- 修复协作 Stop 未返回 Agent 终态及取消收尾遗漏历史的窗口；上下文预览与实际工具集保持一致，
+  未匹配命令 ID 的输出不归入当前任务。Coding/Plan 继续使用 `coding_run`，Python 权限不变。
+- 相关后端 179 passed / 3 skipped，收尾专项 73 passed / 1 skipped；前端 224、Chromium 26 项
+  最终状态、真实 Docker 独立链路、静态检查及 Evals 通过。没有重跑完整后端覆盖率；详见
+  [阶段 2E 验证](docs/validation/workspace-bash-stage2e-2026-09-06.md)。
+
 ### Web Coding/Plan execution approval（2026-09-06）
 
 - Web 以可信账户/活跃 request/Workspace 组合 ExecutionTaskRuntime；Coding 任务范围确认、Plan 精确版本与

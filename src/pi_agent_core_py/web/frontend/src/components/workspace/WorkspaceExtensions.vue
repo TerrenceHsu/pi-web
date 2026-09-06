@@ -5,6 +5,7 @@ import { useSessionStore } from "../../stores/sessionStore"
 import { useSkillStore } from "../../stores/skillStore"
 import { useWorkspaceExtensionStore } from "../../stores/workspaceExtensionStore"
 import WorkspaceExecution from "./WorkspaceExecution.vue"
+import BashRunHistory from "./BashRunHistory.vue"
 
 const sessionStore = useSessionStore()
 const skillStore = useSkillStore()
@@ -78,7 +79,8 @@ watch(sessionId, (session) => void load(session), { immediate: true })
     <p v-if="store.error" class="extension-error">{{ store.error }}</p>
     <div v-if="!sessionId" class="extension-empty">Select a Session first.</div>
     <template v-else-if="store.snapshot">
-      <WorkspaceExecution :key="sessionId" :session-id="sessionId" />
+      <WorkspaceExecution :key="sessionId" :session-id="sessionId" @changed="load(sessionId)" />
+      <BashRunHistory :key="`bash-${sessionId}`" :session-id="sessionId" />
       <section class="extension-group">
         <h3>Tools</h3>
         <label v-for="tool in store.snapshot.tools ?? []" :key="tool.name" class="extension-option">
@@ -91,7 +93,9 @@ watch(sessionId, (session) => void load(session), { immediate: true })
           />
           <span>
             <strong>{{ tool.label }}</strong>
-            <small>{{ tool.available ? "Local calculation · optional" : tool.reason }}</small>
+            <small>{{ tool.available
+              ? tool.name === "run_bash" ? "Offline copy · confirm each script · files discarded" : "Local calculation · optional"
+              : tool.reason }}</small>
           </span>
         </label>
         <p class="extension-empty">

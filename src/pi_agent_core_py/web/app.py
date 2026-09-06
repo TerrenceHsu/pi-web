@@ -81,6 +81,7 @@ from coding_agent_app.core import (
 from coding_agent_app.execution.models import ExecutionDenied
 from coding_agent_app.execution.runtime import ExecutionRequest
 from coding_agent_app.intent_router import (
+    BASH_SYSTEM_PROMPT,
     READ_ONLY_SYSTEM_PROMPT,
     IntentDecision,
     is_read_only_tool_name,
@@ -451,6 +452,8 @@ def create_app(
         "sse_clients": set(),
         "ws_clients": set(),
         "coding_sandbox_tool_names": set(),
+        "bash_route_requests": set(),
+        "bash_tool_registered": False,
         "continuity_tasks": set(),
         "coding_agent_session_ids": {},
         "coding_agent_request_reservations": set(),
@@ -518,7 +521,7 @@ def create_app(
         resources=HarnessCodingAgentResourceLoader(
             harness,
             selection_loader=_load_workspace_resource_selection,
-            optional_tool_names=frozenset({"analyze_data", "run_python_analysis"}),
+            optional_tool_names=frozenset({"analyze_data", "run_python_analysis", "run_bash"}),
         ),
     )
     coding_agent_runtime = CodingAgentRuntime(
@@ -1279,6 +1282,17 @@ def create_app(
                             )
                             await execution_runtime.init()
                             _app.state.execution_runtime = execution_runtime
+                            from .bash import BashHistory, WebBashTool
+
+                            bash_history = BashHistory(session_connection)
+                            await bash_history.init()
+                            _app.state.bash_history = bash_history
+                            if harness.agent.tools.has("run_bash"):
+                                raise RuntimeError("run_bash is reserved for Web execution")
+                            harness.agent.tools.register(WebBashTool(
+                                execution_runtime, bash_history, _bash_request_identity,
+                            ))
+                            container["bash_tool_registered"] = True
                         from ..tools.coding_sandbox import (
                             create_coding_sandbox_tools,
                             create_coding_validation_tool,
@@ -1353,6 +1367,10 @@ def create_app(
                 if closing_execution is not None:
                     await closing_execution.shutdown()
                 _app.state.execution_runtime = None
+                _app.state.bash_history = None
+                if container["bash_tool_registered"]:
+                    harness.agent.tools.unregister("run_bash")
+                    container["bash_tool_registered"] = False
                 registered_names = container["coding_sandbox_tool_names"]
                 for tool_name in tuple(registered_names):
                     harness.agent.tools.unregister(tool_name)
@@ -1519,6 +1537,7 @@ def create_app(
     app.state.credential_runtime = None
     app.state.coding_sandbox_runtime = None
     app.state.execution_runtime = None
+    app.state.bash_history = None
     # P1-E2-3B1: provider_config_runtime placeholder——lifespan 启动时填入
     app.state.provider_config_runtime = None
     # M1-5: request_provider_runtime placeholder——仅 cred + pc runtime 都启用时填入
@@ -1809,6 +1828,17 @@ def create_app(
         # normal chat; its service always pauses for explicit execution consent.
         # Automated Coding planner read-tools retain the strict read-only set.
         return is_read_only_tool_name(name) or name == "run_python_analysis"
+
+    def _bash_request_identity() -> ExecutionRequest:
+        rid = request_id_context.get()
+        record = state.active_requests.get(rid) if rid else None
+        execution = cast(WebExecutionRuntime | None, app.state.execution_runtime)
+        if (record is None or execution is None or record.status != "running"
+                or record.abort_reason is not None or record.session_id is None
+                or tool_session_context.get() != record.session_id
+                or rid not in container["bash_route_requests"]):
+            raise ExecutionDenied("execution_request_denied")
+        return execution.request_identity(record.session_id, record.id)
 
     from ..agent.harness.compaction.budget import ContextEstimate, estimate_context
     from ..agent.loop import ModelCallDecision
@@ -2600,6 +2630,7 @@ def create_app(
             if (coding_mode_raw or execution_mode == "plan") and intent_mode in {
                 "read_only",
                 "knowledge",
+                "bash",
             }:
                 raise PromptValidationError(
                     400,
@@ -2690,7 +2721,7 @@ def create_app(
             if knowledge_conversation is not None and (
                 coding_mode_raw
                 or execution_mode == "plan"
-                or intent_mode in {"coding", "read_only"}
+                or intent_mode in {"coding", "read_only", "bash"}
             ):
                 raise PromptValidationError(
                     400,
@@ -3963,7 +3994,7 @@ def create_app(
             parsed_intent_mode = parse_intent_mode(intent_mode)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
-        if coding_mode and parsed_intent_mode in {"read_only", "knowledge"}:
+        if coding_mode and parsed_intent_mode in {"read_only", "knowledge", "bash"}:
             raise HTTPException(status_code=400, detail="coding_mode conflicts with intent_mode")
 
         knowledge_conversation = None
@@ -3986,7 +4017,7 @@ def create_app(
                         status_code=400,
                         detail="Knowledge conversations use a fixed built-in Skill",
                     )
-                if coding_mode or parsed_intent_mode in {"coding", "read_only"}:
+                if coding_mode or parsed_intent_mode in {"coding", "read_only", "bash"}:
                     raise HTTPException(
                         status_code=400,
                         detail="Knowledge conversations use their bound Knowledge route",
@@ -4081,6 +4112,8 @@ def create_app(
                     route_instructions = AUTOMATED_CODING_PROMPT
                 elif intent is not None and intent.route == "read_only":
                     route_instructions = READ_ONLY_SYSTEM_PROMPT
+                elif intent is not None and intent.route == "bash":
+                    route_instructions = BASH_SYSTEM_PROMPT
                 suffix = (
                     "\n\n".join(
                         block
@@ -4172,8 +4205,15 @@ def create_app(
                         if tool.name in registered_names or tool.name == "read_tool_output"
                     ]
                 )
+            elif intent is not None and intent.route == "bash":
+                tool_registry = ToolRegistry([
+                    t for t in resource_snapshot.tools
+                    if is_read_only_tool_name(t.name) or t.name == "run_bash"
+                ])
             else:
-                tool_registry = ToolRegistry(list(resource_snapshot.tools))
+                tool_registry = ToolRegistry([
+                    tool for tool in resource_snapshot.tools if tool.name != "run_bash"
+                ])
         if tool_registry is None:
             raise HTTPException(status_code=503, detail="Knowledge tools unavailable")
         estimate = estimate_context(
@@ -4338,6 +4378,8 @@ def create_app(
                     )
             elif validated.intent is not None and validated.intent.route == "read_only":
                 route_instructions = READ_ONLY_SYSTEM_PROMPT
+            elif validated.intent is not None and validated.intent.route == "bash":
+                route_instructions = BASH_SYSTEM_PROMPT
             prompt_suffix = (
                 "\n\n".join(
                     block
@@ -4386,7 +4428,9 @@ def create_app(
                 request_mode: CodingAgentMode = "direct"
                 coding_tool_names: set[str] = set()
                 override_tools = None
-                request_permission_policy = None
+                from ..policy import ToolPermissionPolicy
+
+                request_permission_policy: ToolPermissionPolicy | None = None
                 if (
                     provider_bound_operation is None
                     and validated.intent is not None
@@ -4432,6 +4476,30 @@ def create_app(
                 base_resources = await coding_agent_services.resources.load(
                     validated.session_id
                 )
+                request_tools = base_resources.tools
+                if validated.intent is not None and validated.intent.route == "bash":
+                    request_tools = tuple(t for t in request_tools
+                                          if is_read_only_tool_name(t.name) or t.name == "run_bash")
+                    # The reserved Web tool owns mandatory exact approval. Skip
+                    # only the stock policy's generic unknown-tool prompt, not
+                    # explicit denies or any caller-supplied custom policy.
+                    from copy import copy
+
+                    from ..policy import DefaultToolPermissionPolicy
+
+                    original_policy = agent_session.harness.permission_policy
+                    if type(original_policy) is DefaultToolPermissionPolicy:
+                        bash_policy = copy(original_policy)
+                        bash_policy.allowed_tools = {
+                            *original_policy.allowed_tools, "run_bash",
+                        }
+                        request_permission_policy = bash_policy
+                    rid = request_id_context.get()
+                    if rid is not None:
+                        container["bash_route_requests"].add(rid)
+                        stack.callback(container["bash_route_requests"].discard, rid)
+                else:
+                    request_tools = tuple(t for t in request_tools if t.name != "run_bash")
                 request_resources = CodingAgentResourceSnapshot(
                     skills=(
                         base_resources.skills
@@ -4440,7 +4508,7 @@ def create_app(
                         and provider_bound_operation is None
                         else ()
                     ),
-                    tools=base_resources.tools,
+                    tools=request_tools,
                     mcp_tool_names=base_resources.mcp_tool_names,
                     context_fragments=((prompt_suffix,) if prompt_suffix else ()),
                     diagnostics=base_resources.diagnostics,
@@ -5832,7 +5900,7 @@ def create_app(
             },
             "intent_routing": {
                 "enabled": state.intent_routing_enabled,
-                "routes": ["read_only", "coding", "knowledge"],
+                "routes": ["read_only", "coding", "knowledge", "bash"],
             },
             "plan_mode": {
                 "enabled": state.plan_mode_enabled,
@@ -8201,6 +8269,12 @@ def create_app(
             }, {
                 "name": "run_python_analysis", "label": "Python Data Analysis · confirm each run",
                 **python_capability, "selected": "run_python_analysis" in selection.tool_names,
+            }, {
+                "name": "run_bash", "label": "Bash · Local Docker · confirm each script",
+                **(await app.state.execution_runtime.bash_capability(session_id)
+                   if app.state.execution_runtime is not None
+                   else {"available": False, "reason": "Execution is not configured."}),
+                "selected": "run_bash" in selection.tool_names,
             }],
             "selected_tool_names": list(selection.tool_names),
         }
@@ -8308,6 +8382,21 @@ def create_app(
             return await execution.select(session_id, payload)
         except ExecutionDenied as exc:
             raise HTTPException(409, exc.code) from None
+
+    @app.get("/api/workspaces/{session_id}/bash-runs", response_model=None)
+    async def list_bash_runs(session_id: str) -> dict[str, Any]:
+        await _require_workspace_session(session_id)
+        history = app.state.bash_history
+        return {"runs": [] if history is None else await history.read(session_id)}
+
+    @app.get("/api/workspaces/{session_id}/bash-runs/{run_id}", response_model=None)
+    async def get_bash_run(session_id: str, run_id: str) -> dict[str, Any]:
+        await _require_workspace_session(session_id)
+        history = app.state.bash_history
+        rows = [] if history is None else await history.read(session_id, run_id)
+        if not rows:
+            raise HTTPException(404, "Bash run not found")
+        return cast(dict[str, Any], rows[0])
 
     from .data_analysis import register_analysis_routes
 

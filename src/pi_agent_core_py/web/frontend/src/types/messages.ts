@@ -170,7 +170,7 @@ export function isPersistedMessageDto(
   return typeof (m as PersistedMessageDto).message_id === "string"
 }
 
-export type IntentRoute = "read_only" | "coding" | "knowledge"
+export type IntentRoute = "read_only" | "coding" | "knowledge" | "bash"
 export type IntentMode = "auto" | IntentRoute
 export type ExecutionMode = "direct" | "plan"
 

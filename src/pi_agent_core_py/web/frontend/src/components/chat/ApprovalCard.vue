@@ -7,7 +7,10 @@ import { useChatStore } from "../../stores/chatStore"
 const props = defineProps<{ item: ToolApprovalItem }>()
 const chatStore = useChatStore()
 const executionTask = computed(() => props.item.policyName === "execution_task")
+const bashScript = computed(() => executionTask.value && props.item.arguments.kind === "bash"
+  && typeof props.item.arguments.script === "string" ? props.item.arguments.script : null)
 const approvalLabel = computed(() => !executionTask.value ? "Approve once"
+  : bashScript.value !== null ? "Approve this exact Bash script once"
   : props.item.arguments.kind === "plan" ? "Approve this plan and isolated execution" : "Allow this Coding task to execute")
 const pythonCode = computed(() => props.item.policyName === "python_execution"
   && typeof props.item.arguments.code === "string" ? props.item.arguments.code : null)
@@ -55,9 +58,20 @@ async function decide(decision: ToolApprovalDecision) {
     <p v-if="item.reason" class="reason">{{ item.reason }}</p>
     <p v-if="executionTask" class="reason" data-testid="execution-scope-warning">
       {{ item.arguments.data_location }} · {{ item.arguments.backend }} · input revision {{ item.arguments.workspace_revision }}.
-      This request only. Future commands are chosen by the Agent within the displayed limits.
-      No automatic writeback; publishing changes requires separate approval.
+      <template v-if="bashScript !== null">
+        This exact script once in a new offline copy. Copy file changes are discarded in this stage.
+        Only bounded output and a change summary are retained; no publication or host execution.
+      </template>
+      <template v-else>
+        This request only. Future commands are chosen by the Agent within the displayed limits.
+        No automatic writeback; publishing changes requires separate approval.
+      </template>
     </p>
+    <details v-if="bashScript !== null" open>
+      <summary>Complete Bash script · cwd {{ item.arguments.cwd }} · {{ item.arguments.timeout_seconds }} seconds</summary>
+      <pre data-testid="approval-bash-script">{{ bashScript }}</pre>
+      <p>SHA256: {{ item.arguments.script_sha256 }}</p>
+    </details>
     <details v-if="pythonCode !== null" open>
       <summary>Complete Python code · review before execution</summary>
       <pre data-testid="approval-python-code">{{ pythonCode }}</pre>

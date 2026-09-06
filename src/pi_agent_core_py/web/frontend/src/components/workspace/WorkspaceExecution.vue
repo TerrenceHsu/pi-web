@@ -10,6 +10,7 @@ interface Capability {
   backends: { id: Backend; label: string; available: boolean }[]
 }
 const props = defineProps<{ sessionId: string }>()
+const emit = defineEmits<{ changed: [] }>()
 const state = ref<Capability | null>(null)
 const busy = ref(false)
 const error = ref("")
@@ -41,7 +42,10 @@ async function select(event: Event) {
     const value = await requestJson<Capability>(path(props.sessionId), {
       method: "PUT", body: { backend, expected_revision: state.value.revision },
     })
-    if (token === generation) state.value = value
+    if (token === generation) {
+      state.value = value
+      emit("changed")
+    }
   } catch {
     if (token === generation) error.value = "Selection changed or backend is unavailable. Reload before retrying."
   } finally {
@@ -66,7 +70,9 @@ async function select(event: Event) {
     <p v-else>Execution is not configured.</p>
     <p>Selection does not authorize execution. Each request needs approval before creating a copy.
       Changing this selection revokes current execution. Publishing needs separate confirmation.
-      Python Analysis permission is independent; standalone Bash is not enabled.</p>
+      Python Analysis permission is independent. For standalone Bash, choose Local Docker,
+      select the optional Bash tool, then ask “run_bash …” in normal chat with Code/Plan off.
+      Each script needs confirmation. Copy changes are discarded; output may reach your model.</p>
     <p v-if="error" role="alert">{{ error }}</p>
   </section>
 </template>

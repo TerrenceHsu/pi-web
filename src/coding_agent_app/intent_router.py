@@ -6,8 +6,8 @@ import re
 from dataclasses import dataclass
 from typing import Literal, cast
 
-IntentRoute = Literal["read_only", "coding", "knowledge"]
-IntentMode = Literal["auto", "read_only", "coding", "knowledge"]
+IntentRoute = Literal["read_only", "coding", "knowledge", "bash"]
+IntentMode = Literal["auto", "read_only", "coding", "knowledge", "bash"]
 IntentSource = Literal["explicit", "rule", "fallback", "session_binding"]
 
 READ_ONLY_SYSTEM_PROMPT = """# Read-only request
@@ -17,6 +17,19 @@ provided for this turn. Do not claim to have changed files, executed code, or co
 an implementation. If a mutation is required, explain it and ask the user to explicitly
 request implementation or enable Code mode.
 """
+
+BASH_SYSTEM_PROMPT = """# Standalone Bash request
+
+Use only the supplied readers and optional run_bash tool. Each script needs human
+approval and runs once in a NEW offline Docker copy, never on the host. No network,
+package installation or implicit Python Analysis permission. Copy changes are
+DISCARDED in this stage; only bounded output and a change summary are retained.
+Do not claim files were saved, published, or that one call's files persist into
+another. If run_bash is unavailable, explain that local Docker and the Workspace
+tool selection must first be configured. Do not use another tool to bypass it.
+"""
+
+_BASH_REQUEST = re.compile(r"\b(?:run_bash|bash)\b", re.IGNORECASE)
 
 _STRONG_READ_ONLY = re.compile(
     r"(?:不要|不需要|无需|别|禁止)(?:修改|改动|写入|写代码|执行|运行|提交|实现)"
@@ -133,8 +146,9 @@ def parse_intent_mode(value: object) -> IntentMode:
         "read_only",
         "coding",
         "knowledge",
+        "bash",
     }:
-        raise ValueError("intent_mode must be auto, read_only, coding, or knowledge")
+        raise ValueError("intent_mode must be auto, read_only, coding, knowledge, or bash")
     return cast(IntentMode, value)
 
 
@@ -171,6 +185,11 @@ def route_intent(
             reason_code="explicit_read_only_mode",
             explicit=True,
         )
+    if intent_mode == "bash":
+        return IntentDecision(
+            route="bash", confidence=1.0, source="explicit",
+            reason_code="explicit_bash_mode", explicit=True,
+        )
 
     normalized = " ".join(text.strip().split())
     if _STRONG_READ_ONLY.search(normalized):
@@ -186,6 +205,10 @@ def route_intent(
             confidence=0.9,
             source="rule",
             reason_code="analysis_or_plan_request",
+        )
+    if _BASH_REQUEST.search(normalized):
+        return IntentDecision(
+            route="bash", confidence=0.9, source="rule", reason_code="standalone_bash_request",
         )
     if _CODING_ARTIFACT_REQUEST.search(normalized):
         return IntentDecision(

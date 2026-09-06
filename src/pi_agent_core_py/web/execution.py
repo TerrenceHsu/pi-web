@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agent_workspace.store import WorkspaceStore
 from coding_agent_app.execution.automation import ApprovedCodingAutomation, approval_arguments
-from coding_agent_app.execution.models import ExecutionDenied, digest_json
+from coding_agent_app.execution.models import ExecutionDenied, ExecutionScope, digest_json
 from coding_agent_app.execution.runtime import (
     ExecutionProfile,
     ExecutionRequest,
@@ -72,6 +72,7 @@ class WebExecutionRuntime:
         self._local_backend = local_backend_factory
         self._approvals = approvals
         self._tasks: dict[str, ApprovedCodingAutomation] = {}
+        self.bash_tasks: dict[str, PreparedExecution] = {}
         self._watcher: asyncio.Task[None] | None = None
         baseline = WorkspaceSandboxBaselineProvider(
             workspace,
@@ -81,8 +82,9 @@ class WebExecutionRuntime:
         async def version(request: ExecutionRequest) -> tuple[int, str]:
             return await baseline.current_version(request.session_id)
 
-        async def enabled(_scope: object) -> bool:
-            return True  # Full request/profile/selection checks are mandatory runtime ports.
+        async def enabled(scope: ExecutionScope) -> bool:
+            selected = await extensions.get_workspace_extension_selection(scope.identity.session_id)
+            return scope.kind != "bash" or "run_bash" in selected.tool_names
 
         self.runtime = ExecutionTaskRuntime(
             store=ExecutionStore(connection),
@@ -145,8 +147,64 @@ class WebExecutionRuntime:
                 },
             ],
             "approval_required": True,
-            "bash_tool_enabled": False,
+            "bash_tool_enabled": (await self.bash_capability(session_id))["available"],
         }
+
+    async def bash_capability(self, session_id: str) -> dict[str, Any]:
+        available = (
+            self._local.enabled and self._local_backend is not None
+            and (await self.selection(session_id))["backend"] == "local_docker"
+        )
+        return {
+            "available": available,
+            "reason": None if available else "Select a configured Local Docker backend first.",
+        }
+
+    def request_identity(self, session_id: str, request_id: str) -> ExecutionRequest:
+        return ExecutionRequest(
+            account_id=self._account, workspace_id=session_id,
+            session_id=session_id, request_id=request_id,
+        )
+
+    async def approve_execution(
+        self, prepared: PreparedExecution, plan: PlanSpec | None = None,
+        *, signal: asyncio.Event | None = None,
+    ) -> bool:
+        identity = prepared.scope.identity
+
+        async def commit_approval() -> None:
+            await self.runtime.approve(identity, expected_scope_sha256=prepared.scope.sha256)
+
+        arguments = approval_arguments(prepared, plan)
+        reason = (
+            "Approve this exact plan/version and isolated scope for this request. "
+            "The Agent chooses future commands within these limits. "
+            "Input files may be sent to the displayed backend. "
+            "Real Workspace publication requires separate approval."
+        )
+        if prepared.bash is not None:
+            arguments.update(
+                **prepared.bash.model_dump(), script_sha256=prepared.bash.sha256,
+                publication="Unavailable: copy changes are discarded after execution.",
+            )
+            reason = (
+                "Review the COMPLETE Bash script, cwd and input scope. Approve this script once "
+                "in a fresh local, offline Docker copy. Output may be sent to your model. "
+                "Copy changes will be discarded; no file publication or host execution."
+            )
+        grant = await self.runtime.store.get(identity)
+        return await self._approvals.request_approval(
+            request_id=identity.request_id, session_id=identity.session_id,
+            context=ToolApprovalContext(
+                tool_call=ToolCall(id=identity.task_id, name="execution_task", arguments={}),
+                tool=None, signal=signal,
+                decision=ToolPermissionDecision(
+                    decision="require_approval", policy_name="execution_task", reason=reason,
+                ),
+            ),
+            exact_arguments=arguments, on_approve=commit_approval,
+            timeout_seconds=max(1, (grant.approval_deadline_ms - grant.created_at_ms) / 1000),
+        )
 
     async def select(self, session_id: str, value: ExecutionSelectionPut) -> dict[str, Any]:
         capabilities = await self.capability(session_id)
@@ -227,37 +285,7 @@ class WebExecutionRuntime:
         )
 
         async def approve(prepared: PreparedExecution, plan: PlanSpec | None) -> bool:
-            async def commit_approval() -> None:
-                await self.runtime.approve(
-                    prepared.scope.identity,
-                    expected_scope_sha256=prepared.scope.sha256,
-                )
-
-            arguments = approval_arguments(prepared, plan)
-            grant = await self.runtime.store.get(prepared.scope.identity)
-            return await self._approvals.request_approval(
-                request_id=request_id,
-                session_id=session_id,
-                context=ToolApprovalContext(
-                    tool_call=ToolCall(
-                        id=prepared.scope.identity.task_id, name="execution_task", arguments={}
-                    ),
-                    tool=None,
-                    decision=ToolPermissionDecision(
-                        decision="require_approval",
-                        policy_name="execution_task",
-                        reason=(
-                            "Approve this exact plan/version and isolated scope for this request. "
-                            "The Agent chooses future commands within these limits. "
-                            "Input files may be sent to the displayed backend. "
-                            "Real Workspace publication requires separate approval."
-                        ),
-                    ),
-                ),
-                exact_arguments=arguments,
-                on_approve=commit_approval,
-                timeout_seconds=max(1, (grant.approval_deadline_ms - grant.created_at_ms) / 1000),
-            )
+            return await self.approve_execution(prepared, plan)
 
         task = ApprovedCodingAutomation(
             self._lifecycle,
@@ -283,11 +311,19 @@ class WebExecutionRuntime:
             if task.request.session_id == session_id and task.prepared is not None:
                 await self._approvals.cancel_request(task.request.request_id)
                 await self.runtime.cancel(task.prepared.scope.identity)
+        for prepared in tuple(self.bash_tasks.values()):
+            identity = prepared.scope.identity
+            if identity.session_id == session_id:
+                await self._approvals.cancel_request(identity.request_id)
+                await self.runtime.cancel(identity)
 
     async def cancel_request(self, request_id: str) -> None:
         task = self._tasks.get(request_id)
         if task is not None and task.prepared is not None:
             await self.runtime.cancel(task.prepared.scope.identity)
+        prepared = self.bash_tasks.get(request_id)
+        if prepared is not None:
+            await self.runtime.cancel(prepared.scope.identity)
 
     @asynccontextmanager
     async def read_operation(self, operation_id: str) -> AsyncIterator[None]:
@@ -305,10 +341,9 @@ class WebExecutionRuntime:
     async def _watch(self) -> None:
         while True:
             await asyncio.sleep(0.25)
-            for task in tuple(self._tasks.values()):
-                if task.prepared is None:
-                    continue
-                scope = task.prepared.scope
+            pending = [t.prepared for t in tuple(self._tasks.values()) if t.prepared is not None]
+            for prepared in [*pending, *tuple(self.bash_tasks.values())]:
+                scope = prepared.scope
                 try:
                     grant = await self.runtime.store.get(scope.identity)
                     # Activation is durable before seed; cleanup_pending is also

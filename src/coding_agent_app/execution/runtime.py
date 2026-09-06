@@ -228,6 +228,11 @@ class ExecutionTaskRuntime:
             ):
                 raise ExecutionDenied("baseline_required")
             await asyncio.to_thread(self._validate_snapshot, baseline, policy)
+            if bash is not None and bash.cwd != "." and not any(
+                entry.path.startswith(bash.cwd + "/")
+                for entry in baseline.snapshot.manifest.entries
+            ):
+                raise ExecutionDenied("bash_cwd_unavailable")
             validation = load_sandbox_validation_plan(baseline.snapshot, policy=policy)
             if bash is None and any(
                 check.timeout_seconds > profile.limits.command_timeout_seconds

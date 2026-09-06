@@ -19,11 +19,14 @@
 - [x] 阶段 2D Coding/Plan Web 装配：精确范围确认、Plan 原子合并审批、每请求独立运行副本，
   任务/Executor/Verifier/只读 UI 上下文、停止与撤销；冻结制品交回现有审阅并回收计算资源。
   Workspace 后端选择 CAS、真实 Docker Coding/Plan 两条 Web 链路通过；E2B 已装配统一许可。
-- [ ] 阶段 2D 剩余：独立 Bash 完整脚本确认与运行记录；完成专用证据闭环后才注册 `run_bash`。
-- [ ] 阶段 3：独立 Bash 证据、Coding 固定验证、冻结审阅与确认发布。
+- [x] 阶段 2C/2D 提交：`297a81a`，未推送。
+- [x] 阶段 2E 独立 Bash：可选工具注册、独立意图路由、完整脚本一次确认、停止/失效回收、
+  有界私有 SQLite 历史和 Web 查询。只返回输出和变更摘要，副本文件丢弃，不创建可发布制品。
+- [ ] 阶段 2 剩余：为 Coding/Plan Executor 装配复用任务许可的 `run_bash` 薄适配；当前仍使用 `coding_run`。
+- [ ] 阶段 3：独立 Bash 专用文件证据与冻结、Docker 制品审阅/确认发布；Coding 已有固定验证不可降级。
 - [ ] 阶段 4：Web 管理/运行/恢复/撤销、任务预算和 Telemetry。
 - [ ] 阶段 5：完整后端/前端/E2E/Evals/真实 Docker 门禁及最终交付。
-  见 [`实施方案`](docs/design/workspace-bash-tool.md) 和 [`阶段 2D 记录`](docs/validation/workspace-bash-stage2d-2026-09-06.md)。
+  见 [`实施方案`](docs/design/workspace-bash-tool.md) 和 [`阶段 2E 记录`](docs/validation/workspace-bash-stage2e-2026-09-06.md)。
 
 ## 会话历史与 Memory
 

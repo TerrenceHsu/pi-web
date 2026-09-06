@@ -45,7 +45,7 @@ export interface AgentStateSummary {
   }
   intent_routing: {
     enabled: boolean
-    routes: ["read_only", "coding", "knowledge"]
+    routes: ["read_only", "coding", "knowledge", "bash"]
   }
   plan_mode: {
     enabled: boolean

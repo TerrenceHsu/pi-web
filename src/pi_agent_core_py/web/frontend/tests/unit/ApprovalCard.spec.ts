@@ -30,6 +30,25 @@ beforeEach(() => {
 })
 
 describe("ApprovalCard", () => {
+  it("shows the complete Bash script and exact scope without automatic approval", async () => {
+    const resolve = vi.spyOn(useChatStore(), "resolveToolApproval").mockResolvedValue()
+    const script = "# <script>unsafe()</script>\n" + "# 审阅\n".repeat(1500) + "echo end"
+    const wrapper = mount(ApprovalCard, { props: { item: {
+      ...pendingItem(), policyName: "execution_task", arguments: {
+        kind: "bash", script, script_sha256: "f".repeat(64), cwd: "upload", timeout_seconds: 60,
+        backend: "local_docker", data_location: "local Docker", workspace_revision: 3,
+      },
+    } } })
+    expect(wrapper.get('[data-testid="approval-bash-script"]').text()).toBe(script)
+    expect(wrapper.find("script").exists()).toBe(false)
+    expect(wrapper.text()).toContain("Copy file changes are discarded")
+    expect(resolve).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-testid="approval-approve"]').text()).toContain("exact Bash script once")
+    await wrapper.get('[data-testid="approval-approve"]').trigger("click")
+    await flushPromises()
+    expect(resolve).toHaveBeenCalledOnce()
+    wrapper.unmount()
+  })
   it("displays a full execution scope and requires one explicit combined Plan approval", async () => {
     const resolve = vi.spyOn(useChatStore(), "resolveToolApproval").mockResolvedValue()
     const goal = "review ".repeat(100) + "<script>unsafe()</script>"

@@ -6,7 +6,7 @@
 
 | 项 | 当前事实 |
 |---|---|
-| 代码基线 | `0.0.29` 发布基线之后的 `master`；新增三类意图路由、Planner–Executor–Verifier Plan Mode、Sandbox 审阅/冲突恢复，以及 pi `ai` / `agent` / `coding-agent` / `session-backends/sqlite-node` / `telemetry` / `evals` 核心边界对齐与 Admin Telemetry 前端 |
+| 代码基线 | `0.0.29` 发布基线之后的 `master`；四类意图路由（read_only/coding/knowledge/bash）、Planner–Executor–Verifier Plan Mode、Sandbox 审阅/冲突恢复，以及 pi `ai` / `agent` / `coding-agent` / `session-backends/sqlite-node` / `telemetry` / `evals` 核心边界对齐与 Admin Telemetry 前端 |
 | 分支 | `master` |
 | 最新 release tag | `0.0.29`；annotated tag 指向本次统一版本与发布验证提交 |
 | Python / API 版本 | `0.0.29`（Python `__version__`、workspace FastAPI 与 Auth gateway 共用同一来源） |
@@ -20,7 +20,13 @@
 
 ## 当前交付状态
 
-**阶段 2D：Web Coding/Plan 已接入任务审批与调度**。Coding 每请求确认执行范围，Plan 以一次确认
+**阶段 2E：独立 `run_bash` Web 最小闭环已接入**。Workspace 选择已配置的 Local Docker 并勾选
+Bash 工具后，可在普通聊天明确请求 `run_bash`（Code/Plan 关闭）。每条脚本单独审阅完整代码、
+cwd、SHA、输入快照及预算；默认权限策略只弹一次精确确认，显式拒绝优先，AllowAll 也不能跳过。
+每次批准后创建新离线副本，执行完回收容器和许可，只保留有界输出与变更摘要，**副本文件全部丢弃**。
+新增按账号/Session 隔离的 SQLite 私有历史及前端查询；刷新/重启只读，不重放命令。
+
+阶段 2D 的 Coding/Plan 任务审批保持不变：Coding 每请求确认执行范围，Plan 以一次确认
 原子批准精确计划版本与执行许可；准备/批准不创建容器，启动前复核原快照、请求、配置与资源选择。
 任务内工具共用获准副本，Planner/Verifier 不获得执行权限；旧直接启动/计划单独批准入口拒绝绕过，
 验证与冻结由请求调度器执行，运行期 UI diff 只获得只读上下文。
@@ -28,15 +34,18 @@
 Workspace 增加 revision-CAS 后端选择；选择变更/撤销、Stop、到期和能力变更使许可失效，不跨请求复用。
 
 本地 Docker 需部署者显式配置固定镜像/CLI 并由用户选择，**本轮未修改真实部署配置或自动启用**；
-没有静默迁移 E2B，也没有启用独立 `run_bash`。Python 分析原有逐次授权不变。
-新增 11 项离线 Web 专项、2 条真实 Docker Web Coding/Plan 链路和前端全量 221 项通过；
-最终门禁见 [阶段 2D 记录](docs/validation/workspace-bash-stage2d-2026-09-06.md)。
-阶段 2C 的 398 项相关回归与 25 项后端 Docker smoke 保留为历史证据，不与本轮两条 Web 链路合并计数。
+没有静默迁移 E2B。Python 分析原有逐次授权不变；`run_bash` 仅在独立 Bash 路由装配，
+Coding/Plan Executor 当前仍用 `coding_run`，read-only/Planner/Verifier/Knowledge 不获得 Bash。
+本轮相关后端回归 179 passed / 3 skipped，收尾专项 73 passed / 1 skipped；前端 224 passed、
+Chromium 26 项最终状态通过、真实 Docker 独立 Bash 链路通过。数字不跨轮累加，也未重跑完整后端覆盖率。
+详见 [阶段 2E 记录](docs/validation/workspace-bash-stage2e-2026-09-06.md)；阶段 2C/2D 证据保留在原记录中。
 
-**仍待完成**：独立 Bash 完整脚本确认及注册、Docker 发布、后台孤儿/TTL 与快照缓存回收、私有运行记录、
-跨账号全局配额、管理员执行前端与执行 Telemetry。重启不恢复执行；未知资源保留清理债务，不假装已清理。
+**仍待完成**：Coding/Plan 内 `run_bash` 便捷适配、独立 Bash 文件证据/冻结与 Docker 发布、
+后台孤儿/TTL 与快照缓存回收、Coding/Plan 私有运行全文记录、跨账号全局配额、管理员执行前端与执行 Telemetry。
+Bash 历史上限为每账号 200 条、终态 30 天（新运行时裁剪，列表展示当前 Session 最近 100 条）。
+重启不恢复执行；未知资源保留清理债务，不假装已清理。
 Docker 数据仍位于 `D:\DockerData\DockerDesktopWSL`；没有重启业务解析容器。
-`9518499` 是前置功能/阶段 2B 本地提交；随后阶段 2C 和本轮 2D 改动均尚未提交、未推送。
+`297a81a` 已提交阶段 2C/2D；本轮阶段 2E 为其后的未提交改动，没有推送。
 
 新增 **Web Context Compaction**：按持久化视图、工具输出外置、结构化自动摘要、
 Web/Telemetry/Evals 四步实现。原始 SQLite 消息与来源 ID 不变，Memory 不由压缩改写；

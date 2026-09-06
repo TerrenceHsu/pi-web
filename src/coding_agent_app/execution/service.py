@@ -26,6 +26,14 @@ Cleanup = Callable[[ExecutionIdentity], Awaitable[bool]]
 RunCommand = Callable[[asyncio.Event], Awaitable[SandboxCommandResult]]
 
 
+class CommandInterrupted(ExecutionDenied):
+    """Known bounded backend termination; not an authorization to retry it."""
+
+    def __init__(self, result: SandboxCommandResult) -> None:
+        super().__init__("execution_interrupted")
+        self.result = result
+
+
 class ExecutionService:
     def __init__(self, store: ExecutionStore, *, scope_check: ScopeCheck, cleanup: Cleanup) -> None:
         self.store = store
@@ -100,12 +108,11 @@ class ExecutionService:
                     if signal.is_set() or not await self._scope_check(grant.scope):
                         raise ExecutionDenied("grant_revoked")
                 result = await job
-            if (
-                result.command_id != intent.command_id
-                or result.termination_reason != "exited"
-                or result.exit_code is None
-            ):
+            if result.command_id != intent.command_id:
+                # Output from another command cannot be attributed to this call.
                 raise ExecutionDenied("execution_interrupted")
+            if result.termination_reason != "exited" or result.exit_code is None:
+                raise CommandInterrupted(result)
             await self.store.finish(context, intent, exit_code=result.exit_code)
             return result
         except BaseException as exc:
