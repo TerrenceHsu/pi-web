@@ -232,7 +232,7 @@ export interface PromptResponse {
   } | null
   intent?: IntentAudit | null
   continuity?: {
-    status: "updated" | "pending_retry" | "deferred" | "skipped" | "unavailable"
+    status: "updated" | "no_change" | "pending_retry" | "deferred" | "skipped" | "unavailable"
     operation_id?: string
     source_sha256?: string
     memory_file_id?: string

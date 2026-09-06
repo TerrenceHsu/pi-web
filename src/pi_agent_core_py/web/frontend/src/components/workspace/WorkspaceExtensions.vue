@@ -49,6 +49,16 @@ async function toggleSkill(name: string) {
   }
 }
 
+async function toggleTool(name: string) {
+  const session = sessionId.value
+  if (!session) return
+  try {
+    await store.toggleTool(session, name)
+  } catch {
+    // Store error is rendered below.
+  }
+}
+
 watch(sessionId, (session) => void load(session), { immediate: true })
 </script>
 
@@ -57,7 +67,7 @@ watch(sessionId, (session) => void load(session), { immediate: true })
     <div class="extensions-heading">
       <div>
         <strong>Workspace extensions</strong>
-        <p>Select from your account-wide MCP and Skills catalogs.</p>
+        <p>Select optional Tools, MCP servers and Skills for this Workspace.</p>
       </div>
       <button type="button" :disabled="!sessionId || store.loading" @click="load(sessionId)">
         {{ store.loading ? "Loading…" : "Refresh" }}
@@ -67,6 +77,27 @@ watch(sessionId, (session) => void load(session), { immediate: true })
     <p v-if="store.error" class="extension-error">{{ store.error }}</p>
     <div v-if="!sessionId" class="extension-empty">Select a Session first.</div>
     <template v-else-if="store.snapshot">
+      <section class="extension-group">
+        <h3>Tools</h3>
+        <label v-for="tool in store.snapshot.tools ?? []" :key="tool.name" class="extension-option">
+          <input
+            type="checkbox"
+            :checked="tool.selected"
+            :disabled="(!tool.available && !tool.selected) || store.saving"
+            :data-testid="`workspace-tool-${tool.name}`"
+            @change="toggleTool(tool.name)"
+          />
+          <span>
+            <strong>{{ tool.label }}</strong>
+            <small>{{ tool.available ? "Local calculation · optional" : tool.reason }}</small>
+          </span>
+        </label>
+        <p class="extension-empty">
+          Data stays local for calculation. Analysis summaries sent to chat use your selected model
+          Provider. Saving results is a separate action. Python Data Analysis requires approval
+          every time and runs with local user permissions; its environment is NOT a security sandbox.
+        </p>
+      </section>
       <section class="extension-group">
         <h3>MCP servers</h3>
         <p v-if="!store.snapshot.mcp_servers.length" class="extension-empty">

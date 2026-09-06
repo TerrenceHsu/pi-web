@@ -68,6 +68,11 @@ web = [
 sandbox-e2b = [
     "e2b>=2.39,<3",
 ]
+data-analysis = [
+    "pandas>=2.2,<4",
+    "matplotlib>=3.9,<4",
+    "openpyxl>=3.1,<4",
+]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -138,3 +143,10 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 python_version = "3.11"
 strict = true
 plugins = ["pydantic.mypy"]
+
+# Optional compute libraries remain behind a typed product-service boundary.
+[[tool.mypy.overrides]]
+module = ["pandas.*", "numpy.*", "matplotlib.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+follow_imports_for_stubs = true

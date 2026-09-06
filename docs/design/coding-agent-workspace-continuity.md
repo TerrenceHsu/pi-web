@@ -43,7 +43,8 @@ docs/decisions.md
 docs/validation.md
 docs/notes/**
 scripts/**
-inputs/**
+upload/**
+inputs/**                       # 历史兼容
 artifacts/**
 documents/**
 .pi-agent/continuity/**
@@ -55,7 +56,8 @@ documents/**
 - `tasks/current.md`：当前目标、验收标准、计划状态和下一步。
 - `docs/code-flow.md`：只根据已批准并发布的代码 revision 更新入口、模块、调用链和数据流。
 - `docs/validation.md`：只记录真实工具证据，不接受 Assistant 自述的“测试通过”。
-- `scripts/**`：代码唯一逻辑根；修改仍走 Sandbox、验证、冻结、用户审批和事务发布。
+- `upload/**`：所有新上传原件，含代码；首次成功上传时惰性出现，不参与工作代码摘要。
+- `scripts/**`：工作代码逻辑根；从原件创建副本后，修改仍走 Sandbox、验证、冻结、用户审批和事务发布。
 - `.pi-agent/**`：系统 operation、来源哈希和恢复证据，不进入 Sandbox 发布白名单。
 
 目录无内容时保持逻辑惰性，不用 `.keep` 伪造用户文件。
@@ -72,17 +74,23 @@ documents/**
 | `tasks/**` | continuity | 后续 task renderer 惰性创建/更新 | 禁止 |
 | 固定 `docs/*.md` | continuity | 仅已批准代码事件的固定 renderer 更新 | 禁止 |
 | `docs/notes/**` | shared | 用户和 Agent 可创建 Markdown | 允许 UTF-8 Markdown |
-| `scripts/**` | shared | 用户上传；Coding 模式通过 Sandbox 修改 | 允许 |
-| `inputs/**` | user | 普通上传自动进入；正文不可原地改写，可删除重传 | 禁止 |
+| `scripts/**` | shared | 创建工作代码；Coding 模式通过 Sandbox 修改 | 允许 |
+| `upload/**` | user | 所有新上传原件；正文不可原地改写，普通输入可删除重传，文档原件沿用删除保护 | 禁止 |
+| `inputs/**` | user | 历史普通输入；正文不可原地改写，可删除重传 | 禁止 |
 | `artifacts/**` | agent | `write_file` 非代码产物默认进入；Markdown 可人工修订 | 允许 |
-| `documents/**` | document converter | 原件和固定转换产物均不可变 | 禁止 |
+| `documents/**` | document converter | 固定转换产物和历史原件均不可变 | 禁止 |
 
 为兼容既有 Workspace，历史普通 Markdown 路径仍可读写并保持既有 Sandbox 发布语义，但所有新入口
-默认使用上述命名空间。上传代码仍自动进入 `scripts/**`，其余普通上传进入 `inputs/**`；Agent 的
+默认使用上述命名空间。自 2026-09-05 起所有新上传进入 `upload/**`，旧文件原位兼容；Agent 的
 非代码文本产物进入 `artifacts/**`。`HANDOFF.md`、`tasks/**` 和固定工程摘要在阶段 4–5 的可信
 renderer 首次产出内容前不创建空文件。
 
 ## 4. 每轮自动连续性更新
+
+**2026-09-05 补充**：会话历史与 Memory 第 1–4 阶段现已接入结构化 `MemoryDelta`、
+immutable entry 来源、no-change、用户固定条目保护及分支来源重验。下面阶段 2 的直接 Markdown
+生成描述仅代表旧版实现；当前契约以 [`session-history-memory.md`](session-history-memory.md) 为准。
+事务恢复、Sandbox blocker、Knowledge 跳过与主回答优先等生命周期约束不变；压缩模块未改。
 
 成功持久化的普通 Session Assistant turn（含 Regenerate 后的新 active answer）产生有界、可校验的
 `pi-agent-turn-evidence/v1` evidence，然后由单 Session 串行 continuity lane 自动提炼：

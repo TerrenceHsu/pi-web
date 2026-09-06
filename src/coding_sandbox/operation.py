@@ -12,11 +12,12 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mappin
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
 from pathlib import Path, PurePosixPath
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 from uuid import uuid4
 
 from pydantic import ValidationError
 
+from .access import OperationExecutionGuard
 from .artifact import (
     MAX_ARTIFACT_METADATA_BYTES,
     ArtifactSigner,
@@ -32,6 +33,7 @@ from .artifact import (
     validation_evidence_bytes,
 )
 from .backend import SandboxBackend
+from .bash import BASH_ARGV, BashBackend, BashRequest
 from .errors import SandboxError
 from .models import (
     SandboxCommand,
@@ -52,7 +54,7 @@ from .snapshot import (
     read_snapshot_file,
     validate_snapshot_archive,
 )
-from .unified_patch import apply_file_patch, parse_unified_diff
+from .unified_patch import UnifiedFilePatch, apply_file_patch, parse_unified_diff
 from .validation import (
     MAX_VALIDATION_CONFIG_BYTES,
     SandboxValidationCheck,
@@ -80,6 +82,7 @@ from .workspace_models import (
 )
 
 BaselineReader = Callable[[str], Awaitable[bytes | None]]
+MutationResult = TypeVar("MutationResult")
 _CURRENT_WORKSPACE: ContextVar[CodingWorkspace | None] = ContextVar(
     "coding_sandbox_current_workspace",
     default=None,
@@ -117,6 +120,8 @@ class SandboxOperation(CodingWorkspace):
         artifact_signer: ArtifactSigner | None = None,
         snapshot_policy: SnapshotPolicy | None = None,
         clock_ms: Callable[[], int] | None = None,
+        execution_guard: OperationExecutionGuard | None = None,
+        require_execution_grant: bool = False,
     ) -> None:
         resolved_staging = staging_root.resolve(strict=False)
         if not resolved_staging.is_absolute():
@@ -155,6 +160,18 @@ class SandboxOperation(CodingWorkspace):
         self._clock_ms = clock_ms or (lambda: int(time.time() * 1000))
         self._lock = asyncio.Lock()
         self._closed = False
+        self._execution_guard = execution_guard
+        self._require_execution_grant = (
+            require_execution_grant
+            or execution_guard is not None
+            or handle.provider == "local_docker"
+        )
+
+    async def _check_access(self, *, writing: bool) -> None:
+        if self._execution_guard is not None:
+            await self._execution_guard.check(self._handle, writing=writing)
+        elif self._require_execution_grant:
+            raise SandboxWorkspaceError("execution_approval_required")
 
     @property
     def operation_id(self) -> str:
@@ -187,6 +204,7 @@ class SandboxOperation(CodingWorkspace):
         max_files: int = 1000,
     ) -> SandboxFileList:
         async with self._lock:
+            await self._check_access(writing=False)
             return await self._list_files_unlocked(path, max_files=max_files)
 
     async def seed_from_snapshot(self, snapshot: ProjectSnapshot) -> None:
@@ -251,6 +269,7 @@ class SandboxOperation(CodingWorkspace):
         max_bytes: int = 64 * 1024,
     ) -> SandboxFileRead:
         async with self._lock:
+            await self._check_access(writing=False)
             return await self._read_file_unlocked(path, max_bytes=max_bytes)
 
     async def search(
@@ -271,6 +290,7 @@ class SandboxOperation(CodingWorkspace):
             raise SandboxWorkspaceError("resource_limit")
         safe_matches = min(max_matches, max(1, self._limits.max_output_bytes // 1024))
         async with self._lock:
+            await self._check_access(writing=False)
             payload = await self._helper(
                 "search",
                 path,
@@ -293,37 +313,65 @@ class SandboxOperation(CodingWorkspace):
         overwrite: bool = True,
     ) -> SandboxWriteResult:
         async with self._lock:
-            return await self._write_file_unlocked(path, content, overwrite=overwrite)
+            return await self._mutate(
+                {"action": "write", "path": path, "content": content, "overwrite": overwrite},
+                lambda: self._write_file_unlocked(path, content, overwrite=overwrite),
+            )
 
     async def apply_patch(self, patch: str) -> SandboxDiffResult:
         file_patches = parse_unified_diff(patch)
         async with self._lock:
-            self._ensure_mutable()
-            prepared: list[tuple[str, str | None]] = []
-            for file_patch in file_patches:
-                original: str | None
-                try:
-                    original = (
-                        await self._read_file_unlocked(
-                            file_patch.path,
-                            max_bytes=self._maximum_text_read_bytes(),
-                        )
-                    ).content
-                except SandboxWorkspaceError as exc:
-                    if exc.code != "not_found":
-                        raise
-                    original = None
-                prepared.append((file_patch.path, apply_file_patch(original, file_patch)))
-            for path, content in prepared:
-                if content is None:
-                    await self._delete_file_unlocked(path)
-                else:
-                    await self._write_file_unlocked(path, content, overwrite=True)
-            return await self._diff_unlocked(max_patch_bytes=256 * 1024)
+            return await self._mutate(
+                {"action": "patch", "patch": patch},
+                lambda: self._apply_patch_unlocked(file_patches),
+            )
+
+    async def _apply_patch_unlocked(
+        self, file_patches: tuple[UnifiedFilePatch, ...]
+    ) -> SandboxDiffResult:
+        self._ensure_mutable()
+        prepared: list[tuple[str, str | None]] = []
+        for file_patch in file_patches:
+            original: str | None
+            try:
+                original = (
+                    await self._read_file_unlocked(
+                        file_patch.path,
+                        max_bytes=self._maximum_text_read_bytes(),
+                    )
+                ).content
+            except SandboxWorkspaceError as exc:
+                if exc.code != "not_found":
+                    raise
+                original = None
+            prepared.append((file_patch.path, apply_file_patch(original, file_patch)))
+        for path, content in prepared:
+            if content is None:
+                await self._delete_file_unlocked(path)
+            else:
+                await self._write_file_unlocked(path, content, overwrite=True)
+        return await self._diff_unlocked(max_patch_bytes=256 * 1024)
 
     async def delete_file(self, path: str) -> SandboxDeleteResult:
         async with self._lock:
-            return await self._delete_file_unlocked(path)
+            return await self._mutate(
+                {"action": "delete", "path": path}, lambda: self._delete_file_unlocked(path)
+            )
+
+    async def _mutate(
+        self, payload: object, invoke: Callable[[], Awaitable[MutationResult]]
+    ) -> MutationResult:
+        self._ensure_mutable()
+        await self._check_access(writing=True)
+        if self._execution_guard is None:
+            return await invoke()
+        return await self._execution_guard.mutate(
+            self._handle,
+            payload=canonical_json_bytes(payload),
+            operation_revision=self._workspace_revision,
+            timeout_seconds=min(30, self._limits.command_timeout_seconds),
+            invoke=invoke,
+        )
 
     async def run(
         self,
@@ -359,19 +407,83 @@ class SandboxOperation(CodingWorkspace):
         async with self._lock:
             self._ensure_open()
             self._ensure_mutable()
-            self._mark_workspace_may_change()
             try:
-                return await self._backend.execute(
-                    self._handle,
-                    command,
-                    signal=signal,
-                    on_output=on_output,
-                )
+                return await self._execute_user_command(command, signal=signal, on_output=on_output)
             except SandboxError as exc:
                 raise _map_backend_error(exc) from exc
 
+    async def run_bash(
+        self,
+        request: BashRequest,
+        *,
+        signal: asyncio.Event | None = None,
+        on_output: SandboxOutputCallback | None = None,
+    ) -> SandboxCommandResult:
+        if self._handle.provider != "local_docker" or not isinstance(self._backend, BashBackend):
+            raise SandboxWorkspaceError("bash_unavailable")
+        if self._execution_guard is None:
+            raise SandboxWorkspaceError("execution_approval_required")
+        command = SandboxCommand(
+            command_id=f"bash-{uuid4().hex}",
+            argv=BASH_ARGV,
+            cwd=self._remote_path(request.cwd),
+            timeout_seconds=request.timeout_seconds,
+            max_output_bytes=min(16 * 1024, self._limits.max_output_bytes),
+        )
+        if command.timeout_seconds > self._limits.command_timeout_seconds:
+            raise SandboxWorkspaceError("resource_limit")
+        async with self._lock:
+            self._ensure_mutable()
+            return await self._execute_user_command(
+                command, signal=signal, on_output=on_output, bash=request
+            )
+
+    async def _execute_user_command(
+        self,
+        command: SandboxCommand,
+        *,
+        signal: asyncio.Event | None,
+        on_output: SandboxOutputCallback | None,
+        validation: bool = False,
+        bash: BashRequest | None = None,
+    ) -> SandboxCommandResult:
+        await self._check_access(writing=True)
+
+        async def invoke(revoked: asyncio.Event) -> SandboxCommandResult:
+            if revoked.is_set() or signal is not None and signal.is_set():
+                raise asyncio.CancelledError
+            if not validation:
+                self._mark_workspace_may_change()
+            if bash is not None:
+                assert isinstance(self._backend, BashBackend)
+                return await self._backend.execute_bash(
+                    self._handle,
+                    command,
+                    script=bash.script,
+                    signal=signal or revoked,
+                    on_output=on_output,
+                )
+            return await self._backend.execute(
+                self._handle,
+                command,
+                signal=signal or revoked,
+                on_output=on_output,
+            )
+
+        if self._execution_guard is None:
+            return await invoke(asyncio.Event())
+        return await self._execution_guard.execute(
+            self._handle,
+            command,
+            kind="validation" if validation else ("bash" if bash else "argv"),
+            script_sha256=None if bash is None else bash.sha256,
+            operation_revision=self._workspace_revision,
+            invoke=invoke,
+        )
+
     async def diff(self, *, max_patch_bytes: int = 256 * 1024) -> SandboxDiffResult:
         async with self._lock:
+            await self._check_access(writing=False)
             return await self._diff_unlocked(max_patch_bytes=max_patch_bytes)
 
     async def validate_required_checks(
@@ -382,6 +494,7 @@ class SandboxOperation(CodingWorkspace):
     ) -> SandboxValidationEvidence:
         async with self._lock:
             self._ensure_mutable()
+            await self._check_access(writing=True)
             return await self._validate_required_checks_unlocked(
                 on_output=on_output,
                 signal=signal,
@@ -684,6 +797,9 @@ class SandboxOperation(CodingWorkspace):
                 command_id=f"artifact-{uuid4().hex}",
                 argv=(
                     "python3",
+                    "-I",
+                    "-S",
+                    "-B",
                     "-c",
                     REMOTE_ARTIFACT_HELPER,
                     "export",
@@ -951,11 +1067,11 @@ class SandboxOperation(CodingWorkspace):
                 timeout_seconds=check.timeout_seconds,
                 max_output_bytes=capture_bytes,
             )
-            result = await self._backend.execute(
-                self._handle,
+            result = await self._execute_user_command(
                 command,
                 signal=signal,
                 on_output=on_output,
+                validation=True,
             )
         except asyncio.CancelledError:
             raise
@@ -1282,6 +1398,9 @@ class SandboxOperation(CodingWorkspace):
             command_id=f"helper-{uuid4().hex}",
             argv=(
                 "python3",
+                "-I",
+                "-S",
+                "-B",
                 "-c",
                 REMOTE_WORKSPACE_HELPER,
                 action,

@@ -80,16 +80,19 @@ DECISIONS_PATH = f"{DOCS_PATH}/decisions.md"
 VALIDATION_PATH = f"{DOCS_PATH}/validation.md"
 NOTES_PATH = f"{DOCS_PATH}/notes"
 
-#: Agent 与用户代码的唯一逻辑根。目录在第一份代码出现时自然进入文件树。
+#: 可修改工作代码的逻辑根。上传的代码原件位于 upload/。
 SCRIPTS_PATH = "scripts"
 
-#: 用户上传的普通输入；内容不可原地改写，但用户可以删除后重新上传。
+#: 所有新上传原件的逻辑根；目录随首次成功上传惰性出现。
+UPLOAD_PATH = "upload"
+
+#: 历史普通输入目录，保留既有文件的访问和写入边界。
 INPUTS_PATH = "inputs"
 
 #: Agent 生成的非代码交付物；目录在第一份产物出现时自然进入文件树。
 ARTIFACTS_PATH = "artifacts"
 
-#: 富文档原件与固定转换产物的逻辑根。Sandbox 永远不能发布到这里。
+#: 固定转换产物和历史富文档原件的逻辑根。Sandbox 不能发布到这里。
 DOCUMENTS_PATH = "documents"
 
 #: Workspace 固定转换工作流首版支持的不可变原件格式。
@@ -133,7 +136,7 @@ CodeContinuityStatus: TypeAlias = Literal[
     "current",
     "failed",
 ]
-WorkspacePublishKind: TypeAlias = Literal["sandbox", "document_conversion"]
+WorkspacePublishKind: TypeAlias = Literal["sandbox", "document_conversion", "analysis"]
 
 #: Workspace revision 的隐藏持久化状态；不属于用户可见文件树。
 WORKSPACE_STATE_FILENAME = ".workspace.json"
@@ -221,9 +224,9 @@ _CHUNK_SIZE = 64 * 1024
 #: 文件名最大长度
 _MAX_FILENAME_LEN = 255
 
-#: 安全文件名正则——保留字母 / 数字 / 下划线 / 连字符 / 点 / 空格 / 中日韩字符；
+#: 安全文件名正则——保留字母 / 数字 / 下划线 / 连字符 / 点 / 空格 / 括号 / 中日韩字符；
 #: 去掉路径分隔符 / 控制字符 / 特殊字符
-_SAFE_FILENAME_RE = re.compile(r"[^\w.\- \u4e00-\u9fff]+", flags=re.UNICODE)
+_SAFE_FILENAME_RE = re.compile(r"[^\w.\- ()\u4e00-\u9fff]+", flags=re.UNICODE)
 
 
 # ============================================================================
@@ -679,7 +682,7 @@ def workspace_path_policy(
         return policy("handoff", "continuity")
     if _is_below(parts, TASKS_PATH) or purpose == "task":
         return policy("task", "continuity")
-    if _is_below(parts, INPUTS_PATH) or purpose == "input":
+    if _is_below(parts, UPLOAD_PATH) or _is_below(parts, INPUTS_PATH) or purpose == "input":
         return policy("input", "user", delete=True, immutable=True)
     if _is_below(parts, SCRIPTS_PATH):
         return policy(
@@ -748,21 +751,17 @@ def workspace_upload_logical_path(
     filename: str,
     folder: str | None = None,
 ) -> str:
-    """Route user uploads to ``scripts/**`` or immutable ``inputs/**``."""
+    """Route every user-uploaded original below the lazy ``upload/`` root."""
     safe_name = sanitize_filename(filename)
-    if is_code_filename(safe_name):
-        return workspace_logical_path(safe_name, folder)
-
-    normalized_folder = INPUTS_PATH
+    normalized_folder = UPLOAD_PATH
     if folder is not None and folder.strip():
         requested = normalize_workspace_logical_path(folder)
-        if requested.casefold() == INPUTS_PATH or requested.casefold().startswith(
-            f"{INPUTS_PATH}/"
-        ):
-            normalized_folder = requested
+        parts = PurePosixPath(requested).parts
+        if parts[0].casefold() == UPLOAD_PATH:
+            normalized_folder = str(PurePosixPath(UPLOAD_PATH, *parts[1:]))
         else:
-            normalized_folder = f"{INPUTS_PATH}/{requested}"
-    return workspace_logical_path(safe_name, normalized_folder)
+            normalized_folder = f"{UPLOAD_PATH}/{requested}"
+    return normalize_workspace_logical_path(normalize_logical_path(safe_name, normalized_folder))
 
 
 def agent_workspace_folder(filename: str, folder: str | None = None) -> str | None:
@@ -782,6 +781,7 @@ def agent_workspace_folder(filename: str, folder: str | None = None) -> str | No
     if requested.casefold() == NOTES_PATH.casefold() or _is_below(parts, NOTES_PATH):
         return requested
     if parts[0].casefold() in {
+        UPLOAD_PATH,
         INPUTS_PATH,
         TASKS_PATH,
         DOCUMENTS_PATH,
@@ -841,8 +841,29 @@ def workspace_document_root(filename: str, file_id: str) -> str:
     safe_name = sanitize_filename(filename)
     stem = sanitize_filename(PurePosixPath(safe_name).stem).strip(" ._-") or "document"
     stem = stem[:80].rstrip(" ._-") or "document"
-    suffix = file_id.removeprefix("file-")[:12]
+    suffix = file_id.removeprefix("file-")
     return normalize_workspace_logical_path(f"{DOCUMENTS_PATH}/{stem}-{suffix}")
+
+
+def workspace_document_output_root(source: FileRef) -> str:
+    """Resolve outputs from a new upload or an existing legacy original."""
+    normalized = normalize_workspace_logical_path(source.logical_path)
+    path = PurePosixPath(normalized)
+    if (
+        source.purpose != "document_original"
+        or normalized != source.logical_path
+        or not is_workspace_document_filename(path.name)
+    ):
+        raise WorkspacePublishPolicyError("Workspace document original path is invalid")
+    if _is_below(path.parts, UPLOAD_PATH):
+        return workspace_document_root(source.name, source.id)
+    if (
+        len(path.parts) == 3
+        and path.parts[0].casefold() == DOCUMENTS_PATH
+        and path.stem.casefold() == "original"
+    ):
+        return str(path.parent)
+    raise WorkspacePublishPolicyError("Workspace document original path is invalid")
 
 
 def is_document_conversion_workspace_path(
@@ -875,6 +896,20 @@ def is_document_conversion_workspace_path(
     if folded[0] == "tables":
         return PurePosixPath(relative[1]).suffix.casefold() in {".csv", ".json"}
     return folded[0] == "assets"
+
+
+def _publish_path_allowed(kind: WorkspacePublishKind, root: str | None, path: str) -> bool:
+    if kind == "sandbox":
+        return is_sandbox_publishable_workspace_path(path)
+    if root is None:
+        return False
+    if kind == "document_conversion":
+        return is_document_conversion_workspace_path(path, root)
+    return (
+        re.fullmatch(r"artifacts/analysis/analysis-[0-9a-f]{32}", root) is not None
+        and str(PurePosixPath(path).parent) == root
+        and PurePosixPath(path).name in {"report.md", "result.csv", "chart.png", "manifest.json"}
+    )
 
 
 def _guess_mime(filename: str, content_type: str | None) -> str:
@@ -1577,11 +1612,7 @@ class WorkspaceStore:
                 raise WorkspacePublishPolicyError(
                     "Workspace document conversion requires an immutable original"
                 )
-            document_root = str(PurePosixPath(source.logical_path).parent)
-            if not source.logical_path.casefold().startswith(
-                f"{document_root.casefold()}/original."
-            ):
-                raise WorkspacePublishPolicyError("Workspace document original path is invalid")
+            document_root = workspace_document_output_root(source)
             refs = await self.list_session(session_id)
             return self._publish_workspace_changes_unlocked(
                 state,
@@ -1592,6 +1623,39 @@ class WorkspaceStore:
                 deleted_paths=deleted_paths,
                 publish_kind="document_conversion",
                 document_root=document_root,
+            )
+
+    async def publish_analysis_result(
+        self, session_id: str, *, run_id: str, source_file_id: str, source_sha256: str,
+        changes: tuple[WorkspacePublishChange, ...],
+    ) -> WorkspacePublishResult:
+        """Append a user-requested, trusted analysis bundle; never overwrite user files."""
+        if re.fullmatch(r"analysis-[0-9a-f]{32}", run_id) is None:
+            raise WorkspacePublishPolicyError("invalid analysis run id")
+        root = f"artifacts/analysis/{run_id}"
+        names = {PurePosixPath(c.logical_path).name for c in changes}
+        if not 3 <= len(changes) <= 4 or names not in (
+            {"report.md", "result.csv", "manifest.json"},
+            {"report.md", "result.csv", "manifest.json", "chart.png"},
+        ):
+            raise WorkspacePublishPolicyError("invalid analysis bundle")
+        await self.ensure_session_workspace(session_id)
+        async with self._session_lock(session_id):
+            state = await self._ensure_workspace_state_unlocked(session_id)
+            source = await self.get_for_session(session_id, source_file_id)
+            if source.sha256 != source_sha256:
+                raise WorkspaceTreeConflictError("analysis source changed")
+            refs = await self.list_session(session_id)
+            existing = {ref.logical_path.casefold() for ref in refs}
+            if any(c.logical_path.casefold() in existing for c in changes):
+                raise WorkspacePathConflictError("analysis output already exists")
+            entries = tuple(WorkspaceMaterializationEntry(
+                logical_path=ref.logical_path, size=ref.size, sha256=ref.sha256,
+            ) for ref in sorted(refs, key=lambda item: item.logical_path))
+            return self._publish_workspace_changes_unlocked(
+                state, refs, transaction_id=f"publish-{run_id.removeprefix('analysis-')}",
+                expected_workspace_sha256=_workspace_materialization_digest(entries),
+                changes=changes, deleted_paths=(), publish_kind="analysis", document_root=root,
             )
 
     def _publish_workspace_changes_unlocked(
@@ -1645,12 +1709,7 @@ class WorkspaceStore:
             folded = normalized.casefold()
             if normalized != logical_path or folded in requested_paths:
                 raise WorkspacePublishPolicyError("Workspace publish paths are not unique")
-            allowed = (
-                is_sandbox_publishable_workspace_path(normalized)
-                if publish_kind == "sandbox"
-                else document_root is not None
-                and is_document_conversion_workspace_path(normalized, document_root)
-            )
+            allowed = _publish_path_allowed(publish_kind, document_root, normalized)
             if not allowed:
                 actor = "Sandbox" if publish_kind == "sandbox" else "document converter"
                 raise WorkspacePublishPolicyError(
@@ -1689,7 +1748,7 @@ class WorkspaceStore:
                 existing = refs_by_path.get(change.logical_path.casefold())
                 if existing is not None:
                     expected_purpose = (
-                        "file" if publish_kind == "sandbox" else "document_conversion"
+                        "document_conversion" if publish_kind == "document_conversion" else "file"
                     )
                     if existing.purpose != expected_purpose or (
                         existing.logical_path != change.logical_path
@@ -1749,7 +1808,9 @@ class WorkspaceStore:
                     created_at=created_at,
                     logical_path=change.logical_path,
                     origin="agent" if publish_kind == "sandbox" else "system",
-                    purpose=("file" if publish_kind == "sandbox" else "document_conversion"),
+                    purpose=(
+                        "document_conversion" if publish_kind == "document_conversion" else "file"
+                    ),
                     updated_at=now,
                 )
                 intent_changes.append(
@@ -1769,7 +1830,9 @@ class WorkspaceStore:
                     raise WorkspaceTreeConflictError(
                         "Workspace deletion target is no longer present"
                     )
-                expected_purpose = "file" if publish_kind == "sandbox" else "document_conversion"
+                expected_purpose = (
+                    "document_conversion" if publish_kind == "document_conversion" else "file"
+                )
                 if existing.purpose != expected_purpose or (existing.logical_path != logical_path):
                     actor = "Sandbox" if publish_kind == "sandbox" else "document converter"
                     raise WorkspacePublishPolicyError(
@@ -2032,7 +2095,10 @@ class WorkspaceStore:
             or intent.after_state.session_id != intent.session_id
             or intent.after_state.revision != intent.before_state.revision + 1
             or (intent.publish_kind == "sandbox" and intent.document_root is not None)
-            or (intent.publish_kind == "document_conversion" and intent.document_root is None)
+            or (intent.publish_kind != "sandbox" and intent.document_root is None)
+            or (intent.publish_kind == "analysis" and (
+                bool(intent.deletions) or any(c.before_ref is not None for c in intent.changes)
+            ))
         ):
             raise FileStoreError("Workspace publish intent identity is invalid")
         session_dir = self._session_dir(intent.session_id)
@@ -2041,18 +2107,12 @@ class WorkspaceStore:
             raise FileStoreError("Workspace publish intent is outside its Session")
         seen: set[str] = set()
         expected_purpose: FilePurpose = (
-            "file" if intent.publish_kind == "sandbox" else "document_conversion"
+            "document_conversion" if intent.publish_kind == "document_conversion" else "file"
         )
         for change in intent.changes:
             logical_path = normalize_workspace_logical_path(change.logical_path)
-            path_allowed = (
-                is_sandbox_publishable_workspace_path(logical_path)
-                if intent.publish_kind == "sandbox"
-                else intent.document_root is not None
-                and is_document_conversion_workspace_path(
-                    logical_path,
-                    intent.document_root,
-                )
+            path_allowed = _publish_path_allowed(
+                intent.publish_kind, intent.document_root, logical_path,
             )
             if (
                 logical_path != change.logical_path
@@ -2079,14 +2139,8 @@ class WorkspaceStore:
             )
         for deletion in intent.deletions:
             logical_path = normalize_workspace_logical_path(deletion.logical_path)
-            path_allowed = (
-                is_sandbox_publishable_workspace_path(logical_path)
-                if intent.publish_kind == "sandbox"
-                else intent.document_root is not None
-                and is_document_conversion_workspace_path(
-                    logical_path,
-                    intent.document_root,
-                )
+            path_allowed = _publish_path_allowed(
+                intent.publish_kind, intent.document_root, logical_path,
             )
             if (
                 logical_path != deletion.logical_path
@@ -2254,10 +2308,12 @@ class WorkspaceStore:
         suffix = path.suffix
         index = 2
         while True:
-            filename = f"{stem} ({index}){suffix}"
+            counter = f" ({index})"
+            available = _MAX_FILENAME_LEN - len(counter) - len(suffix)
+            filename = f"{stem[:available]}{counter}{suffix}"
             candidate = f"{parent}/{filename}" if parent else filename
             if candidate.casefold() not in existing:
-                return candidate
+                return normalize_workspace_logical_path(candidate)
             index += 1
 
     # ------------------------------------------------------------------
@@ -2320,22 +2376,14 @@ class WorkspaceStore:
         original_name = upload.filename or "upload.bin"
         safe_name = sanitize_filename(original_name)
         file_id = _gen_file_id()
-        is_document = is_workspace_document_filename(safe_name)
-        if is_document:
-            if relative_folder is not None and relative_folder.strip():
-                raise UnsafeFilenameError("Workspace documents use a fixed documents/<id> layout")
-            document_root = workspace_document_root(safe_name, file_id)
-            extension = PurePosixPath(safe_name).suffix.casefold()
-            logical_path = f"{document_root}/original{extension}"
-            stored_name = f"original{extension}"
-            purpose: FilePurpose = "document_original"
-        else:
-            logical_path = await self._unique_logical_path(
-                session_id,
-                workspace_upload_logical_path(safe_name, relative_folder),
-            )
-            stored_name = safe_name
-            purpose = "file" if is_code_filename(safe_name) else "input"
+        logical_path = await self._unique_logical_path(
+            session_id,
+            workspace_upload_logical_path(safe_name, relative_folder),
+        )
+        stored_name = safe_name
+        purpose: FilePurpose = (
+            "document_original" if is_workspace_document_filename(safe_name) else "input"
+        )
 
         # 预检 session 总量
         current_size = await self.session_total_size(session_id)
@@ -3096,6 +3144,7 @@ __all__ = [
     "NOTES_PATH",
     "SCRIPTS_PATH",
     "INPUTS_PATH",
+    "UPLOAD_PATH",
     "ARTIFACTS_PATH",
     "DOCUMENTS_PATH",
     "WORKSPACE_DOCUMENT_EXTENSIONS",
@@ -3143,6 +3192,7 @@ __all__ = [
     "is_markdown_filename",
     "is_workspace_document_filename",
     "workspace_document_root",
+    "workspace_document_output_root",
     "is_document_conversion_workspace_path",
     "is_sandbox_publishable_workspace_path",
     "workspace_path_policy",

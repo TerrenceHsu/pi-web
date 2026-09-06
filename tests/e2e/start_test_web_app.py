@@ -92,8 +92,21 @@ def _build_test_harness():
 
             async def stream(self, **kwargs):
                 import asyncio
+                import json
                 import random
 
+                if (kwargs.get("metadata") or {}).get("operation") == "context_compaction":
+                    source = json.loads(kwargs["messages"][0].content[0].text)
+                    entry_id = source["source_entries"][0]["entry_id"]
+                    yield TextDeltaEvent(delta=json.dumps({
+                        "current_goal": "Continue context budget test",
+                        "facts": [{"text": "The user supplied context turn 1",
+                                   "source_entry_ids": [entry_id]}],
+                        "decisions": [], "failed_attempts": [], "open_questions": [],
+                        "next_steps": [], "artifacts": [], "memory_item_ids": [],
+                    }))
+                    yield DoneEvent(stop_reason="stop")
+                    return
                 messages = kwargs.get("messages", [])
                 messages_repr = repr(messages)
                 latest_user_repr = next(
@@ -109,6 +122,7 @@ def _build_test_harness():
                     yield DoneEvent(stop_reason="stop")
                     return
                 utf8_turn_count = sum(
+                    # Each marker below is an offline test fixture, never a live Provider.
                     getattr(message, "role", None) == "user"
                     and "UTF8_DDGS_TURN_" in repr(message)
                     for message in messages
@@ -137,6 +151,28 @@ def _build_test_harness():
                         yield DoneEvent(stop_reason="tool_use")
                     return
                 approval_marker = None
+                if "PYTHON_ANALYSIS_E2E" in latest_user_repr:
+                    import re
+
+                    match = re.search(r"PYTHON_ANALYSIS_E2E:([\w-]+)", latest_user_repr)
+                    assert match is not None
+                    if any(getattr(message, "tool_call_id", None) == "python-analysis-e2e"
+                           for message in messages):
+                        yield TextDeltaEvent(delta="Python analysis finished")
+                        yield DoneEvent(stop_reason="stop")
+                    else:
+                        yield ToolCallEvent(tool_call=ToolCall(
+                            id="python-analysis-e2e", name="run_python_analysis",
+                            arguments={"file_id": match.group(1), "code": (
+                                "# " + "Review complete Python code. " * 40 + "\n"
+                                "df['sales'] = pd.to_numeric(df['sales'], errors='raise')\n"
+                                "result = df.groupby('region', as_index=False)['sales'].sum()\n"
+                                "print('计算完成')\n"
+                                "plt.bar(result['region'], result['sales'])\n"
+                            )},
+                        ))
+                        yield DoneEvent(stop_reason="tool_use")
+                    return
                 if "WORKSPACE_RESULT_PY" in messages_repr:
                     approval_marker = "workspace-result-e2e.py"
                 elif "P2B_APPROVAL_APPROVE" in messages_repr:
@@ -187,6 +223,20 @@ def _build_test_harness():
             """Fast fixture with the same integrity-test override as delayed mode."""
 
             async def stream(self, **kwargs):
+                import json
+
+                if (kwargs.get("metadata") or {}).get("operation") == "context_compaction":
+                    source = json.loads(kwargs["messages"][0].content[0].text)
+                    entry_id = source["source_entries"][0]["entry_id"]
+                    yield TextDeltaEvent(delta=json.dumps({
+                        "current_goal": "Continue context budget test",
+                        "facts": [{"text": "The user supplied context turn 1",
+                                   "source_entry_ids": [entry_id]}],
+                        "decisions": [], "failed_attempts": [], "open_questions": [],
+                        "next_steps": [], "artifacts": [], "memory_item_ids": [],
+                    }))
+                    yield DoneEvent(stop_reason="stop")
+                    return
                 messages = kwargs.get("messages", [])
                 latest_user_repr = next(
                     (

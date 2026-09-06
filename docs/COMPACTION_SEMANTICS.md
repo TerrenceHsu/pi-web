@@ -1,5 +1,10 @@
 # Compaction Semantics
 
+This page describes the compatible SDK compaction API. Since 2026-09-05,
+ordinary Web Sessions use durable context projections, bounded structured
+summaries and automatic admission policy; see [Web Context Compaction](design/context-compaction.md).
+The Web transcript is no longer replaced by a summary message.
+
 ## Boundary contract
 
 `CompactionConfig.boundary_mode` defaults to `turn`. A turn starts at a user

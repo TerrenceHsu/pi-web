@@ -24,7 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from ..ai.llm_messages import (
@@ -33,6 +34,7 @@ from ..ai.llm_messages import (
     LLMToolResultMessage,
     LLMUserMessage,
 )
+from ..ai.model_client import ModelClient
 from .messages import (
     AgentMessage,
     AssistantMessage,
@@ -46,6 +48,7 @@ from .messages import (
     ToolResultMessage,
     UserMessage,
 )
+from .tooling import ToolDef
 
 # 钩子类型（便于 Step 15 等覆盖）
 TransformContextFn = Callable[
@@ -58,10 +61,22 @@ ConvertToLLMFn = Callable[
 ]
 
 
+@dataclass(frozen=True)
+class ContextTransformInfo:
+    """Actual per-call model binding, including prepare_next_turn overrides."""
+
+    system_prompt: str
+    tools: Sequence[ToolDef]
+    client: ModelClient
+    turn_index: int
+
+
 async def apply_transform_context(
     transform: TransformContextFn,
     messages: list[AgentMessage],
     signal: asyncio.Event | None = None,
+    *,
+    model_context: ContextTransformInfo | None = None,
 ) -> list[AgentMessage]:
     """Invoke new signal-aware and legacy one-argument transforms."""
     try:
@@ -69,7 +84,7 @@ async def apply_transform_context(
         positional = [
             parameter
             for parameter in parameters.values()
-            if parameter.kind
+            if parameter.name != "model_context" and parameter.kind
             in (
                 inspect.Parameter.POSITIONAL_ONLY,
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
@@ -83,16 +98,19 @@ async def apply_transform_context(
             parameter.kind is inspect.Parameter.VAR_KEYWORD
             for parameter in parameters.values()
         )
+        accepts_model_context = "model_context" in parameters
     except (TypeError, ValueError):
         accepts_positional_signal = True
         accepts_keyword_signal = False
+        accepts_model_context = False
+    extra = {"model_context": model_context} if accepts_model_context else {}
     result: Any
     if accepts_positional_signal:
-        result = transform(messages, signal)
+        result = transform(messages, signal, **extra)
     elif accepts_keyword_signal:
-        result = transform(messages, signal=signal)
+        result = transform(messages, signal=signal, **extra)
     else:
-        result = transform(messages)
+        result = transform(messages, **extra)
     if inspect.isawaitable(result):
         result = await result
     return list(result)

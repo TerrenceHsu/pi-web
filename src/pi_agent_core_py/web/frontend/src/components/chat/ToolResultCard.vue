@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { ToolResultItem } from "../../types"
 import CardDetails from "./CardDetails.vue"
+import DataAnalysisCard from "./DataAnalysisCard.vue"
 
 defineProps<{ item: ToolResultItem }>()
 </script>
@@ -22,6 +23,7 @@ defineProps<{ item: ToolResultItem }>()
       <code>{{ item.resultPreview }}</code>
     </div>
     <CardDetails :details="item.details" />
+    <DataAnalysisCard v-if="['analyze_data', 'run_python_analysis'].includes(item.toolName)" :details="item.details" />
   </div>
 </template>
 

@@ -32,7 +32,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-          pip install -e ".[web]"
+          pip install -e ".[web,data-analysis]"
+          pip install uv
+
+      - name: Install separate Python analysis environment
+        run: python scripts/setup_analysis_python.py
 
       - name: Ruff
         run: ruff check src/ tests/ evals/

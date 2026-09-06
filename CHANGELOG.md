@@ -8,6 +8,85 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Workspace Bash protected execution / Plan atomic adapter（2026-09-06）
+
+- 增加严格 Bash 输入和薄 RunBashTool（暂未注册）；脚本按精确 UTF-8 字节哈希并投递到固定控制路径，
+  控制用户 UID 10000、任务用户 UID 10001，任务不能覆盖脚本或注入下一次 shell 的环境。
+- 在公共 SandboxOperation 统一保护 argv、Bash、写入/删除/patch 和固定验证，绑定服务端请求/角色与
+  ExecutionGrant；编辑和验证共用任务预算，已知失败可在同一副本用新命令修复。
+- PlanStore 与 ExecutionStore 共享事务提交绑定、精确计划版本审批、事件和许可；失败整批回滚，
+  已绑定计划拒绝旧审批路径和 operation 替换。Web 路由尚未装配此适配器。
+- 固定 Python 检查/导出辅助程序改用 `-I -S -B`，防止 Workspace 中的 `json.py`/sitecustomize 被加载。
+- 新镜像通过 20 项真实 Docker 检查；新增专项 57 项，最终相关回归 314 passed / 2 skipped，详见
+  [阶段 2B 验证](docs/validation/workspace-bash-stage2b-2026-09-06.md)。功能默认关闭，未改变 Python 授权，
+  现有 Web E2B 尚未接入新许可；本次不是完整五阶段交付。
+
+### Workspace Bash backend verified / execution grants foundation（2026-09-06）
+
+- 新增固定 local Docker Backend、无宿主 shell/环境继承的 CLI transport、限额 tmpfs 传输与冻结控制，
+  inert PID 1 与执行用户使用不同非 root UID；命令后有残留进程则终止整个容器。
+- 独立 revisioned SQLite 配置不覆盖 E2B；只读探针不启动容器，也不把 daemon 可用误报为隔离已验证。
+- 新增固定镜像源码和 `scripts/check_bash_docker.py`，不自动安装、拉取或启用。
+- Docker 环境恢复后，固定镜像通过 14 项真实隔离/复用/清理门禁；原文档解析容器不受影响。
+- 修复 CLI TimeoutError 被 OSError 分支误报为 daemon 不可用；以 private cgroup v2 的 OOM 事件
+  补足 Docker State.OOMKilled 对 exec 子进程的盲区，禁用 IPC shared memory，固定 runc。
+- 新增内部 ExecutionGrant/command SQLite CAS、身份/角色/快照/后端绑定、预算预扣、撤销、清理债务和重启失效；
+  Plan 需要同事务的可信审批适配，未配置时拒绝批准；不凭模式或 AllowAll 推断执行授权。
+- 最终相关回归 154 passed（Backend 44 / 授权 41 / 既有相关 69），含单文件上传限额负例；
+  Ruff / strict Mypy 293 files / Evals 通过。
+- 本轮后端全量 2463 passed / 7 skipped / 9 deselected，coverage 77.18%（门槛 75%）；
+  单文件限额补丁另行通过最终 154 项相关回归，Frontend/E2E 本轮未重跑。
+- 仍未注册 `run_bash`，未接入 Coding/Plan/Web、可信脚本路径、发布、后台回收及 Telemetry；默认关闭，未宣称五阶段完成。
+
+### Web context compaction（2026-09-05）
+
+- SQLite 持久化工作视图与 journal/CAS 恢复，压缩不删除聊天、不改变来源 ID 或 Memory。
+- 大工具输出先外置再限长，默认 Session 绑定只读回读工具；预览仅查询已有引用。
+- 独立结构化摘要、70/80/60 有效预算策略、每请求两次调用上限与持久失败熔断；逐模型调用最终门禁保留。
+- Web 独立工作摘要、来源分页和会话级开关；Telemetry 不保存正文，新增离线压缩安全 EvalSuite。
+- 设计见 `docs/design/context-compaction.md`，验证见 `docs/validation/context-compaction-2026-09-05.md`。
+- 最终门禁：Backend 2378 passed / coverage 77.19%，Frontend 218 passed，Chromium 24/24（零重试）；
+  Ruff、strict Mypy 284 files、Evals、lock 与生产构建全部通过。
+
+### Session history and structured Memory, stages 1–4（2026-09-05）
+
+- 新增默认 Web 原生只读 `search_session_history` / `read_session_history`：Session 服务端绑定、
+  独立只读 SQLite 连接、正文投影 FTS、中文短词回退、来源/分支标记与有界分页；查询不建表。
+- 索引初始化/回填由 writer 事务负责，SDK 搜索也不再在查询时迁移数据库；初始化失败可恢复。
+- 自动记忆使用结构化增量及 immutable entry 引用，no-change 不改文件；校验用户/执行证据，
+  用户修正和固定条目受保护，失效分支投影为待确认，复用提交日志与重启恢复。
+- 历史召回不重新成为独立新证据；原文保留在 SQLite，Memory 不复制源正文。
+- 修复 Web 刷新后的终态同步遗漏工具结果：按持久消息补回结果/详情、保持顺序与幂等，并终化本轮状态。
+- Workspace 扩展配置独立加载，避免其等待 Session 资源锁时阻塞 Regenerate 实时恢复和停止按钮。
+- 现有压缩入口、阈值、完整轮次保留策略和摘要器保持不变。设计见 `docs/design/session-history-memory.md`。
+- 验证：Backend 2243 passed / coverage 76.59%，最终定向 36 passed，Frontend 202/202，最终 Chromium 24/24（禁用重试）；Ruff、strict Mypy 277 files、Evals、lock 与生产构建通过。迭代失败及修复记录见 `docs/validation/session-history-memory-2026-09-05.md`。
+
+### User-approved local Python analysis（2026-09-05）
+
+- 新增按 Workspace 选择的 `run_python_analysis`，使用独立 `.venv-analysis`，不依赖 Docker/E2B，不回退 Web 解释器
+- 服务层强制逐次确认：完整代码、输入文件及双 SHA-256 展示，拒绝/停止/超时不执行，None/AllowAll/allowlist 也不能绕过；确认后复查来源与工具选择
+- 真实 pandas/NumPy/Matplotlib 运算，返回中文 stdout、表格、PNG、代码错误行号；复用分析历史和显式保存，失败重试重新确认，重启不自动重放
+- 明确信任边界：专用环境隔离依赖，不隔离本机文件/网络权限，仅适用于受信 localhost 用户审阅过的代码
+- 安装脚本、CI 专用环境步骤、前端确认与错误展示、真实 Agent/worker/browser 回归已增加；详细证据见 `docs/validation/python-data-analysis-2026-09-05.md`
+- 最终本机门禁：Backend 2231 passed / coverage 76.43%，Frontend 200/200，Chromium 24/24，Ruff、strict Mypy 274 files、Evals、lock 检查全部通过
+
+### Optional local Data Analysis（2026-09-05）
+
+- 增加默认关闭的 `analyze_data` 原生工具和 Workspace Tools 选择；extension schema v4 原子迁移并兼容旧 MCP/Skill 客户端，未选择的 Workspace 不暴露该工具。
+- 支持 CSV/TSV/XLSX/Parquet 的检查、画像、过滤、分组指标、UTC 时间分桶及四类 PNG 图表；固定 Pandas 运算，无自由 Python/SQL/eval。
+- 本机工作进程使用独立输入副本、有限环境、内存/CPU/超时限制和取消；每 Workspace 一个活跃任务，同一进程最多两个并发计算。重启标记 interrupted，保留已完成结果。
+- 新增 analysis 前端、聊天表格/图表卡片与历史；用户显式保存时，WorkspaceStore 单事务追加报告、CSV、可选 PNG 和来源/参数/版本/hash manifest。
+- 声明可选依赖 extra、更新锁文件与 CI 安装；Telemetry 只记录动作、状态、处理行数和耗时，不保存单元格或参数正文。
+- 验证：后端全量 2212 passed / coverage 76.60%，最终分析专项 27/27；前端 198/198，Chromium 22/22，静态检查、依赖锁与 Evals 通过。详见 `docs/validation/data-analysis-2026-09-05.md`。
+
+### Workspace upload root and media design（2026-09-05）
+
+- 聊天区与 Workspace 面板支持拖拽上传；所有新上传原件（含代码、PDF/DOCX/XLSX）统一进入只读 `upload/**`，首次成功上传时目录自然出现，同名文件自动编号且可正常物化
+- 文档转换结果独立发布到 `documents/<stem>-<source-id>/`；保留旧文档原件重解析，并修复短时间连续上传同名文档的输出目录碰撞
+- 上传代码只作为输入原件保存；复制到 `scripts/**` 后参与代码连续性摘要与 Sandbox 修改，旧文件无需迁移
+- 新增图片 OCR/视觉理解与视频字幕/可选本机语音转录的设计，涵盖异步任务、来源追踪、网络与资源边界；此轮不实现媒体解析
+- 验证：Backend 2186 passed / coverage 76.57%，Frontend 193/193，Chromium E2E 21/21，Ruff、strict Mypy 263 files、前端 lint/typecheck/build 与本机 Evals gate 全部通过
+
 ### MinerU-only Wiki parsing（2026-09-05）
 
 - PDF 解析运行时统一为 MinerU 3.4.5，删除旧解析器、回退状态机、模型获取脚本及对应测试/文档；每个 Contract v2 Job 只运行一个 MinerU attempt

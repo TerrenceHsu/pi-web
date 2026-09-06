@@ -325,7 +325,7 @@ async def test_writer_leases_reject_second_writer_and_fence_stale_owner(
 
 
 @pytest.mark.asyncio
-async def test_lazy_fts_search_filters_and_tracks_deletes(tmp_path: Path) -> None:
+async def test_writer_initialized_fts_search_filters_and_tracks_deletes(tmp_path: Path) -> None:
     database = tmp_path / "search.sqlite"
     repository = SQLiteSessionRepository(database)
     storage = await repository.create(session_id="session", title="Search")
@@ -337,7 +337,7 @@ async def test_lazy_fts_search_filters_and_tracks_deletes(tmp_path: Path) -> Non
     cursor = await connection.execute(
         "SELECT 1 FROM sqlite_master WHERE name = 'session_search_fts'"
     )
-    assert await cursor.fetchone() is None
+    assert await cursor.fetchone() is not None
     await cursor.close()
 
     entry = await storage.append_entry(

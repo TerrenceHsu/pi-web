@@ -62,6 +62,21 @@ beforeEach(() => {
 })
 
 describe("Workspace extensions", () => {
+  it("enables the optional tool without changing MCP or Skill selections", async () => {
+    api.getWorkspaceExtensions.mockResolvedValue({ ...snapshot(true),
+      tools: [{ name: "analyze_data", label: "Data Analysis", available: true, selected: false }],
+      selected_tool_names: [],
+    })
+    const wrapper = mount(WorkspaceExtensions)
+    await flushPromises()
+    await wrapper.get('[data-testid="workspace-tool-analyze_data"]').setValue(true)
+    await flushPromises()
+    expect(api.updateWorkspaceExtensions).toHaveBeenCalledWith("sess-1", {
+      mcp_server_names: ["ddgs"], skill_names: ["review"], tool_names: ["analyze_data"],
+    })
+    wrapper.unmount()
+  })
+
   it("loads the global catalog and persists a Workspace MCP choice", async () => {
     const wrapper = mount(WorkspaceExtensions)
     await flushPromises()
@@ -75,6 +90,7 @@ describe("Workspace extensions", () => {
     expect(api.updateWorkspaceExtensions).toHaveBeenCalledWith("sess-1", {
       mcp_server_names: ["ddgs"],
       skill_names: [],
+      tool_names: [],
     })
   })
 })

@@ -8,18 +8,26 @@ const props = withDefaults(defineProps<{
   loading?: boolean
   compacting?: boolean
   disabled?: boolean
+  managementEnabled?: boolean
 }>(), {
   loading: false,
   compacting: false,
   disabled: false,
+  managementEnabled: true,
 })
 
-const emit = defineEmits<{ (event: "compact"): void }>()
+const emit = defineEmits<{
+  (event: "compact"): void
+  (event: "show-details"): void
+}>()
 
 const level = computed(() => props.budget?.estimate.level ?? "unknown")
 const label = computed(() => {
   if (props.loading && !props.budget) return "Context …"
-  const ratio = props.budget?.estimate.input_ratio
+  const estimate = props.budget?.estimate
+  const ratio = estimate?.effective_ratio === undefined
+    ? estimate?.input_ratio
+    : estimate.effective_ratio
   return typeof ratio === "number"
     ? `Context ~${Math.round(ratio * 100)}%`
     : "Context unknown"
@@ -28,11 +36,15 @@ const details = computed(() => {
   const estimate = props.budget?.estimate
   if (!estimate) return "Context estimate is loading."
   const parts = [
+    "Approximate token estimate",
     `Input ~${estimate.estimated_input_tokens.toLocaleString()} tokens`,
     `System ~${estimate.system_prompt_tokens.toLocaleString()}`,
     `Messages ~${estimate.message_tokens.toLocaleString()}`,
     `Tools ~${estimate.tool_definition_tokens.toLocaleString()}`,
   ]
+  if (estimate.effective_input_budget) {
+    parts.push(`Effective input budget ${estimate.effective_input_budget.toLocaleString()} (output and tool-growth reserves excluded)`)
+  }
   if (estimate.context_window) {
     parts.push(`Window ${estimate.context_window.toLocaleString()}`)
   } else {
@@ -43,19 +55,25 @@ const details = computed(() => {
   }
   return parts.join(" · ")
 })
-const canCompact = computed(() => level.value === "compact" || level.value === "blocked")
 </script>
 
 <template>
   <div class="context-budget" :class="`level-${level}`" :title="details">
     <span data-testid="context-budget-label">{{ label }}</span>
     <button
-      v-if="canCompact"
+      v-if="managementEnabled && budget"
       type="button"
       data-testid="context-compact-button"
       :disabled="disabled || compacting"
       @click="emit('compact')"
     >{{ compacting ? "Compacting…" : "Compact" }}</button>
+    <button
+      v-if="managementEnabled"
+      type="button"
+      data-testid="context-details-button"
+      aria-label="Context settings and working summary"
+      @click="emit('show-details')"
+    >Details</button>
   </div>
 </template>
 

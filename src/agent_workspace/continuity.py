@@ -15,7 +15,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from .store import MEMORY_PATH
+from .structured_memory import MemoryEvidence
 
 ContinuityTextGenerator = Callable[..., Awaitable[str]]
 
@@ -65,6 +68,7 @@ class CheckpointSource:
     source_sha256: str
     message_count: int
     chunks: tuple[str, ...]
+    entries: tuple[MemoryEvidence, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -110,6 +114,7 @@ def checkpoint_source_to_operation_payload(
         "source_message_count": source.message_count,
         "chunks": list(chunks),
         "memory_logical_path": SESSION_MEMORY_PATH,
+        "entries": [entry.model_dump(mode="json") for entry in source.entries],
     }
     if blocked_by_sandbox_operation_id is not None:
         payload["blocked_by_sandbox_operation_id"] = blocked_by_sandbox_operation_id
@@ -157,12 +162,22 @@ def checkpoint_source_from_operation_payload(
             "invalid_turn_evidence",
             "Latest turn evidence hash is invalid.",
         )
+    try:
+        raw_entries = payload.get("entries", [])
+        if not isinstance(raw_entries, list) or len(raw_entries) > 512:
+            raise ValueError("invalid entries")
+        entries = tuple(MemoryEvidence.model_validate(item) for item in raw_entries)
+        if sum(len(e.text) for e in entries) > _MAX_TURN_EVIDENCE_CHARS * 2:
+            raise ValueError("oversized entries")
+    except (ValueError, ValidationError) as exc:
+        raise CheckpointerError("invalid_turn_evidence", "Invalid memory sources") from exc
     return AutoMemoryOperationEvidence(
         source=CheckpointSource(
             messages=(),
             source_sha256=source_sha256,
             message_count=message_count,
             chunks=tuple(chunks_raw),
+            entries=entries,
         ),
         blocked_by_sandbox_operation_id=blocked_by,
         latest_turn_source_sha256=latest_turn_source_sha256,
@@ -188,6 +203,7 @@ def merge_checkpoint_sources(
         source_sha256=hashlib.sha256(identity.encode("utf-8")).hexdigest(),
         message_count=earlier.message_count + later.message_count,
         chunks=_bound_evidence_chunks((*earlier.chunks, *later.chunks)),
+        entries=tuple({e.entry_id: e for e in (*earlier.entries, *later.entries)}.values()),
     )
 
 
@@ -242,7 +258,14 @@ async def recover_auto_memory_operations(
             memory_hash = extract_checkpoint_source_hash(
                 memory_bytes.decode("utf-8", errors="replace")
             )
-        if memory_hash == evidence.source.source_sha256:
+        no_change_committed = any(
+            record.record_type == "effect_committed" and record.payload.get("no_change") is True
+            for record in operation.records
+        )
+        if no_change_committed:
+            await session_store.finish_operation(operation.id, outcome="completed")
+            completed += 1
+        elif memory_hash == evidence.source.source_sha256:
             assert memory_ref is not None
             await session_store.mark_operation_effect_committed(
                 operation.id,
@@ -495,12 +518,38 @@ async def generate_checkpoint_memory(
     model_id: str = "",
     operation: str = "checkpointer",
     signal: asyncio.Event | None = None,
-) -> str:
+) -> str | None:
     """Generate cumulative Memory.md content with one or more bounded LLM calls."""
     if source.message_count == 0 or not source.chunks:
         raise CheckpointerError(
             "nothing_to_checkpoint",
             "There are no messages to checkpoint.",
+        )
+
+    from .structured_memory import (
+        MemoryValidationError,
+        generate_memory_update,
+        is_structured_memory,
+        parse_memory,
+        render_memory,
+    )
+
+    if operation == AUTO_MEMORY_OPERATION_KIND or is_structured_memory(prior_memory):
+        try:
+            updated = await generate_memory_update(
+                generate_text, prior_memory=prior_memory, evidence=list(source.entries),
+                operation=operation, signal=signal,
+            )
+        except MemoryValidationError as exc:
+            raise CheckpointerError(str(exc), "Structured memory validation failed") from exc
+        if updated is None:
+            if operation == AUTO_MEMORY_OPERATION_KIND:
+                return None
+            updated = render_memory(*parse_memory(prior_memory))
+        return render_memory_document(
+            updated, source_sha256=source.source_sha256,
+            source_message_count=source.message_count, provider_id=provider_id,
+            model_id=model_id, operation=operation,
         )
 
     chunk_summaries: list[str] = []

@@ -127,19 +127,21 @@ async function restoreWorkspaceSession(sessionId: string | null): Promise<void> 
     return
   }
 
+  // Extension discovery may wait for a running Session's resource lock. It
+  // must not delay active-request recovery, live output or the Stop button.
+  void workspaceExtensionStore
+    .load(sessionId)
+    .then((result) => {
+      if (version === activationVersion && sessionStore.activeSessionId === sessionId) {
+        skillStore.setSelectedSkillNames(result.selected_skill_names)
+      }
+    })
+    .catch(() => undefined)
   await Promise.all([
     chatStore.loadMessages(sessionId),
     fileStore.loadFiles(sessionId),
     contextBudgetStore.load(sessionId),
     codingSandboxStore.restoreSession(sessionId),
-    workspaceExtensionStore
-      .load(sessionId)
-      .then((result) => {
-        if (sessionStore.activeSessionId === sessionId) {
-          skillStore.setSelectedSkillNames(result.selected_skill_names)
-        }
-      })
-      .catch(() => undefined),
   ])
   if (version !== activationVersion || sessionStore.activeSessionId !== sessionId) return
 

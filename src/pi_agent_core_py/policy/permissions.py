@@ -197,6 +197,7 @@ _DEFAULT_READONLY_LOCAL = {
     "search", "web_search",
     "read_file", "list_files", "get_file_info",
     "fetch_url_readonly",
+    "search_session_history", "read_session_history", "read_tool_output",
 }
 
 #: 默认视为高风险的本地工具名（小写比较）。
@@ -330,6 +331,19 @@ class DefaultToolPermissionPolicy(ToolPermissionPolicy):
                         "server": server,
                         "tool": mcp_tool,
                     },
+                )
+
+        # This concrete product tool has its own mandatory, source-hash-bound
+        # execution confirmation inside the service. Do not ask twice. Explicit
+        # denies above still win; allow-all/allowlists cannot bypass that gate.
+        if name == "run_python_analysis":
+            from ..tools.data_analysis import PythonDataAnalysisTool
+
+            if isinstance(tool, PythonDataAnalysisTool):
+                return ToolPermissionDecision(
+                    decision="allow", policy_name=self.name,
+                    reason="Execution deferred to mandatory Python confirmation",
+                    metadata={"execution_confirmation": "required"},
                 )
 
         # --- 2. 显式 allow 名单 ---

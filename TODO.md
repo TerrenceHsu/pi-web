@@ -1,6 +1,44 @@
 # Current TODO
 
-> 校准日期：**2026-09-03**。本文件只保留尚未完成或明确延期的事项；已完成阶段不再复制数百行历史记录，统一由 [`STATUS.md`](STATUS.md)、[`CHANGELOG.md`](CHANGELOG.md) 和 `docs/validation/` 追溯。
+> 校准日期：**2026-09-06**。当前事项优先；下方已完成阶段为历史记录，最新事实以 [`STATUS.md`](STATUS.md) 为准。
+
+## Workspace Bash / 统一任务授权
+
+- [x] 阶段 1 基础代码：固定 Docker 后端、隔离传输/worker、独立配置与探针、36 个离线契约测试。
+- [x] 定位非标准安装目录中的 Docker CLI：用户提供的 DockerDesktop 目录下 `resources/bin/docker.exe`。
+- [x] 恢复 Docker 引擎，并通过官方设置将 WSL 数据迁至 `D:\DockerData\DockerDesktopWSL`；
+  原 3 个镜像与容器 ID 保留，解析容器健康，迁移前备份经校验后已按用户要求删除。见 [迁移记录](docs/validation/docker-data-migration-2026-09-06.md)。
+- [x] 阶段 1 真实验收：已构建固定镜像，14 项真实 Docker 检查通过，测试容器全部回收；
+  修复超时误报，补齐 cgroup OOM 检查、禁用共享内存、固定 private cgroup/runc 和构建上下文白名单。
+- [x] 阶段 2A 内部授权基础：ExecutionGrant、SQLite 原子批准/激活、命令 CAS、身份/角色/预算、撤销与重启失效；41 项离线测试。
+- [x] 阶段 2B：保护脚本投递、公共 Operation 执行/编辑/验证门禁、服务端角色上下文、真实 PlanStore 同事务绑定/审批；
+  定义未注册的 RunBashTool，固定 Python 辅助程序隔离启动；20 项真实 Docker 检查与 57 项新增专项通过。
+- [ ] 阶段 2：ExecutionGrant、Coding/Plan 按任务授权、独立 Bash 逐次确认与统一执行入口。
+  下一步拆分“准备精确快照/许可 → 用户批准 → 激活并创建运行副本”，接入 Coding 任务确认、Plan Web 合并审批、
+  独立 Bash 完整脚本确认和 Web request/Executor/Verifier 上下文；每次新请求创建新任务，不复用 Session 旧授权。
+  生命周期装配并完成拒绝/取消/重启测试后再注册工具；现有 Web E2B/Coding/Plan 尚未受新许可保护。
+- [ ] 阶段 3：独立 Bash 证据、Coding 固定验证、冻结审阅与确认发布。
+- [ ] 阶段 4：Web 管理/运行/恢复/撤销、任务预算和 Telemetry。
+- [ ] 阶段 5：完整后端/前端/E2E/Evals/真实 Docker 门禁及最终交付。
+  见 [`实施方案`](docs/design/workspace-bash-tool.md) 和 [`阶段 1 记录`](docs/validation/workspace-bash-stage1-2026-09-06.md)。
+
+## 会话历史与 Memory
+
+- [x] 会话历史与 Memory 阶段 1–4：只读工具、正文检索隔离/限额、每轮结构化增量、来源追溯与纠正。
+  见 [`session-history-memory.md`](docs/design/session-history-memory.md)。
+- [x] 在记忆阶段之后实现 Web 压缩四阶段：不可变来源投影、工具输出回读、结构化摘要与自动预算、Web/Telemetry/Evals。
+  见 [`context-compaction.md`](docs/design/context-compaction.md)。真实模型摘要质量需继续通过实际任务评估。
+
+## Workspace 上传与媒体解析
+
+- [x] Agent 调用独立本机 Python：`.venv-analysis`、逐次完整代码确认、pandas/NumPy/Matplotlib、错误反馈、结果预览保存；不使用 Docker，明确本机权限与非安全沙箱边界。见 [`python-data-analysis.md`](docs/design/python-data-analysis.md)。
+
+- [x] 按顺序完成可选 Data Analysis：Workspace 工具选择、结构化契约、本机受限进程、统计/图表、独立结果保存、前端及恢复链路；详见 [`data-analysis.md`](docs/design/data-analysis.md)。
+
+- [x] 聊天区与 Workspace 面板拖拽上传统一进入根目录 `upload/`；首次成功上传惰性创建，同名原件不覆盖，PDF/DOCX/XLSX 转换产物独立于原件路径，旧数据原位兼容。
+- [x] 完成图片与视频链接的本机解析设计：[`workspace-upload-media.md`](docs/design/workspace-upload-media.md)。当前仅提交方案，未实现媒体解析。
+- [ ] 方案确认后，实现图片 OCR（MinerU）及独立视觉理解入口；补齐共享解析适配器、能力探测和可恢复异步任务。
+- [ ] 再实现公共视频链接的字幕优先解析、时间戳来源和显式本机语音转录；按站点验证能力，不承诺任意视频地址均可解析。
 
 ## 当前收敛执行顺序
 

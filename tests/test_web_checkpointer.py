@@ -1,7 +1,7 @@
 """Web /checkpointer slash-command integration tests."""
 from __future__ import annotations
 
-import io
+import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +24,32 @@ def _script(text: str) -> list[Any]:
     return [TextDeltaEvent(delta=text), DoneEvent(stop_reason="stop")]
 
 
+class _StructuredMemoryFixtureClient(FakeClient):
+    """Bind deterministic test summaries to the real persisted evidence IDs."""
+
+    async def stream(self, **kwargs):
+        async for event in super().stream(**kwargs):
+            if (
+                isinstance(event, TextDeltaEvent)
+                and (kwargs.get("metadata") or {}).get("memory_schema")
+                and event.delta.startswith("# Memory")
+            ):
+                request = json.loads(kwargs["messages"][0].content[0].text)
+                source_id = request["turn_evidence"][0]["entry_id"]
+                statements = [
+                    line[2:] for line in event.delta.splitlines() if line.startswith("- ")
+                ]
+                yield TextDeltaEvent(delta=json.dumps({
+                    "no_change": False,
+                    "changes": [
+                        {"kind": "reference", "text": statement, "source_entry_ids": [source_id]}
+                        for statement in statements
+                    ],
+                }))
+            else:
+                yield event
+
+
 def _build_app(
     tmp_path: Path,
     scripts: list[list[Any]],
@@ -31,7 +57,7 @@ def _build_app(
     auto_memory: bool = False,
     code_continuity: bool = False,
 ):
-    fake = FakeClient(scripts)
+    fake = _StructuredMemoryFixtureClient(scripts) if auto_memory else FakeClient(scripts)
     harness = AgentHarness(Agent(system_prompt="base-system", client=fake))
     app = create_app(
         harness,
@@ -458,18 +484,17 @@ def test_workspace_context_restores_coding_facts_without_chat_history_after_rest
                 "expected_sha256": memory_md["sha256"],
             },
         ).status_code == 200
-        uploaded = client.post(
-            f"/api/sessions/{sid}/files",
-            files={
-                "files": (
-                    "main.py",
-                    io.BytesIO(b"def restart_entrypoint():\n    return 'ready'\n"),
-                    "text/x-python",
-                )
-            },
-        )
-        assert uploaded.status_code == 200
-        assert uploaded.json()["workspace"]["code_continuity"]["status"] == "current"
+        async def create_working_code():
+            await first_app.state.web.file_store.write_text(
+                sid, "main.py", "def restart_entrypoint():\n    return 'ready'\n"
+            )
+            await first_app.state.web.code_continuity_service.refresh(
+                sid, trigger="workspace_published", changed_paths=("scripts/main.py",)
+            )
+
+        client.portal.call(create_working_code)
+        workspace = client.get(f"/api/sessions/{sid}/workspace").json()["workspace"]
+        assert workspace["code_continuity"]["status"] == "current"
         assert client.get(f"/api/messages?session_id={sid}").json()["count"] == 0
     dispose_app(first_app)
 
@@ -521,29 +546,25 @@ def test_workspace_context_marks_pending_artifact_memory_and_stale_code(
     )
     with TestClient(app) as client:
         sid = _create_session(client)
-        first_code = client.post(
-            f"/api/sessions/{sid}/files",
-            files={
-                "files": (
-                    "legacy.py",
-                    io.BytesIO(b"def obsolete_summary_symbol():\n    return 1\n"),
-                    "text/x-python",
-                )
-            },
-        )
-        assert first_code.json()["workspace"]["code_continuity"]["status"] == "current"
+        async def create_summarized_code():
+            await app.state.web.file_store.write_text(
+                sid, "legacy.py", "def obsolete_summary_symbol():\n    return 1\n"
+            )
+            await app.state.web.code_continuity_service.refresh(
+                sid, trigger="workspace_published", changed_paths=("scripts/legacy.py",)
+            )
+
+        client.portal.call(create_summarized_code)
+        workspace = client.get(f"/api/sessions/{sid}/workspace").json()["workspace"]
+        assert workspace["code_continuity"]["status"] == "current"
         app.state.web.code_continuity_service = None
-        second_code = client.post(
-            f"/api/sessions/{sid}/files",
-            files={
-                "files": (
-                    "fresh.py",
-                    io.BytesIO(b"def current_symbol():\n    return 2\n"),
-                    "text/x-python",
-                )
-            },
+
+        client.portal.call(
+            app.state.web.file_store.write_text,
+            sid, "fresh.py", "def current_symbol():\n    return 2\n",
         )
-        assert second_code.json()["workspace"]["code_continuity"]["status"] == "stale"
+        workspace = client.get(f"/api/sessions/{sid}/workspace").json()["workspace"]
+        assert workspace["code_continuity"]["status"] == "stale"
 
         first = client.post(
             "/api/prompt",

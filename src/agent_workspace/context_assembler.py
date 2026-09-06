@@ -119,10 +119,22 @@ class WorkspaceContextAssembler:
         *,
         pending_memory: AutoMemoryOperationEvidence | None = None,
         sandbox: SandboxContinuationState | None = None,
+        active_memory_entry_ids: set[str] | None = None,
     ) -> WorkspaceContextAssembly:
         state, refs, texts, read_errors = await self._read_revision_snapshot(
             session_id
         )
+        memory_text = texts.get(MEMORY_PATH.casefold())
+        if memory_text is not None:
+            from .structured_memory import is_structured_memory, memory_prompt_text
+
+            if is_structured_memory(memory_text.content):
+                texts[MEMORY_PATH.casefold()] = _VerifiedText(
+                    content=memory_prompt_text(
+                        memory_text.content, active_memory_entry_ids or set(),
+                    ),
+                    truncated=memory_text.truncated,
+                )
         refs_by_path = {ref.logical_path.casefold(): ref for ref in refs}
         required_paths = {AGENT_INSTRUCTIONS_PATH, MEMORY_PATH}
         if state.code_continuity.status == "current":

@@ -69,7 +69,7 @@ async def generate_checkpoint_memory(
     prior_memory: str | None,
     operation: str = "checkpointer",
     signal: asyncio.Event | None = None,
-) -> str:
+) -> str | None:
     """Adapt a Core ``ModelClient`` to the Workspace text-generator port."""
 
     async def generate_text(

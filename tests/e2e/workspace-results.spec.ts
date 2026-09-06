@@ -88,7 +88,7 @@ test("Workspace panel creates Markdown and uploads code without attaching it to 
     buffer: Buffer.from("print('uploaded result')\n", "utf8"),
   })
   await expect(page.locator("[data-testid='workspace-file-preview']")).toContainText(
-    "scripts/uploaded-result.py",
+    "upload/uploaded-result.py",
   )
   await expect(page.locator("[aria-label='uploaded-result.py code']")).toContainText(
     "uploaded result",
@@ -96,7 +96,7 @@ test("Workspace panel creates Markdown and uploads code without attaching it to 
   await expect(page.locator("[data-testid='file-chip']")).toHaveCount(0)
 })
 
-test("uploaded workbook is converted and shown read-only in the Workspace panel", async ({
+test("dropped workbook keeps its original in upload and converts in the Workspace panel", async ({
   page,
 }) => {
   await page.goto("/")
@@ -106,12 +106,19 @@ test("uploaded workbook is converted and shown read-only in the Workspace panel"
   await waitForApp(page)
 
   const fixture = fileURLToPath(new URL("./fixtures/metrics.xlsx.b64", import.meta.url))
-  const workbook = Buffer.from((await readFile(fixture, "utf8")).trim(), "base64")
-  await page.locator("[data-testid='workspace-upload-input']").setInputFiles({
-    name: "metrics.xlsx",
-    mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    buffer: workbook,
+  const workbook = (await readFile(fixture, "utf8")).trim()
+  const transfer = await page.evaluateHandle((encoded) => {
+    const bytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0))
+    const data = new DataTransfer()
+    data.items.add(new File([bytes], "metrics.xlsx", {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }))
+    return data
+  }, workbook)
+  await page.locator("[data-testid='workspace-files-pane']").dispatchEvent("drop", {
+    dataTransfer: transfer,
   })
+  await transfer.dispose()
 
   const preview = page.locator("[data-testid='workspace-file-preview']")
   await expect(preview).toContainText("content.md")
@@ -120,6 +127,40 @@ test("uploaded workbook is converted and shown read-only in the Workspace panel"
   await expect(preview).toContainText("Metrics")
   await expect(preview).toContainText("Generated document output is read-only.")
   await expect(page.getByRole("tab", { name: "Edit" })).toHaveCount(0)
+  await expect(page.locator("[data-testid='file-chip']")).toHaveCount(0)
+  const response = await page.request.get(`/api/sessions/${session.id}/files`)
+  const { files } = await response.json()
+  expect(files.some((file: any) => file.logical_path === "upload/metrics.xlsx")).toBe(true)
+  expect(files.some((file: any) => /documents\/.+\/content.md$/.test(file.logical_path))).toBe(true)
+})
+
+test("chat file drops create upload lazily and preserve duplicate originals after reload", async ({ page }) => {
+  await page.goto("/")
+  await waitForApp(page)
+  const session = await createSession(page)
+  await page.goto(`/chat/${session.id}`)
+  await waitForApp(page)
+  const listFiles = async () => (await (await page.request.get(`/api/sessions/${session.id}/files`)).json()).files
+  expect((await listFiles()).some((file: any) => file.logical_path.startsWith("upload/"))).toBe(false)
+  const transfer = await page.evaluateHandle(() => {
+    const data = new DataTransfer()
+    data.items.add(new File(["first"], "notes.txt", { type: "text/plain" }))
+    data.items.add(new File(["second"], "notes.txt", { type: "text/plain" }))
+    data.items.add(new File(["print('hello')"], "demo.py", { type: "text/x-python" }))
+    return data
+  })
+  await page.locator("[data-testid='chat-input']").dispatchEvent("drop", { dataTransfer: transfer })
+  await transfer.dispose()
+  await expect(page.locator("[data-testid='attachment-bar'] [data-testid='file-chip']")).toHaveCount(3)
+  await expect(page.locator("[data-testid='workspace-file-preview']")).toContainText("upload/demo.py")
+  await page.reload()
+  await waitForApp(page)
+  const files = await listFiles()
+  expect(files.map((file: any) => file.logical_path)).toEqual(expect.arrayContaining([
+    "upload/notes.txt", "upload/notes (2).txt", "upload/demo.py",
+  ]))
+  const duplicate = files.find((file: any) => file.logical_path === "upload/notes (2).txt")
+  expect(await (await page.request.get(`/api/sessions/${session.id}/files/${duplicate.id}`)).text()).toBe("second")
 })
 
 test("narrow layout exposes Workspace results as a drawer", async ({ page }) => {

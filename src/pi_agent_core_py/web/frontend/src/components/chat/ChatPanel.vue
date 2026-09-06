@@ -2,8 +2,10 @@
 import { computed, onMounted, ref, watch } from "vue"
 
 import { abortRun, getState } from "../../api/state"
+import { getContextSource } from "../../api/contextBudget"
+import { ApiError } from "../../api/client"
 import { listSlashCommands } from "../../api/slashCommands"
-import type { SlashCommandDefinition } from "../../types"
+import type { ContextSourcePage, SlashCommandDefinition } from "../../types"
 import { useChatStore } from "../../stores/chatStore"
 import { useCodingSandboxStore } from "../../stores/codingSandboxStore"
 import { useContextBudgetStore } from "../../stores/contextBudgetStore"
@@ -44,7 +46,36 @@ const errorMessage = computed(
   () => chatStore.error || codingSandboxStore.error || fileStore.error || contextBudgetStore.error,
 )
 const contextBudget = computed(() => contextBudgetStore.getBudget(activeSessionId.value))
-const contextBlocked = computed(() => contextBudget.value?.estimate.level === "blocked")
+const compaction = computed(() => contextBudgetStore.getCompaction(activeSessionId.value))
+const contextBlocked = computed(() => contextBudget.value?.estimate.level === "blocked"
+  && compaction.value?.can_auto_compact !== true)
+const contextDetailsOpen = ref(false)
+const sourcePage = ref<ContextSourcePage | null>(null)
+const sourceEntryId = ref<string | null>(null)
+const sourceLoading = ref(false)
+const sourceError = ref<string | null>(null)
+const visibleSourceCount = ref(50)
+let sourceVersion = 0
+const compactionStatusLabel = computed(() => {
+  if (contextBudgetStore.compactingSessionId === activeSessionId.value) return "Compacting…"
+  const labels: Record<string, string> = {
+    idle: "Not compacted",
+    prepared: "Compacting…",
+    committed: "Summary active",
+    failed: "Compaction failed; previous context retained",
+    interrupted: "Compaction interrupted; previous context retained",
+  }
+  const status = compaction.value?.status ?? "idle"
+  return labels[status] ?? status
+})
+const compactionTokenChange = computed(() => {
+  const stats = compaction.value?.token_stats
+  const before = stats?.estimated_input_tokens_before
+  const after = stats?.estimated_input_tokens_after
+  return typeof before === "number" && typeof after === "number"
+    ? `Estimated input: ~${before.toLocaleString()} → ~${after.toLocaleString()} tokens`
+    : null
+})
 const pendingAttachments = computed(() => fileStore.pendingAttachments)
 const uploading = computed(() => fileStore.uploading)
 const slashCommands = ref<SlashCommandDefinition[]>([
@@ -55,6 +86,72 @@ const slashCommands = ref<SlashCommandDefinition[]>([
     accepts_arguments: false,
   },
 ])
+
+watch(activeSessionId, () => {
+  contextDetailsOpen.value = false
+  clearContextSource()
+})
+
+watch(
+  () => [activeSessionId.value, compaction.value?.active_projection_id] as const,
+  ([sessionId, projectionId], previous) => {
+    if (previous?.[0] === sessionId && previous?.[1] === projectionId) return
+    clearContextSource()
+    visibleSourceCount.value = 50
+    if (!knowledgeMode.value && sessionId && projectionId
+      && (previous?.[0] !== sessionId || previous?.[1] !== projectionId)) {
+      void contextBudgetStore.loadCompaction(sessionId)
+    }
+  },
+  { immediate: true },
+)
+
+function clearContextSource() {
+  sourceVersion += 1
+  sourcePage.value = null
+  sourceEntryId.value = null
+  sourceLoading.value = false
+  sourceError.value = null
+}
+
+async function toggleContextDetails() {
+  contextDetailsOpen.value = !contextDetailsOpen.value
+  if (contextDetailsOpen.value && activeSessionId.value) {
+    await contextBudgetStore.loadCompaction(activeSessionId.value)
+  }
+}
+
+async function setAutoCompaction(event: Event) {
+  const sessionId = activeSessionId.value
+  if (!sessionId || chatStore.sending) return
+  const checkbox = event.target as HTMLInputElement
+  const enabled = checkbox.checked
+  await contextBudgetStore.setAutoCompaction(sessionId, enabled)
+  // The pending control reflects the click; failed saves restore the confirmed setting.
+  if (activeSessionId.value === sessionId) checkbox.checked = compaction.value?.auto_compact === true
+}
+
+async function showContextSource(entryId: string, offset = 0) {
+  const sessionId = activeSessionId.value
+  if (!sessionId) return
+  const version = ++sourceVersion
+  sourceEntryId.value = entryId
+  sourcePage.value = null
+  sourceLoading.value = true
+  sourceError.value = null
+  try {
+    const page = await getContextSource(sessionId, entryId, offset)
+    if (version !== sourceVersion || activeSessionId.value !== sessionId) return
+    if (page.entry_id !== entryId) throw new Error("context_source_mismatch")
+    sourcePage.value = page
+  } catch (cause) {
+    if (version === sourceVersion) {
+      sourceError.value = cause instanceof ApiError ? cause.detail : "Source could not be loaded."
+    }
+  } finally {
+    if (version === sourceVersion) sourceLoading.value = false
+  }
+}
 
 watch(
   () => codingSandboxStore.available,
@@ -169,7 +266,7 @@ async function onSubmit(text: string) {
       skill_names: skillNames,
       coding_mode: codingMode.value || planMode.value,
     })
-    if (preview?.estimate.level === "blocked") {
+    if (preview?.estimate.level === "blocked" && preview.compaction?.can_auto_compact !== true) {
       contextBudgetStore.error =
         "Context budget exceeded. Compact this conversation before sending."
       chatInputRef.value?.setText(lastFailedText.value)
@@ -200,9 +297,8 @@ async function onSubmit(text: string) {
 async function onCompactContext() {
   const sessionId = activeSessionId.value
   if (!sessionId || chatStore.sending) return
-  const compacted = await contextBudgetStore.compact(sessionId)
-  if (!compacted) return
-  await chatStore.loadMessages(sessionId)
+  contextDetailsOpen.value = true
+  await contextBudgetStore.compact(sessionId)
 }
 
 async function onAbort() {
@@ -233,7 +329,9 @@ function dismissError() {
         :loading="contextBudgetStore.loadingSessionId === activeSessionId"
         :compacting="contextBudgetStore.compactingSessionId === activeSessionId"
         :disabled="chatStore.sending"
+        :management-enabled="!knowledgeMode"
         @compact="onCompactContext"
+        @show-details="toggleContextDetails"
       />
       <span v-if="chatStore.checkpointing" class="header-status running">checkpointing</span>
       <span
@@ -259,6 +357,76 @@ function dismissError() {
     </header>
 
     <ErrorBanner v-if="errorMessage" :message="errorMessage" dismissible @dismiss="dismissError" />
+    <section
+      v-if="hasSession && !knowledgeMode && (contextDetailsOpen || compaction?.active_projection_id)"
+      class="context-management"
+      :data-testid="compaction?.active_projection_id ? 'context-summary-card' : 'context-management-panel'"
+      aria-label="Working context summary"
+    >
+      <div class="context-management-header">
+        <strong>Working context</strong>
+        <span data-testid="context-compaction-status" role="status">{{ compactionStatusLabel }}</span>
+        <label>
+          <input
+            type="checkbox"
+            data-testid="context-auto-compact-toggle"
+            :checked="compaction?.auto_compact === true"
+            :disabled="!compaction || chatStore.sending || contextBudgetStore.settingsSessionId === activeSessionId"
+            @change="setAutoCompaction"
+          >
+          Auto-compact
+        </label>
+        <button type="button" :aria-expanded="contextDetailsOpen" @click="toggleContextDetails">
+          {{ contextDetailsOpen ? "Hide details" : "View summary" }}
+        </button>
+      </div>
+      <template v-if="contextDetailsOpen">
+        <p class="context-note">Only the model's working context is shortened. Original chat and Memory are unchanged.</p>
+        <p v-if="compactionTokenChange" data-testid="context-token-change">{{ compactionTokenChange }}</p>
+        <p v-if="compaction?.active_projection_id">
+          Covers {{ compaction.covered_message_count }} original messages · {{ compaction.active_projection_id }}
+        </p>
+        <p v-if="compaction?.circuit_open" class="context-error">
+          自动压缩已因连续失败暂停。旧上下文仍然保留，可点击 Compact 手动重试。
+        </p>
+        <p v-if="compaction?.error_code" class="context-error" data-testid="context-compaction-error">
+          压缩未完成，旧上下文仍然保留：{{ compaction.error_code }}
+        </p>
+        <pre v-if="compaction?.summary_text" class="context-summary-text" data-testid="context-summary-text">{{ compaction.summary_text }}</pre>
+        <p v-else class="context-note">No working summary is available yet.</p>
+        <div v-if="compaction?.source_entry_ids?.length" class="context-sources" aria-label="Summary sources">
+          <span>Original sources:</span>
+          <button
+            v-for="entryId in compaction.source_entry_ids.slice(0, visibleSourceCount)"
+            :key="entryId"
+            type="button"
+            data-testid="context-source-button"
+            @click="showContextSource(entryId)"
+          >{{ entryId }}</button>
+          <button
+            v-if="compaction.source_entry_ids.length > visibleSourceCount"
+            type="button"
+            @click="visibleSourceCount += 50"
+          >Show more sources ({{ compaction.source_entry_ids.length - visibleSourceCount }} remaining)</button>
+        </div>
+        <div v-if="sourceEntryId" class="context-source" data-testid="context-source-preview">
+          <div class="context-management-header">
+            <strong>{{ sourceEntryId }}</strong>
+            <button type="button" @click="clearContextSource">Close source</button>
+          </div>
+          <p v-if="sourceLoading" role="status">Loading source…</p>
+          <p v-if="sourceError" role="alert" class="context-error">{{ sourceError }}</p>
+          <template v-if="sourcePage">
+            <pre>{{ sourcePage.text }}</pre>
+            <div class="context-source-pagination">
+              <span>Characters {{ sourcePage.offset }}–{{ sourcePage.next_offset ?? sourcePage.total_chars }} of {{ sourcePage.total_chars }}</span>
+              <button v-if="sourcePage.offset > 0" type="button" @click="showContextSource(sourceEntryId, Math.max(0, sourcePage.offset - 6000))">Previous page</button>
+              <button v-if="sourcePage.next_offset !== null" type="button" @click="showContextSource(sourceEntryId, sourcePage.next_offset)">Next page</button>
+            </div>
+          </template>
+        </div>
+      </template>
+    </section>
     <div
       v-if="chatStore.checkpointNotice"
       class="checkpoint-notice"
@@ -327,6 +495,48 @@ function dismissError() {
   background: var(--chat-bg);
   font-size: 13px;
 }
+.context-management {
+  flex-shrink: 0;
+  max-height: 45%;
+  overflow: auto;
+  margin: 8px 24px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--chat-bg);
+  color: var(--fg);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.context-management-header, .context-sources, .context-source-pagination {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.context-management-header label { margin-left: auto; }
+.context-management-header label, .context-note { color: var(--muted); }
+.context-management pre {
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 10px;
+  border-radius: 6px;
+  background: var(--code-bg);
+}
+.context-management button {
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--chat-bg);
+  color: var(--fg);
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.context-management input:disabled { cursor: not-allowed; }
+.context-error { color: #991b1b; }
+.context-source { margin-top: 12px; }
 .header-title {
   flex: 1;
   font-weight: 500;

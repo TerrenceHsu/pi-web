@@ -15,6 +15,8 @@ if TYPE_CHECKING:
     from .validation import SandboxValidationEvidence
 
 WorkspaceErrorCode = Literal[
+    "execution_approval_required",
+    "bash_unavailable",
     "no_active_operation",
     "operation_closed",
     "unsafe_path",
@@ -39,6 +41,8 @@ WorkspaceErrorCode = Literal[
 ]
 
 _ERROR_MESSAGES: dict[WorkspaceErrorCode, str] = {
+    "execution_approval_required": "An active execution grant is required.",
+    "bash_unavailable": "Bash requires the approved local Docker runtime.",
     "no_active_operation": "No coding sandbox operation is active.",
     "operation_closed": "The coding sandbox operation is closed.",
     "unsafe_path": "The requested workspace path is unsafe.",

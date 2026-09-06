@@ -9,7 +9,8 @@ deterministic cases. It is separate from the runtime wheel and from pytest:
 
 ## Safety boundary
 
-The built-in suites use FakeProviderAdapter exclusively. They do not load the
+The agent-run suites use FakeProviderAdapter exclusively; context safety also
+exercises pure projections and local SQLite directly. They do not load the
 repository .env file, create HTTP clients, start MCP subprocesses, or call Web
 routes. Each observation receives its own temporary Workspace and SQLite
 database.
@@ -40,6 +41,12 @@ new .eval run directory. Use --artifacts-dir to select an explicit directory.
 - resource-composition: Provider, Skill, MCP, Workspace and Prompt assembly.
 - session-reload: durable messages survive Runtime Session reconstruction.
 - telemetry-safety: required spans exist without prompt or suffix content.
+- context-compaction: source/Memory preservation, branch invalidation, failed
+  attempts retained, invalid-summary rejection, and current-turn tool readback.
+  This deterministic suite does not measure model summary quality or Web retry
+  scheduling; those remain separate quality and orchestration checks. Its
+  input/total token metric is the shared context estimator, not Provider usage
+  or a claim of measured billing savings.
 
 The resource-composition baseline intentionally lacks product resources, so
 its lower score demonstrates paired pass-rate lift. The gate applies to

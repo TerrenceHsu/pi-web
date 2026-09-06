@@ -34,6 +34,7 @@ from .store import (
     WorkspaceStore,
     is_document_conversion_workspace_path,
     normalize_workspace_logical_path,
+    workspace_document_output_root,
 )
 
 WORKSPACE_DOCUMENT_MANIFEST_SCHEMA: Literal["pi-agent-workspace-document/v1"] = (
@@ -576,8 +577,8 @@ class WorkspaceDocumentService:
                 "only immutable Workspace document originals can be converted"
             )
         source_path = PurePosixPath(source.logical_path)
-        document_root = str(source_path.parent)
-        document_id = source_path.parent.name
+        document_root = workspace_document_output_root(source)
+        document_id = PurePosixPath(document_root).name
         extension = source_path.suffix.casefold()
         converter = self._registry.for_extension(extension)
 
@@ -866,7 +867,7 @@ class WorkspaceDocumentService:
         reused: bool,
         workspace_revision: int | None = None,
     ) -> WorkspaceDocumentConversionResult:
-        document_root = str(PurePosixPath(source.logical_path).parent)
+        document_root = workspace_document_output_root(source)
         refs = tuple(
             sorted(
                 (

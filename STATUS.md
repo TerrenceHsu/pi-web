@@ -1,6 +1,6 @@
 # Project Status
 
-> 当前事实快照，校准日期：**2026-09-05**。本页只描述当前代码基线；阶段性测试数字和历史决策保留在 `docs/validation/`、`CHANGELOG.md` 与归档计划中。
+> 当前事实快照，校准日期：**2026-09-06**。本页只描述当前代码基线；阶段性测试数字和历史决策保留在 `docs/validation/`、`CHANGELOG.md` 与归档计划中。
 
 ## 基线身份
 
@@ -20,6 +20,45 @@
 
 ## 当前交付状态
 
+**Workspace Bash 实施中，Web 尚不可用**：阶段 2B 已实现受保护 Bash 脚本投递、
+`SandboxOperation` 公共执行/编辑/固定验证门禁、服务端角色上下文，以及真实 PlanStore 的绑定/原子审批适配。
+薄 `RunBashTool` 已定义但未注册；本地 Operation 没有许可适配器时默认拒绝。
+固定 Python 检查/导出辅助程序改用 `-I -S -B`，避免执行 Workspace 同名模块。
+真实 Docker 20 项检查通过；新增专项 57 项，最终相关回归 314 passed / 2 skipped，静态检查及 Evals 见
+[阶段 2B 记录](docs/validation/workspace-bash-stage2b-2026-09-06.md)。
+Docker 数据仍位于 `D:\DockerData\DockerDesktopWSL`，原解析容器健康，测试容器已回收。
+**尚未接入** Web/Coding 请求审批及启动生命周期、Plan Web 合并审批、独立 Bash 完整脚本确认、
+Docker 制品发布、后台清理器和 Telemetry；阶段 2 整体及阶段 3–5 未完成。
+现有 Web E2B 未装配新许可，不应描述为已受新门禁保护；Python 产品行为未改变，Bash 默认关闭。
+阶段 2B 与前置上传/分析/记忆/压缩改动一起纳入本地开发基线；本次提交不表示 Bash 已对 Web 开放。
+此前阶段 1/2A 的后端全量 2463 passed、coverage 77.18% 是历史基线；本次未重跑全量后端或前端/E2E。
+历史证据见 [阶段 1](docs/validation/workspace-bash-stage1-2026-09-06.md) 与
+[阶段 2A](docs/validation/workspace-bash-stage2a-2026-09-06.md)。
+
+新增 **Web Context Compaction**：按持久化视图、工具输出外置、结构化自动摘要、
+Web/Telemetry/Evals 四步实现。原始 SQLite 消息与来源 ID 不变，Memory 不由压缩改写；
+实际逐次模型调用执行有效预算检查，失败保留旧视图。支持独立工作摘要、来源回查与会话自动开关。
+设计及边界见 [`context-compaction.md`](docs/design/context-compaction.md)。
+最终门禁：Backend 2378 passed / coverage 77.19%，Frontend 218 passed，Chromium 24/24
+（零重试）；Ruff、strict Mypy 284 files、Evals、lock 与生产构建通过。见
+[`验收记录`](docs/validation/context-compaction-2026-09-05.md)。
+
+新增 **Session History / Structured Memory（阶段 1–4）**：Agent 通过两个 Session 绑定只读工具
+检索原始 SQLite 历史；正文 FTS/中文短词回退、分页、只读连接与事务初始化已接入。
+每轮输出结构化 Memory 增量，支持 no-change、来源 ID、用户纠正/固定和分支失效标记，沿用失败恢复。
+设计见 [`session-history-memory.md`](docs/design/session-history-memory.md)。其后的压缩阶段见上。
+
+新增 **Python Data Analysis**：Agent 通过 `run_python_analysis` 在独立 `.venv-analysis`
+执行用户逐次批准的 Python，完整代码/来源确认、拒绝/取消、中文 stdout、表格/PNG、历史与显式保存
+已接通；None/AllowAll 权限也不能跳过确认。不需要 Docker，依赖隔离不是安全沙箱，仅供受信本机使用。
+设计见 [`python-data-analysis.md`](docs/design/python-data-analysis.md)。
+
+新增可选本机 **Data Analysis**：在 Workspace → extensions → Tools 启用 `analyze_data`，
+通过聊天或 analysis 页执行 CSV/TSV/XLSX/Parquet 的固定统计、分组、时间汇总和图表。
+独立工作进程可取消、有资源限制；用户显式保存后才向 Workspace 追加报告/CSV/PNG/manifest，
+不改原件。工具默认关闭，选择、任务和结果按账号/Session 隔离；具体限制见
+[`data-analysis.md`](docs/design/data-analysis.md)。
+
 LLM Wiki 阶段 0–10 已完成：PDF 采用隔离 MinerU Worker 与三档固定配置，HTML
 保持零网络；Raw、Agent Summary、入口/主题页面、Change Set 审批、页面 FTS5、知识图谱、每 Space
 多 Knowledge 对话、独立前端、来源保留、Space 生命周期和归档只读门禁均已接通。产品组合不再启动
@@ -33,7 +72,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用隔离 MinerU Worker 与三档固�
 | pi `agent` 核心契约对齐（第二项） | ✅ P0 差距已补齐 | 生命周期终化、下一轮控制顺序、文本/图片/AgentMessage prompt、signal-aware context、自定义 LLM 转换、工具参数预处理与 hook patch、assistant-tail 队列续作、thinking/运行时替换和公开状态同步；详见 `docs/validation/pi-agent-parity-2026-08-31.md` |
 | pi `agent` package 结构对齐 | ✅ 完成 | canonical 实现迁入 `ai/`、`agent/`、`agent/harness/{compaction,session,tools}` 与 `session_backends/sqlite/`；旧平铺模块保留 thin facade/模块别名，兼容导入保持对象身份；AST 依赖边界、wheel 内容与隔离安装导入均通过；详见 `docs/validation/pi-agent-package-structure-2026-09-01.md` |
 | pi `coding-agent` 产品组合边界（第三项） | ✅ 阶段 1–3 完成 | 新增 `coding_agent_app.core` 的 Application/Runtime/Session/Services/Settings/Resources/Toolset/Prompt/SDK 边界；Web Session ID 真实映射独立 Runtime Session/Harness，不同 Session 可并行；Provider、Skill、MCP、Workspace 与 Prompt 统一经请求 composition 快照装配；Sandbox automation/workspace 迁入产品包并保留旧导入对象身份。详见 `docs/validation/pi-coding-agent-parity-2026-09-01.md` |
-| pi `session-backends/sqlite-node` 持久化边界（第四项） | ✅ 核心差距已补齐 | 新增 Harness 级 Repository/Storage/Search 协议、全局 append-only log、typed query、统计、writer lease/fence/heartbeat、branch cache/repair、有序事务 migration 与惰性 FTS5；共享 SQLite 服务按 connection 串行并在异常/取消时回滚；每个已启动 Web Runtime Session 持有独立可释放 Storage handle。详见 `docs/validation/pi-session-backend-parity-2026-09-03.md` |
+| pi `session-backends/sqlite-node` 持久化边界（第四项） | ✅ 核心差距已补齐 | 新增 Harness 级 Repository/Storage/Search 协议、全局 append-only log、typed query、统计、writer lease/fence/heartbeat、branch cache/repair、有序事务 migration 与 writer 初始化的 FTS5；共享 SQLite 服务按 connection 串行并在异常/取消时回滚；每个已启动 Web Runtime Session 持有独立可释放 Storage handle。详见 `docs/validation/pi-session-backend-parity-2026-09-03.md` |
 | pi `telemetry` 运行观测（第五项） | ✅ 核心与 Admin 产品面完成 | 对齐 Context/Span、noop/memory/schema 与 passive callback 语义；增加共享 SQLite Recorder、Web/Coding Agent 安全指标、Admin-only summary/list/detail API 和 Vue 仪表盘。正文、工具参数/输出、凭证与异常正文不落盘。详见 `docs/validation/pi-telemetry-parity-2026-09-03.md` |
 | pi `evals` 本机行为评测 | ✅ 离线核心完成 | 独立私有包在真实 Coding Agent Application/Runtime/Session 上运行 Prompt/Reload；每个 Observation 隔离临时 Workspace/SQLite，以 Fake Provider 执行确定性 Judge、baseline/candidate 配对、pass-rate/token/latency/cost 汇总和默认脱敏产物。详见 `docs/validation/pi-evals-parity-2026-09-03.md` |
 | 旧 Chunk Knowledge PDF → Chunk FTS5 → Citation | 🗑️ 已移除 | 运行时、REST、工具、前端与 `rag` extra 均已删除；只保留 `wiki/legacy.py` 识别并归档旧磁盘数据 |
@@ -42,7 +81,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用隔离 MinerU Worker 与三档固�
 | Session Workspace、`AGENT.md`、`Memory.md`、`/checkpointer` | ✅ 完成 | `WorkspaceStore` 为唯一规范事实源；新旧 Session 幂等初始化两个固定根文件，保留旧正文/file id；设计见 `docs/design/workspace-sandbox-integration.md` |
 | Workspace 模块分离 | ✅ 阶段 1 完成 | 规范 Store、固定文档转换和 provider-neutral continuity 已迁移到顶层 `agent_workspace`；Workspace/Sandbox adapter 位于 `coding_agent_app`，旧 Core 路径只保留兼容层；独立 import boundary 与 wheel 内容验证通过，Ruff、strict Mypy 177 files、既有定向 133 passed |
 | 每轮自动 Session Memory | ✅ 阶段 2 完成 | Prompt/Regenerate 以有界 turn evidence 和串行 durable operation 累计更新 `Memory.md`；失败不影响主回答并在下一轮 preflight 恢复，Coding 待审批期间按 Sandbox blocker 延迟以保护 Workspace revision，Knowledge 模式跳过；产品入口默认启用 |
-| Coding Workspace 内容分类 | ✅ 阶段 3 完成 | `WorkspacePathPolicy` 统一 HANDOFF/tasks/docs/scripts/inputs/artifacts/documents 所有权与写入/发布边界；普通上传进入只读 `inputs/**`，Agent 非代码产物进入 `artifacts/**`，空目录保持惰性；Backend 定向 124 passed，strict Mypy 177 files、Frontend typecheck PASS |
+| Coding Workspace 内容分类 | ✅ 完成并更新上传路由 | `WorkspacePathPolicy` 统一所有权与写入/发布边界；所有新上传原件进入只读 `upload/**`，工作代码进入 `scripts/**`，Agent 非代码产物进入 `artifacts/**`；空目录保持惰性，历史 `inputs/**` 与文档原件原位兼容 |
 | 已发布代码流程总结 | ✅ 阶段 4 完成 | revision-bound `scripts/**` 生成固定 architecture/code-flow/validation；mutation 先 stale、全套持久化后 current，并发/失败 fail closed；真实 Sandbox evidence 与普通上传“未验证”严格区分；Backend 30 + 邻接 85 passed，Frontend 6/6，静态检查通过 |
 | 无聊天上下文续作 | ✅ 阶段 5 完成 | 单一 provider-neutral assembler 为 Prompt/Regenerate/Context Budget 装配 revision-bound Workspace；stale 摘要与未发布 Artifact fail closed/显式标记，公开 secret-free context hash/audit；零历史重启与复合恢复风险已验收 |
 | Workspace 代码/Markdown 规则与 revision | ✅ 完成 | 代码统一映射到逻辑 `scripts/**`；Markdown CRUD、逐文件 SHA 与持久 Workspace revision 冲突契约已接入 Store/Web/Agent/Frontend API |
@@ -71,7 +110,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用隔离 MinerU Worker 与三档固�
 | Coding Sandbox 阶段 4A 状态机/TOCTOU | ✅ 完成 | Backend 单一转换表与公开 actions/transitions、SQLite 完整记录 CAS、UI 动作投影；Validation→Freeze 屏障前 stale 可重验，屏障后 `artifact_stale` fail-closed 终止 |
 | Coding Sandbox 阶段 4B Workspace baseline | ✅ 完成 | WorkspaceStore mutation lock 内按 logical path 物化 revision-bound 树，逐文件稳定 stat/SHA 校验；operation 记录源 revision/tree SHA，主应用不再以独立项目目录作为输入事实源；4C 前发布 fail closed |
 | Coding Sandbox 阶段 4C Workspace 发布 | ✅ 完成 | 签名 Artifact 在隔离镜像复验后，通过 WorkspaceStore journaled multi-file transaction 发布；路径白名单、目标端 revision/tree/content TOCTOU、rollback/recovery、单次 revision 和 `workspace_changed` 右栏刷新均已接通 |
-| Session Workspace 固定文档转换 | ✅ 完成 | PDF/DOCX/XLSX 原件进入 `documents/<id>/original.*` 且不可变；本地固定转换器从 revision 快照生成只读 Markdown/CSV/schema/assets/manifest，并通过 WorkspaceStore 单 revision 事务发布；OCR 延期，完全独立于 LLM Wiki Parser |
+| Session Workspace 固定文档转换 | ✅ 完成 | PDF/DOCX/XLSX 原件进入 `upload/<filename>` 且不可变；本地固定转换器从 revision 快照在 `documents/<stem>-<source-id>/` 生成只读 Markdown/CSV/schema/assets/manifest，并通过 WorkspaceStore 单 revision 事务发布；OCR 延期，完全独立于 LLM Wiki Parser |
 | Backend warning / pytest 状态目录 / ToolResult UTF-8 E2E | ✅ 完成 | Backend `-W error` 0 warning；cache/temp 固定到工作区；Playwright 48/48 |
 | Frontend warning 收敛 | ✅ 完成 | Modal/Teleport attrs、Vite mixed import 与 Playwright color env 三类提示归零；Vitest 404/404；Playwright 48/48 |
 | 历史消息 U+FFFD 完整性标记 | ✅ 完成 | 读取时递归检测并返回计数/RFC 6901 路径，不改写 SQLite、不伪造恢复；消息与工具卡可见，刷新保持；Playwright 49/49 |
@@ -90,7 +129,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用隔离 MinerU Worker 与三档固�
 - Session 路由为 `/chat/{session_id}`；刷新恢复准确 Session、历史、文件树、`AGENT.md`、`Memory.md` 及当前请求状态
 - 每个 Web Session ID 对应独立 `CodingAgentRuntime` Session 与 Agent/Harness 状态机；同 Session 单请求串行，不同 Session 可并行，Provider/Skill/MCP/Workspace/Prompt 在进入 Agent 前形成一次不可变请求装配
 - 每个 Session 由唯一 `WorkspaceStore` 初始化独立文件夹和唯一根 `AGENT.md`、`Memory.md`；启动时幂等补齐旧 Session，保留已有正文/file id，两个根文件不可删除；`VirtualFileStore` 仅为同一实现的兼容别名
-- Agent 写入或用户上传的代码按扩展名自动进入逻辑 `scripts/**`；普通上传进入不可原地改写的 `inputs/**`，Agent 非代码交付物默认进入 `artifacts/**`，共享笔记使用 `docs/notes/**`
+- 所有新上传原件（含代码）进入不可原地改写的 `upload/**`；聊天区与 Workspace 面板均支持拖拽，同名自动编号，目录首次成功上传时出现。代码原件复制到 `scripts/**` 才作为工作代码参与摘要；Agent 非代码交付物默认进入 `artifacts/**`，共享笔记使用 `docs/notes/**`
 - 文件 API 和右侧 Workspace 面板直接消费 `WorkspacePathPolicy` 的分类、所有者、可编辑/移动/删除、Agent 写入、Sandbox 发布及不可变标记；系统连续性文件不能由普通用户/Agent 文件入口伪造
 - Workspace revision 以隐藏状态持久化；上传、创建、更新、移动和删除可同时校验 revision 与逐文件 SHA，过期客户端收到 409 而不会静默覆盖
 - 用户代码上传/删除和批准 Sandbox 发布会从实际 revision 更新三份只读工程摘要；每份记录代码树 SHA 和来源 revision，右栏公开 current/stale/failed，启动可恢复未完成或旧 Session 摘要
@@ -149,21 +188,47 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用隔离 MinerU Worker 与三档固�
 | Agent Telemetry | `.pi-agent-data/telemetry.sqlite`；跨账号集中存储结构化运行元数据，默认 30 天且最多 50,000 spans；正文与凭证不采集 |
 | Active request / pending approval / event subscribers | 当前后端进程内存；后端重启不恢复执行 |
 
-## 2026-09-05 当前验证基线
+## 2026-09-06 Bash 阶段 2B 验证
 
-当前 `0.0.29` 后续代码已实际复跑全量离线 Backend、Frontend、Chromium E2E、Evals 与静态门禁；
-本轮完成 Web-only Agent Core 全模块审计，并按产品设计恢复和实现 HTTP MCP；验证删除旧 Chunk-RAG、重复搜索和死前端层后，
-真实 Coding Agent Session、SQLite reload、Workspace/Tool、Provider/Skill/MCP/Prompt 装配、Telemetry 隐私与
-全部 Web 主旅程仍闭环。真实 E2B、Parser OCI 与 DDGS/GLM 沿用最近一次保留证据：
+- 最终相关回归：**314 passed / 2 skipped**，31.78 秒；其中新增 Bash/公共许可/Plan 原子适配专项 57 项。
+- Ruff、strict Mypy **282 source files**、6 suites / 10 配对案例 Evals candidate gate 通过。
+- 新镜像真实 Docker **20 项**两次通过；最后补充的投递期间取消检查另行通过上述最终回归。
+- 本次未跑全量后端/coverage 或前端/E2E；当前 Web Bash 尚未注册启用。
+
+见 [阶段 2B 验证记录](docs/validation/workspace-bash-stage2b-2026-09-06.md)。
+
+### 阶段 1/2A 历史基线
+
+- 后端全量：**2463 passed, 7 skipped, 9 deselected**；1133.32 秒，coverage **77.18%**，达到 75% 门槛。
+- 单文件限额补丁另跑最终相关回归：**154 passed**；授权 41、Docker Backend 44、既有相关 69。
+- Ruff、strict Mypy **293 files**、本地 Evals candidate gate、真实 Docker **14 项**全部通过。
+- 本轮没有重跑前端/Chromium E2E，不构成 Workspace Bash 五阶段最终门禁；产品接入仍未完成。
+
+见 [阶段 2A 验证记录](docs/validation/workspace-bash-stage2a-2026-09-06.md)。
+
+## 2026-09-05 验证记录（历史）
+
+当前 `0.0.29` 后续代码持续验证离线 Backend、Frontend、Chromium E2E、Evals 与静态门禁。
+本轮完成 Session History / Structured Memory 阶段 1–4，并补齐刷新后工具结果的终态恢复；
+详细记录见 [`session-history-memory-2026-09-05.md`](docs/validation/session-history-memory-2026-09-05.md)。
+此前固定统计和逐次确认 Python 分析证据分别见 [`data-analysis-2026-09-05.md`](docs/validation/data-analysis-2026-09-05.md)
+与 [`python-data-analysis-2026-09-05.md`](docs/validation/python-data-analysis-2026-09-05.md)。
+先前上传与媒体设计证据保留在 [`workspace-upload-media-2026-09-05.md`](docs/validation/workspace-upload-media-2026-09-05.md)。
+Worker、wheel、真实 E2B 与 DDGS/GLM 沿用最近一次保留证据；Parser OCI 仍未通过实机 Gate。
+下表标注专项/历史的行是阶段证据，不是本轮重新运行的数字：
 
 | 验证 | 结果 | 备注 |
 |---|---|---|
 | Ruff 全量 | **PASS** | `ruff check src tests scripts evals`；0 errors |
-| strict Mypy 全量 | **PASS** | `mypy src evals`：263 source files / 0 issues；覆盖 Wiki、独立 Workspace/Plan 包、Managed Sandbox、AI/Agent/Harness/SQLite Repository、Coding Agent、Telemetry 与 Evals 边界 |
+| strict Mypy 全量 | **PASS** | `mypy src evals`：277 source files / 0 issues；包含只读历史与结构化记忆模块 |
 | Wiki Parser Worker 静态门禁 | **PASS** | Ruff 0 errors；strict Mypy 18 source files / 0 issues |
 | Backend 全量离线（第二轮前基线） | **3143 passed, 7 skipped, 9 deselected** | 当时为 3159 collected；`pytest tests --tb=short -q`；1053.41s；coverage 81.91% |
-| Backend 当前精简套件 | **2182 passed, 7 skipped, 9 deselected** | `pytest tests --tb=short -q`；419.32s；coverage 76.62%；默认门禁覆盖 `pi_agent_core_py`、`agent_workspace`、`coding_agent_app`、`coding_sandbox`，并排除真实外网、LLM 与 Docker marker |
-| Frontend 当前精简套件 | **188/188 passed** | 29 files；Vitest 0 failure；同时通过 typecheck、ESLint 与 production build |
+| Backend 当前精简套件 | **2243 passed, 7 skipped, 9 deselected** | `pytest tests --tb=short -q`；540.83s；coverage 76.59%；包含 12 项历史/记忆新增回归。之后收紧非原始消息证据角色过滤，并通过最终定向 36 项、Ruff/Mypy；排除真实外网、LLM 与 Docker marker |
+| Frontend 当前精简套件 | **202/202 passed** | 30 files；含终态工具结果恢复的 2 项新增回归；同时通过 typecheck、ESLint 与 production build |
+| Session History / Structured Memory 阶段 1–4 | **最终定向 36/36 passed** | 只读/隔离、中文搜索/分页、原文投影、原子索引初始化、结构化增量/no-change、来源/更正/手工固定、分支失效、Web Agent 调用与重启恢复；压缩实现未改 |
+| 逐次确认 Python 分析 | **Backend 18/18；Chromium 2/2（含在完整 24/24）** | 独立环境真实执行、完整代码/来源确认、None/AllowAll 不绕过、拒绝/取消/超时、来源复查、错误行号、CSV/PNG/报告保存、重启不重放；见 `docs/validation/python-data-analysis-2026-09-05.md` |
+| 可选 Data Analysis 专项 | **Backend 27/27；Chromium 1/1（包含在完整 22/22 中）** | 真实工作进程、四类文件/图表、Web Agent 调用、默认关闭/Session 隔离、取消/超时/恢复、迁移 rollback、显式保存、来源 hash、无正文 Telemetry；uv lock 一致性 PASS |
+| Workspace upload 拖拽专项 | **Chromium 5/5 passed；Checkpointer 11/11 passed** | 覆盖聊天/右栏真实拖拽、原件归档、同名文件刷新恢复、Excel 转换、工作代码摘要重启恢复；完整门禁见专项验证文档 |
 | pi Evals 专项 | **18 passed；5 suites / 10 observations；candidate gate PASS** | 覆盖数据契约、Judge、配对/诊断、真实 Application/Runtime/Session、工具/Workspace、统一资源装配、SQLite reload、Telemetry 隐私、默认/显式正文产物和离线依赖边界；默认 JSONL 泄漏扫描 PASS |
 | pi Telemetry 专项 | **21 passed** | 覆盖 noop/memory/nested span、SQLite 并发/持久/筛选、passive failure、正文脱敏、Agent event 投影、Admin API、跨账号查询、Auth v1→v2 和 package 依赖方向 |
 | pi Telemetry wheel | **PASS** | 离线构建主 wheel，共 444 entries；Core/Web Telemetry 与前端资源在包内；隔离安装导入 PASS |
@@ -201,7 +266,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用隔离 MinerU Worker 与三档固�
 | Agent 公开状态定向回归 | **137 passed** | Agent、Harness、stream、Provider runtime 与 Web state；系统 temp ACL 阻断项改用工作区 `basetemp` 后通过 |
 | DDGS + GLM 真实 smoke | **3/3 passed** | 固定 secret-safe 脚本；DDGS 1 项 + GLM 2 项；24.63s；未输出凭证 |
 | 真实测试门禁回归 | **3 skipped** | 手工选择 `-m integration` 但未设置 `PI_RUN_INTEGRATION=1`，确认不触网 |
-| Frontend Vitest 全量 | **352/352 passed** | 30 files；旧 Chunk Knowledge UI/Store 测试随产品退役删除，新 Wiki API/Store/Views/Route/Knowledge Chat 回归已覆盖 |
+| Frontend Vitest 历史全量 | **352/352 passed** | 30 files；旧 Chunk Knowledge UI/Store 测试随产品退役删除，新 Wiki API/Store/Views/Route/Knowledge Chat 回归已覆盖 |
 | Frontend typecheck | **PASS** | `vue-tsc --noEmit` |
 | Frontend ESLint | **PASS** | `eslint . --max-warnings=0` |
 | Frontend production build | **PASS** | `vite build`；0 mixed dynamic/static import warning |
@@ -212,7 +277,7 @@ LLM Wiki 阶段 0–10 已完成：PDF 采用隔离 MinerU Worker 与三档固�
 | Keyring 定向回归 | **94/94 passed** | Runtime、launcher 与 restart 范围 |
 | 真实 Windows Keyring 探针 | **write/read = true；cleanup = true** | 随机非用户值，执行后删除；同账号/同解释器复验与安全取证步骤已形成 Windows smoke 文档 |
 | MCP/DDGS UTF-8 定向回归 | **34 passed, 1 deselected** | 含真实 Python 子进程中文 round-trip |
-| Browser E2E | **20/20 passed** | Chromium；9 个规格、单 worker、`CI=1`；本轮 1.0m；覆盖 Sandbox、Compaction、Approval、Wiki、MCP、Session refresh、Telemetry Admin 与 Workspace；0 retry / 0 flaky / 0 failure |
+| Browser E2E | **24/24 passed** | Chromium；11 个规格、单 worker、`CI=1 --retries=0`；最终 1.4m；覆盖固定/Python Data Analysis、Sandbox、Compaction、Approval、Wiki、MCP、Session refresh、Telemetry Admin 与 Workspace 拖拽，以及扩展延迟时实时恢复；修复迭代失败后最终 0 retry / 0 flaky / 0 failure；posttest 恢复生产构建，过程见本轮验证记录 |
 | Context Compaction Browser E2E | **1/1 passed** | 修复逐轮 Prompt 未等待 202 导致的测试自身竞态；沙箱外真实启动浏览器；production build 由 posttest 恢复 |
 
 默认 pytest marker 排除真实 LLM、真实外网 integration 和 Docker；额外门禁还要求
@@ -235,7 +300,8 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 - 普通 Prompt/Regenerate active request 与 pending approval 不跨后端重启恢复；浏览器刷新只恢复仍在当前进程运行的请求。Checkpointer 可对已接受 intent 前滚；Managed Sandbox 只恢复持久状态/事件并把重启前未完成操作标为 `interrupted`，不重放模型、命令或发布
 - Human Approval 只有 Approve once / Deny；没有永久授权
 - Context Budget 是带安全余量的确定性近似，不是 Provider 官方 tokenizer
-- Context compaction 由用户手动触发，默认摘要器为本地规则式；自动 Session Memory 与 `/checkpointer` 调用当前 Session LLM，但前者保留消息、后者成功后清空当前 lane
+- 普通 Web Context compaction 支持自动/手动有界 LLM 摘要及持久工作视图，原消息与 Memory 不变；
+  SDK 旧规则式接口保持兼容。自动 Session Memory 与 `/checkpointer` 仍独立，前者保留消息、后者成功后清空当前 lane
 - Regenerate 仅支持最新 Assistant，不提供历史 revision 切换 UI
 - Session tree 的 Core/Web API 已完成；当前聊天 UI 尚无可视化 branch/lane navigator
 - MCP stdio command 是可信本机代码执行边界；Streamable HTTP endpoint 允许用户配置，但只作为当前 Web Agent 的扩展 transport，不提供独立远程 Agent 服务
@@ -245,9 +311,10 @@ Docker；真实 smoke 必须通过 `scripts/run_live_integration_tests.py` 在�
 
 ### 文件与 LLM Wiki
 
-- Session 文件统一到 `WorkspaceStore` 事实源，代码归一到逻辑 `scripts/**`，Sandbox 已事务发布回同一事实源；右侧成果面板展示代码、Markdown 和固定文档转换产物
-- Session PDF/DOCX/XLSX 上传后进入 `documents/<id>/`；Agent/右栏读取生成的 `content.md`、CSV/schema 与 assets，二进制原件只提供元信息/下载且不可变
-- PDF 扫描件由用户选择的 MinerU 档位处理；`gpu-high` 启用图片/图表分析
+- Session 文件统一到 `WorkspaceStore` 事实源；新上传原件放在逻辑 `upload/**`，工作代码在 `scripts/**`，Sandbox 已事务发布回同一事实源；右侧成果面板展示代码、Markdown 和固定文档转换产物
+- Session PDF/DOCX/XLSX 原件在 `upload/**`，转换产物在 `documents/<stem>-<source-id>/`；Agent/右栏读取生成的 `content.md`、CSV/schema 与 assets，二进制原件只提供元信息/下载且不可变。历史 `documents/<id>/original.*` 可继续重解析
+- Wiki PDF 扫描件由用户选择的 MinerU 档位处理；`gpu-high` 启用图片/图表分析。Session 固定文档转换目前仍使用 pypdf/python-docx/openpyxl，不含 OCR
+- 图片可上传和预览，但 Workspace OCR/视觉理解与视频链接解析尚未实现；本机异步任务方案见 [`workspace-upload-media.md`](docs/design/workspace-upload-media.md)
 - Wiki 只对已批准页面使用 SQLite FTS5/BM25，不建立 Chunk、向量数据库或 embedding 主链路
 - 新 Wiki 已独立接入 Web lifespan/API；真实用户旧 Chunk 库原样保留但产品不再打开。MinerU Contract v2 与 OCI file-queue Provider 已接入；开发启动器默认装配本机 exchange，Worker 未启动时 PDF fail closed
 - 旧记录中已经写入的 Unicode replacement character `U+FFFD` 仍无法从现有数据反推出原字符；当前会在读取时把它标记为“疑似编码损坏”并显示受影响字段，但不会猜测或写回所谓修复
@@ -264,7 +331,8 @@ LLM Wiki 阶段 0–10、Session Workspace 阶段 1–7 与 Coding Agent Workspa
 
 ## 建议下一步
 
-1. 已完成既定五项对齐、离线 Evals 与 Web-only Agent Core 收敛；本项目不再追随 pi 的 `client/protocol/server/tui` 产品形态。下一轮可选择 P2-D Session organization，或补充真实模型 Evals / Wiki 子步骤 Telemetry。
-2. 如需发布到远端，先配置 Git remote 再单独授权 push；Modal 与图片能力继续按既有决定暂缓。
+1. 继续 Workspace Bash 阶段 2：接入快照准备、明确审批后创建运行副本的生命周期，以及 Coding/Plan/独立 Bash 三类审批与服务端请求/角色上下文；完成门禁后再注册工具，保持发布单独确认。
+2. 此后按计划实施 Docker 制品发布、Web/Admin/Telemetry/后台清理和完整门禁。本项目不追随 pi 的 `client/protocol/server/tui` 产品形态。
+3. 如需发布到远端，先配置 Git remote 再单独授权 push；Modal 与图片能力继续按既有决定暂缓。
 
 未完成事项的唯一清单见 [`TODO.md`](TODO.md)。使用与架构说明见 [`README.md`](README.md)。

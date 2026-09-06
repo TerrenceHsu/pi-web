@@ -443,7 +443,17 @@ class SQLiteSessionStore:
             await db.execute("PRAGMA foreign_keys=ON")
             await db.execute("PRAGMA busy_timeout=5000")
             await self._exec_schema()
+            from .history import initialize_history_index
+
+            # DDL + triggers + legacy backfill are one recoverable publication.
+            # A crash must not leave an empty table mistaken for a complete index.
             await db.commit()
+            await db.execute("BEGIN IMMEDIATE")
+            await initialize_history_index(db)
+            await db.commit()
+            from .search_backend import SQLiteSessionSearch
+
+            await SQLiteSessionSearch(db_path, connection=db).initialize(db)
         except BaseException:
             # Reset first so a close failure cannot leave a half-initialized
             # connection exposed through ``connection`` / ``_require_db``.

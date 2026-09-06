@@ -159,14 +159,26 @@ test.describe.serial("P2-A Session route and full refresh recovery", () => {
     ).then((handle) => handle.jsonValue())
     expect(regenerateRequestId).toMatch(/^req_/)
 
-    await page.reload()
-    await waitForWorkspace(page)
-    await expect
-      .poll(() =>
-        page.evaluate(() => (window as any).__storeHooks.chatStore().regeneration.status),
-      )
-      .toBe("running")
-    await expect(page.locator("[data-testid='stop-button']")).toBeVisible()
+    // Extension discovery can wait on the Session resource lock. Prove that
+    // restoring the live request does not wait for this auxiliary response.
+    let releaseExtensions!: () => void
+    const extensionsGate = new Promise<void>((resolve) => { releaseExtensions = resolve })
+    await page.route(`**/api/workspaces/${session.id}/extensions`, async (route) => {
+      await extensionsGate
+      await route.continue()
+    })
+    try {
+      await page.reload()
+      await waitForWorkspace(page)
+      await expect
+        .poll(() =>
+          page.evaluate(() => (window as any).__storeHooks.chatStore().regeneration.status),
+        )
+        .toBe("running")
+      await expect(page.locator("[data-testid='stop-button']")).toBeVisible()
+    } finally {
+      releaseExtensions()
+    }
     await waitUntilIdle(page)
     await expect(page.locator("[data-testid='assistant-message']").last()).toContainText(
       "fake backend",

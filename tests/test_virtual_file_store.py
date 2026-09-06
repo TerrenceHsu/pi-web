@@ -697,7 +697,7 @@ async def test_update_text_with_legacy_plain_metadata_path(store, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_code_files_are_placed_below_scripts(store):
+async def test_agent_code_uses_scripts_and_uploaded_code_uses_upload(store):
     agent_code = await store.write_text("sess-code", "main.py", "print('ok')")
     nested_code = await store.write_text(
         "sess-code",
@@ -719,8 +719,50 @@ async def test_code_files_are_placed_below_scripts(store):
 
     assert agent_code.logical_path == "scripts/main.py"
     assert nested_code.logical_path == "scripts/packages/core/util.ts"
-    assert uploaded_code.logical_path == "scripts/src/main.rs"
+    assert uploaded_code.logical_path == "upload/src/main.rs"
+    assert uploaded_code.purpose == "input"
     assert markdown.logical_path == "docs/README.md"
+
+
+@pytest.mark.asyncio
+async def test_upload_directory_is_lazy_isolated_collision_safe_and_materialized(tmp_path):
+    from pathlib import Path
+
+    from agent_workspace import is_sandbox_publishable_workspace_path, workspace_path_policy
+
+    store = WorkspaceStore(tmp_path / "storage")
+    await store.ensure_session_workspace("one")
+    await store.ensure_session_workspace("two")
+    initial_files = await store.list_session("one")
+    assert not any(ref.logical_path.startswith("upload/") for ref in initial_files)
+    originals = [
+        ("report.pdf", b"pdf"), ("image.png", b"png"), ("main.py", b"code"),
+        ("notes.docx", b"docx"), ("data.xlsx", b"xlsx"),
+    ]
+    for name, content in originals:
+        ref = await store.save("one", _upload(content, name))
+        assert ref.logical_path == f"upload/{name}"
+        assert await asyncio.to_thread(Path(ref.path).read_bytes) == content
+        policy = workspace_path_policy(ref.logical_path, purpose=ref.purpose)
+        assert policy.immutable_content and not policy.sandbox_publishable
+        assert not is_sandbox_publishable_workspace_path(ref.logical_path)
+
+    duplicate = await store.save("one", _upload(b"different", "report.pdf"))
+    assert duplicate.logical_path == "upload/report (2).pdf"
+    other_files = await store.list_session("two")
+    assert not any(ref.logical_path.startswith("upload/") for ref in other_files)
+    await store.materialize_workspace_revision("one", tmp_path / "snapshot")
+    for name, content in originals:
+        assert (tmp_path / "snapshot" / "upload" / name).read_bytes() == content
+    assert (tmp_path / "snapshot" / "upload" / "report (2).pdf").read_bytes() == b"different"
+
+
+@pytest.mark.asyncio
+async def test_upload_subfolder_stays_below_upload_and_rejects_traversal(store):
+    uploaded = await store.save("one", _upload(b"hello", "AGENT.md"), relative_folder="UPLOAD/docs")
+    assert uploaded.logical_path == "upload/docs/AGENT.md"
+    with pytest.raises(UnsafeFilenameError):
+        await store.save("one", _upload(b"bad", "file.txt"), relative_folder="../outside")
 
 
 @pytest.mark.parametrize(

@@ -144,6 +144,28 @@ describe("Knowledge mode input", () => {
   })
 })
 
+describe("file drops", () => {
+  it("uploads dropped files through the attachment flow", async () => {
+    const wrapper = mountInput()
+    const files = [new File(["hello"], "notes.txt", { type: "text/plain" })]
+    await wrapper.get('[data-testid="chat-input"]').trigger("drop", { dataTransfer: { files } })
+    expect(wrapper.emitted("upload-files")?.[0]).toEqual([files])
+  })
+
+  it.each([
+    { attachmentsEnabled: false },
+    { sending: true },
+    { uploading: true },
+    { sessionId: null },
+  ])("rejects file drops when the input is unavailable: %o", async (props) => {
+    const wrapper = mountInput(props)
+    await wrapper.get('[data-testid="chat-input"]').trigger("drop", {
+      dataTransfer: { files: [new File(["hello"], "notes.txt")] },
+    })
+    expect(wrapper.emitted("upload-files")).toBeUndefined()
+  })
+})
+
 describe("slash command menu", () => {
   const commands = [
     {

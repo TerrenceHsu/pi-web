@@ -1,0 +1,6 @@
+# Only the image-owned worker may enter the build context. No workspace data,
+# credentials, local configuration, tests or git history is sent to the builder.
+**
+!src
+!src/coding_sandbox
+!src/coding_sandbox/local_worker.py

@@ -251,7 +251,7 @@ async def test_fresh_db_initializes_to_current_version(tmp_path):
     await store.init()
     try:
         assert await store.get_schema_version() == SCHEMA_VERSION
-        assert SCHEMA_VERSION == 3
+        assert SCHEMA_VERSION == 4
         for table in (
             "web_uploaded_skills",
             "web_mcp_servers",
@@ -295,7 +295,7 @@ async def test_v2_db_upgrades_to_v3_and_preserves_mcp_rows(tmp_path):
     store = ExtensionSQLiteStore(db_path)
     await store.init()
     try:
-        assert await store.get_schema_version() == 3
+        assert await store.get_schema_version() == SCHEMA_VERSION
         persisted = await store.get_mcp_server("seeded_srv")
         assert persisted is not None
         assert persisted.transport == "stdio"

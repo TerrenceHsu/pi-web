@@ -9,7 +9,47 @@
 > ⚠️ Web app **仅 localhost 使用**——当前已有本地账号登录、Cookie 网关与账号工作区隔离，但无 TLS / RBAC / OAuth / 公网部署加固；
 > **Localhost-first, authenticated local workspaces, not suitable for public exposure.**
 
-## P1 当前状态（相对 P0 的增量）
+## 可选 Data Analysis（2026-09-05）
+
+扩展工具目录还提供 `run_python_analysis`，独立选择并探测专用本机解释器。此工具仅从聊天调用：
+每次由服务创建 `policy_name=python_execution` 的一次性确认，完整 `code` 与来源 hash 不被通用
+512 字符预览截断。已有 `/api/requests/{request_id}/approvals` 查询/决议接口负责确认；浏览器不能
+修改待执行参数。分析历史新增 `awaiting_approval` 状态，列表含 `action`。
+Python 成功结果补充 `code`、`code_sha256`、`stdout`；失败可包含 `python_error`。
+固定分析 POST 不接受 Python；Python 历史 Retry 返回 409 `python_retry_requires_new_chat_approval`。
+详情见 [本地 Python 分析与信任边界](../design/python-data-analysis.md)。
+
+Workspace 扩展 `GET/PUT /api/workspaces/{sid}/extensions` 新增 `tools` 目录和
+`selected_tool_names`；PUT 可带 `tool_names: ["analyze_data"]`，省略则保留原选择，空数组关闭。
+默认关闭；缺失 `data-analysis` 可选依赖时不可新启用。MCP/Skill 选择仍原子保留原有协议。
+
+以下 API 全部要求当前登录账号拥有该 Session，run ID 还必须属于同一 Session：
+
+| 方法与路径（前缀 `/api/workspaces/{sid}/analysis`） | 行为 |
+| --- | --- |
+| GET `/` | 最多 20 条任务摘要 |
+| POST `/` | 接收 `AnalysisRequest`，202 返回 queued/running 任务；不写 Workspace |
+| GET `/{run}` | 状态、原参数及完成结果；用于轮询/刷新恢复 |
+| POST `/{run}/cancel` | 取消排队或运行中的任务，终止工作进程 |
+| POST `/{run}/retry` | 仅失败/取消/中断记录可新建一次任务，返回新 run ID |
+| POST `/{run}/save` | 用户显式保存；单事务追加分析产物，重复请求幂等 |
+| GET `/{run}/chart` | 校验 Session、产物 hash 后返回 PNG，private/no-store |
+| DELETE `/{run}` | 取消并清除该条历史/私有预览；已保存 Workspace 文件保留 |
+
+列表/创建的实际路径不带尾部 `/`。创建参数示例：
+
+```json
+{"file_id":"file-...","action":"aggregate","group_by":["region"],"metrics":[{"column":"sales","operation":"sum"}],"limit":100}
+```
+
+动作是 `inspect/profile/aggregate/timeseries/chart`，只接受当前 Workspace 的 file ID，不接受本机
+任意路径、URL、Python/SQL。完整契约见 `agent_workspace/analysis.py` 与 OpenAPI schema。
+状态为 `queued/running/succeeded/failed/cancelled/interrupted`；安全错误码不含文件正文或宿主路径。
+开启检查、资源上限或冲突返回 409，非法参数返回 422，未知 run 返回 404，无服务返回 503。
+成功结果包含 schema、rows、处理/导出/预览数量及截断标志、来源 hash、警告和相对图表地址。
+详见[数据分析边界](../design/data-analysis.md)。
+
+## P1 历史阶段摘要
 
 下表概括 P1-A / B / C / D 各阶段相对 P0 MVP 的增量。详细架构见 [docs/architecture/](../architecture/)。
 
@@ -207,6 +247,8 @@ Agent 当前 messages。**P0-1 起支持 `?session_id=`**：
 messages、tools、output reserve、projected tokens、context window 与占用比例；
 `approximate=true` 表示当前使用安全余量 estimator，而非 Provider 官方 tokenizer。普通 Session 还返回
 `workspace_context` 审计投影；Knowledge Conversation 返回 `null`。
+普通 Web 还返回 `compaction` 状态；`effective_input_budget` / `effective_ratio` 扣除
+输出预留和工具增长余量，实际模型调用逐次再次检查。未知窗口不启用自动压缩。
 
 ### `POST /api/sessions/{sid}/context-budget/estimate`
 
@@ -226,16 +268,33 @@ Body 可包含尚未发送的 `text`、`file_ids` 与 `skill_names`，只读估�
 最新 turn 即使超过目标也完整保留，不会留下孤立 tool result。成功响应包含
 `token_stats`、`budget_before` 与压缩后的 `budget`，以及压缩/保留 message 计数。
 没有可压缩的完整 turn 时返回 409；字段类型或范围非法返回 422。
+2026-09-05 起，Web 发布 SQLite 持久工作视图，不改 `/api/messages` 原文、entry ID 或 Memory。
+模型生成严格结构化摘要，失败或不节省 token 时 409，旧有效视图不变；具体原因在 `detail.reason`。
 
-详细语义见 [Compaction Semantics](../COMPACTION_SEMANTICS.md)。
+Web 详细语义见 [Context Compaction](../design/context-compaction.md)；通用 SDK 的旧接口仍见
+[Compaction Semantics](../COMPACTION_SEMANTICS.md)。
+
+### 压缩状态与来源
+
+- GET `/api/sessions/{sid}/context/compaction`：开关、状态、熔断、当前摘要、来源 entry IDs。
+- PUT 同路径：仅接受 `{"auto_compact": true|false}`，空闲时持久化到当前 Session。
+- GET `/api/sessions/{sid}/context/source/{entry_id}`：`offset` 与 `max_chars` 分页，默认 6,000、
+  最多 12,000 字符。只返回当前 Session 活动分支中的文本来源，越界或跨 Session 返回 404。
+- 原生只读工具 `read_tool_output(ref, offset=0, max_chars=6000)` 用于完整大工具结果的按需回读；
+  不接受 Session、数据库、路径或 SQL 参数。来源与回读正文均为不可信历史材料。
 
 **Response 200**:
 
 ```json
 {
-  "count": 2,
-  "session_id": "sess-...",
-  "messages": [{"role": "user", "content": [...], ...}, ...]
+  "auto_compact": true,
+  "status": "idle",
+  "active_projection_id": null,
+  "covered_message_count": 0,
+  "token_stats": null,
+  "error_code": null,
+  "circuit_open": false,
+  "can_auto_compact": false
 }
 ```
 
@@ -245,6 +304,18 @@ Body 可包含尚未发送的 `text`、`file_ids` 与 `skill_names`，只读估�
 ---
 
 ## Automatic Session Memory
+
+2026-09-05 更新：普通自动记忆改为结构化增量及 immutable entry 引用，新增
+`continuity.status="no_change"`（已处理但不改 Memory 文件）。保留原有失败/延迟/恢复状态。
+用户编辑托管条目正文将其固定，旧笔记不被自动覆盖；详见
+[`session-history-memory.md`](../design/session-history-memory.md)。
+
+Agent 新增 `search_session_history(query, limit=5, before_seq?)` 与
+`read_session_history(entry_id, offset=0, max_chars=6000)` 原生工具，不新增任意 SQL API。
+数据库/账号/Session 参数只能由服务端提供；工具参数不接受 `session_id`、`sql` 或物理路径。
+结果含 `entry_id`、`role`、`timestamp`、正文片段及 `active / archived_or_superseded` 状态。
+搜索最多 20 项、原文单页最多 12,000 字符；跨 Session entry 返回 `history_entry_not_found`。
+历史工具默认随文件型 Web Session 装配，知识模式不继承它们；现有压缩 API 不变。
 
 产品启动器默认开启自动 Session Memory；通用嵌入场景需显式设置
 `create_app(..., enable_auto_memory=True)`，并同时提供 Session `db_path` 与 `uploads_dir`。
@@ -269,7 +340,7 @@ Provider/Model 累计更新 `Memory.md`。该模型调用不进入 Agent loop，
 }
 ```
 
-`status` 可能为 `updated`、`deferred`、`pending_retry`、`unavailable` 或 `skipped`。自动记忆失败不会
+`status` 可能为 `updated`、`no_change`、`deferred`、`pending_retry`、`unavailable` 或 `skipped`。自动记忆失败不会
 把已经持久化的主回答改为失败；未完成 evidence 在下一轮串行 preflight 先重试，持续失败时作为
 不可信历史上下文注入。若进程退出发生在消息提交后、operation intent 落库前，下一轮会从 canonical
 最新完整 turn 与最近覆盖 hash 重建 intent。
@@ -402,6 +473,9 @@ Slash command 是独立的 Session 操作；命令文本不会作为 UserMessage
 
 上传一个或多个文件到指定 session。
 
+所有新上传的逻辑路径统一为 `upload/<filename>`，根目录首次成功上传时惰性出现；
+可选 `relative_folder` 也被约束在 `upload/` 以下。同名路径自动编号，不覆盖已有原件。
+
 **Content-Type**: `multipart/form-data`，字段名 `files` 可重复。
 
 **约束**：
@@ -413,15 +487,15 @@ Slash command 是独立的 Session 操作；命令文本不会作为 UserMessage
 
 ```json
 {
-  "count": 2,
+  "count": 1,
   "files": [
     {
       "id": "f-...",
       "session_id": "sess-...",
       "name": "doc.md",
-      "logical_path": "references/doc.md",
+      "logical_path": "upload/doc.md",
       "origin": "upload",
-      "purpose": "file",
+      "purpose": "input",
       "size": 1234,
       "mime": "text/markdown",
       "sha256": "abc...",
@@ -437,13 +511,13 @@ Slash command 是独立的 Session 操作；命令文本不会作为 UserMessage
     "revision": 3,
     "code_continuity": {
       "schema_version": "pi-agent-code-continuity/v1",
-      "status": "current",
+      "status": "not_initialized",
       "stale": false,
-      "latest_code_workspace_revision": 1,
-      "summarized_code_workspace_revision": 1,
-      "summary_workspace_revision": 3,
-      "code_source_sha256": "...",
-      "trigger": "user_upload",
+      "latest_code_workspace_revision": null,
+      "summarized_code_workspace_revision": null,
+      "summary_workspace_revision": null,
+      "code_source_sha256": null,
+      "trigger": null,
       "validation_evidence_id": null,
       "error_code": null,
       "updated_at": 1787000000000
@@ -452,14 +526,16 @@ Slash command 是独立的 Session 操作；命令文本不会作为 UserMessage
 }
 ```
 
-代码上传保存成功后，启用 `enable_code_continuity` 的产品组合会从实际 `scripts/**` revision 同步生成
-只读 `docs/architecture.md`、`docs/code-flow.md` 与 `docs/validation.md`。摘要失败不撤销上传，
-`code_continuity` 会返回 `failed` 且 `stale=true`，并在启动恢复时重试。普通上传没有 Sandbox
-validation evidence，因此 `validation.md` 会明确标为未验证。批准的 Sandbox 发布携带真实验证证据。
+上传代码在 `upload/**` 中作为只读输入，不触发代码摘要。原件复制成 `scripts/**` 的工作代码后，
+启用 `enable_code_continuity` 的产品组合从实际工作代码 revision 生成只读 `docs/architecture.md`、
+`docs/code-flow.md` 与 `docs/validation.md`。摘要失败不撤销工作代码，`code_continuity` 返回
+`failed` 且 `stale=true`，并在启动恢复时重试。没有 Sandbox validation evidence 的代码明确标为
+未验证；批准的 Sandbox 发布携带真实验证证据。
 
-`.pdf`、`.docx`、`.xlsx` 不进入普通上传路径，而是归档为
-`documents/<document-id>/original.<ext>`（`purpose=document_original`）。服务从不可变 Workspace
-快照执行固定转换；`conversions` 返回状态、primary/manifest file id、warning 和本次生成的
+`.pdf`、`.docx`、`.xlsx` 原件同样位于 `upload/<filename>`（`purpose=document_original`）。
+服务从不可变 Workspace 快照执行固定转换，独立发布到 `documents/<stem>-<source-id>/`；
+历史 `documents/<document-id>/original.<ext>` 保持原位并可继续转换。
+`conversions` 返回状态、primary/manifest file id、warning 和本次生成的
 `document_conversion` 文件。成功产物可包含 `content.md`、`tables/*.csv`、`tables/*.json`、
 `assets/*`、`manifest.json`。原件和生成物均只读；扫描 PDF 返回 `needs_ocr`，当前不会自动 OCR。
 

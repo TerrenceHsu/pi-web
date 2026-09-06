@@ -10,7 +10,7 @@
    `decode_uploaded_skill(row)` 独立 decode。单行损坏 JSON 不阻塞其他行 restore。
 
 3. **Schema version**——`web_extension_schema_meta(version)` 为未来 alter column /
-   数据回填留入口。当前 version=3。
+   数据回填留入口。当前 version=4。
 
 4. **MCP env 安全**——只持久化 env_keys（list[str]），**绝不**持久化 env value。
    value 从 os.environ 恢复（C4 实现）。
@@ -178,6 +178,7 @@ class WorkspaceExtensionSelection:
     configured: bool = False
     mcp_server_names: tuple[str, ...] = ()
     skill_names: tuple[str, ...] = ()
+    tool_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -207,7 +208,7 @@ class PersistedMessageRevision:
 # ============================================================================
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 # ============================================================================
@@ -295,6 +296,15 @@ _WORKSPACE_SELECTION_DDL_STATEMENTS: list[str] = [
     """,
 ]
 
+_WORKSPACE_TOOLS_DDL = """
+CREATE TABLE IF NOT EXISTS web_workspace_tool_selection (
+    session_id TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    PRIMARY KEY (session_id, tool_name),
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+)
+"""
+
 # P1-D2 revisions 表——fresh schema 与 migration 共用
 # DDL 补充（审核要求）：
 #   - revision_number CHECK >= 0
@@ -368,6 +378,7 @@ _REQUIRED_TABLES = (
     "web_workspace_extension_selection",
     "web_workspace_mcp_selection",
     "web_workspace_skill_selection",
+    "web_workspace_tool_selection",
 )
 _REQUIRED_INDEXES = (
     "uq_web_message_revision_request",
@@ -472,8 +483,12 @@ class ExtensionSQLiteStore:
             elif version == 1:
                 await self._migrate_v1_to_v2()
                 await self._migrate_v2_to_v3()
+                await self._migrate_v3_to_v4()
             elif version == 2:
                 await self._migrate_v2_to_v3()
+                await self._migrate_v3_to_v4()
+            elif version == 3:
+                await self._migrate_v3_to_v4()
             elif version == SCHEMA_VERSION:
                 await self._validate_schema()
             elif version > SCHEMA_VERSION:
@@ -516,6 +531,7 @@ class ExtensionSQLiteStore:
                 await db.execute(stmt)
             for stmt in _WORKSPACE_SELECTION_DDL_STATEMENTS:
                 await db.execute(stmt)
+            await db.execute(_WORKSPACE_TOOLS_DDL)
             await db.execute(
                 "INSERT INTO web_extension_schema_meta (id, version) VALUES (1, ?)",
                 (SCHEMA_VERSION,),
@@ -609,12 +625,27 @@ class ExtensionSQLiteStore:
             cursor = await db.execute(
                 "UPDATE web_extension_schema_meta SET version = ? "
                 "WHERE id = 1 AND version = 2",
-                (SCHEMA_VERSION,),
+                (3,),
             )
             if cursor.rowcount != 1:
                 raise ExtensionStoreError(
                     "migration rowcount mismatch——version unchanged"
                 )
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
+
+    async def _migrate_v3_to_v4(self) -> None:
+        db = self._require_db()
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            await db.execute(_WORKSPACE_TOOLS_DDL)
+            cursor = await db.execute(
+                "UPDATE web_extension_schema_meta SET version = 4 WHERE id = 1 AND version = 3"
+            )
+            if cursor.rowcount != 1:
+                raise ExtensionStoreError("schema version changed during migration")
             await db.commit()
         except BaseException:
             await db.rollback()
@@ -1117,10 +1148,17 @@ class ExtensionSQLiteStore:
             )
             skill_names = tuple(str(row[0]) for row in await cursor.fetchall())
             await cursor.close()
+            cursor = await db.execute(
+                "SELECT tool_name FROM web_workspace_tool_selection "
+                "WHERE session_id = ? ORDER BY tool_name", (session_id,),
+            )
+            tool_names = tuple(str(row[0]) for row in await cursor.fetchall())
+            await cursor.close()
             return WorkspaceExtensionSelection(
                 configured=True,
                 mcp_server_names=mcp_names,
                 skill_names=skill_names,
+                tool_names=tool_names,
             )
         except Exception as e:
             raise ExtensionStoreError(self._safe_db_error(e)) from None
@@ -1132,12 +1170,20 @@ class ExtensionSQLiteStore:
         *,
         mcp_server_names: list[str],
         skill_names: list[str],
+        tool_names: list[str] | None = None,
     ) -> WorkspaceExtensionSelection:
         """Atomically replace a Workspace selection, including an empty selection."""
         db = self._require_db()
         mcp_names = sorted(set(mcp_server_names))
         skills = sorted(set(skill_names))
-        if not all(isinstance(value, str) and value for value in [*mcp_names, *skills]):
+        # Old clients do not know about Tools: preserve their current selection.
+        selected_tools = sorted(set(
+            tool_names if tool_names is not None
+            else (await self.get_workspace_extension_selection(session_id)).tool_names
+        ))
+        if not all(
+            isinstance(value, str) and value for value in [*mcp_names, *skills, *selected_tools]
+        ):
             raise ExtensionStoreValidationError("extension names must be non-empty strings")
         now = self._now_iso()
         try:
@@ -1176,6 +1222,15 @@ class ExtensionSQLiteStore:
                     "(session_id, skill_name, selected_at) VALUES (?, ?, ?)",
                     (session_id, skill_name, now),
                 )
+            await db.execute(
+                "DELETE FROM web_workspace_tool_selection WHERE session_id = ?", (session_id,)
+            )
+            for tool_name in selected_tools:
+                await db.execute(
+                    "INSERT INTO web_workspace_tool_selection (session_id, tool_name) "
+                    "VALUES (?, ?)",
+                    (session_id, tool_name),
+                )
             await db.commit()
         except ExtensionStoreConflictError:
             await db.rollback()
@@ -1187,6 +1242,7 @@ class ExtensionSQLiteStore:
             configured=True,
             mcp_server_names=tuple(mcp_names),
             skill_names=tuple(skills),
+            tool_names=tuple(selected_tools),
         )
 
     @serialized_operation
@@ -1195,6 +1251,9 @@ class ExtensionSQLiteStore:
         db = self._require_db()
         try:
             await db.execute("BEGIN IMMEDIATE")
+            await db.execute(
+                "DELETE FROM web_workspace_tool_selection WHERE session_id = ?", (session_id,)
+            )
             await db.execute(
                 "DELETE FROM web_workspace_mcp_selection WHERE session_id = ?",
                 (session_id,),

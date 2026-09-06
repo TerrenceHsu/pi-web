@@ -208,6 +208,47 @@ describe("G2: sendPrompt clears stale turn_info cards", () => {
 })
 
 describe("terminal message reconciliation", () => {
+  it.each([true, false])("recovers missing tool completion (start present: %s)", async (hasStart) => {
+    const result = {
+      role: "toolResult", name: "read_session_history", tool_call_id: "history-1",
+      is_error: false, content: [{ type: "text", text: "历史来源" }],
+      details: { source_entry_id: "entry-original" },
+    }
+    const message = (id: string, idx: number, value: any) => ({
+      message_id: id, idx, session_id: "sess-1", created_at: idx,
+      role: value.role, content: value.content, message: value,
+    })
+    vi.mocked(messagesApi.getMessages).mockResolvedValue({
+      session_id: "sess-1", count: 3, messages: [
+        message("user-1", 0, { role: "user", content: [{ type: "text", text: "查历史" }] }),
+        message("result-1", 1, result),
+        message("answer-1", 2, { role: "assistant", content: [{ type: "text", text: "已找到" }] }),
+      ],
+    } as any)
+    const store = useChatStore()
+    store.setActiveSession("sess-1")
+    store.streamItems = [
+      { kind: "user_message", id: "user-1", messageId: "user-1", content: "查历史" } as any,
+      ...(hasStart ? [{
+        kind: "tool_call", id: "live-tool", toolCallId: "history-1",
+        toolName: "read_session_history", status: "running", argsPreview: "entry-original",
+      } as any] : []),
+      { kind: "assistant_message", id: "answer-1", messageId: "answer-1", content: "已找到" } as any,
+    ]
+    await store.reconcileMessagesFromServer("sess-1")
+    await store.reconcileMessagesFromServer("sess-1")
+    expect(store.streamItems.map((item) => item.kind)).toEqual([
+      "user_message", hasStart ? "tool_call" : "tool_result", "assistant_message",
+    ])
+    expect(store.streamItems[1]).toMatchObject({
+      status: "done", toolCallId: "history-1", resultPreview: "历史来源",
+      details: { source_entry_id: "entry-original" },
+    })
+    if (hasStart) expect(store.streamItems[1]).toMatchObject({
+      id: "live-tool", argsPreview: "entry-original",
+    })
+  })
+
   it("keeps a previous tool result anchored inside its original turn", async () => {
     const persisted = (
       messageId: string,

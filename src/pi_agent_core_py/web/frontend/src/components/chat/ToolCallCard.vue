@@ -3,6 +3,7 @@ import { computed } from "vue"
 
 import type { ToolCallItem } from "../../types"
 import CardDetails from "./CardDetails.vue"
+import DataAnalysisCard from "./DataAnalysisCard.vue"
 
 const props = defineProps<{ item: ToolCallItem }>()
 
@@ -32,6 +33,7 @@ const durationText = computed(() => {
       <code>{{ item.argsPreview }}</code>
     </div>
     <CardDetails :details="item.details" />
+    <DataAnalysisCard v-if="['analyze_data', 'run_python_analysis'].includes(item.toolName)" :details="item.details" />
   </div>
 </template>
 

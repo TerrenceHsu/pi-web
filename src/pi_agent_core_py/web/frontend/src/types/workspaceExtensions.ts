@@ -18,9 +18,12 @@ export interface WorkspaceExtensionsResponse {
   skills: WorkspaceSkill[]
   selected_mcp_server_names: string[]
   selected_skill_names: string[]
+  tools?: { name: string; label: string; available: boolean; selected: boolean; reason: string | null }[]
+  selected_tool_names?: string[]
 }
 
 export interface WorkspaceExtensionsUpdate {
   mcp_server_names: string[]
   skill_names: string[]
+  tool_names?: string[]
 }

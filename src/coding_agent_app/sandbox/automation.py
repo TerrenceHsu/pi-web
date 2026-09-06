@@ -25,8 +25,9 @@ file before any coding_run, package inspection, dependency installation, or codi
 Do not install dependencies unless the user explicitly asks for installation. Dependency-heavy
 source can be syntax-checked without importing optional packages. Do not draft the requested
 source code only in reasoning or chat. Put non-code deliverables in artifacts/** or shared notes
-in docs/notes/**. Treat inputs/**, HANDOFF.md, tasks/**, fixed docs summaries, and documents/**
-as read-only. After a file exists, run the relevant checks and use coding_validate. If validation
+in docs/notes/**. Treat upload/**, inputs/**, HANDOFF.md, tasks/**, fixed docs summaries,
+and documents/** as read-only. Copy uploaded source to scripts/** before editing it.
+After a file exists, run the relevant checks and use coding_validate. If validation
 fails, diagnose the output, repair the files, and validate again. A Coding turn with no file diff
 is a failure. Do not write directly to the Session Workspace and do not claim that changes were
 published. After your turn, the server will run an independent fixed validation and freeze the

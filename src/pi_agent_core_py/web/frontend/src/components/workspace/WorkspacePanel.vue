@@ -13,8 +13,9 @@ import CodingSandboxModal from "../coding-sandbox/CodingSandboxModal.vue"
 import FileTreeNode from "../chat/FileTreeNode.vue"
 import WorkspaceFilePreview from "./WorkspaceFilePreview.vue"
 import WorkspaceExtensions from "./WorkspaceExtensions.vue"
+import DataAnalysisPanel from "./DataAnalysisPanel.vue"
 
-type WorkspaceTab = "files" | "extensions" | "sandbox" | "changes"
+type WorkspaceTab = "files" | "extensions" | "analysis" | "sandbox" | "changes"
 
 interface AgentArtifactSignal {
   signature: string
@@ -277,14 +278,25 @@ function openUpload(): void {
 
 async function uploadSelected(event: Event): Promise<void> {
   const input = event.target as HTMLInputElement
-  if (!sessionId.value || !input.files?.length) return
+  if (!input.files?.length) return
   try {
-    await fileStore.uploadFiles(sessionId.value, input.files, {
-      attachToPrompt: false,
-    })
+    await uploadFiles(input.files)
   } finally {
     input.value = ""
   }
+}
+
+async function uploadFiles(files: FileList): Promise<void> {
+  if (!sessionId.value || fileStore.uploading || !files.length) return
+  try {
+    await fileStore.uploadFiles(sessionId.value, files, { attachToPrompt: false })
+  } catch {
+    // The store exposes the upload error in this panel.
+  }
+}
+
+async function onFilesDrop(event: DragEvent): Promise<void> {
+  if (event.dataTransfer?.files.length) await uploadFiles(event.dataTransfer.files)
 }
 
 async function createMarkdown(): Promise<void> {
@@ -400,7 +412,7 @@ onBeforeUnmount(() => {
 
     <nav class="workspace-tabs" aria-label="Workspace views">
       <button
-        v-for="tab in ['files', 'extensions', 'sandbox', 'changes'] as WorkspaceTab[]"
+        v-for="tab in ['files', 'extensions', 'analysis', 'sandbox', 'changes'] as WorkspaceTab[]"
         :key="tab"
         type="button"
         :class="{ active: activeTab === tab }"
@@ -417,6 +429,8 @@ onBeforeUnmount(() => {
         class="workspace-files-pane"
         :style="{ height: `${filesPaneHeight}px` }"
         data-testid="workspace-files-pane"
+        @dragover.prevent
+        @drop.prevent="onFilesDrop"
       >
         <div class="workspace-toolbar">
           <button type="button" :disabled="fileStore.loading" @click="refresh">
@@ -435,6 +449,9 @@ onBeforeUnmount(() => {
             @change="uploadSelected"
           />
         </div>
+
+        <p class="upload-hint">Drop files here to save originals in upload/.</p>
+        <p v-if="fileStore.error" class="upload-error" role="alert">{{ fileStore.error }}</p>
 
         <form v-if="createOpen" class="create-markdown" @submit.prevent="createMarkdown">
           <label>
@@ -524,6 +541,8 @@ onBeforeUnmount(() => {
 
     <WorkspaceExtensions v-else-if="activeTab === 'extensions'" />
 
+    <DataAnalysisPanel v-else-if="activeTab === 'analysis'" />
+
     <div v-else-if="activeTab === 'sandbox'" class="workspace-tab-body">
       <div v-if="!sandboxStore.available" class="workspace-empty">Managed Sandbox unavailable.</div>
       <div v-else-if="!operation" class="workspace-empty">
@@ -579,6 +598,15 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.upload-hint,
+.upload-error {
+  margin: 4px 12px 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.upload-error {
+  color: var(--danger);
+}
 .workspace-panel {
   display: flex;
   min-width: 0;

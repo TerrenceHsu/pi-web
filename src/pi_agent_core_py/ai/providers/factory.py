@@ -46,6 +46,7 @@ from .registry import ProviderDefinition
 __all__ = [
     "UnsupportedProviderError",
     "create_provider",
+    "default_output_tokens",
 ]
 
 
@@ -58,6 +59,24 @@ _MSG_MODEL_INVALID = "provider model is invalid"
 _MSG_ENDPOINT_UNAVAILABLE = "provider endpoint is unavailable"
 _MSG_CONFIG_INVALID = "provider configuration is invalid"
 _MSG_UNSUPPORTED = "provider is unsupported"
+
+
+def default_output_tokens(provider_id: str) -> int | None:
+    """Public factory default for previews; no Config, Adapter or secret lookup."""
+    from .registry import get_provider_definition
+
+    definition = get_provider_definition(provider_id)
+    if definition is None:
+        return None
+    if provider_id == "glm":
+        value = GLMConfig.model_fields["max_tokens"].default
+    elif provider_id == "anthropic":
+        value = AnthropicCompatConfig.model_fields["max_tokens"].default
+    elif definition.api_style == "openai_compatible":
+        value = OpenAICompatConfig.model_fields["max_tokens"].default
+    else:
+        return None
+    return value if type(value) is int and value > 0 else None
 
 
 def create_provider(

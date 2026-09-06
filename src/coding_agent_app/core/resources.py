@@ -48,6 +48,7 @@ class CodingAgentResourceSelection:
 
     skill_names: frozenset[str] = frozenset()
     mcp_server_names: frozenset[str] = frozenset()
+    tool_names: frozenset[str] = frozenset()
 
 
 CodingAgentResourceSelectionLoader = Callable[
@@ -80,6 +81,7 @@ class HarnessCodingAgentResourceLoader:
 
     harness: AgentHarness
     selection_loader: CodingAgentResourceSelectionLoader | None = None
+    optional_tool_names: frozenset[str] = frozenset()
 
     async def load(self, session_id: str | None) -> CodingAgentResourceSnapshot:
         skill_registry = self.harness.skill_registry
@@ -93,6 +95,11 @@ class HarnessCodingAgentResourceLoader:
         selection = None
         if session_id is not None and self.selection_loader is not None:
             selection = await self.selection_loader(session_id)
+        selected_tools = selection.tool_names if selection is not None else frozenset()
+        tools = tuple(
+            tool for tool in tools
+            if tool.name not in self.optional_tool_names or tool.name in selected_tools
+        )
         if selection is not None:
             skills = tuple(
                 skill for skill in skills if skill.name in selection.skill_names

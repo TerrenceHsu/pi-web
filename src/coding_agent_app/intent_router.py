@@ -53,8 +53,12 @@ _LOCAL_READ_ONLY_TOOLS = frozenset(
     {
         "list_files",
         "view_file",
+        "analyze_data",
         "web_search",
         "search_knowledge",
+        "search_session_history",
+        "read_session_history",
+        "read_tool_output",
     }
 )
 _MCP_READ_PREFIXES = (

@@ -245,10 +245,10 @@ async def test_operation_maps_helper_payloads_and_uses_fixed_argv(tmp_path: Path
     assert search.matches[0].line == 1
     assert exc_info.value.code == "not_found"
     assert all(
-        command.argv[:2] == ("python3", "-c")
+        command.argv[:5] == ("python3", "-I", "-S", "-B", "-c")
         for command in backend.executed_commands
     )
-    assert len({command.argv[2] for command in backend.executed_commands}) == 1
+    assert len({command.argv[5] for command in backend.executed_commands}) == 1
     assert all(command.cwd == "/workspace" for command in backend.executed_commands)
 
 
@@ -285,8 +285,8 @@ async def test_write_stages_upload_and_removes_local_temporary_file(tmp_path: Pa
     assert result.created is True
     assert list(staging.iterdir()) == []
     command = backend.executed_commands[0]
-    assert command.argv[3:5] == ("write", "/workspace")
-    assert command.argv[5] == "src/new.py"
+    assert command.argv[6:8] == ("write", "/workspace")
+    assert command.argv[8] == "src/new.py"
 
 
 @pytest.mark.asyncio

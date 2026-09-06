@@ -23,6 +23,7 @@ import io
 import pytest
 from fastapi.testclient import TestClient
 
+from agent_workspace.code_continuity import CodeContinuityError
 from pi_agent_core_py.agent import Agent
 from pi_agent_core_py.harness import AgentHarness
 from pi_agent_core_py.messages import ToolCall
@@ -111,7 +112,7 @@ def test_upload_single_file(web_client):
     assert ref["mime"] == "text/plain"
     assert ref["sha256"]
     assert ref["id"].startswith("file-")
-    assert ref["logical_path"] == "inputs/test.txt"
+    assert ref["logical_path"] == "upload/test.txt"
     assert ref["purpose"] == "input"
     assert ref["category"] == "input"
     assert ref["owner"] == "user"
@@ -694,7 +695,7 @@ def test_workspace_markdown_crud_and_revision_conflicts(web_client):
         files=[_upload_payload(b"print('ok')", "main.py", "text/x-python")],
     )
     assert uploaded.status_code == 200
-    assert uploaded.json()["files"][0]["logical_path"] == "scripts/demo/main.py"
+    assert uploaded.json()["files"][0]["logical_path"] == "upload/demo/main.py"
     assert uploaded.json()["workspace"]["revision"] == 1
 
     stale_upload = client.post(
@@ -769,7 +770,7 @@ def test_workspace_markdown_crud_and_revision_conflicts(web_client):
     assert deleted.json()["workspace"]["revision"] == 5
 
 
-def test_code_upload_refreshes_revision_bound_workspace_summaries(tmp_path):
+def test_uploaded_original_is_excluded_until_copied_to_workspace_code(tmp_path):
     app = create_app(
         AgentHarness(Agent(system_prompt="", client=FakeClient([]))),
         db_path=tmp_path / "workspace.sqlite",
@@ -791,11 +792,25 @@ def test_code_upload_refreshes_revision_bound_workspace_summaries(tmp_path):
 
         assert uploaded.status_code == 200
         continuity = uploaded.json()["workspace"]["code_continuity"]
+        assert continuity["status"] == "not_initialized"
+        assert uploaded.json()["files"][0]["logical_path"] == "upload/main.py"
+
+        async def create_working_copy():
+            await app.state.web.file_store.write_text(
+                sid, "main.py", "import pathlib\n\ndef main():\n    return pathlib.Path('.')\n"
+            )
+            await app.state.web.code_continuity_service.refresh(
+                sid, trigger="workspace_published", changed_paths=("scripts/main.py",)
+            )
+
+        client.portal.call(create_working_copy)
+        snapshot = client.get(f"/api/sessions/{sid}/workspace").json()
+        continuity = snapshot["workspace"]["code_continuity"]
         assert continuity["status"] == "current"
         assert continuity["stale"] is False
-        assert continuity["latest_code_workspace_revision"] == 1
-        assert continuity["summarized_code_workspace_revision"] == 1
-        assert continuity["summary_workspace_revision"] == 4
+        assert continuity["latest_code_workspace_revision"] == 2
+        assert continuity["summarized_code_workspace_revision"] == 2
+        assert continuity["summary_workspace_revision"] == 5
 
         snapshot = client.get(f"/api/sessions/{sid}/workspace").json()
         summaries = {
@@ -817,7 +832,7 @@ def test_code_upload_refreshes_revision_bound_workspace_summaries(tmp_path):
         validation = client.get(
             f"/api/sessions/{sid}/files/{summaries['docs/validation.md']['id']}"
         ).text
-        assert "source_workspace_revision: 1" in architecture
+        assert "source_workspace_revision: 2" in architecture
         assert "`scripts/main.py` imports `pathlib`" in architecture
         assert "function main" in flow
         assert "No Sandbox validation evidence" in validation
@@ -825,7 +840,7 @@ def test_code_upload_refreshes_revision_bound_workspace_summaries(tmp_path):
     dispose_app(app)
 
 
-def test_code_summary_failure_keeps_upload_and_marks_workspace_stale(
+def test_code_summary_failure_keeps_both_upload_original_and_working_copy(
     tmp_path,
     monkeypatch,
 ):
@@ -849,11 +864,23 @@ def test_code_summary_failure_keeps_upload_and_marks_workspace_stale(
         )
 
         assert uploaded.status_code == 200
-        continuity = uploaded.json()["workspace"]["code_continuity"]
+        assert uploaded.json()["workspace"]["code_continuity"]["status"] == "not_initialized"
+
+        async def create_working_copy():
+            await app.state.web.file_store.write_text(sid, "kept.py", "print('kept')\n")
+            await service.refresh(
+                sid, trigger="workspace_published", changed_paths=("scripts/kept.py",)
+            )
+
+        with pytest.raises(CodeContinuityError):
+            client.portal.call(create_working_copy)
+        snapshot = client.get(f"/api/sessions/{sid}/workspace").json()
+        continuity = snapshot["workspace"]["code_continuity"]
         assert continuity["status"] == "failed"
         assert continuity["stale"] is True
         assert continuity["error_code"] == "OSError"
         snapshot = client.get(f"/api/sessions/{sid}/workspace").json()
+        assert any(item["logical_path"] == "upload/kept.py" for item in snapshot["files"])
         assert any(
             item["logical_path"] == "scripts/kept.py"
             for item in snapshot["files"]

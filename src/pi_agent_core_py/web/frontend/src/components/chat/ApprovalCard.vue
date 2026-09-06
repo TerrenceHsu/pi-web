@@ -6,6 +6,8 @@ import { useChatStore } from "../../stores/chatStore"
 
 const props = defineProps<{ item: ToolApprovalItem }>()
 const chatStore = useChatStore()
+const pythonCode = computed(() => props.item.policyName === "python_execution"
+  && typeof props.item.arguments.code === "string" ? props.item.arguments.code : null)
 
 const argumentsJson = computed(() => {
   try {
@@ -48,6 +50,10 @@ async function decide(decision: ToolApprovalDecision) {
     </header>
 
     <p v-if="item.reason" class="reason">{{ item.reason }}</p>
+    <details v-if="pythonCode !== null" open>
+      <summary>Complete Python code · review before execution</summary>
+      <pre data-testid="approval-python-code">{{ pythonCode }}</pre>
+    </details>
     <details open>
       <summary>Arguments</summary>
       <pre data-testid="approval-arguments">{{ argumentsJson }}</pre>

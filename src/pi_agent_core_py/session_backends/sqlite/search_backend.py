@@ -15,11 +15,11 @@ from ...agent.harness.session.types import (
     SessionSearchOptions,
 )
 from .database import database_for
-from .repo import SessionSerializationError, SQLiteSessionStore
+from .repo import SessionSerializationError
 
 
 class SQLiteSessionSearch:
-    """Lazy trigram FTS search kept separate from repository ownership."""
+    """Read-only SDK search; index initialization belongs to the Session writer."""
 
     def __init__(
         self,
@@ -28,19 +28,17 @@ class SQLiteSessionSearch:
         connection: aiosqlite.Connection | None = None,
     ) -> None:
         self._db_path = str(db_path)
+        self._read_uri = Path(db_path).resolve().as_uri() + "?mode=ro"
         self._injected_connection = connection
 
     async def _open(self) -> tuple[aiosqlite.Connection, bool]:
         if self._injected_connection is not None:
             return self._injected_connection, False
-        bootstrap = SQLiteSessionStore(self._db_path)
-        await bootstrap.init()
-        await bootstrap.close()
-        db = await aiosqlite.connect(self._db_path)
+        db = await aiosqlite.connect(
+            self._read_uri, uri=True,
+        )
         db.row_factory = aiosqlite.Row
-        await db.execute("PRAGMA journal_mode=WAL")
-        await db.execute("PRAGMA synchronous=FULL")
-        await db.execute("PRAGMA foreign_keys=ON")
+        await db.execute("PRAGMA query_only=ON")
         await db.execute("PRAGMA busy_timeout=5000")
         return db, True
 
@@ -54,7 +52,7 @@ class SQLiteSessionSearch:
         await cursor.close()
         return row is not None
 
-    async def _ensure_search_schema(self, db: aiosqlite.Connection) -> None:
+    async def initialize(self, db: aiosqlite.Connection) -> None:
         existed = await self._table_exists(db, "session_search_fts")
         try:
             await db.execute("BEGIN IMMEDIATE")
@@ -132,7 +130,6 @@ class SQLiteSessionSearch:
         coordinator = database_for(db)
         try:
             async with coordinator.operation_lock:
-                await self._ensure_search_schema(db)
                 predicates = ["session_search_fts MATCH ?"]
                 values: list[object] = [f'"{query_text.replace(chr(34), chr(34) * 2)}"']
                 if resolved.entry_types is not None:

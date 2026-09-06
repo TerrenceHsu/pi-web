@@ -64,6 +64,7 @@ from ..policy import (
     ToolPermissionPolicy,
 )
 from .context import (
+    ContextTransformInfo,
     ConvertToLLMFn,
     TransformContextFn,
     apply_transform_context,
@@ -1327,7 +1328,25 @@ async def run_event_loop(
         # —— Context 转换 ——
         raw_context: list[AgentMessage] = list(new_messages)
         transform = transform_context_fn or default_transform_context
-        transformed = await apply_transform_context(transform, raw_context, signal)
+        try:
+            transformed = await apply_transform_context(
+                transform, raw_context, signal,
+                model_context=ContextTransformInfo(
+                    system_prompt=current_system_prompt, tools=tuple(tool_defs),
+                    client=current_client, turn_index=turn_count,
+                ),
+            )
+        except asyncio.CancelledError:
+            if signal is None or not signal.is_set():
+                raise
+            # Cooperative cancellation during context preparation must settle
+            # the same lifecycle as cancellation during the model/tool phases.
+            async for ev in _finalize_abort(
+                client=current_client, new_messages=new_messages,
+                run_messages=run_messages, tool_results=current_tool_results,
+            ):
+                yield ev
+            return
         converter = convert_to_llm_fn or convert_to_llm
         llm_messages = list(await _await_maybe(converter(transformed)))
 

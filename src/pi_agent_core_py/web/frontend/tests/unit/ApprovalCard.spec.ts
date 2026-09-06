@@ -30,6 +30,19 @@ beforeEach(() => {
 })
 
 describe("ApprovalCard", () => {
+  it("shows complete Python code as text without executing or auto-approving", () => {
+    const resolve = vi.spyOn(useChatStore(), "resolveToolApproval").mockResolvedValue()
+    const code = "# <script>alert(1)</script>\n" + "# review this line\n".repeat(80) + "print('end')"
+    const wrapper = mount(ApprovalCard, { props: { item: {
+      ...pendingItem(), policyName: "python_execution", toolName: "run_python_analysis",
+      arguments: { file_id: "file-a", code, source_name: "sales.csv" },
+    } } })
+    expect(wrapper.get('[data-testid="approval-python-code"]').text()).toBe(code)
+    expect(wrapper.find("script").exists()).toBe(false)
+    expect(resolve).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it("shows tool arguments and approves exactly once", async () => {
     const store = useChatStore()
     const resolve = vi.spyOn(store, "resolveToolApproval").mockResolvedValue()

@@ -36,7 +36,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeVar, cast
@@ -504,6 +504,7 @@ def create_app(
         return CodingAgentResourceSelection(
             skill_names=frozenset(skill_names),
             mcp_server_names=frozenset(mcp_names),
+            tool_names=frozenset(persisted.tool_names),
         )
     # The configured Harness is the product template and owns shared extension
     # transports.  CodingAgentRuntime maps every durable Web Session ID to an
@@ -512,6 +513,7 @@ def create_app(
         resources=HarnessCodingAgentResourceLoader(
             harness,
             selection_loader=_load_workspace_resource_selection,
+            optional_tool_names=frozenset({"analyze_data", "run_python_analysis"}),
         ),
     )
     coding_agent_runtime = CodingAgentRuntime(
@@ -589,12 +591,46 @@ def create_app(
         await session_store.init()
         session_repository = SQLiteSessionRepository(store_path, store=session_store)
         await session_repository.init()
+        from coding_agent_app.core.context_management import ContextManagementService
+
+        from ..session_backends.sqlite.context_store import SQLiteContextStore
+
+        context_store = SQLiteContextStore(session_store)
+        await context_store.initialize()
+        _app.state.context_management = ContextManagementService(context_store)
+        from coding_agent_app.core.tool_context import ToolContextBudgeter
+
+        from ..tools.context_output import ReadToolOutputTool
+
+        _app.state.tool_context_budgeter = ToolContextBudgeter(context_store)
+        if harness.agent.tools.has(ReadToolOutputTool.name):
+            if not isinstance(harness.agent.tools.get(ReadToolOutputTool.name), ReadToolOutputTool):
+                raise ValueError("Tool output reader name is reserved by the Web product")
+            harness.agent.tools.unregister(ReadToolOutputTool.name)
+        harness.agent.tools.register(ReadToolOutputTool(
+            context_store, lambda: tool_session_context.get(),
+        ))
         coding_agent_services.session_store = session_store
         coding_agent_services.session_repository = session_repository
         coding_agent_services.session_search = SQLiteSessionSearch(
             store_path,
             connection=session_store.connection,
         )
+        if store_path != ":memory:":
+            from ..session_backends.sqlite.history import SQLiteHistoryReader
+            from ..tools.session_history import ReadSessionHistoryTool, SearchSessionHistoryTool
+
+            history_reader = SQLiteHistoryReader(store_path)
+            for history_tool_type in (SearchSessionHistoryTool, ReadSessionHistoryTool):
+                if harness.agent.tools.has(history_tool_type.name):
+                    if not isinstance(
+                        harness.agent.tools.get(history_tool_type.name), SearchSessionHistoryTool,
+                    ):
+                        raise ValueError("Session history tool name is reserved by the Web product")
+                    harness.agent.tools.unregister(history_tool_type.name)
+                harness.agent.tools.register(history_tool_type(
+                    history_reader, lambda: tool_session_context.get(),
+                ))
         # 自动创建 / 复用 default session，作为 current_session_id
         try:
             default_session = await session_store.ensure_default_session()
@@ -795,6 +831,44 @@ def create_app(
         state.extension_store = extension_store
         state.skill_mutation_lock = asyncio.Lock()
 
+        if state.file_store is not None:
+            from coding_agent_app.data_analysis.service import DataAnalysisService
+
+            from ..tools.data_analysis import DataAnalysisTool, PythonDataAnalysisTool
+
+            async def _analysis_enabled(session_id: str) -> bool:
+                selected = await extension_store.get_workspace_extension_selection(session_id)
+                return "analyze_data" in selected.tool_names
+
+            async def _python_enabled(session_id: str) -> bool:
+                selected = await extension_store.get_workspace_extension_selection(session_id)
+                return "run_python_analysis" in selected.tool_names
+
+            assert uploads_dir is not None
+            analysis_service = DataAnalysisService(
+                Path(uploads_dir).parent / (Path(uploads_dir).name + "-analysis"),
+                state.file_store, _analysis_enabled,
+                python_enabled=_python_enabled, python_approval=_approve_python_execution,
+            )
+            await analysis_service.init()
+            state.data_analysis_service = analysis_service
+            if harness.agent.tools.has("analyze_data") and isinstance(
+                harness.agent.tools.get("analyze_data"), DataAnalysisTool,
+            ):
+                harness.agent.tools.unregister("analyze_data")
+            if not harness.agent.tools.has("analyze_data"):
+                harness.agent.tools.register(DataAnalysisTool(
+                    analysis_service, lambda: tool_session_context.get(),
+                ))
+            if harness.agent.tools.has("run_python_analysis") and isinstance(
+                harness.agent.tools.get("run_python_analysis"), PythonDataAnalysisTool,
+            ):
+                harness.agent.tools.unregister("run_python_analysis")
+            if not harness.agent.tools.has("run_python_analysis"):
+                harness.agent.tools.register(PythonDataAnalysisTool(
+                    analysis_service, lambda: tool_session_context.get(),
+                ))
+
         telemetry_recorder = None
         if telemetry_db_path is not None:
             from ..telemetry import SQLiteTelemetryContext
@@ -814,10 +888,15 @@ def create_app(
                 )
                 telemetry_recorder = None
         coding_agent_services.telemetry = telemetry_recorder or NOOP_TELEMETRY_CONTEXT
+        if state.data_analysis_service is not None:
+            state.data_analysis_service.telemetry = coding_agent_services.telemetry
         _app.state.telemetry_reader = telemetry_recorder
 
         async def _close_startup_sqlite_stores() -> None:
             """Close core stores when startup fails before lifespan yield."""
+
+            if state.data_analysis_service is not None:
+                await state.data_analysis_service.close()
 
             try:
                 await coding_agent_runtime.close()
@@ -1346,6 +1425,8 @@ def create_app(
             pass  # 单个 detach 失败不阻塞 shutdown
 
         # P1-C2: 先 detach injected extension store，再关闭 connection owner。
+        if state.data_analysis_service is not None:
+            await state.data_analysis_service.close()
         if state.extension_store is not None:
             try:
                 await state.extension_store.close()
@@ -1657,10 +1738,94 @@ def create_app(
     app.state.web_tool_approval_handler = _web_tool_approval_handler
     app.state.previous_tool_approval_handler = previous_tool_approval_handler
 
+    async def _approve_python_execution(
+        session_id: str, run_id: str, request: Any, source: dict[str, str],
+    ) -> bool:
+        from ..agent.messages import ToolCall
+        from ..policy import ToolApprovalContext, ToolPermissionDecision
+
+        # Only a live, exact Web request can request code execution. Never use
+        # a mutable "current request" fallback or accept an approval from args.
+        request_id = request_id_context.get()
+        record = state.active_requests.get(request_id) if request_id else None
+        if (record is None or record.session_id != session_id
+                or tool_session_context.get() != session_id):
+            return False
+        return await approval_manager.request_approval(
+            request_id=record.id, session_id=session_id,
+            context=ToolApprovalContext(
+                tool_call=ToolCall(id=run_id, name="run_python_analysis",
+                                  arguments={**request.model_dump(), **source}),
+                tool=harness.agent.tools.get("run_python_analysis"),
+                decision=ToolPermissionDecision(
+                    decision="require_approval", policy_name="python_execution",
+                    reason=("Review the complete Python code and input below. Approve once runs "
+                            "it with your local user permissions in a separate Python environment. "
+                            "This is NOT a security sandbox: code can access local files/network. "
+                            "Only approve code you trust. Deny or stop to prevent execution."),
+                    metadata={"run_id": run_id, "code_sha256": source["code_sha256"],
+                              "source_sha256": source["source_sha256"]},
+                ),
+            ),
+        )
+
+    def _interactive_chat_tool(name: str) -> bool:
+        # Python is not read-only. Admit only this separately selected tool to
+        # normal chat; its service always pauses for explicit execution consent.
+        # Automated Coding planner read-tools retain the strict read-only set.
+        return is_read_only_tool_name(name) or name == "run_python_analysis"
+
     from ..agent.harness.compaction.budget import ContextEstimate, estimate_context
     from ..agent.loop import ModelCallDecision
 
     previous_before_model_call = harness.agent.before_model_call
+
+    def _model_output_reserve(client: Any, capability_reserve: int | None) -> int:
+        configured = getattr(getattr(getattr(client, "adapter", None), "config", None),
+                             "max_tokens", None)
+        return max(
+            capability_reserve or 0,
+            configured if type(configured) is int and configured > 0 else 0,
+        )
+
+    def _context_budget_payload(estimate: ContextEstimate) -> dict[str, Any]:
+        from ..agent.harness.compaction.projection import effective_input_budget
+
+        result = estimate.to_dict()
+        effective = effective_input_budget(estimate.context_window, estimate.reserved_output_tokens)
+        ratio = estimate.estimated_input_tokens / effective if effective else None
+        result.update(effective_input_budget=effective, effective_ratio=ratio)
+        if ratio is not None:
+            result["level"] = (
+                "blocked" if not estimate.can_send or ratio > 1 else
+                "compact" if ratio >= .80 else "warning" if ratio >= .70 else "normal"
+            )
+            result["can_send"] = result["level"] != "blocked"
+        return result
+
+    async def _record_context_outcome(
+        session_id: str | None, outcome: dict[str, Any], *, trigger: str, duration_ms: float = 0,
+    ) -> None:
+        if session_id is None:
+            return
+        from ..telemetry.compaction import record_compaction_event
+
+        record = outcome.get("record") or {}
+        stats = outcome.get("token_stats") or {}
+        skipped = outcome.get("reason") in {
+            "no_new_complete_prefix", "summary_request_limit", "auto_compaction_disabled",
+            "unknown_context_window", "summary_input_budget_exceeded",
+        }
+        await record_compaction_event(
+            coding_agent_services.telemetry, session_id=session_id,
+            request_id=request_id_context.get(), trigger=trigger,
+            before_tokens=stats.get("estimated_input_tokens_before"),
+            after_tokens=stats.get("estimated_input_tokens_after"),
+            covered_count=len(record.get("payload", {}).get("covered_entry_ids", [])),
+            status="committed" if outcome.get("applied") else "skipped" if skipped else "failed",
+            error_code=outcome.get("reason"),
+            duration_ms=outcome.get("duration_ms", duration_ms),
+        )
 
     async def _web_before_model_call(context: Any) -> Any:
         if previous_before_model_call is not None:
@@ -1684,9 +1849,16 @@ def create_app(
             messages=context.messages,
             tools=context.tools,
             context_window=(capabilities.context_window if capabilities else None),
-            reserved_output_tokens=(capabilities.max_output_tokens if capabilities else None),
+            reserved_output_tokens=_model_output_reserve(
+                context.client, capabilities.max_output_tokens if capabilities else None,
+            ),
         )
         bound_session_id = tool_session_context.get()
+        budget_payload = _context_budget_payload(estimate)
+        compaction_status = (
+            await app.state.context_management.status(bound_session_id)
+            if bound_session_id is not None else None
+        )
         await _emit_web_payload(
             {
                 "type": "context_budget_updated",
@@ -1694,7 +1866,8 @@ def create_app(
                 "provider_id": context.client.provider_id or "legacy",
                 "model_id": getattr(context.client, "model", "unknown") or "unknown",
                 "capability_source": capabilities.source if capabilities else "unknown",
-                "estimate": estimate.to_dict(),
+                "estimate": budget_payload,
+                "compaction": compaction_status,
             },
             (
                 state.active_request_by_session.get(bound_session_id)
@@ -1705,7 +1878,7 @@ def create_app(
             or state.current_request_id,
             bound_session_id or state.current_request_session_id,
         )
-        if not estimate.can_send:
+        if not budget_payload["can_send"]:
             return ModelCallDecision(
                 allow=False,
                 error_message=("context budget exceeded; compact the session before continuing"),
@@ -1756,7 +1929,7 @@ def create_app(
             agent_session = create_coding_agent_session(
                 session_id=session_id,
                 harness=session_harness,
-                read_only_tool=is_read_only_tool_name,
+                read_only_tool=_interactive_chat_tool,
                 services=coding_agent_services,
                 session_storage=session_storage,
                 close_harness=not uses_template,
@@ -2589,6 +2762,47 @@ def create_app(
             return True
         return not record.terminal
 
+    async def _bind_memory_sources(
+        session_id: str, source: CheckpointSource,
+        *, request_id: str | None = None,
+    ) -> CheckpointSource:
+        """Bind evidence to immutable entries, never UI message IDs or model claims."""
+        from agent_workspace.structured_memory import MemoryEvidence
+
+        store = state.session_store
+        if store is None:
+            raise CheckpointerError("memory_sources_unavailable", "Session storage unavailable")
+        entries = [e for e in await store.list_entries(session_id) if e.message is not None]
+        active_ids = {e.id for e in entries}
+        if source.entries:
+            return replace(source, entries=tuple(
+                e.model_copy(update={"active": e.entry_id in active_ids}) for e in source.entries
+            ))
+        candidates = entries[-source.message_count:]
+        candidate_hash = build_checkpoint_source([e.message for e in candidates]).source_sha256
+        if candidate_hash != source.source_sha256:
+            raise CheckpointerError(
+                "memory_source_changed", "Source conversation is no longer active",
+            )
+        evidence = []
+        for entry in candidates:
+            message = entry.message
+            text_blocks = [
+                block.text for block in getattr(message, "content", ())
+                if getattr(block, "type", None) == "text"
+            ]
+            text = "\n".join(text_blocks)
+            if len(text) > 12_000:
+                text = text[:6000] + "\n[... evidence truncated ...]\n" + text[-6000:]
+            evidence.append(MemoryEvidence(
+                entry_id=entry.id, request_id=request_id, role=entry.role,
+                text=text, tool_name=getattr(message, "name", None),
+                is_error=bool(getattr(message, "is_error", False)),
+            ))
+        if sum(len(e.text) for e in evidence) > 96_000:
+            raise CheckpointerError("memory_evidence_too_large", "Turn evidence needs review")
+        return replace(source, entries=tuple(evidence))
+
     async def _apply_auto_memory_operation(
         validated: _PromptValidated,
         operation: Any,
@@ -2607,6 +2821,7 @@ def create_app(
             agent_session = await _get_coding_agent_session(session_id)
             validated.agent_session = agent_session
         request_harness = agent_session.harness
+        source = await _bind_memory_sources(session_id, evidence.source)
         if await _auto_memory_blocked_by_sandbox(
             evidence.blocked_by_sandbox_operation_id
         ):
@@ -2652,7 +2867,7 @@ def create_app(
                     str,
                     await _execute_prompt(
                         checkpoint_request,
-                        checkpoint_source=evidence.source,
+                        checkpoint_source=source,
                         checkpoint_prior_memory=prior_memory,
                         checkpoint_operation=AUTO_MEMORY_OPERATION_KIND,
                         manage_running_state=False,
@@ -2660,13 +2875,15 @@ def create_app(
                 )
             finally:
                 request_harness.context.metadata.pop("continuity_active", None)
+            if memory_text is None:
+                await store.mark_operation_effect_committed(
+                    operation.id, {"no_change": True, "file_sha256": memory_ref.sha256},
+                )
+                await store.finish_operation(operation.id, outcome="completed")
+                return {"status": "no_change", "operation_id": operation.id}
             updated_ref = await file_store.update_text(
-                session_id,
-                memory_ref.id,
-                memory_text,
-                expected_sha256=memory_ref.sha256,
-                origin="agent",
-                purpose="memory",
+                session_id, memory_ref.id, memory_text,
+                expected_sha256=memory_ref.sha256, origin="agent", purpose="memory",
             )
             recovered = False
 
@@ -2753,7 +2970,7 @@ def create_app(
             except Exception as exc:
                 state.last_error = f"auto_memory: {type(exc).__name__}"
             else:
-                if result["status"] == "updated":
+                if result["status"] in {"updated", "no_change"}:
                     return None, None
             validated.pending_continuity_evidence = evidence
             return evidence, operation.id
@@ -2779,6 +2996,7 @@ def create_app(
         if _extract_terminal_assistant(turn_messages) is None:
             return
         latest_turn = build_checkpoint_source(turn_messages)
+        latest_turn = await _bind_memory_sources(session_id, latest_turn)
         latest_operation = await store.get_latest_operation(
             kind=AUTO_MEMORY_OPERATION_KIND,
             session_id=session_id,
@@ -2847,6 +3065,9 @@ def create_app(
 
         session_id = validated.session_id
         latest_turn_source = build_checkpoint_source(list(result.turn_messages))
+        latest_turn_source = await _bind_memory_sources(
+            session_id, latest_turn_source, request_id=request_id_context.get(),
+        )
         source = latest_turn_source
         if pending_evidence is not None:
             source = merge_checkpoint_sources(pending_evidence.source, source)
@@ -3651,6 +3872,10 @@ def create_app(
                 session_id,
                 pending_memory=pending_memory,
                 sandbox=sandbox,
+                active_memory_entry_ids=(
+                    {entry.id for entry in await state.session_store.list_entries(session_id)}
+                    if state.session_store is not None else set()
+                ),
             ),
         )
         metadata = assembly.metadata()
@@ -3672,6 +3897,7 @@ def create_app(
         skill_selection: SkillSelection | None = None,
         coding_mode: bool = False,
         intent_mode: str | None = None,
+        model_context_sink: list[Any] | None = None,
     ) -> tuple[dict[str, Any], ContextEstimate]:
         """Estimate the canonical Provider input without reading a secret."""
         session_harness = await _get_session_harness(session_id)
@@ -3845,8 +4071,18 @@ def create_app(
         from ..agent.context import transform_context as default_transform_context
         from ..agent.harness.compaction.budget import estimate_context
 
+        context_manager = getattr(app.state, "context_management", None)
+        context_messages = list(messages)
+        if context_manager is not None and knowledge_conversation is None:
+            context_messages = await context_manager.project(session_id, context_messages)
+            context_messages = await app.state.tool_context_budgeter.project(
+                session_id, context_messages, request_id=None, allow_write=False,
+            )
         transform = session_harness.agent.transform_context_fn or default_transform_context
-        transformed = await apply_transform_context(transform, list(messages))
+        # A concurrent preview must never enter the live request's orchestrator:
+        # that wrapper can offload tool text and invoke a summary model.
+        transform = getattr(transform, "_web_preview_transform", transform)
+        transformed = await apply_transform_context(transform, context_messages)
         llm_messages = convert_to_llm(transformed)
 
         provider_id = session_harness.agent.client.provider_id or "legacy"
@@ -3855,6 +4091,7 @@ def create_app(
         # Provider binding path.  Read only the public, non-secret config
         # projection; _execute_prompt remains the sole Harness binding site.
         provider_config_runtime = app.state.provider_config_runtime
+        public_output_reserve = 0
         if provider_config_runtime is not None:
             binding = await provider_config_runtime.service.get_session_binding(
                 session_id,
@@ -3865,6 +4102,9 @@ def create_app(
                 )
                 provider_id = profile.provider_id
                 model_id = binding.model_id
+                from ..ai.providers.factory import default_output_tokens
+
+                public_output_reserve = default_output_tokens(provider_id) or 0
 
         capability_store = state.model_capability_store
         capabilities = (
@@ -3881,7 +4121,7 @@ def create_app(
                     [
                         tool
                         for tool in resource_snapshot.tools
-                        if is_read_only_tool_name(tool.name)
+                        if _interactive_chat_tool(tool.name)
                     ]
                 )
             elif resolved_coding_mode:
@@ -3890,7 +4130,7 @@ def create_app(
                     [
                         tool
                         for tool in resource_snapshot.tools
-                        if tool.name in registered_names
+                        if tool.name in registered_names or tool.name == "read_tool_output"
                     ]
                 )
             else:
@@ -3902,17 +4142,43 @@ def create_app(
             messages=llm_messages,
             tools=tool_registry.definitions(),
             context_window=(capabilities.context_window if capabilities else None),
-            reserved_output_tokens=(capabilities.max_output_tokens if capabilities else None),
+            reserved_output_tokens=(
+                _model_output_reserve(
+                    session_harness.agent.client,
+                    capabilities.max_output_tokens if capabilities else None,
+                )
+                if (provider_id, model_id) == (
+                    session_harness.agent.client.provider_id or "legacy",
+                    session_harness.agent.client.model or "unknown",
+                ) else max(
+                    (capabilities.max_output_tokens if capabilities else None) or 0,
+                    public_output_reserve,
+                )
+            ),
         )
+        if model_context_sink is not None:
+            from ..agent.context import ContextTransformInfo
+
+            model_context_sink.append(ContextTransformInfo(
+                system_prompt=rendered_prompt, tools=tuple(tool_registry.definitions()),
+                client=session_harness.agent.client, turn_index=0,
+            ))
         payload = {
             "session_id": session_id,
             "provider_id": provider_id,
             "model_id": model_id,
             "capability_source": capabilities.source if capabilities else "unknown",
-            "estimate": estimate.to_dict(),
+            "estimate": _context_budget_payload(estimate),
             "workspace_context": workspace_context_metadata,
             "intent": intent.public() if intent is not None else None,
+            "compaction": (
+                await context_manager.status(session_id)
+                if context_manager is not None and knowledge_conversation is None else None
+            ),
         }
+        if capabilities is None or capabilities.context_window is None:
+            if isinstance(payload["compaction"], dict):
+                payload["compaction"]["can_auto_compact"] = False
         return payload, estimate
 
     async def _estimate_session_context_budget(
@@ -3944,8 +4210,8 @@ def create_app(
         checkpoint_operation: str = "checkpointer",
         manage_running_state: bool = True,
         coding_repair: bool = False,
-        provider_bound_operation: Callable[[], Awaitable[PlanRunResult]] | None = None,
-    ) -> PromptExecutionResult | PlanRunResult | str:
+        provider_bound_operation: Callable[[], Awaitable[PlanRunResult | None]] | None = None,
+    ) -> PromptExecutionResult | PlanRunResult | str | None:
         """D2-4：纯执行——只跑模型/Agent，**不**碰 DB。
 
         三种模式（由参数决定）：
@@ -4092,7 +4358,9 @@ def create_app(
                     from ..policy import AllowAllToolPermissionPolicy
 
                     request_mode = "coding"
-                    coding_tool_names = set(container["coding_sandbox_tool_names"])
+                    coding_tool_names = {
+                        *container["coding_sandbox_tool_names"], "read_tool_output",
+                    }
                     request_permission_policy = AllowAllToolPermissionPolicy()
                 if (
                     provider_bound_operation is None
@@ -4174,11 +4442,89 @@ def create_app(
                 if provider_bound_operation is not None:
                     return await provider_bound_operation()
                 if checkpoint_source is not None:
+                    if validated.session_id is not None:
+                        checkpoint_source = await _bind_memory_sources(
+                            validated.session_id, checkpoint_source,
+                        )
                     return await generate_checkpoint_memory(
                         request_harness.agent.client,
                         source=checkpoint_source,
                         prior_memory=checkpoint_prior_memory,
                         operation=checkpoint_operation,
+                    )
+                context_manager = getattr(app.state, "context_management", None)
+                if (
+                    context_manager is not None
+                    and validated.session_id is not None
+                    and validated.knowledge_conversation is None
+                ):
+                    from ..agent.context import apply_transform_context
+                    from ..agent.context import transform_context as identity_transform
+
+                    original_transform = request_harness.agent.transform_context_fn
+                    context_request_state: dict[str, Any] = {
+                        "request_id": request_id_context.get(),
+                    }
+
+                    async def project_request_context(
+                        raw_messages: list[Any], signal: asyncio.Event | None = None,
+                        *, model_context: Any = None,
+                    ) -> list[Any]:
+                        projected = await app.state.tool_context_budgeter.project(
+                            validated.session_id, raw_messages,
+                            request_id=request_id_context.get(), signal=signal,
+                        )
+                        # Summary coverage is verified against raw persisted evidence;
+                        # the budgeter is reapplied to the resulting view below.
+                        capabilities = (
+                            await state.model_capability_store.resolve(
+                                model_context.client.provider_id or "legacy",
+                                model_context.client.model or "unknown",
+                            )
+                            if model_context is not None and state.model_capability_store else None
+                        )
+                        if model_context is not None:
+                            started = time.perf_counter()
+                            try:
+                                projected = await context_manager.prepare(
+                                    validated.session_id, raw_messages,
+                                    model_context=model_context,
+                                    context_window=(
+                                        capabilities.context_window if capabilities else None
+                                    ),
+                                    reserve_output_tokens=_model_output_reserve(
+                                        model_context.client,
+                                        capabilities.max_output_tokens if capabilities else None,
+                                    ),
+                                    request_state=context_request_state, signal=signal,
+                                )
+                            finally:
+                                for outcome in context_request_state.pop(
+                                    "context_compaction_outcomes", [],
+                                ):
+                                    await _record_context_outcome(
+                                        validated.session_id, outcome, trigger="auto",
+                                        duration_ms=(time.perf_counter() - started) * 1000,
+                                    )
+                        else:
+                            projected = await context_manager.project(
+                                validated.session_id, raw_messages,
+                            )
+                        projected = await app.state.tool_context_budgeter.project(
+                            validated.session_id, projected,
+                            request_id=request_id_context.get(), signal=signal,
+                        )
+                        return await apply_transform_context(
+                            original_transform or identity_transform, projected, signal,
+                            model_context=model_context,
+                        )
+
+                    project_request_context._web_preview_transform = (  # type: ignore[attr-defined]
+                        original_transform or identity_transform
+                    )
+                    request_harness.agent.transform_context_fn = project_request_context
+                    stack.callback(
+                        setattr, request_harness.agent, "transform_context_fn", original_transform,
                     )
                 if suppress_user_append:
                     # Regenerate 路径——caller 已设置 Session Harness messages
@@ -5916,6 +6262,47 @@ def create_app(
             intent_mode=intent_mode,
         )
 
+    @app.get("/api/sessions/{sid}/context/compaction")
+    async def get_session_compaction(sid: str) -> dict[str, Any]:
+        await _get_session_harness(sid)
+        return cast(dict[str, Any], await app.state.context_management.status(
+            sid, include_summary=True,
+        ))
+
+    @app.put("/api/sessions/{sid}/context/compaction")
+    async def put_session_compaction(sid: str, payload: dict[str, Any]) -> dict[str, Any]:
+        session_harness = await _get_session_harness(sid)
+        _ensure_idle(session_harness, session_id=sid)
+        if set(payload) != {"auto_compact"} or not isinstance(payload["auto_compact"], bool):
+            raise HTTPException(status_code=422, detail="auto_compact must be a boolean")
+        await app.state.context_management.store.set_settings(sid, payload["auto_compact"])
+        return await get_session_compaction(sid)
+
+    @app.get("/api/sessions/{sid}/context/source/{entry_id}")
+    async def get_session_context_source(
+        sid: str, entry_id: str, offset: int = 0, max_chars: int = 6000,
+    ) -> dict[str, Any]:
+        await _get_session_harness(sid)
+        if offset < 0 or offset > 16 * 1024 * 1024 or not 1 <= max_chars <= 12000:
+            raise HTTPException(status_code=422, detail="invalid source page")
+        snapshot = await app.state.context_management.store.snapshot(sid)
+        if entry_id not in snapshot.entry_ids:
+            raise HTTPException(status_code=404, detail="source entry not found")
+        message = snapshot.messages[snapshot.entry_ids.index(entry_id)]
+        text = "\n".join(
+            block.text for block in message.content if getattr(block, "type", None) == "text"
+        )
+        from ..tools.context_output import _redact_page
+
+        end = offset + max_chars
+        return {
+            "entry_id": entry_id,
+            "text": _redact_page(text[offset:end], text[max(0, offset - 1024):offset],
+                                 text[end:end + 1024]),
+            "offset": offset, "next_offset": end if end < len(text) else None,
+            "total_chars": len(text), "trust": "untrusted_historical_data",
+        }
+
     @app.post("/api/sessions/{sid}/context/compact")
     async def post_session_context_compact(
         sid: str,
@@ -5941,8 +6328,8 @@ def create_app(
             )
 
         # Reserve the same single-writer slot as prompt validation. This prevents
-        # a prompt from starting between the idle check and SQLite replacement.
-        budget_before, context_estimate = await _estimate_session_context_budget_details(
+        # a prompt from starting between the idle check and projection publication.
+        budget_before, _ = await _estimate_session_context_budget_details(
             session_id=sid,
         )
         session_harness = await _get_session_harness(sid)
@@ -5950,69 +6337,75 @@ def create_app(
         reservations = cast(set[str], container["coding_agent_request_reservations"])
         reservations.add(sid)
         state.running = True
-        result = None
+        result: dict[str, Any] | None = None
         try:
             store = state.session_store
             if store is None:
                 raise HTTPException(status_code=503, detail="session store unavailable")
-            from pydantic import TypeAdapter
-
-            from ..agent.harness.compaction.service import CompactionConfig, compact_messages
-            from ..agent.messages import AgentMessage
-
-            try:
-                messages = list(await store.list_messages(sid))
-                snapshots = list(await store.list_snapshots(sid))
-            except Exception as exc:
-                from ..session_backends.sqlite import SessionNotFoundError
-
-                if isinstance(exc, SessionNotFoundError):
-                    raise HTTPException(status_code=404, detail="session not found") from None
-                raise
-            result = await compact_messages(
-                messages,
-                snapshots=snapshots,
-                config=CompactionConfig(
-                    min_messages_to_compact=2,
-                    boundary_mode="turn",
-                    keep_last_n_turns=keep_turns,
-                    keep_recent_tokens=keep_tokens,
-                    max_summary_chars=4000,
-                    metadata={"trigger": "user"},
-                ),
-                context_estimate=context_estimate,
+            context_manager = app.state.context_management
+            source_snapshot = await context_manager.store.snapshot(sid)
+            await app.state.tool_context_budgeter.project(
+                sid, source_snapshot.messages, request_id=None,
             )
-            if not result.applied or result.summary_message is None:
+
+            async def run_bound_compaction() -> None:
+                nonlocal result, budget_before
+                model_contexts: list[Any] = []
+                budget_before, estimate = await _estimate_session_context_budget_details(
+                    session_id=sid, model_context_sink=model_contexts,
+                )
+                started = time.perf_counter()
+                result = await context_manager.compact(
+                    sid, model_context=model_contexts[0],
+                    context_window=estimate.context_window,
+                    reserve_output_tokens=estimate.reserved_output_tokens,
+                    keep_turns=keep_turns, keep_recent_tokens=keep_tokens, trigger="user",
+                )
+                await _record_context_outcome(
+                    sid, cast(dict[str, Any], result), trigger="user",
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                )
+
+            await _execute_prompt(
+                _PromptValidated(
+                    text="", skill_selection=None, session_id=sid, store=store,
+                    original_messages=None, attached_blocks=[], attached_summary=[],
+                    agent_session=await _get_coding_agent_session(sid),
+                ),
+                manage_running_state=False, provider_bound_operation=run_bound_compaction,
+            )
+            if result is None or not result["applied"]:
                 raise HTTPException(
                     status_code=409,
                     detail={
-                        "code": "nothing_to_compact",
-                        "reason": result.reason,
+                        "code": "compaction_not_applied",
+                        "reason": result["reason"] if result else "compaction_unavailable",
                     },
                 )
-            adapter: TypeAdapter[AgentMessage] = TypeAdapter(AgentMessage)
-            replacement = [adapter.validate_python(item) for item in result.new_messages]
-            await store.replace_messages(sid, replacement)
-            session_harness.agent.state.messages = replacement
         finally:
             reservations.discard(sid)
             state.running = bool(reservations or state.active_requests)
 
         budget = await _estimate_session_context_budget(session_id=sid)
-        assert result is not None and result.source is not None
+        assert result is not None and result["record"] is not None
+        record = result["record"]
+        covered = len(record["payload"]["covered_entry_ids"])
+        from ..agent.messages import SummaryMessage, TextContent
+
+        summary_message = SummaryMessage(
+            content=[TextContent(text=record["payload"]["summary_text"])],
+            summary_type="context_compaction",
+            metadata={"projection_id": record["id"]},
+        )
         return {
             "ok": True,
             "session_id": sid,
-            "summary_message": result.summary_message.model_dump(mode="json"),
-            "source_message_count": result.source.source_message_count,
-            "compacted_message_count": result.source.compacted_message_count,
-            "retained_message_count": result.source.retained_message_count,
-            "snapshots_retained": len(result.source.source_snapshot_ids),
-            "token_stats": (
-                result.token_stats.model_dump(mode="json")
-                if result.token_stats is not None
-                else None
-            ),
+            "summary_message": summary_message.model_dump(mode="json"),
+            "source_message_count": len(source_snapshot.messages),
+            "compacted_message_count": covered,
+            "retained_message_count": len(source_snapshot.messages) - covered,
+            "snapshots_retained": len(await store.list_snapshots(sid)),
+            "token_stats": result["token_stats"],
             "budget_before": budget_before,
             "budget": budget,
         }
@@ -6204,6 +6597,8 @@ def create_app(
                 return stop_error
 
             # P0-2：先删 uploads/{sid}/
+            if state.data_analysis_service is not None:
+                await state.data_analysis_service.delete_session(sid)
             deleted_files = 0
             if state.file_store is not None:
                 try:
@@ -6763,6 +7158,7 @@ def create_app(
             UnsafeFilenameError,
             WorkspaceVersionConflictError,
             is_code_workspace_path,
+            workspace_document_output_root,
         )
 
         saved: list[dict[str, Any]] = []
@@ -6795,7 +7191,9 @@ def create_app(
                         conversions.append(
                             {
                                 "source_file_id": ref.id,
-                                "document_id": PurePosixPath(ref.logical_path).parent.name,
+                                "document_id": PurePosixPath(
+                                    workspace_document_output_root(ref)
+                                ).name,
                                 "status": "failed",
                                 "reused": False,
                                 "workspace_revision": (
@@ -7703,6 +8101,16 @@ def create_app(
         selection = await state.extension_store.get_workspace_extension_selection(
             session_id
         )
+        from coding_agent_app.data_analysis.service import analysis_capability
+
+        capability = analysis_capability() if state.data_analysis_service is not None else {
+            "available": False, "reason": "Workspace storage is unavailable.",
+        }
+        python_capability = (
+            await state.data_analysis_service.python_runtime.capability()
+            if state.data_analysis_service is not None else
+            {"available": False, "reason": "Workspace storage is unavailable."}
+        )
         if selection.configured:
             selected_mcp = set(selection.mcp_server_names)
             selected_skills = set(selection.skill_names)
@@ -7743,6 +8151,14 @@ def create_app(
             ],
             "selected_mcp_server_names": sorted(selected_mcp),
             "selected_skill_names": sorted(selected_skills),
+            "tools": [{
+                "name": "analyze_data", "label": "Data Analysis",
+                **capability, "selected": "analyze_data" in selection.tool_names,
+            }, {
+                "name": "run_python_analysis", "label": "Python Data Analysis · confirm each run",
+                **python_capability, "selected": "run_python_analysis" in selection.tool_names,
+            }],
+            "selected_tool_names": list(selection.tool_names),
         }
 
     @app.get("/api/workspaces/{session_id}/extensions", response_model=None)
@@ -7763,6 +8179,18 @@ def create_app(
             raise HTTPException(status_code=503, detail="extension store not initialized")
         raw_mcp = (payload or {}).get("mcp_server_names", [])
         raw_skills = (payload or {}).get("skill_names", [])
+        raw_tools = (payload or {}).get("tool_names")
+        if raw_tools is not None:
+            if not isinstance(raw_tools, list) or not all(
+                isinstance(name, str) for name in raw_tools
+            ) or len(raw_tools) > 20:
+                raise HTTPException(400, "tool_names must be a bounded list of strings")
+            catalog = (await _workspace_extensions_payload(session_id))["tools"]
+            available = {
+                item["name"] for item in catalog if item["available"] or item["selected"]
+            }
+            if set(raw_tools) - available:
+                raise HTTPException(409, "selected tool is unknown or unavailable")
         if not isinstance(raw_mcp, list) or not all(
             isinstance(value, str) and value for value in raw_mcp
         ):
@@ -7809,8 +8237,15 @@ def create_app(
             session_id,
             mcp_server_names=list(raw_mcp),
             skill_names=list(raw_skills),
+            tool_names=raw_tools,
         )
         return await _workspace_extensions_payload(session_id)
+
+    from .data_analysis import register_analysis_routes
+
+    register_analysis_routes(
+        app, lambda: state.data_analysis_service, _require_workspace_session,
+    )
 
     async def _refresh_enabled_mcp_servers() -> None:
         """从 state.mcp_server_configs 取 enabled=True 的 configs，重 attach。

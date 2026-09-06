@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from typing import Any, cast
@@ -9,6 +10,7 @@ from uuid import uuid4
 
 import aiosqlite
 
+from coding_agent_app.execution.models import ExecutionDenied, ExecutionScope, digest_json
 from pi_agent_core_py.session_backends.sqlite.database import (
     database_for,
     serialized_operation,
@@ -84,6 +86,13 @@ class PlanStore:
                 created_at_ms INTEGER NOT NULL,
                 PRIMARY KEY (run_id, version),
                 FOREIGN KEY (run_id) REFERENCES plan_runs(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS plan_execution_bindings (
+                run_id TEXT PRIMARY KEY REFERENCES plan_runs(id) ON DELETE CASCADE,
+                task_id TEXT NOT NULL UNIQUE,
+                scope_sha256 TEXT NOT NULL,
+                version INTEGER NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS plan_tasks (
@@ -220,6 +229,11 @@ class PlanStore:
     async def approve(self, run_id: str) -> tuple[PlanRunView, bool]:
         async with self._write_lock:
             row = await self._run_row_locked(run_id)
+            async with self._db.execute(
+                "SELECT 1 FROM plan_execution_bindings WHERE run_id=?", (run_id,)
+            ) as cursor:
+                if await cursor.fetchone() is not None:
+                    raise PlanConflictError("this plan requires atomic execution approval")
             if row["status"] == "executing":
                 return await self._get_run_locked(run_id), True
             if row["status"] != "awaiting_plan_approval":
@@ -233,8 +247,84 @@ class PlanStore:
             await self._db.commit()
             return await self._get_run_locked(run_id), False
 
+    async def _check_execution_scope(
+        self, connection: aiosqlite.Connection, scope: ExecutionScope
+    ) -> aiosqlite.Row:
+        if connection is not self._db or not connection.in_transaction or scope.kind != "plan":
+            raise ExecutionDenied("plan_approval_transaction_required")
+        assert scope.plan_id is not None
+        row = await self._run_row_locked(scope.plan_id)
+        if (
+            row["session_id"] != scope.identity.session_id
+            or row["request_id"] != scope.identity.request_id
+            or row["status"] != "awaiting_plan_approval"
+            or int(row["plan_version"]) != scope.plan_version
+            or hashlib.sha256(str(row["goal"]).encode()).hexdigest() != scope.request_sha256
+        ):
+            raise ExecutionDenied("plan_version_stale")
+        async with self._db.execute(
+            "SELECT spec_json FROM plan_versions WHERE run_id=? AND version=?",
+            (scope.plan_id, scope.plan_version),
+        ) as cursor:
+            version = await cursor.fetchone()
+        if version is None or digest_json(json.loads(version[0])) != scope.plan_sha256:
+            raise ExecutionDenied("plan_version_stale")
+        return row
+
+    async def bind_execution(self, connection: aiosqlite.Connection, scope: ExecutionScope) -> None:
+        """ExecutionStore.prepare callback: freeze the exact pending plan link."""
+        async with self._write_lock:
+            await self._check_execution_scope(connection, scope)
+            await self._db.execute(
+                "INSERT INTO plan_execution_bindings VALUES (?, ?, ?, ?)",
+                (scope.plan_id, scope.identity.task_id, scope.sha256, scope.plan_version),
+            )
+
+    async def approve_execution(
+        self, connection: aiosqlite.Connection, scope: ExecutionScope
+    ) -> None:
+        """ExecutionStore.approve callback. Never commit independently of the grant."""
+        async with self._write_lock:
+            await self._check_execution_scope(connection, scope)
+            async with self._db.execute(
+                "SELECT task_id,scope_sha256,version FROM plan_execution_bindings WHERE run_id=?",
+                (scope.plan_id,),
+            ) as cursor:
+                binding = await cursor.fetchone()
+            if binding is None or tuple(binding) != (
+                scope.identity.task_id,
+                scope.sha256,
+                scope.plan_version,
+            ):
+                raise ExecutionDenied("grant_scope_mismatch")
+            cursor = await self._db.execute(
+                "UPDATE plan_runs SET status='executing',sandbox_operation_id=?,updated_at_ms=? "
+                "WHERE id=? AND status='awaiting_plan_approval' AND plan_version=?",
+                (scope.identity.operation_id, _now_ms(), scope.plan_id, scope.plan_version),
+            )
+            if cursor.rowcount != 1:
+                raise ExecutionDenied("plan_version_stale")
+            assert scope.plan_id is not None
+            await self._append_event_locked(
+                scope.plan_id,
+                "plan_approved",
+                payload={
+                    "execution_task_id": scope.identity.task_id,
+                    "execution_scope_sha256": scope.sha256,
+                    "execution_authorized": True,
+                },
+            )
+
     @serialized_operation
     async def set_sandbox_operation(self, run_id: str, operation_id: str) -> PlanRunView:
+        async with self._db.execute(
+            "SELECT 1 FROM plan_execution_bindings WHERE run_id=?", (run_id,)
+        ) as cursor:
+            bound = await cursor.fetchone() is not None
+        if bound:
+            row = await self._run_row_locked(run_id)
+            if row["sandbox_operation_id"] != operation_id:
+                raise PlanConflictError("execution-approved plan cannot switch its operation")
         await self._update_run(
             run_id,
             "executing",
@@ -300,9 +390,7 @@ class PlanStore:
         return await self.get_run(run_id)
 
     @serialized_operation
-    async def block_task(
-        self, run_id: str, task_id: str, report: TaskBlockedReport
-    ) -> PlanRunView:
+    async def block_task(self, run_id: str, task_id: str, report: TaskBlockedReport) -> PlanRunView:
         async with self._write_lock:
             row = await self._task_row_locked(run_id, task_id)
             if row["status"] != "executing":
@@ -360,9 +448,7 @@ class PlanStore:
         return await self.get_run(run_id)
 
     @serialized_operation
-    async def mark_artifact_ready(
-        self, run_id: str, *, artifact_id: str | None
-    ) -> PlanRunView:
+    async def mark_artifact_ready(self, run_id: str, *, artifact_id: str | None) -> PlanRunView:
         await self._update_run(
             run_id,
             "awaiting_artifact_approval",

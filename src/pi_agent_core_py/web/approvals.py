@@ -147,7 +147,9 @@ class ToolApprovalManager:
             tool_label=(
                 getattr(context.tool, "label", None) or context.tool_call.name
             ),
-            arguments=_safe_arguments(dict(context.tool_call.arguments)),
+            arguments=(dict(context.tool_call.arguments)
+                       if context.decision.policy_name == "python_execution"
+                       else _safe_arguments(dict(context.tool_call.arguments))),
             reason=context.decision.reason,
             policy_name=context.decision.policy_name,
             policy_metadata=_redact_json(dict(context.decision.metadata)),

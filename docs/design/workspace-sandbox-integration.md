@@ -1,14 +1,15 @@
 # Workspace 与 Coding Sandbox 一体化设计
 
 > 状态：阶段 1–3、4A–4C 已完成；阶段 4 Sandbox/Workspace 主链路闭环
-> 日期：2026-08-22
+> 日期：2026-08-22；上传布局更新：2026-09-05（见 [上传与媒体设计](workspace-upload-media.md)）
 > 范围：Session Workspace、Agent 文件工具、E2B Coding Sandbox、安全发布与后续文档转换
 
 ## 1. 目标
 
 每个 Session 拥有一个持久、隔离、可在 UI 中浏览的 Workspace。新 Workspace 立即包含
-`AGENT.md` 与 `Memory.md`；代码统一进入根目录同级的 `scripts/`，但 `scripts/` 只在
-Agent 首次写代码或用户首次上传代码时创建。Agent 可以自行决定 `scripts/` 内部目录树，
+`AGENT.md` 与 `Memory.md`；所有上传原件统一进入首次成功上传时创建的 `upload/`。
+工作代码进入 `scripts/`，该目录只在 Agent 首次写代码或从原件创建工作副本时出现。
+Agent 可以自行决定 `scripts/` 内部目录树，
 服务端负责安全边界、版本冲突和事务提交。
 
 代码只能在托管 Sandbox 中执行和验证。Sandbox 使用 Workspace 的不可变快照，验证成功后
@@ -47,16 +48,18 @@ workspace/
 workspace/
 ├── AGENT.md
 ├── Memory.md
+├── upload/
+│   ├── report.pdf             # 不可变上传原件
+│   └── app.py                 # 上传代码同样作为原件保存
 ├── scripts/
 │   ├── app.py
 │   ├── tests/
 │   │   └── test_app.py
 │   └── ...                    # 由 Agent 决定
-├── notes/
-│   └── design.md
+├── docs/
+│   └── notes/design.md
 └── documents/
     └── <document-id>/
-        ├── original.<ext>     # 不可变原件
         ├── content.md         # 规范可读正文
         ├── manifest.json      # 来源、转换器版本和输出 hash
         ├── tables/
@@ -73,9 +76,10 @@ workspace/
 |---|---|---|
 | `AGENT.md` | 用户 / 专用 API | 初始化时创建；可带 SHA 更新；不可删除或由 Sandbox 覆盖 |
 | `Memory.md` | Checkpointer / 用户 | 初始化时创建；以 immutable generation 更新；不可删除或由 Sandbox 覆盖 |
-| `scripts/**` | Agent / 用户 | 代码写入和代码上传的默认根；允许模型决定子目录 |
+| `upload/**` | 用户 | 新上传原件的统一根；禁止原地改写及 Sandbox 发布 |
+| `scripts/**` | Agent / 用户 | 工作代码写入的默认根；上传代码需先复制为工作副本 |
 | `notes/**` 及其他安全 Markdown 路径 | Agent / 用户 | 支持创建、读取、更新、移动和删除 |
-| `documents/*/original.*` | 系统 | 上传后不可变，不能执行 |
+| `documents/*/original.*` | 系统 | 兼容历史原件；不再接收新上传，不可变，不能执行 |
 | `documents/*/content.md`、`tables/**`、`assets/**` | 固定转换器 | 由转换任务重建，Agent 只读或基于其另建派生文件 |
 | `.pi-agent/**` | 系统 | 隐藏且禁止外部直接访问 |
 
@@ -97,14 +101,16 @@ revision；该文件不进入用户文件树或容量统计。后续仍可在不
 
 ## 6. 上传与 Agent 文件工具
 
-### 6.1 代码上传
+### 6.1 文件上传
 
-- 识别允许的代码扩展名后，默认逻辑路径为 `scripts/<filename>`。
-- 上传 API 可接受安全的 `relative_folder`，但必须位于 `scripts/`。
+- 所有新上传默认逻辑路径为 `upload/<filename>`，包括代码和 PDF/DOCX/XLSX 原件。
+- 上传 API 可接受安全的 `relative_folder`，最终强制位于 `upload/`。
 - 路径统一为相对 POSIX 形式；拒绝绝对路径、`..`、反斜杠、控制字符、保留路径、symlink、
   junction/reparse point 和大小写冲突。
-- 同名默认返回冲突或显式生成不重名路径，不静默覆盖。
+- 同名自动生成带 `(2)` 等编号的不重名路径，不静默覆盖。
 - 上传仅持久化，不在本机执行。
+- 逻辑目录随首份成功上传出现，物理 file-ID 存储布局不迁移；Sandbox 物化得到 `/workspace/upload/**`。
+- 新文档输出为 `documents/<stem>-<source-id>/**`；旧 `documents/<id>/original.*` 重解析仍使用原输出根。
 
 ### 6.2 Workspace 工具
 

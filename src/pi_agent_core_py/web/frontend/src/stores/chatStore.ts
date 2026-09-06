@@ -378,6 +378,7 @@ export const useChatStore = defineStore("chat", () => {
     const status = msg.is_error ? "error" : "done"
     const resultPreview = previewOf(textOf(msg))
     const contentWarnings = contentWarningsOf(msg)
+    const details = msg.details ?? msg
 
     if (isMcpTool(toolName)) {
       const parsed = parseMcpName(toolName)
@@ -389,7 +390,7 @@ export const useChatStore = defineStore("chat", () => {
         toolCallId,
         status,
         resultPreview,
-        details: msg.details,
+        details,
         contentWarnings,
       }
     }
@@ -401,7 +402,7 @@ export const useChatStore = defineStore("chat", () => {
         toolCallId,
         status,
         preview: resultPreview,
-        details: msg.details,
+        details,
         contentWarnings,
       }
     }
@@ -412,7 +413,7 @@ export const useChatStore = defineStore("chat", () => {
       toolCallId,
       status,
       resultPreview,
-      details: msg.details,
+      details,
       contentWarnings,
     }
   }
@@ -594,7 +595,20 @@ export const useChatStore = defineStore("chat", () => {
       // 收集服务端的 user_message / assistant_message item（顺序敏感）
       // D2-7: 优先用 persisted DTO 的 message_id；fallback 到 index
       const persistedItems: ChatStreamItem[] = []
+      const canonicalTimeline: ChatStreamItem[] = []
+      const persistedTools = new Map<string, ChatStreamItem[]>()
       resp.messages.forEach((m, i) => {
+        const canonical = isPersistedMessageDto(m)
+          ? persistedMessageToItem(m)
+          : messageToItem(m, `srv-${i}`)
+        if (canonical) {
+          canonicalTimeline.push(canonical)
+          if ("toolCallId" in canonical && canonical.toolCallId) {
+            const matches = persistedTools.get(canonical.toolCallId) ?? []
+            matches.push(canonical)
+            persistedTools.set(canonical.toolCallId, matches)
+          }
+        }
         if (isPersistedMessageDto(m)) {
           if (m.message.role === "user" || m.message.role === "assistant") {
             const item = persistedMessageToItem(m)
@@ -634,10 +648,31 @@ export const useChatStore = defineStore("chat", () => {
         return typeof messageId !== "string" || !representedIds.has(messageId)
       })
       const consumedUnmatched = new Set<number>()
+      const consumedTools = new Set<string>()
 
       const reconciled: ChatStreamItem[] = []
       for (const existing of streamItems.value) {
         if (existing.kind !== "user_message" && existing.kind !== "assistant_message") {
+          // Reload/replay may miss tool_execution_end. Restore the durable
+          // result in its existing slot; approval cards are not execution cards.
+          if (
+            ["tool_call", "tool_result", "file_read", "mcp_tool_call"].includes(existing.kind)
+            && "toolCallId" in existing && existing.toolCallId
+          ) {
+            const canonical = persistedTools.get(existing.toolCallId)?.find(
+              (item) => !consumedTools.has(item.id),
+            )
+            if (canonical) {
+              consumedTools.add(canonical.id)
+              // Keep the mounted card kind/ID and live arguments. Switching
+              // tool_call to tool_result would remount its children and lose
+              // an in-flight Save/expanded-details state during final sync.
+              reconciled.push({
+                ...existing, ...canonical, kind: existing.kind, id: existing.id,
+              } as ChatStreamItem)
+              continue
+            }
+          }
           reconciled.push(existing)
           continue
         }
@@ -669,6 +704,18 @@ export const useChatStore = defineStore("chat", () => {
       // every item above and retain their tool-card anchors.
       unmatched.forEach((item, index) => {
         if (!consumedUnmatched.has(index)) reconciled.push(item)
+      })
+      // If both start/end were missed, place the result before its next
+      // canonical message, not after the final answer or at the timeline tail.
+      canonicalTimeline.forEach((item, index) => {
+        if (!("toolCallId" in item) || !item.toolCallId || consumedTools.has(item.id)) return
+        const next = canonicalTimeline.slice(index + 1).find(
+          (candidate) => reconciled.some((local) => local.id === candidate.id),
+        )
+        const anchor = next ? reconciled.findIndex((local) => local.id === next.id) : -1
+        if (anchor >= 0) reconciled.splice(anchor, 0, item)
+        else reconciled.push(item)
+        consumedTools.add(item.id)
       })
       streamItems.value = reconciled
 
@@ -801,6 +848,7 @@ export const useChatStore = defineStore("chat", () => {
             }
           }
 
+          finalizeTurnInfo(r.status === "completed" ? "done" : "error")
           // 清 state
           sending.value = false
           streaming.value = false

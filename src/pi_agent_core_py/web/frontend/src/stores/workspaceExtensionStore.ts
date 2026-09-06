@@ -33,7 +33,10 @@ export const useWorkspaceExtensionStore = defineStore("workspaceExtensions", () 
     }
   }
 
-  async function save(sessionId: string, mcpServerNames: string[], skillNames: string[]) {
+  async function save(
+    sessionId: string, mcpServerNames: string[], skillNames: string[],
+    toolNames = snapshot.value?.selected_tool_names ?? [],
+  ) {
     const version = ++snapshotVersion
     const saveToken = ++saveVersion
     saving.value = true
@@ -42,6 +45,7 @@ export const useWorkspaceExtensionStore = defineStore("workspaceExtensions", () 
       const next = await api.updateWorkspaceExtensions(sessionId, {
         mcp_server_names: mcpServerNames,
         skill_names: skillNames,
+        tool_names: toolNames,
       })
       if (version === snapshotVersion) snapshot.value = next
       return next
@@ -57,7 +61,7 @@ export const useWorkspaceExtensionStore = defineStore("workspaceExtensions", () 
 
   async function toggleMCP(sessionId: string, name: string) {
     const current = snapshot.value
-    if (!current) return
+    if (!current || current.session_id !== sessionId || saving.value) return
     const names = new Set(current.selected_mcp_server_names)
     if (names.has(name)) names.delete(name)
     else names.add(name)
@@ -66,11 +70,20 @@ export const useWorkspaceExtensionStore = defineStore("workspaceExtensions", () 
 
   async function toggleSkill(sessionId: string, name: string) {
     const current = snapshot.value
-    if (!current) return
+    if (!current || current.session_id !== sessionId || saving.value) return
     const names = new Set(current.selected_skill_names)
     if (names.has(name)) names.delete(name)
     else names.add(name)
     return save(sessionId, current.selected_mcp_server_names, [...names])
+  }
+
+  async function toggleTool(sessionId: string, name: string) {
+    const current = snapshot.value
+    if (!current || current.session_id !== sessionId || saving.value) return
+    const names = new Set(current.selected_tool_names ?? [])
+    if (names.has(name)) names.delete(name)
+    else names.add(name)
+    return save(sessionId, current.selected_mcp_server_names, current.selected_skill_names, [...names])
   }
 
   function reset() {
@@ -83,5 +96,5 @@ export const useWorkspaceExtensionStore = defineStore("workspaceExtensions", () 
     error.value = null
   }
 
-  return { snapshot, loading, saving, error, load, save, toggleMCP, toggleSkill, reset }
+  return { snapshot, loading, saving, error, load, save, toggleMCP, toggleSkill, toggleTool, reset }
 })

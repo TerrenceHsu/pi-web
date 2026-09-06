@@ -204,6 +204,7 @@ class WebAppState(BaseModel):
     uploads_dir: Any = None
     # Fixed PDF/DOCX/XLSX converter for immutable Session Workspace documents.
     workspace_document_service: Any = None
+    data_analysis_service: Any = None
     # Trusted revision-bound architecture/code-flow/validation renderer.
     code_continuity_service: Any = None
     code_continuity_enabled: bool = False

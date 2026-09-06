@@ -22,12 +22,16 @@
 
 ### Web 工作台
 
+- Session 只读历史检索与每轮结构化 Memory：来源回查、增量去重、用户纠正/固定、分支失效标记；
+  见 [`session-history-memory.md`](docs/design/session-history-memory.md)；后续压缩已实现，见
+  [`context-compaction.md`](docs/design/context-compaction.md)。
 - 本地账号登录；每账号独立 Session、文件、Skills、MCP、Wiki Space/Conversation 和 Provider 配置
 - `/chat/{session_id}` 路由；整页刷新恢复 Session、历史、文件树及当前进程中的 active request
 - Prompt、Stop、Regenerate 最新 Assistant、Markdown Export、SSE/WebSocket 实时事件
 - 产品入口以确定性规则把请求路由到 `read_only`、`coding` 或会话绑定的 `knowledge`；只读模式移除写入/执行工具，Coding 进入受管 Sandbox，路由依据在 Turn 卡与 API 中可审计
 - Human Approval：高风险 ToolCall 在当前 Turn 内暂停，支持 Approve once / Deny
-- Context Budget：完整输入估算、70/85/95% 分级、hard stop、手动 Turn-safe compaction
+- Web Context Budget：有效输入预算 70% 预警、80% 自动摘要、60% 目标、逐调用 hard stop；
+  持久工作视图保留原聊天/来源，支持手动压缩、开关、来源回查与大工具结果只读分页
 - Assistant Markdown 渲染、usage、总 latency 与 TTFT 展示
 - ToolCall/ToolResult 卡片保持原始跨轮顺序；MCP stdio 端到端严格 UTF-8
 
@@ -37,7 +41,7 @@
 - lane operation 使用 append-only intent/effect/finish records；Checkpointer 可在进程退出后凭 source leaf/hash 幂等前滚
 - 当前 active lane 会物化为兼容消息视图，因此现有聊天、Regenerate、Export 与 Context 工具无需理解树结构
 - 每个 Session 通过唯一 `WorkspaceStore` 初始化独立目录和唯一根 `AGENT.md`、`Memory.md`；旧 `VirtualFileStore` 名称仅为兼容别名
-- 用户上传的普通输入归入只读 `inputs/**`，代码归入 `scripts/**`；Agent 的非代码交付物默认归入 `artifacts/**`
+- 聊天区和 Workspace 面板支持拖拽上传；所有新上传原件统一归入只读 `upload/**`，目录首次上传成功时创建，同名文件自动避让。工作代码放在 `scripts/**`；Agent 的非代码交付物默认归入 `artifacts/**`
 - 文件树可查看、下载、删除和刷新；API/右栏共享路径的 category、owner 与编辑/发布权限，`AGENT.md`、`Memory.md` 可用 SHA-256 乐观锁编辑
 - 用户代码上传/删除或批准 Sandbox 发布后，可信 renderer 从对应 revision 的实际代码字节更新只读 `docs/architecture.md`、`docs/code-flow.md`、`docs/validation.md`；右栏显示代码摘要 current/stale/failed 状态
 - `validation.md` 只投影真实 Sandbox 验证证据；普通上传明确标为未验证，不把 Agent 自述当作通过证据
@@ -58,6 +62,8 @@
 - MCP client 支持 stdio 与 Streamable HTTP（JSON/SSE）tools/prompts、HTTP Session 续传、server 生命周期、工具 enable/disable 和持久化恢复
 - MCP 与 Skills 均为账号级全局目录；每个 Web Workspace/Session 持久选择自己的可用集合，请求开始时冻结为独立运行时快照
 - 内置 `ddgs` MCP 随开发工作区固定创建且不可删除；全局启用后，新 Workspace 默认选中
+- 可选 `analyze_data` 工具默认关闭：Workspace → extensions → Tools 启用 Data Analysis，在聊天或 analysis 页分析 CSV/TSV/XLSX/Parquet。固定统计/分组/时间汇总/图表在本机工作进程执行，点击保存才发布到 `artifacts/analysis/<run-id>/`，不改原件。详见[数据分析设计与边界](docs/design/data-analysis.md)。
+- 可选 `run_python_analysis` 让 Agent 编写 Python：运行 `scripts/setup_analysis_python.py` 创建独立 `.venv-analysis`，重启后在 Tools 启用 Python Data Analysis；每次展示完整代码和输入并要求 Approve once。支持 pandas/NumPy/Matplotlib，复用结果预览/保存。**依赖隔离不是安全沙箱，批准的代码拥有本机用户权限**。详见[本地 Python 分析](docs/design/python-data-analysis.md)。
 - DDGS 前端可调整返回数、地区、安全搜索、时间范围、后端等参数
 - MCP 子进程强制 `PYTHONIOENCODING=utf-8` / `PYTHONUTF8=1`；非法 UTF-8 作为协议错误拒绝
 - HTTP MCP 认证头通过“Header 名 → 服务进程环境变量名”配置，SQLite 只保存引用、不保存 secret value
@@ -114,6 +120,15 @@ Set-Location D:\LLMTutorial\test
 D:\miniconda\envs\pipy\python.exe -m pip install -e ".[dev,web]"
 npm --prefix src/pi_agent_core_py/web/frontend ci
 ```
+
+如需启用可选 Data Analysis，再安装分析依赖（本机开发环境已安装；未安装时前端会提示不可用）：
+
+```powershell
+D:\miniconda\envs\pipy\python.exe -m pip install -e ".[data-analysis]"
+```
+
+这是固定运算工具，不执行用户 Python/SQL，不启动 E2B，也不调用 MinerU。聊天分析的表格预览与
+摘要会进入当前模型 Provider；直接在 analysis 页运行不调用模型。
 
 ### 2. 启动后端
 
@@ -209,10 +224,11 @@ D:\miniconda\envs\pipy\python.exe scripts/dev_web_app.py
         │       ├── HANDOFF.md       # continuity renderer 首次写入时惰性出现
         │       ├── tasks/           # current + archive；系统拥有
         │       ├── docs/            # revision-bound 代码摘要 + shared notes
-        │       ├── scripts/         # 用户代码和已批准 Sandbox 代码
-        │       ├── inputs/          # 普通上传，只读正文
+        │       ├── scripts/         # 工作代码和已批准 Sandbox 代码
+        │       ├── upload/          # 所有新上传原件，只读正文，按需创建
+        │       ├── inputs/          # 历史上传兼容；不再接收新上传
         │       ├── artifacts/       # Agent/Sandbox 非代码交付物
-        │       └── documents/       # 不可变原件与固定转换产物
+        │       └── documents/       # 固定转换产物，兼容历史 original.*
         └── knowledge/
             ├── wiki.db
             ├── spaces/
@@ -220,6 +236,10 @@ D:\miniconda\envs\pipy\python.exe scripts/dev_web_app.py
 ```
 
 可通过 `PI_AGENT_DATA_DIR` 修改根目录。后端重启会撤销旧登录 Session，但不会删除账号或工作区数据。
+
+上图 Session 内的文件树是 Workspace 的逻辑视图；文件字节继续按 file ID 隔离保存，Sandbox
+物化后对应 `/workspace/upload/**` 等真实目录，不另建镜像。图片与视频链接解析尚未启用，
+方案见 [`Workspace 上传与媒体解析设计`](docs/design/workspace-upload-media.md)。
 
 ## API 与事件
 
@@ -323,7 +343,8 @@ FakeClient，不访问真实 Provider。
 ## 当前限制
 
 - 每个持久 Web Session ID 映射独立 Runtime Session/Harness；同一 Session 单请求串行，不同 Session 可并行
-- Context estimator 不是 Provider 官方 tokenizer；compaction 默认手动、规则式
+- Context estimator 不是 Provider 官方 tokenizer；普通 Web 使用有界结构化 LLM 摘要，
+  未知窗口禁用自动压缩，摘要真实性仍需来源复核；SDK 旧规则式 compaction 保持兼容
 - Regenerate 只支持最新 Assistant；没有 revision history UI
 - Session Folder 不解析 PDF 正文；PDF 知识处理必须上传到 Wiki Space
 - Wiki 的 `gpu-high` 档位启用 MinerU 图片/图表分析，但不做向量检索、Multi-Agent、RBAC/OAuth 或公网部署

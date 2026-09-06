@@ -132,9 +132,10 @@ function onFilesChosen(e: Event) {
 }
 
 function onDrop(e: DragEvent) {
-  if (!props.attachmentsEnabled) return
-  if (!e.dataTransfer?.files?.length) return
   e.preventDefault()
+  if (!props.attachmentsEnabled) return
+  if (props.sending || props.uploading || !props.sessionId) return
+  if (!e.dataTransfer?.files?.length) return
   emit("upload-files", e.dataTransfer.files)
 }
 
@@ -285,10 +286,10 @@ function onDragOver(e: DragEvent) {
         >Coding mode · Sandbox starts automatically · validated changes require approval</span
       >
       <span v-else-if="!wsConnected" class="muted"
-        >○ disconnected · supports md / html / csv / parquet / text</span
+        >○ disconnected · drop files into Workspace upload/</span
       >
       <span v-else class="muted"
-        >connected · supports md / html / csv / parquet / text · images & PDF not parsed</span
+        >Drop files into Workspace upload/ · PDF / DOCX / XLSX converted · images not analyzed</span
       >
     </div>
   </div>
