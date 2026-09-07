@@ -20,6 +20,6 @@ The original Web Claude P0 plan is also archived:
 - [API reference](docs/api/web-api.md)
 - [Testing guide](docs/guides/web-testing.md)
 
-> 当前代码位于 `0.0.29` 发布基线之后：三类意图路由与 Planner–Executor–Verifier Plan Mode 已完成；与上游 pi 的逐模块对齐已完成第 1 项 `ai` 和第 2 项 `agent`。Session Workspace、自动 Memory、Managed Coding Sandbox、LLM Wiki、Approval、Context Budget/Compaction 等既有主线保持有效。
->
-> 当前后续顺序是继续逐项审查 `coding-agent`、`session-backends/sqlite-node`、`telemetry`。实施事实和最新门禁数字见 [STATUS.md](STATUS.md)，对齐证据见 [pi-ai parity report](docs/validation/pi-ai-parity-2026-08-31.md) 与 [pi-agent parity report](docs/validation/pi-agent-parity-2026-08-31.md)，后续优先级与明确延期项见 [ROADMAP.md](ROADMAP.md)。
+本文件只保留文档导航，不重复维护容易过期的阶段状态。
+当前项目已进入本机 Web Agent 工程化收敛；最新实施、门禁与 MinerU 质量边界见
+[STATUS.md](STATUS.md) 和 [工程化验收报告](docs/validation/engineering-closure-2026-09-07.md)。
