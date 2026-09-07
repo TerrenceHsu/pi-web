@@ -25,7 +25,8 @@ def commands(group: str, python: str, npm: str) -> list[tuple[str, list[str]]]:
         checks.extend([
             ("lock", [python, "-m", "uv", "lock", "--check", "--offline"]),
             ("ruff", [python, "-m", "ruff", "check", "src", "tests", "scripts", "evals"]),
-            ("mypy", [python, "-m", "mypy", "src", "evals"]),
+            ("mypy-linux", [python, "-m", "mypy", "--platform", "linux", "src", "evals"]),
+            ("mypy-win32", [python, "-m", "mypy", "--platform", "win32", "src", "evals"]),
             ("worker-ruff", [python, "-m", "ruff", "check", "workers/wiki_parser_worker"]),
             ("worker-mypy", [python, "-m", "mypy", "--config-file",
                               "workers/wiki_parser_worker/pyproject.toml",

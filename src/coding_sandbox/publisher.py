@@ -8,6 +8,7 @@ import importlib
 import os
 import shutil
 import stat
+import sys
 import tarfile
 import time
 from collections.abc import Callable, Iterator
@@ -1296,7 +1297,7 @@ def _exclusive_project_lock(
 
 def _lock_descriptor(descriptor: int) -> None:
     os.lseek(descriptor, 0, os.SEEK_SET)
-    if os.name == "nt":
+    if sys.platform == "win32":
         import msvcrt
 
         msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
@@ -1310,7 +1311,7 @@ def _lock_descriptor(descriptor: int) -> None:
 
 def _unlock_descriptor(descriptor: int) -> None:
     os.lseek(descriptor, 0, os.SEEK_SET)
-    if os.name == "nt":
+    if sys.platform == "win32":
         import msvcrt
 
         msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)

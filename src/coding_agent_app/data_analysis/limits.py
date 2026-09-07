@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import os
+import sys
 
 _job_handle: object = None
 
 
 def apply_worker_limits() -> None:
     global _job_handle
-    if os.name == "nt":
+    if sys.platform == "win32":
         import ctypes
         from ctypes import wintypes
 

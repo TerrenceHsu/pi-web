@@ -307,9 +307,11 @@ python scripts/run_local_gates.py
 Docker 与 MinerU 实机验收需显式运行，见 [本地门禁指南](docs/guides/local-gates.md)。
 离线备份/恢复及旧 Wiki 升级见 [数据维护指南](docs/guides/data-maintenance.md)。
 
-首次跑完整门禁前还需安装独立分析环境与浏览器依赖（会下载依赖与 Chromium）：
+首次跑完整门禁前还需安装 E2B SDK（仅供离线配置安全测试）、独立分析环境与浏览器依赖
+（会下载依赖与 Chromium，不启用云服务）：
 
 ```powershell
+python -m uv sync --frozen --extra dev --extra web --extra data-analysis --extra sandbox-e2b
 python scripts/setup_analysis_python.py
 npm --prefix tests/e2e ci
 npm --prefix tests/e2e exec -- playwright install chromium

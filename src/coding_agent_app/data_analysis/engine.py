@@ -125,7 +125,7 @@ def _load(path: Path, request: AnalysisRequest) -> tuple[Any, dict[str, Any], li
 
         if request.sheet is not None or request.header_row:
             raise AnalysisError("invalid_parquet_options")
-        parquet = pq.ParquetFile(path)  # type: ignore[no-untyped-call]
+        parquet = pq.ParquetFile(path)
         try:
             _check_shape(parquet.metadata.num_rows, len(parquet.schema_arrow))
             expanded = sum(
@@ -134,7 +134,7 @@ def _load(path: Path, request: AnalysisRequest) -> tuple[Any, dict[str, Any], li
             )
             if expanded > 256 * 1024**2:
                 raise AnalysisError("data_limit_exceeded")
-            frame = parquet.read().to_pandas()  # type: ignore[no-untyped-call]
+            frame = parquet.read().to_pandas()
             frame.columns = _headers(list(frame.columns))
         finally:
             parquet.close()

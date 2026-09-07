@@ -236,9 +236,11 @@ Follow the [five-minute walkthrough](docs/demo/README.en.md), using only the
 [synthetic demo inputs](examples/demo/). It includes expected totals, model-enabled
 prompts, approval boundaries, and a recording storyboard.
 
-Prepare the remaining gate dependencies explicitly:
+Prepare the remaining gate dependencies explicitly. The E2B SDK is needed for
+offline configuration safety tests; installing it does not enable cloud calls:
 
 ```powershell
+python -m uv sync --frozen --extra dev --extra web --extra data-analysis --extra sandbox-e2b
 python scripts/setup_analysis_python.py
 npm --prefix tests/e2e ci
 npm --prefix tests/e2e exec -- playwright install chromium

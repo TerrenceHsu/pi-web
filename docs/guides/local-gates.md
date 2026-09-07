@@ -1,20 +1,25 @@
 # 本机一键门禁与 MinerU 实机验收
 
 从仓库根目录、同一个 Python 环境执行。门禁不会安装依赖、拉镜像、读取 Provider Key、
-替换业务服务或开启 Workspace Bash。首次环境准备需自行完成主项目 dev/web/data-analysis
+替换业务服务或开启 Workspace Bash。首次环境准备需自行完成主项目 dev/web/data-analysis/sandbox-e2b
 extras、前端与 E2E 的 `npm ci`、Chromium，以及 `scripts/setup_analysis_python.py`。
 CI 使用 `uv sync --frozen`；独立分析环境的新安装从 `uv.lock` 导出约束，不漂移解析依赖。
+`sandbox-e2b` 在门禁中用于离线 SDK 配置安全测试，不发起云调用；普通本机 Web 运行无需安装它。
 
 ```powershell
 $env:PYTHONPATH = "src"
 D:\miniconda\envs\pipy\python.exe scripts/run_local_gates.py
 ```
 
-默认 `all` 顺序执行锁文件、Ruff、Mypy、Worker 静态检查、分析环境只读探针、
+默认 `all` 顺序执行锁文件、Ruff、Mypy（显式检查 Linux 和 Windows 两套平台类型）、Worker 静态检查、分析环境只读探针、
 后端（保留 75% 总覆盖率门槛，含分支统计）、Worker 单元、离线 Evals、前端 lint/type/unit/build、
 Chromium（零重试）。退出码非零即不通过，不把失败前的子项通过当作整套通过。
 `--group offline` 不启动浏览器；`--group browser --port 8121` 单独验浏览器；
 `--dry-run` 只列命令。端口需空闲，CI 模式不会复用既有业务服务。
+
+本机与 CI 统一使用 `python -m pytest`，让仓库根目录可用于 `tests`/`scripts` 的导入；
+不要改成裸 `pytest` 后依赖开发机偶然存在的导入路径。复现 CI 时应在独立环境中按
+`uv.lock` 安装，已有 conda 环境检查通过不能替代 frozen 依赖验证。
 
 日志和逐项耗时/退出码位于 `.test-tmp/gate-<group>-<UTC>/`；Evals 每次使用
 `.eval/local-gate/<unique-id>/` 保存独立证据，不覆盖上一次运行。

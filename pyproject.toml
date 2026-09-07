@@ -145,8 +145,10 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 # Optional compute libraries remain behind a typed product-service boundary.
+# PyArrow wheel typing differs between releases/platforms; do not depend on a
+# developer environment's incidental stubs. Keep our callers strictly checked.
 [[tool.mypy.overrides]]
-module = ["pandas.*", "numpy.*", "matplotlib.*"]
+module = ["pandas.*", "numpy.*", "matplotlib.*", "pyarrow.*"]
 ignore_missing_imports = true
 follow_imports = "skip"
 follow_imports_for_stubs = true

@@ -244,7 +244,7 @@ def _read_parquet_summary(
             "parquet support requires pyarrow; install with `pip install pyarrow>=15`"
         ) from e
 
-    pf = pq.ParquetFile(str(path))  # type: ignore[no-untyped-call]
+    pf = pq.ParquetFile(str(path))
     arrow_schema = pf.schema_arrow
     schema_dict: dict[str, str] = {
         name: str(arrow_schema.field(name).type) for name in arrow_schema.names
@@ -254,7 +254,7 @@ def _read_parquet_summary(
     row_count = metadata.num_rows if metadata is not None else -1
 
     # 只读前 max_rows
-    batch_iter = pf.iter_batches(  # type: ignore[no-untyped-call]
+    batch_iter = pf.iter_batches(
         batch_size=max(1, max_rows),
     )
     rows: list[dict[str, Any]] = []
