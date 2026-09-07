@@ -72,4 +72,18 @@ Windows MAX_PATH 限制（2525 passed / 1 failed / 3 skipped，提前停止）�
 `.t/ci-fix` 后相关用例通过。这不是新的本机全量通过记录，深路径限制仍保留在 TODO。
 本机浏览器首次尝试被宿主权限限制拒绝启动（spawn EPERM），需正常授权的浏览器进程复验。
 
-第二轮提交后继续远端完整复验；在实际完成前，不将此前跳过的阶段标记为通过。
+第二轮提交 `7cc5b63` 后，本机授权环境 Chromium **27 passed，零重试**，
+生产构建恢复成功；证据 `.test-tmp/gate-browser-20260907T093812Z/`。
+此前权限受限的测试进程树已核验后终止，未触碰业务服务。
+远端 [34107214687](https://github.com/TerrenceHsu/pi-web/actions/runs/34107214687)
+最终后端 **2684 passed / 1 skipped / 21 deselected，覆盖率 78.49%**；Worker 11 passed、
+Evals PASS、前端和 Linux Chromium 27 项均通过，隐藏门禁日志/summary 已下载核验。
+Windows Chromium 为 26 passed / 1 failed：上传 Python 后显示了旧 Markdown 正文。
+
+第三轮定位到真实预览竞态：`WorkspaceFilePreview` 的旧异步读取完成后无条件写 `content`，
+保存后的自动重读可能晚于新文件读取，导致新文件标题下显示旧正文。
+修复将读取、保存、下载回调绑定到 Session ID / File ID / SHA 和请求代次，切换/卸载后
+不允许旧结果、错误、baseline 或 busy 状态写回当前视图。保存参数仍绑定原文件和原 SHA。
+新增五项确定性的延迟响应回归，在修复前五项全部失败，修复后与现有面板测试 10 项通过；
+前端全量 **241 passed**，typecheck / ESLint 通过。
+继续复验第三轮提交的完整远端门禁，不将单项成功合并成一次全绿记录。

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue"
+import { computed, onBeforeUnmount, ref, watch } from "vue"
 
 import { downloadFileUrl } from "../../api/files"
 import type { FileRef } from "../../types"
@@ -25,6 +25,14 @@ const busy = ref(false)
 const error = ref("")
 const editing = ref(false)
 const downloading = ref(false)
+const fileRevision = computed(() =>
+  JSON.stringify([props.sessionId, props.file.id, props.file.sha256]),
+)
+let viewGeneration = 0
+
+function isCurrent(generation: number, revision: string): boolean {
+  return generation === viewGeneration && revision === fileRevision.value
+}
 
 const format = computed(() => refFormat(props.file))
 const logicalPath = computed(() => props.file.logical_path || props.file.name)
@@ -62,53 +70,75 @@ const originLabel = computed(() => {
 })
 
 async function load(): Promise<void> {
+  const generation = ++viewGeneration
+  const revision = fileRevision.value
+  const file = props.file
   editing.value = false
+  busy.value = false
+  downloading.value = false
   error.value = ""
   content.value = ""
   baseline.value = ""
   if (!canRead.value) return
   busy.value = true
   try {
-    const loaded = await props.loadContent(props.file.id)
+    const loaded = await props.loadContent(file.id)
+    if (!isCurrent(generation, revision)) return
     content.value = loaded
     baseline.value = loaded
   } catch (cause: any) {
-    error.value = String(cause?.message || `Unable to load ${props.file.name}`)
+    if (isCurrent(generation, revision)) {
+      error.value = String(cause?.message || `Unable to load ${file.name}`)
+    }
   } finally {
-    busy.value = false
+    if (isCurrent(generation, revision)) busy.value = false
   }
 }
 
 async function save(): Promise<void> {
-  if (!canEditMarkdown.value || !dirty.value) return
+  if (!canEditMarkdown.value || !dirty.value || busy.value) return
+  const generation = viewGeneration
+  const revision = fileRevision.value
+  const file = props.file
+  const submittedContent = content.value
   busy.value = true
   error.value = ""
   try {
-    const updated = await props.saveContent(props.file.id, content.value, props.file.sha256)
-    baseline.value = content.value
+    const updated = await props.saveContent(file.id, submittedContent, file.sha256)
+    if (!isCurrent(generation, revision)) return
+    baseline.value = submittedContent
     editing.value = false
     emit("saved", updated)
   } catch (cause: any) {
-    error.value = String(cause?.message || `Unable to save ${props.file.name}`)
+    if (isCurrent(generation, revision)) {
+      error.value = String(cause?.message || `Unable to save ${file.name}`)
+    }
   } finally {
-    busy.value = false
+    if (isCurrent(generation, revision)) busy.value = false
   }
 }
 
 async function download(): Promise<void> {
   if (!props.downloadFile || downloading.value) return
+  const generation = viewGeneration
+  const revision = fileRevision.value
+  const name = props.file.name
   downloading.value = true
   error.value = ""
   try {
     await props.downloadFile()
   } catch (cause: any) {
-    error.value = String(cause?.message || `Unable to download ${props.file.name}`)
+    if (isCurrent(generation, revision)) {
+      error.value = String(cause?.message || `Unable to download ${name}`)
+    }
   } finally {
-    downloading.value = false
+    if (isCurrent(generation, revision)) downloading.value = false
   }
 }
 
-watch(() => [props.file.id, props.file.sha256], load, { immediate: true })
+// A late read/save from another file, version or Session cannot update this view.
+watch(fileRevision, load, { immediate: true })
+onBeforeUnmount(() => { viewGeneration += 1 })
 </script>
 
 <template>
