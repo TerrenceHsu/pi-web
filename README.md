@@ -1,8 +1,22 @@
-# pi-agent-core-py
+# pi-web
+
+[中文](README.md) | [English](README.en.md) · [使用演示](docs/demo/README.zh-CN.md) · [当前状态](STATUS.md)
+
+面向本机使用的 Web Agent 工作台：把对话、独立 Workspace、可审阅的代码执行、数据分析和页面式知识库放在同一个浏览器界面中。
+
+GitHub 仓库名为 `pi-web`；Python 包名与导入路径仍为 `pi-agent-core-py` / `pi_agent_core_py`，不需要改代码中的 import。
 
 `@earendil-works/pi-agent-core` 的 Python 移植与本地 Web Agent 工作台。项目包含事件驱动 Agent Runtime、工具与 MCP、Skills、Provider 切换、Session 工作区、页面中心 LLM Wiki、审批、上下文预算和可恢复的浏览器聊天界面。
 
 > 当前代码事实以 [`STATUS.md`](STATUS.md) 为准；未完成事项只维护在 [`TODO.md`](TODO.md)。本项目是 **localhost-only** 本地开发工具，不是公网 SaaS。
+
+## 先试什么
+
+- **不填 API Key**：体验登录、文件上传、固定数据分析和模拟流式聊天；模拟回复不代表真实模型能力。
+- **配置真实 Provider**：让 Agent 读取已上传的资料，使用当前 Workspace 选择的 Skills/MCP，或提出可审批的任务。
+- **可选组件**：Python 分析需独立环境；Bash 需显式配置 Docker；Wiki PDF 需独立 MinerU Worker。基础聊天不依赖 Docker/GPU。
+
+[五分钟演示与合成数据](docs/demo/README.zh-CN.md)包含逐步操作、示例提示词、预期结果和中英文录屏脚本。
 
 ## 当前能力概览
 
@@ -86,9 +100,9 @@ Session 文件和 Wiki Source/Page 用途不同：
 |---|---|---|
 | 作用域 | 单个 Session | 账号内 Space；每 Space 多 Knowledge 对话 |
 | 输入 | 任意受配额文件 | PDF、单文件 HTML |
-| Agent 读取 | 文本/Markdown/HTML/CSV/Parquet；PDF 仅元信息 | 受限工具读取 Raw artifact 与已批准页面/FTS/图谱 |
+| Agent 读取 | 文本与表格预览；PDF/DOCX/XLSX 可显式固定转换后读取产物 | 受限工具读取 Raw artifact 与已批准页面/FTS/图谱 |
 | 持久化 | `uploads/{session_id}/` + workspace metadata | `knowledge/wiki.db` + `knowledge/spaces/` |
-| 图片/OCR | 不支持 | MinerU 提取 PDF 图片；扫描件和富版面按所选 MinerU 档位处理 |
+| 图片/OCR | 可上传/预览；尚无 Workspace OCR/视觉解析 | MinerU 提取 PDF 图片；扫描件和富版面按所选 MinerU 档位处理 |
 
 `AGENT.md` 是当前 Session 的行为指令；`Memory.md` 是当前 Session 的对话摘要。两者都不是跨 Session 用户画像，也不能覆盖平台安全规则。
 
@@ -107,27 +121,39 @@ Session 文件和 Wiki Source/Page 用途不同：
 
 ## 快速开始
 
-以下命令针对当前 Windows 工作区和项目约定。Python 必须使用：
-
-```powershell
-D:\miniconda\envs\pipy\python.exe
-```
+需要 Git、Python 3.11+（当前验证版本为 3.12）和 Node.js 20+ / npm。
+下列命令从仓库根目录运行。Windows 是当前完整实机验收平台；Linux/macOS 可使用对应虚拟环境命令，
+但 OS Keyring、Docker 和 GPU 仍需在各自环境单独验证。**安装依赖会访问网络；真实模型调用可能产生 Provider 费用。**
 
 ### 1. 安装 Python 与前端依赖
 
 ```powershell
-Set-Location D:\LLMTutorial\test
-D:\miniconda\envs\pipy\python.exe -m pip install -e ".[dev,web]"
+git clone https://github.com/TerrenceHsu/pi-web.git
+Set-Location pi-web
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install uv==0.11.26
+python -m uv sync --frozen --extra dev --extra web --extra data-analysis
 npm --prefix src/pi_agent_core_py/web/frontend ci
+npm --prefix src/pi_agent_core_py/web/frontend run build
 ```
 
-如需启用可选 Data Analysis，再安装分析依赖（本机开发环境已安装；未安装时前端会提示不可用）：
+若 PowerShell 阻止激活脚本，无需修改系统执行策略：用 `.\.venv\Scripts\python.exe` 代替下面的 `python`。
+私有仓库需要获授权的 GitHub 登录。Linux/macOS 中创建并激活环境：
 
-```powershell
-D:\miniconda\envs\pipy\python.exe -m pip install -e ".[data-analysis]"
+```bash
+git clone https://github.com/TerrenceHsu/pi-web.git
+cd pi-web
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install uv==0.11.26
+python -m uv sync --frozen --extra dev --extra web --extra data-analysis
+npm --prefix src/pi_agent_core_py/web/frontend ci
+npm --prefix src/pi_agent_core_py/web/frontend run build
 ```
 
-这是固定运算工具，不执行用户 Python/SQL，不启动 E2B，也不调用 MinerU。聊天分析的表格预览与
+`data-analysis` 安装的是固定运算依赖，不自动启用工具，也不创建 Agent Python 的独立环境。
+不执行用户 Python/SQL，不启动 E2B，也不调用 MinerU。聊天分析的表格预览与
 摘要会进入当前模型 Provider；直接在 analysis 页运行不调用模型。
 
 ### 2. 启动后端
@@ -135,12 +161,13 @@ D:\miniconda\envs\pipy\python.exe -m pip install -e ".[data-analysis]"
 必须从当前 Windows 交互式登录用户会话启动，确保 Credential Manager 可用：
 
 ```powershell
-Set-Location D:\LLMTutorial\test
 $env:PYTHONPATH = "src"
-D:\miniconda\envs\pipy\python.exe scripts/dev_web_app.py
+python scripts/dev_web_app.py
 ```
 
-默认地址：`http://127.0.0.1:8000`。默认数据目录：`.pi-agent-data/`。
+打开 `http://127.0.0.1:8000`，即可使用构建后的完整前端。默认数据目录为 `.pi-agent-data/`。
+Linux/macOS 使用 `PYTHONPATH=src python scripts/dev_web_app.py`；需可用的系统 Keyring，
+或明确选择下述不持久化密钥模式。不要改为 `0.0.0.0`、配置端口转发或对公网暴露该开发服务。
 
 开发启动器默认 `PI_AGENT_SECRET_BACKEND=keyring`。Keyring 探针失败时会在监听端口前退出；如果明确接受 API Key 不持久化，可临时使用：
 
@@ -153,12 +180,11 @@ $env:PI_AGENT_SECRET_BACKEND = "memory"
 Windows 实机 write/read/delete、启动器 listen-before-probe 验收和安全排障步骤见
 [`docs/guides/windows-keyring-preflight-smoke.md`](docs/guides/windows-keyring-preflight-smoke.md)。
 
-### 3. 启动前端开发服务器
+### 3. 可选：前端开发服务器
 
-另开一个 PowerShell：
+日常使用可跳过本节。修改 Vue 前端时，保持后端运行并另开一个 PowerShell：
 
 ```powershell
-Set-Location D:\LLMTutorial\test
 npm --prefix src/pi_agent_core_py/web/frontend run dev
 ```
 
@@ -175,11 +201,12 @@ Password: 123456
 
 登录后：
 
-1. 打开左侧 `Providers`。
+1. 先在侧栏 `Password` 将初始密码改为 12–128 字符的新密码，随后重新登录；再打开 `Providers`。
 2. 为 GLM、Qwen 或 Kimi 创建 Profile，填写 Model ID 与 API Key。
 3. 保存后将 Profile 设为当前 Session binding。
 4. 新建或选择 Session，再发送消息。
 
+不配置真实 Profile 时，启动器回复 `Hello from delayed fake backend`，这只是离线 UI 演示。
 当前没有 Users 管理模块。初始凭据只适合 localhost 本地开发。
 
 ### 5. 由 FastAPI 托管构建后的前端
@@ -187,7 +214,7 @@ Password: 123456
 ```powershell
 npm --prefix src/pi_agent_core_py/web/frontend run build
 $env:PYTHONPATH = "src"
-D:\miniconda\envs\pipy\python.exe scripts/dev_web_app.py
+python scripts/dev_web_app.py
 ```
 
 然后访问 `http://127.0.0.1:8000/`。
@@ -200,7 +227,7 @@ D:\miniconda\envs\pipy\python.exe scripts/dev_web_app.py
 4. 输入 `/checkpointer` 生成或累计更新 `Memory.md`。
 5. `Skills` 上传并启用 `SKILL.md`，按 Turn 选择使用。
 6. `Knowledge` 创建 Wiki Space，上传 PDF/HTML，审核 Summary/页面 Change Set，并在 Space 对话中检索或提出修改。
-7. `MCP` 配置自定义 stdio server；内置 DDGS 参数可直接编辑。
+7. `MCP` 配置账号级 stdio / Streamable HTTP server，再在 Workspace → extensions 选择；内置 DDGS 参数可直接编辑且不能删除。Skills 同样先全局启用，再由 Workspace 选择。
 8. `Providers` 管理凭证/Profile/模型窗口，并切换当前 Session binding。
 9. Admin 可打开 `Telemetry` 查看跨账号请求量、错误率、P95、token、Provider、工具与安全事件详情。
 10. 对最新 Assistant 使用 Regenerate；从 Session 菜单导出 Markdown。
@@ -273,20 +300,27 @@ Compaction 默认只在完整 turn 边界切分，使用与 preflight 相同的 
 
 ```powershell
 $env:PYTHONPATH = "src"
-D:\miniconda\envs\pipy\python.exe scripts/run_local_gates.py
+python scripts/run_local_gates.py
 ```
 
 覆盖后端分支覆盖率、Worker、Evals、前端和 Chromium 零重试，失败时也恢复生产构建。
 Docker 与 MinerU 实机验收需显式运行，见 [本地门禁指南](docs/guides/local-gates.md)。
 离线备份/恢复及旧 Wiki 升级见 [数据维护指南](docs/guides/data-maintenance.md)。
 
+首次跑完整门禁前还需安装独立分析环境与浏览器依赖（会下载依赖与 Chromium）：
+
+```powershell
+python scripts/setup_analysis_python.py
+npm --prefix tests/e2e ci
+npm --prefix tests/e2e exec -- playwright install chromium
+```
+
 ### Backend offline
 
 ```powershell
-Set-Location D:\LLMTutorial\test
 New-Item -ItemType Directory -Force .test-tmp/pytest | Out-Null
 $env:PYTHONPATH = "src"
-D:\miniconda\envs\pipy\python.exe -m pytest tests -q --no-cov --basetemp=.test-tmp/pytest
+python -m pytest tests -q --no-cov --basetemp=.test-tmp/pytest
 ```
 
 默认 marker 排除 `slow`、`integration` 和 `docker`，不会调用真实 LLM、外部 DDGS 或 Docker。
@@ -298,7 +332,7 @@ baseline/candidate 配对评测。内置套件只用 Fake Provider、临时 Work
 SQLite，不读取 `.env`、不访问网络：
 
     $env:PYTHONPATH = "src"
-    D:\miniconda\envs\pipy\python.exe -m evals --gate
+    python -m evals --gate
 
 默认 `.eval/` 产物不保存 Prompt、Response、Tool payload、Workspace 正文或
 Telemetry 属性；只有显式 `--include-content` 才保存完整内容。详细契约见
@@ -310,8 +344,7 @@ Telemetry 属性；只有显式 `--include-content` 才保存完整内容。详�
 都可用：
 
 ```powershell
-Set-Location D:\LLMTutorial\test
-D:\miniconda\envs\pipy\python.exe scripts/run_live_integration_tests.py
+python scripts/run_live_integration_tests.py
 ```
 
 固定脚本只运行 1 个 DDGS 与 2 个 GLM smoke，并自动设置真实测试门禁。
@@ -357,11 +390,11 @@ FakeClient，不访问真实 Provider。
 - Context estimator 不是 Provider 官方 tokenizer；普通 Web 使用有界结构化 LLM 摘要，
   未知窗口禁用自动压缩，摘要真实性仍需来源复核；SDK 旧规则式 compaction 保持兼容
 - Regenerate 只支持最新 Assistant；没有 revision history UI
-- Session Folder 不解析 PDF 正文；PDF 知识处理必须上传到 Wiki Space
+- Session Folder 支持固定 PDF/DOCX/XLSX 转换，但不等于 MinerU OCR；需要页面提案/知识检索时上传到 Wiki Space
 - Wiki 的 `gpu-high` 档位启用 MinerU 图片/图表分析，但不做向量检索、Multi-Agent、RBAC/OAuth 或公网部署
 - MCP 支持本机 stdio 与用户配置的 Streamable HTTP endpoint；HTTP 仅作为当前 Web Agent 的扩展 transport，不提供独立远程 Agent 服务
 - 历史数据中已经存在的 `U+FFFD` 无法自动恢复原字符
-- 当前 package baseline 为 `0.0.29`，Python、FastAPI/Auth、前端与 Wiki Parser Worker 版本已统一；Git remote 仍待配置
+- 当前 package baseline 为 `0.0.29`，Python、FastAPI/Auth、前端与 Wiki Parser Worker 版本已统一
 
 ## 项目结构
 
@@ -386,11 +419,17 @@ FakeClient，不访问真实 Provider。
 │       ├── telemetry/          # Admin API 与 Agent event 安全投影
 │       ├── wiki/               # Raw、页面、审批、FTS5、图谱、Knowledge Agent
 │       └── frontend/           # Vue 3/Vite/Pinia
+├── src/coding_agent_app/        # Web 产品装配、任务、分析、连续性
+├── src/agent_workspace/         # Workspace 存储与权限
+├── src/coding_sandbox/          # 隔离执行、冻结、审批和发布
+├── src/wiki_parser/             # 外部解析 Worker 客户端契约
+├── workers/wiki_parser_worker/  # 独立 MinerU 运行时与许可
 ├── scripts/dev_web_app.py
 ├── tests/
 ├── tests/e2e/
 ├── docs/
-└── steps/
+├── examples/demo/              # 可公开的合成演示输入
+└── evals/
 ```
 
 ## 文档职责
@@ -409,5 +448,6 @@ FakeClient，不访问真实 Provider。
 LLM Wiki PDF Parser Worker 位于 [`workers/wiki_parser_worker`](workers/wiki_parser_worker)，自身采用
 MIT，并通过独立 OCI 环境使用 MinerU 3.4.5。Source archive 包含 notices、MinerU 许可提示、
 adapter/构建源码、完整依赖锁、manifest 与 SPDX SBOM；MinerU、Torch 和模型不会装入主应用。
-新 MinerU 镜像尚未完成真实 CPU/GPU/断网语料 Gate，因此 manifest 保持
-`runtime_ready=false`。登录后的侧栏 **About & Source** 可查看许可和下载同版本源码归档。
+新 MinerU 镜像已完成三档合成语料解析和取消/恢复检查，但 CPU 表格存在错误，代表性中文与复杂文档质量尚未验收，
+因此 manifest 保持 `runtime_ready=false`；不能以镜像构建成功宣称生产就绪。
+登录后的侧栏 **About & Source** 可查看许可和下载同版本源码归档。分发 Worker 镜像时须另外遵守其中依赖及模型的许可。

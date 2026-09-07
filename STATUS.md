@@ -8,10 +8,13 @@
 - Python、Web API、前端、Worker 与最新 release tag 均为 `0.0.29`；当前工作分支 `master`。
 - localhost-only 本机 Web Agent，不提供公网 SaaS、独立 client/protocol/server/tui。
 - 声明 Python >=3.11，本机用 conda `pipy` Python 3.12.13。
-- 当前无 Git remote；本次仅整理本地提交，不 push、不新增 release tag。
+- Git origin 为 `https://github.com/TerrenceHsu/pi-web.git`，仓库为私有；上传源码不等于部署 Web 服务，不新增 release tag。
 - 主工程 MIT；Worker 另附 MinerU 第三方许可、Notice、SBOM 与对应源码入口。
 
 ## 本轮工程化修复
+
+本次 GitHub 发布补充中英文 README、双语演示与合成输入；具体新增验证和未演示边界见
+[发布准备记录](docs/demo/VALIDATION.md)。下方工程化测试数字保留原批次，不将演示测试累加进去。
 
 实施顺序见 [工程化收敛计划](docs/design/engineering-closure.md)。
 

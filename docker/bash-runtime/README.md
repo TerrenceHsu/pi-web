@@ -1,8 +1,10 @@
-# Local Bash runtime (stage 1, not enabled in Web)
+# Local Bash runtime (opt-in Web execution)
 
-The backend passed 14 real Docker checks on 2026-09-06. Internal ExecutionGrant
-primitives exist, but `run_bash`, shared Coding/Plan/Web approval wiring and
-publication integration are not yet implemented. Web execution stays disabled.
+The five implementation stages now include `run_bash`, Web approval, Coding/Plan
+Executor reuse, frozen artifacts, explicit publication, quotas and admin cleanup.
+See the [current status](../../STATUS.md) for dated validation and remaining boundaries.
+Web execution is still **disabled by default** and requires operator configuration
+plus a Workspace opt-in. Installing the package does not grant execution rights.
 No image is pulled and no container is created by installing/importing the package.
 
 ## Prepare an image explicitly
@@ -43,8 +45,12 @@ Arguments:
 Without `--verify`, only daemon/image metadata is inspected; it does not prove
 isolation, and the feature remains unavailable. Exit code 2 means missing
 prerequisites or incomplete verification, not a successful runtime test.
-Even successful backend verification does not enable Web execution: the later
-grant, authorization, artifact and UI stages must also be completed.
+Even successful backend verification does not enable Web execution. Configure
+`PI_LOCAL_DOCKER_ENABLED=1`, `PI_LOCAL_DOCKER_EXE` (absolute CLI path), and
+`PI_LOCAL_DOCKER_IMAGE_ID` (full immutable image ID) before starting the Web backend;
+then select the optional tool in the intended Workspace. A script/task still
+requires its own approval, and writing results back requires separate publication
+approval. See the [Bash design](../../docs/design/workspace-bash-tool.md).
 
 ## tmpfs export boundary
 
