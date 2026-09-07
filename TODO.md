@@ -4,7 +4,7 @@
 
 ## 本轮工程化收敛
 
-- [ ] GitHub CI 代码/依赖修复及 frozen 本机定向复验已完成，待修复提交推送后通过远端完整门禁；此前未执行的阶段不能记为通过。见 [CI 修复记录](docs/validation/github-ci-repair-2026-09-07.md)。
+- [x] GitHub CI 平台类型/依赖/导入入口、Linux 路径/Wiki WAL 并发、E2E 定位/会话等待及预览异步竞态修复；`32b3d53` 的第三轮完整远端门禁通过（后端 2684 / 78.50%，Worker 11，前端 241，两平台 Chromium 各 27，Evals PASS）。见 [CI 修复记录](docs/validation/github-ci-repair-2026-09-07.md)，不将此前跳过阶段或本机定向结果记为全量通过。
 - [x] Telemetry 周期裁剪/崩溃记录对账、MinerU 探针新鲜度、终态执行对象释放。
 - [x] 离线备份/校验/新目录恢复，Wiki v7 兼容升级与显式原件重建；临时数据恢复后真实 Web 登录/会话验证。
 - [x] 本地一键门禁、锁定依赖与 Worker/双平台 CI 配置、改密 API/UI/旧登录及 WebSocket 撤销。

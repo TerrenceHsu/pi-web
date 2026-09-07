@@ -86,4 +86,34 @@ Windows Chromium 为 26 passed / 1 failed：上传 Python 后显示了旧 Markdo
 不允许旧结果、错误、baseline 或 busy 状态写回当前视图。保存参数仍绑定原文件和原 SHA。
 新增五项确定性的延迟响应回归，在修复前五项全部失败，修复后与现有面板测试 10 项通过；
 前端全量 **241 passed**，typecheck / ESLint 通过。
-继续复验第三轮提交的完整远端门禁，不将单项成功合并成一次全绿记录。
+本机授权环境 Chromium 再次 **27 passed，零重试**，生产构建恢复成功；
+证据 `.test-tmp/gate-browser-20260907T095627Z/`。
+
+## 最终验收结果
+
+第三轮修复提交 `32b3d5302225eb2d043e611bb1b7c7700dbc91a7` 的
+[34108827664](https://github.com/TerrenceHsu/pi-web/actions/runs/34108827664)
+于 2026-09-07 完整通过，四个 job 均为 `success`。下表全部来自同一次远端运行，
+不将此前不同批次的部分通过结果合并为全绿。
+
+| 检查 | 同轮结果 |
+|---|---|
+| Ruff / strict Mypy | PASS；Linux/Windows 各 308 source files，Worker 16 files |
+| 后端离线全量 | 2684 passed / 1 skipped / 21 deselected，573.53 秒 |
+| 后端分支统计覆盖率 | 78.50%，保留原 75% 门槛；coverage XML 已归档 |
+| Worker | 11 passed |
+| Evals | 6 suites / 10 pairs，Candidate gate PASS |
+| 前端 | 241 passed / 36 files；ESLint、vue-tsc、production build 全通过 |
+| Linux / Windows 平台前置检查 | 各 74 passed |
+| Linux Chromium | 27 passed，零重试；生产构建恢复成功 |
+| Windows Chromium | 27 passed，零重试；生产构建恢复成功 |
+
+双平台 artifact 已下载并核对 `chromium.log`、`summary.json` 与构建恢复结果：
+
+- Linux：`.test-tmp/ci-repair-20260907/remote-third-linux/.test-tmp/gate-browser-20260907T095811Z/`。
+- Windows：`.test-tmp/ci-repair-20260907/remote-third-windows/.test-tmp/gate-browser-20260907T100204Z/`。
+
+三项修复提交 `e2ab6de`、`7cc5b63`、`32b3d53` 均已推送 `origin/master`。
+随后仅更新状态/验证文档，不改变本次验收对应的代码提交，也不新增 release tag。
+已有 Windows 极深 Raw 路径限制仍在 TODO；MinerU 代表性质量、真实模型能力和 Docker 实机
+不属于这次离线 CI 的通过结论。Actions 运行时弃用提示仍是警告，未被当作本次失败原因。

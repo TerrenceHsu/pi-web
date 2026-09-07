@@ -26,17 +26,17 @@
 | 备份恢复 | 离线 SQLite 快照 + 文件 SHA 清单 + integrity/FK 检查；目标必须全新，不自动切换业务配置；网关与维护共用 OS 锁 |
 | Wiki 升级 | v7 严格兼容迁移，或显式 v1–v7 原件重建；保留完整 legacy 归档，新 ID/旧历史不迁入的边界写入报告 |
 | 本地门禁 | `scripts/run_local_gates.py` 覆盖锁文件、主工程/Worker、独立 Python 环境探针、Evals、前端和 Chromium；Docker 显式固定镜像 |
-| CI | 第二轮远端后端 2684 passed / 78.49%、Worker/Evals/前端/Linux Chromium 通过；Windows Chromium 暴露旧读取覆盖新文件预览，已加请求归属校验及五项确定性回归；等待第三轮完整复验 |
+| CI | 修复提交 `32b3d53` 的第三轮远端完整通过：后端 2684 passed / 78.50%、Worker 11、Evals 6 suites / 10 pairs、前端 241、Linux/Windows Chromium 各 27（零重试）；两平台 strict Mypy 与生产构建恢复通过 |
 | 改密 | 侧栏 Password 入口；当前密码验证，新密码 12–128 字符；原子撤销该账号旧登录，阻断并发旧密码登录并断开旧 WebSocket |
 | 新 MinerU 实机 | 三档队列解析/制品 SHA/销毁、GPU 运行中取消与重启恢复通过；GPU 合成表格/OCR 正确，CPU 表格单元格错误，`runtime_ready=false` |
 
 操作见 [数据维护指南](docs/guides/data-maintenance.md) 与 [本地门禁指南](docs/guides/local-gates.md)。
-首次远端运行见 [GitHub Actions 34095561462](https://github.com/TerrenceHsu/pi-web/actions/runs/34095561462)；
-本次原因和定向复验见 [CI 修复记录](docs/validation/github-ci-repair-2026-09-07.md)。
-下方本地测试结果仍为原批次，不代表远端已通过。公开仓库不改变 localhost-only 和 MinerU 未就绪边界。
+最终修复验收见 [GitHub Actions 34108827664](https://github.com/TerrenceHsu/pi-web/actions/runs/34108827664)；
+首次失败、三轮修复及本机/远端分批结果见 [CI 修复记录](docs/validation/github-ci-repair-2026-09-07.md)。
+下方本地测试结果仍为原批次，不与远端结果累加。公开仓库及离线 CI 通过不改变 localhost-only 和 MinerU 未就绪边界。
 所有维护演练和密码测试均使用临时数据；没有改业务密码、迁业务库、替换业务解析容器或自动开启 Bash。
 
-## 本轮验证
+## 工程化本地验证（CI 修复前批次）
 
 - 本地一键 `all`：15 个检查/恢复步骤全部通过，日志 `.test-tmp/gate-all-20260907T034352Z/`。
 - 后端：2674 passed / 1 skipped / 21 deselected，coverage **78.36%**（含分支统计，门槛 75%）。

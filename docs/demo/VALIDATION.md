@@ -69,7 +69,19 @@ visibility change and recheck are recorded below.
 - The first remote [CI run](https://github.com/TerrenceHsu/pi-web/actions/runs/34095561462)
   on `7ad03ea` failed: frontend passed, Mypy and Linux/Windows platform prechecks
   failed, and downstream backend/browser stages were skipped. Public visibility
-  does not imply a stable release or a successful remote gate; follow-up is in [TODO](../../TODO.md).
+  does not imply a stable release or a successful remote gate. This initial failure is retained as history;
+  the subsequent repair and successful acceptance are recorded below.
+
+## CI 后续修复 / Subsequent CI repair
+
+- The complete [repair run 34108827664](https://github.com/TerrenceHsu/pi-web/actions/runs/34108827664)
+  on `32b3d53` passed all four jobs: backend 2,684 passed (78.50% coverage), Worker 11,
+  frontend 241, Linux/Windows Chromium 27 each with zero retries and production builds restored,
+  plus both-platform strict Mypy and the offline Evals gate (6 suites / 10 pairs).
+- These are subsequent repair results, not additional tests in the original publication pass.
+  The [repair report](../validation/github-ci-repair-2026-09-07.md) preserves the intermediate failures,
+  fixes, local test limits and final same-run evidence. No live Provider, MinerU or Docker acceptance
+  is implied by this offline CI result.
 
 ## 未执行 / Not executed in this publication pass
 
