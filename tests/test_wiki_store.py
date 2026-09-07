@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import aiosqlite
 import pytest
@@ -20,6 +21,7 @@ from pi_agent_core_py.web.wiki import (
     WikiStore,
     WikiStoreError,
 )
+from pi_agent_core_py.web.wiki.store import _enable_wal
 
 
 @pytest.fixture
@@ -96,16 +98,64 @@ async def test_schema_is_idempotent_and_restart_persists_space(tmp_path: Path) -
 
 
 async def test_two_fresh_openers_converge_on_one_schema(tmp_path: Path) -> None:
-    first, second = await asyncio.gather(
-        WikiStore.open(tmp_path),
-        WikiStore.open(tmp_path),
-    )
-    try:
-        assert await first.get_schema_version() == WIKI_SCHEMA_VERSION
-        assert await second.get_schema_version() == WIKI_SCHEMA_VERSION
-    finally:
-        await first.close()
-        await second.close()
+    for attempt in range(3):
+        root = tmp_path / str(attempt)
+        opened = await asyncio.gather(
+            WikiStore.open(root), WikiStore.open(root), return_exceptions=True,
+        )
+        try:
+            for store in opened:
+                if isinstance(store, BaseException):
+                    raise store
+                assert await store.get_schema_version() == WIKI_SCHEMA_VERSION
+                async with store._require_db().execute("PRAGMA journal_mode") as cursor:
+                    assert (await cursor.fetchone())[0] == "wal"
+        finally:
+            # A failed peer must not leave the successful opener's worker alive.
+            await asyncio.gather(
+                *(store.close() for store in opened if isinstance(store, WikiStore)),
+            )
+
+
+async def test_wal_startup_retries_busy_and_closes_pragma_cursor() -> None:
+    busy = sqlite3.OperationalError("database is locked")
+    busy.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    cursor = AsyncMock()
+    cursor.__aenter__.return_value = cursor
+    cursor.fetchone.return_value = ("wal",)
+    connection = AsyncMock()
+    connection.execute.side_effect = [busy, cursor]
+
+    await _enable_wal(connection)
+
+    assert connection.execute.await_count == 2
+    cursor.__aexit__.assert_awaited_once()
+
+
+@pytest.mark.parametrize("code", [sqlite3.SQLITE_BUSY, sqlite3.SQLITE_IOERR])
+async def test_wal_startup_fails_closed_on_timeout_or_nonbusy_error(code: int) -> None:
+    error = sqlite3.OperationalError("not a successful startup")
+    error.sqlite_errorcode = code
+    connection = AsyncMock()
+    connection.execute.side_effect = error
+
+    with pytest.raises(sqlite3.OperationalError) as caught:
+        await _enable_wal(connection, timeout_seconds=0 if code == sqlite3.SQLITE_BUSY else 5)
+
+    assert caught.value is error
+    connection.execute.assert_awaited_once()
+
+
+async def test_wal_startup_rejects_a_silent_journal_mode_fallback() -> None:
+    cursor = AsyncMock()
+    cursor.__aenter__.return_value = cursor
+    cursor.fetchone.return_value = ("delete",)
+    connection = AsyncMock()
+    connection.execute.return_value = cursor
+
+    with pytest.raises(WikiStoreError, match="configuration"):
+        await _enable_wal(connection)
+    cursor.__aexit__.assert_awaited_once()
 
 
 async def test_future_schema_version_fails_closed(tmp_path: Path) -> None:

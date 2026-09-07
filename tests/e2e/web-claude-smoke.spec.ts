@@ -19,11 +19,19 @@ test("the authenticated product shell exposes the three primary work areas", asy
 
 test("a new chat persists one user and one assistant message", async ({ page }) => {
   await page.goto("/")
-  await page.locator('[data-testid="new-chat-button"]').click()
   await expect(page).toHaveURL(/\/chat\/[^/]+$/)
-
-  const sessionId = new URL(page.url()).pathname.split("/").at(-1)
+  const created = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/sessions" &&
+      response.request().method() === "POST",
+  )
+  await page.locator('[data-testid="new-chat-button"]').click()
+  const response = await created
+  expect(response.ok(), await response.text()).toBe(true)
+  const sessionId = (await response.json()).id as string
   expect(sessionId).toBeTruthy()
+  // The previous chat URL already matches /chat/:id; wait for this creation.
+  await expect(page).toHaveURL(new RegExp(`/chat/${sessionId}$`))
   await page.waitForFunction(
     (expectedSessionId) =>
       (window as any).__storeHooks?.chatStore?.().activeSessionId === expectedSessionId,

@@ -82,6 +82,10 @@ def test_sanitize_filename_strips_path():
     assert sanitize_filename("../evil.txt") == "evil.txt"
     assert sanitize_filename("/etc/passwd") == "passwd"
     assert sanitize_filename("..\\windows\\file.txt") == "file.txt"
+    assert sanitize_filename("C:\\fakepath\\file.txt") == "file.txt"
+    assert sanitize_filename("C:file.txt") == "file.txt"
+    assert sanitize_filename("\\\\server\\share\\file.txt") == "file.txt"
+    assert sanitize_filename("../windows\\nested/file.txt") == "file.txt"
 
 
 def test_sanitize_filename_empty_uses_default():

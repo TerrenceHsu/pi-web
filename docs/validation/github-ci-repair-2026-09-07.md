@@ -47,5 +47,29 @@
 
 ## 远端验收
 
-本次修复提交推送后重新运行完整 CI；在实际完成前，不将此前跳过的阶段标记为通过。
-后续远端结果在这里补充，当前状态以根目录 `STATUS.md` / `TODO.md` 为准。
+第一轮修复提交 `e2ab6de` 的 [34100427303](https://github.com/TerrenceHsu/pi-web/actions/runs/34100427303)
+已通过 strict Mypy、两平台前置检查、前端和 Windows 完整浏览器门禁，但仍失败：
+
+- Linux 后端：2677 passed / 2 failed / 1 skipped / 21 deselected，550.82 秒。
+  失败为上传文件名在 Linux 不识别 Windows 路径，以及 Wiki 并发首次打开时 WAL 模式切换报 BUSY。
+- Linux 浏览器：Wiki 整行中心点击误中 Parse 按钮；新建聊天仅匹配 `/chat/:id` 读到旧会话 ID。
+- `.test-tmp` 下门禁日志因上传器默认排除隐藏文件而未归档；失败上下文和 trace 可用。
+
+第二轮修复：
+
+1. 文件名使用平台无关的 `PureWindowsPath` 提取两种分隔符和盘符的基名；补充 UNC/混合路径回归。
+2. WAL 切换仅对 SQLITE_BUSY 做有界异步重试并关闭 PRAGMA cursor；其它 I/O 错误、超时、
+   静默退回 DELETE 模式均失败，不降低事务或持久化保证。并发打开测试重复三次并关闭成功的 peer。
+3. Wiki E2E 精确点击文件名；聊天 E2E 等待创建响应中的 Session ID 对应的 URL 和 Store 状态。
+   不补一个假的 Parse 响应、不放宽断言、不增加超时或重试次数。
+4. 仅对白名单 `.coverage.xml`、`.test-tmp/gate-*/`、`tests/e2e/test-results/` 启用隐藏文件归档；
+   不扩大到整个临时目录或 `.auth`。新增门禁测试保护这个范围。
+
+本机补充：frozen Wiki/Workspace/API/门禁 **109 passed / 1 skipped**；强化后的并发/WAL 测试
+**5 passed / 29 deselected**；两平台 strict Mypy 各 308 files 再次通过。
+本次曾用过深的 `.test-tmp/ci-repair-20260907/frozen-full` 作为全量 basetemp，触发现有 Wiki
+Windows MAX_PATH 限制（2525 passed / 1 failed / 3 skipped，提前停止）；改用预创建的短目录
+`.t/ci-fix` 后相关用例通过。这不是新的本机全量通过记录，深路径限制仍保留在 TODO。
+本机浏览器首次尝试被宿主权限限制拒绝启动（spawn EPERM），需正常授权的浏览器进程复验。
+
+第二轮提交后继续远端完整复验；在实际完成前，不将此前跳过的阶段标记为通过。

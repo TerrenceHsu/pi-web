@@ -63,6 +63,7 @@ jobs:
         with:
           name: coverage-xml
           path: .coverage.xml
+          include-hidden-files: true
           retention-days: 7
 
   frontend:
@@ -141,4 +142,6 @@ jobs:
           path: |
             .test-tmp/gate-*/
             tests/e2e/test-results/
+          # Explicit gate paths only; never upload all of .test-tmp or .auth.
+          include-hidden-files: true
           retention-days: 7

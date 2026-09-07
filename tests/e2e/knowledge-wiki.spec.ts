@@ -327,7 +327,11 @@ test("LLM Wiki supports the source, approval, page, graph and conversation flow"
     "Product Wiki",
   );
 
-  await page.locator("[data-testid='wiki-source-row']").click();
+  // A row contains Parse/Delete buttons; its center may hit Parse on Linux.
+  await page
+    .locator("[data-testid='wiki-source-row']")
+    .getByText("guide.html", { exact: true })
+    .click();
   await page.locator("[data-testid='wiki-artifact-row']").click();
   const rawPreview = page.locator("[data-testid='wiki-artifact-preview']");
   await expect(rawPreview).toContainText("<script>never execute</script>");

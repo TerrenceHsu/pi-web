@@ -7,6 +7,7 @@ import difflib
 import hashlib
 import json
 import secrets
+import sqlite3
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path, PurePosixPath
@@ -1059,6 +1060,30 @@ def _render_page_update_diff(slug: str, before: str, after: str) -> str:
     return f"{rendered}\n" if rendered else ""
 
 
+async def _enable_wal(
+    connection: aiosqlite.Connection, *, timeout_seconds: float = 5.0,
+) -> None:
+    """Retry only startup lock contention; never continue in a fallback mode."""
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            # A competing opener can hold a schema/read lock during this mode
+            # transition. SQLite may report BUSY without invoking busy_timeout.
+            async with await connection.execute("PRAGMA journal_mode=WAL") as cursor:
+                row = await cursor.fetchone()
+            if row is None or str(row[0]).lower() != "wal":
+                raise WikiStoreError("invalid_configuration")
+            return
+        except aiosqlite.OperationalError as exc:
+            code = getattr(exc, "sqlite_errorcode", None)
+            if (
+                code is None or code & 0xFF != sqlite3.SQLITE_BUSY
+                or time.monotonic() >= deadline
+            ):
+                raise
+            await asyncio.sleep(0.05)
+
+
 class WikiStore:
     """Own ``wiki.db`` and the rebuildable account-scoped Wiki mirror."""
 
@@ -1199,7 +1224,7 @@ class WikiStore:
                 legacy_backup_receipt=backup_receipt,
             )
             await store._initialize_schema()
-            await connection.execute("PRAGMA journal_mode=WAL")
+            await _enable_wal(connection)
             store._startup_repair_report = await store.repair_space_mirrors()
             await store.repair_selected_parse_pointers()
             await store.repair_page_mirrors()

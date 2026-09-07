@@ -34,7 +34,7 @@ import stat
 import time
 import uuid
 from collections.abc import Callable
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal, Protocol, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -550,8 +550,8 @@ def sanitize_filename(name: str) -> str:
     """
     if not isinstance(name, str) or not name:
         return "upload.bin"
-    # 取基名（剥掉任何路径前缀），防御 "..\\evil.txt" / "/etc/passwd"
-    base = Path(name).name
+    # 上传文件名来自客户端；在所有宿主上都识别两种分隔符及 Windows 盘符。
+    base = PureWindowsPath(name).name
     # 去掉控制字符（ord < 32） + 替换不安全字符
     cleaned = _SAFE_FILENAME_RE.sub("_", base)
     # 去掉 Windows 保留名前缀的 ".." / "." 段

@@ -47,3 +47,20 @@ def test_ci_preserves_repo_imports_and_cross_platform_strict_checks() -> None:
     assert installs and all("--extra sandbox-e2b" in run for run in installs)
     for platform in ("linux", "win32"):
         assert any(f"mypy --platform {platform} src evals" in run for run in runs)
+
+
+def test_ci_keeps_hidden_gate_evidence_without_uploading_all_test_data() -> None:
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    uploads = [
+        step["with"]
+        for job in workflow["jobs"].values()
+        for step in job["steps"]
+        if step.get("uses", "").startswith("actions/upload-artifact@")
+    ]
+    assert {upload["name"] for upload in uploads} == {"coverage-xml", "browser-${{ matrix.os }}"}
+    for upload in uploads:
+        assert upload["include-hidden-files"] is True
+        assert set(upload["path"].splitlines()) <= {
+            ".coverage.xml", ".test-tmp/gate-*/", "tests/e2e/test-results/",
+        }
