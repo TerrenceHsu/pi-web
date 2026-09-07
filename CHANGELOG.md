@@ -8,6 +8,42 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Local engineering closure（2026-09-07）
+
+- 修复 Telemetry 周期裁剪、启动崩溃记录对账、故障可观测与维护任务退出；MinerU Worker 5 秒心跳和客户端/容器
+  30 秒新鲜度检查；释放已清理的终态执行对象，保留授权与发布审计。
+- 新增离线 no-clobber 备份/校验/恢复、网关维护锁，以及 Wiki 严格兼容升级/显式原件重建。
+  不操作原库，不自动激活恢复目录；Keyring/外置目录及旧历史不迁入的边界明确。
+- 新增本地统一门禁与 frozen CI、Worker 检查、Linux/Windows Chromium 配置；
+  分析环境后续安装使用主锁文件约束，实机 MinerU 不与离线门禁混记。
+- 增加 Password 弹窗和安全改密 API；原子撤销旧登录、阻断并发登录竞态并关闭旧 WebSocket。
+  密码不进入全局前端状态；不提供未认证重置，也未修改实际业务密码。
+- STATUS 收敛为单一当前快照；移除 TODO 中已完成的自动压缩、LLM 摘要和 Local Docker 待办误标。
+  历史证据仍见原有 validation 报告，当前证据见工程化验收报告。
+- 实际门禁发现并修复首次备份离线 WAL 库的空侧文件误报，以及 Wiki 清理重命名后
+  跨越 Windows MAX_PATH 的失败；保留 WAL 提交帧、路径归属和 reparse 拒绝，不缩短测试目录掩盖问题。
+- MinerU 实机暴露 PyTorch 2.14 可选 Triton JIT 写入只读模型目录的失败；通过公开 backend 开关禁用
+  该加速路径，继续使用内置 CUDA 算子，不安装编译器、不放宽容器隔离。质量分数不等于表格单元格准确率。
+- 修复 Linux 容器访问 Windows bind mount 的原子替换重试、销毁意图丢失和 smoke 提前报成功；
+  三档真实解析/销毁与 GPU 运行中取消/重启恢复通过，CPU 表格语义质量仍不通过，runtime 保持未就绪。
+- 一键门禁每次使用独立 Evals 输出目录；备份遇到不可读子目录立即失败，不静默生成不完整清单。
+  最新结果与限制见 [工程化验收](docs/validation/engineering-closure-2026-09-07.md)。
+
+### Workspace Bash final acceptance gates（2026-09-06）
+
+- 按用户要求先提交阶段 4 为 `7908132`，再实施阶段 5；阶段 5 与后续工程化收敛一同整理本地提交，不推送。
+- 真实 Docker 测试增加显式 marker，与默认离线门禁分离；复用清理用例核验两个 Workspace
+  同时存活时文件/网络隔离，撤销一个不误删另一个。没有新增用例文件或扩展产品权限。
+- 修复请求收尾与后台维护同时销毁同一任务的竞态：按 task ID 串行回收，确认成功后关闭；
+  未知回收不虚报成功。新增一个确定性并发回归，真实 Docker 原有断言不放宽。
+- 修复完整覆盖率运行时既有 Uvicorn 冷启动测试的 5 秒误判，增加有界就绪等待与失败诊断；产品超时不变。
+- 修正压缩 Fake 流在 SQLite 初始化期间被超时打断时的生命周期标记，保留原超时断言和产品策略。
+- 更新 API 部署边界与可复跑测试指南，保留 75% 覆盖率门槛（含分支统计）；
+  实际结果及 Fake/真实环境证据分层见 [阶段 5 验证](docs/validation/workspace-bash-stage5-2026-09-06.md)。
+- 最终完整后端 2650 passed / 7 skipped / 21 deselected，覆盖率 78.41%；前端 232 passed，
+  Chromium 26 passed（关闭重试）并恢复生产构建；真实 Docker 12 项用例、25 项底层检查，
+  静态检查、离线 Evals 与依赖锁全部通过。未自动启用部署或修改业务 Workspace。
+
 ### Workspace execution maintenance, quotas and administration（2026-09-06）
 
 - 先将阶段 3 提交为 `5ec6622`，然后实施阶段 4；阶段 4 随本次提交归档，未推送。

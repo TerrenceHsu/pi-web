@@ -13,6 +13,7 @@ import MCPManagerModal from "../mcp/MCPManagerModal.vue"
 import ProviderSettingsModal from "../providers/ProviderSettingsModal.vue"
 import SkillManagerModal from "../skills/SkillManagerModal.vue"
 import CodingSandboxModal from "../coding-sandbox/CodingSandboxModal.vue"
+import ChangePasswordModal from "../auth/ChangePasswordModal.vue"
 
 const authStore = useAuthStore()
 const sessionStore = useSessionStore()
@@ -30,6 +31,7 @@ const mcpOpen = ref(false)
 const providerOpen = ref(false)
 const sandboxOpen = ref(false)
 const aboutOpen = ref(false)
+const passwordOpen = ref(false)
 
 // 请求运行中（sending/streaming/active request）禁用 Provider Settings 入口
 const requestRunning = computed(
@@ -249,6 +251,14 @@ async function signOut(): Promise<void> {
       </div>
       <button
         class="sign-out-btn"
+        data-testid="change-password-button"
+        :disabled="authStore.submitting"
+        @click="passwordOpen = true"
+      >
+        Password
+      </button>
+      <button
+        class="sign-out-btn"
         data-testid="sign-out-button"
         :disabled="authStore.submitting"
         @click="signOut"
@@ -266,6 +276,7 @@ async function signOut(): Promise<void> {
       @close="providerOpen = false"
     />
     <AboutModal :open="aboutOpen" @close="aboutOpen = false" />
+    <ChangePasswordModal :open="passwordOpen" @close="passwordOpen = false" />
   </div>
 </template>
 

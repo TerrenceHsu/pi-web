@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 from .protocol import read_json_object
@@ -37,7 +38,12 @@ def main() -> None:
         return
     probe = read_json_object(arguments.queue_root / PROBE_NAME)
     print(json.dumps(probe, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
-    if probe.get("available") is not True:
+    observed = probe.get("observed_at_ms")
+    if (
+        probe.get("available") is not True
+        or type(observed) is not int
+        or not 0 <= time.time_ns() // 1_000_000 - observed <= 30_000
+    ):
         raise SystemExit(1)
 
 

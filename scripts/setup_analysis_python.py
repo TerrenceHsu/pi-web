@@ -7,8 +7,10 @@ or project package are installed into the runtime. Never run during a tool call.
 from __future__ import annotations
 
 import argparse
+import shutil
 import subprocess
 import sys
+import tempfile
 import venv
 from pathlib import Path
 
@@ -25,24 +27,24 @@ def main() -> None:
             raise SystemExit("Refusing to modify an existing non-venv directory")
         if not executable.is_file():
             venv.EnvBuilder(with_pip=False, clear=False).create(target)
-        subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "uv",
-                "pip",
-                "install",
-                "--python",
-                str(executable),
-                "pydantic>=2.7,<3",
-                "pandas>=2.2,<4",
-                "numpy>=2,<3",
-                "matplotlib>=3.9,<4",
-                "openpyxl>=3.1,<4",
-                "pyarrow>=15",
-            ],
-            check=True,
-        )
+        uv_executable = shutil.which("uv")
+        uv = [uv_executable] if uv_executable else [sys.executable, "-m", "uv"]
+        with tempfile.TemporaryDirectory(prefix="pi-analysis-lock-") as temporary:
+            constraints = Path(temporary) / "constraints.txt"
+            subprocess.run(
+                [*uv, "export", "--frozen", "--offline", "--extra", "data-analysis",
+                 "--no-dev", "--no-emit-project", "--no-hashes", "--output-file", str(constraints)],
+                cwd=root, check=True,
+            )
+            subprocess.run(
+                [
+                    *uv, "pip", "install", "--constraints", str(constraints),
+                    "--python", str(executable),
+                    "pydantic>=2.7,<3", "pandas>=2.2,<4", "numpy>=2,<3",
+                    "matplotlib>=3.9,<4", "openpyxl>=3.1,<4", "pyarrow>=15",
+                ],
+                check=True,
+            )
     if not executable.is_file():
         raise SystemExit("Analysis environment is not installed")
     subprocess.run(

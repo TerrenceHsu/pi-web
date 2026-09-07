@@ -8,7 +8,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 
-from ...telemetry import TelemetryReader
+from ...telemetry import SQLiteTelemetryContext, TelemetryReader
 from ..credentials.api import require_allowed_origin_dep, require_ui_header_dep
 from ..local_web_security import WebSecurityConfig
 
@@ -48,7 +48,14 @@ def build_telemetry_router(config: WebSecurityConfig) -> APIRouter:
         request: Request,
         window_hours: Annotated[int, Query(ge=1, le=24 * 30)] = 24,
     ) -> JSONResponse:
-        payload = await _reader(request).summary(since_ms=_since_ms(window_hours))
+        reader = _reader(request)
+        payload = await reader.summary(since_ms=_since_ms(window_hours))
+        if isinstance(reader, SQLiteTelemetryContext):
+            payload["retention"] = {
+                "days": reader.retention_days,
+                "max_completed_spans": reader.max_spans,
+                "error_code": reader.maintenance_error,
+            }
         response = JSONResponse(content=payload)
         response.headers["Cache-Control"] = "no-store"
         return response

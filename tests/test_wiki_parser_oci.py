@@ -13,6 +13,7 @@ import pytest
 from wiki_parser import (
     ParserArtifactManifestV2,
     ParserJobSpecV2,
+    ParserProbeV2,
     ParserRoutingConfigIdentity,
     ParserSourceSpec,
     PersistentOciParserProvider,
@@ -27,6 +28,7 @@ if str(_WORKER_SOURCE) not in sys.path:
 import wiki_parser_worker.protocol as worker_protocol  # noqa: E402
 from wiki_parser_worker.config import load_routing_config  # noqa: E402
 from wiki_parser_worker.engine import MineruJobEngine  # noqa: E402
+from wiki_parser_worker.errors import WorkerRuntimeError  # noqa: E402
 from wiki_parser_worker.models import (  # noqa: E402
     WorkerParsedDocument,
     WorkerParsedPage,
@@ -34,6 +36,7 @@ from wiki_parser_worker.models import (  # noqa: E402
     WorkerRouteDecision,
 )
 from wiki_parser_worker.quality import QualityEvaluator  # noqa: E402
+from wiki_parser_worker.service import QueueWorkerService  # noqa: E402
 
 from scripts.smoke_wiki_parser_oci import (  # noqa: E402
     _parse_cases,
@@ -53,8 +56,20 @@ def test_worker_atomic_exchange_write_never_calls_bind_mount_fsync(
         raise AssertionError("Worker exchange writes must not fsync a bind mount")
 
     monkeypatch.setattr(os, "fsync", forbidden_fsync)
+    replace = os.replace
+    attempts = 0
+
+    def busy_reader_once(source: Path, destination: Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError("host reader denies delete sharing")
+        replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", busy_reader_once)
     worker_protocol.atomic_write_bytes(target, b'{"state":"queued"}')
     assert target.read_bytes() == b'{"state":"queued"}'
+    assert attempts == 3
 
 
 def test_smoke_case_names_accept_all_mineru_profiles(tmp_path: Path) -> None:
@@ -226,3 +241,82 @@ async def test_provider_probe_is_fail_closed_without_worker(tmp_path: Path) -> N
     assert probe.available is False
     assert probe.error_code == "provider_unavailable"
     assert probe.license_mode == "mineru_open_source"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("observed,available", [(100_000, True), (69_999, False), (100_001, False)])
+async def test_probe_rejects_expired_or_future_heartbeat(
+    tmp_path: Path, observed: int, available: bool,
+) -> None:
+    routing = ParserRoutingConfigIdentity(revision="mineru_profiles", sha256="a" * 64)
+    root = (tmp_path / "exchange").resolve()
+    provider = PersistentOciParserProvider(
+        exchange_root=root, routing_config=routing, clock_ms=lambda: 100_000,
+    )
+    probe = ParserProbeV2(
+        provider="mineru", available=True, worker_version="0.0.29",
+        license_mode="mineru_open_source", routing_config=routing, observed_at_ms=observed,
+    )
+    (root / "probe.json").write_text(probe.model_dump_json(), encoding="utf-8")
+    assert (await provider.probe()).available is available
+
+
+@pytest.mark.asyncio
+async def test_worker_refreshes_heartbeat_when_idle_and_marks_close_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_routing_config(_WORKER_ROOT / "config" / "routing-quality-v1.json")
+    now = [100_000]
+
+    class Controller:
+        def start(self) -> dict[str, object]:
+            return {"config_revision": config.revision, "config_sha256": config.sha256}
+
+        def alive(self) -> bool:
+            return True
+
+        def terminate(self) -> None:
+            pass
+
+        def run(self, job_id: str) -> None:
+            raise AssertionError("no job should run")
+
+    root = (tmp_path / "exchange").resolve()
+    provider = PersistentOciParserProvider(
+        exchange_root=root, clock_ms=lambda: now[0],
+        routing_config=ParserRoutingConfigIdentity(revision=config.revision, sha256=config.sha256),
+    )
+    service = QueueWorkerService(
+        queue_root=root, config=config, controller=Controller(), clock_ms=lambda: now[0],
+    )
+    service.start()
+    assert (await provider.probe()).available
+    job_dir = root / "jobs" / "oci-cleanup"
+    job_dir.mkdir()
+    worker_protocol.atomic_write_json(job_dir / "status.json", {"state": "succeeded"})
+    (job_dir / "destroy.request").touch()
+    original_write = worker_protocol.atomic_write_json
+
+    def blocked_status(path: Path, value: object) -> None:
+        if path.name == "status.json":
+            raise WorkerRuntimeError("invalid_source")
+        original_write(path, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr("wiki_parser_worker.service.atomic_write_json", blocked_status)
+        with pytest.raises(WorkerRuntimeError):
+            service.run_once()
+        assert (job_dir / "destroy.request").exists()
+    service.close()
+    service.start()
+    assert service.run_once()
+    assert worker_protocol.read_json_object(job_dir / "status.json")["state"] == "destroyed"
+    assert not (job_dir / "destroy.request").exists()
+    now[0] += 40_000
+    assert not (await provider.probe()).available
+    assert not service.run_once()
+    assert (await provider.probe()).observed_at_ms == now[0]
+    assert (await provider.probe()).available
+    service.close()
+    assert not (await provider.probe()).available

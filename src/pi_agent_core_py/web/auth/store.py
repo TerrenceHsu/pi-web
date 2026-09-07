@@ -241,11 +241,19 @@ class AuthStore:
         user_id: str,
         created_at: int,
         expires_at: int,
-    ) -> None:
+        expected_password_hash: str,
+    ) -> bool:
         db = self._require_connection()
         async with self._write_lock:
             try:
                 await db.execute("BEGIN IMMEDIATE")
+                async with db.execute(
+                    "SELECT 1 FROM auth_users WHERE id = ? AND password_hash = ?",
+                    (user_id, expected_password_hash),
+                ) as cursor:
+                    if await cursor.fetchone() is None:
+                        await db.execute("ROLLBACK")
+                        return False
                 await db.execute(
                     "DELETE FROM auth_sessions WHERE expires_at <= ?",
                     (created_at,),
@@ -261,6 +269,29 @@ class AuthStore:
                     await db.execute("ROLLBACK")
                 except Exception:
                     pass
+                raise
+        return True
+
+    async def change_password(
+        self, user_id: str, *, expected_hash: str, new_hash: str,
+    ) -> bool:
+        """Compare-and-swap password and revoke every old login in one transaction."""
+        db = self._require_connection()
+        async with self._write_lock:
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                async with db.execute(
+                    "UPDATE auth_users SET password_hash = ?, updated_at = ? "
+                    "WHERE id = ? AND password_hash = ?",
+                    (new_hash, _now_ms(), user_id, expected_hash),
+                ) as cursor:
+                    changed = cursor.rowcount == 1
+                if changed:
+                    await db.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
+                await db.execute("COMMIT")
+                return changed
+            except BaseException:
+                await db.execute("ROLLBACK")
                 raise
 
     async def get_user_for_session(

@@ -455,10 +455,16 @@ class ExecutionStore:
                     pending.append(updated.scope.identity)
         return pending
 
-    async def list_grants(self, *, session_id: str | None = None) -> list[ExecutionGrant]:
+    async def list_grants(
+        self, *, session_id: str | None = None, needs_maintenance: bool = False,
+    ) -> list[ExecutionGrant]:
+        where = (
+            " WHERE state IN ('pending','approved','active') OR cleanup_pending=1"
+            if needs_maintenance else ""
+        )
         async with self._database.operation():
             async with self._db.execute(
-                "SELECT grant_json FROM execution_grants ORDER BY rowid DESC"
+                "SELECT grant_json FROM execution_grants" + where + " ORDER BY rowid DESC"
             ) as cursor:
                 grants = [
                     ExecutionGrant.model_validate_json(row[0]) for row in await cursor.fetchall()

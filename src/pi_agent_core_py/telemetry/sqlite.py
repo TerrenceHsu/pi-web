@@ -160,9 +160,12 @@ class SQLiteTelemetryContext:
         base_attributes: SpanAttributes | None = None,
         retention_days: int = DEFAULT_RETENTION_DAYS,
         max_spans: int = DEFAULT_MAX_SPANS,
+        maintenance_interval_seconds: float = 60.0,
     ) -> None:
         if retention_days <= 0 or max_spans <= 0:
             raise ValueError("telemetry retention limits must be positive")
+        if not math.isfinite(maintenance_interval_seconds) or maintenance_interval_seconds <= 0:
+            raise ValueError("telemetry maintenance interval must be positive")
         self.database_path = str(database_path)
         self.base_attributes = copy_attributes(base_attributes, persistent=True)
         self.retention_days = retention_days
@@ -170,6 +173,9 @@ class SQLiteTelemetryContext:
         self._connection: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
         self._closed = False
+        self._maintenance_interval = maintenance_interval_seconds
+        self._maintenance_task: asyncio.Task[None] | None = None
+        self.maintenance_error: str | None = None
 
     async def init(self) -> None:
         if self._connection is not None:
@@ -233,7 +239,23 @@ class SQLiteTelemetryContext:
             await connection.close()
             raise
         self._connection = connection
-        await self.prune()
+        await self._prune_safely()
+        self._maintenance_task = asyncio.create_task(
+            self._maintain(), name="telemetry_retention",
+        )
+
+    async def _prune_safely(self) -> None:
+        try:
+            await self.prune()
+            self.maintenance_error = None
+        except Exception:
+            # No SQL, path or exception body is exposed, and collection stays passive.
+            self.maintenance_error = "telemetry_retention_failed"
+
+    async def _maintain(self) -> None:
+        while True:
+            await asyncio.sleep(self._maintenance_interval)
+            await self._prune_safely()
 
     async def start_span(self, options: SpanOptions, callback: SpanCallback[T]) -> T:
         return await self._start(options, callback, trace_id=None, parent_id=None)
@@ -364,15 +386,33 @@ class SQLiteTelemetryContext:
         cutoff = _now_ms() - self.retention_days * 24 * 60 * 60 * 1000
         async with self._lock:
             await connection.execute(
-                "DELETE FROM telemetry_spans WHERE started_at_ms < ?",
+                "DELETE FROM telemetry_spans WHERE status != 'running' AND started_at_ms < ?",
                 (cutoff,),
             )
             await connection.execute(
                 "DELETE FROM telemetry_spans WHERE id IN ("
-                "SELECT id FROM telemetry_spans ORDER BY started_at_ms DESC, id DESC "
+                "SELECT id FROM telemetry_spans WHERE status != 'running' "
+                "ORDER BY started_at_ms DESC, id DESC "
                 "LIMIT -1 OFFSET ?)",
                 (self.max_spans,),
             )
+
+    async def recover_interrupted(self) -> None:
+        """Startup-only: caller must hold the installation lock, with no live writers.
+
+        Never call from an account context's init: accounts share this database.
+        """
+        connection = self._require_connection()
+        now = _now_ms()
+        async with self._lock:
+            await connection.execute(
+                "UPDATE telemetry_spans SET status = 'error', error_name = 'ProcessInterrupted', "
+                "ended_at_ms = ?, duration_ms = MAX(0, ? - started_at_ms), "
+                "attributes_json = json_set(attributes_json, '$.outcome', 'error') "
+                "WHERE status = 'running'",
+                (now, now),
+            )
+        await self.prune()
 
     async def summary(self, *, since_ms: int) -> dict[str, object]:
         connection = self._require_connection()
@@ -595,6 +635,10 @@ class SQLiteTelemetryContext:
         }
 
     async def close(self) -> None:
+        maintenance, self._maintenance_task = self._maintenance_task, None
+        if maintenance is not None:
+            maintenance.cancel()
+            await asyncio.gather(maintenance, return_exceptions=True)
         async with self._lock:
             if self._closed:
                 return

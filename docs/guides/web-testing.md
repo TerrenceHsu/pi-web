@@ -4,6 +4,9 @@
 语义、安全和关键用户旅程回归，不再为已退役实现或每个历史阶段维持重复验收矩阵。
 准确的最近一次结果见 [`STATUS.md`](../../STATUS.md)。
 
+当前统一执行入口为 `scripts/run_local_gates.py`；覆盖率、Worker、Chromium 和显式 Docker
+分组及日志边界见 [本地门禁指南](local-gates.md)。默认不运行真实 MinerU/LLM，不用 Fake 代替实机验收。
+
 ## 基本原则
 
 1. 优先运行和复用现有测试，不为已有覆盖重复编写测试。
@@ -78,11 +81,13 @@ Backend 默认离线门禁：
 ```powershell
 Set-Location D:\LLMTutorial\test
 $env:PYTHONPATH = "src"
-D:\miniconda\envs\pipy\python.exe -m pytest tests --tb=short -q
+D:\miniconda\envs\pipy\python.exe -m pytest tests --tb=short -q --basetemp=.test-tmp/full
 ```
 
 默认配置排除 `slow`、`integration` 和 `docker`，并使用工作区内可写的 pytest cache
-和临时目录。
+和临时目录。Windows 使用短 basetemp 避免深层安全路径测试撞到系统路径长度限制。
+完整门禁保留 branch coverage 和 75% 门槛；只跑某几个文件时显式加 `--no-cov`，
+不能把定向测试的覆盖率或多批次合并值当作一次完整门禁。
 
 Frontend 快速门禁：
 
@@ -95,7 +100,7 @@ npm --prefix src/pi_agent_core_py/web/frontend run build
 
 ## Playwright 关键旅程
 
-当前只保留以下 8 个规格、18 项浏览器测试：
+当前保留以下 12 个规格、26 项浏览器测试：
 
 | 规格 | 关键风险 |
 |---|---|
@@ -107,6 +112,10 @@ npm --prefix src/pi_agent_core_py/web/frontend run build
 | `workspace-results.spec.ts` | Agent 成果进入 Workspace 与右栏展示 |
 | `coding-sandbox.spec.ts` | Sandbox 验证、审批发布与失败阻断 |
 | `knowledge-wiki.spec.ts` | Source → Change Set → Page/FTS/Graph/Conversation |
+| `data-analysis.spec.ts` | 可选固定分析、成果保存及 Workspace 恢复 |
+| `python-data-analysis.spec.ts` | 独立 Python 执行批准/拒绝、刷新后不重放 |
+| `bash-approval.spec.ts` | 完整脚本确认、只读私有历史、不重放 |
+| `telemetry-admin.spec.ts` | Admin 脱敏观测与执行管理鉴权 |
 
 运行：
 
@@ -119,8 +128,26 @@ npm --prefix tests/e2e run test:e2e
 
 Playwright 使用单 worker、FakeClient 和独立端口，不调用真实 Provider。失败时查看
 `tests/e2e/test-results/` 中的 trace、截图和视频。
+成功后 npm 的 posttest 自动恢复 production build；测试失败时手动执行前端 `npm run build`，
+不要将 E2E 构建留作业务静态页面。此层以 Fake 后端/网络响应验证 UI，不冒充真实 Docker 执行证据。
 
 ## 显式环境 smoke
+
+Local Docker 分为底层安全检查和真实 Web 链路。必须使用已验收的本机固定镜像 SHA；
+这些命令不安装、不拉取镜像、不启用部署，也不修改业务 Workspace。
+
+```powershell
+$env:PYTHONPATH = "src"
+$env:PI_TEST_DOCKER_IMAGE = "sha256:9b3899021dbd4afaa0225ab5a5b4bb1764d1743bf8e5e103f3a56795df85a3f6"
+$env:PI_TEST_DOCKER_EXE = "C:/Users/Administrator/AppData/Local/Programs/DockerDesktop/resources/bin/docker.exe"
+D:\miniconda\envs\pipy\python.exe scripts/check_bash_docker.py --docker-executable $env:PI_TEST_DOCKER_EXE --image-id $env:PI_TEST_DOCKER_IMAGE --verify
+D:\miniconda\envs\pipy\python.exe -m pytest tests/test_execution_maintenance.py tests/test_web_execution.py tests/test_web_bash.py tests/test_web_task_bash.py -m docker --no-cov --basetemp=.test-tmp/real --tb=short -q
+```
+
+真实测试同时要求显式 `-m docker` 与镜像环境变量；默认离线套件即使继承镜像变量也不会创建容器。
+上例的真实 Web 传输使用 Windows Docker Desktop Linux Engine；其他主机需适配测试 endpoint，
+不能将 Windows 本机验收外推为已通过 Linux/macOS 验收。完成后只读检查测试 namespace 已无残留，
+不得用全局 prune 或删除业务容器来“清理测试环境”。未知结果必须保留清理债务，不能重放命令。
 
 DDGS + GLM：
 

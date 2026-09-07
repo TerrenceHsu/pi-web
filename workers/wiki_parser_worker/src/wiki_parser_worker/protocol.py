@@ -31,7 +31,9 @@ DESTROY_NAME: Final = "destroy.request"
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _WINDOWS_REPARSE_POINT = 0x400
-_ATOMIC_REPLACE_ATTEMPTS = 20 if os.name == "nt" else 1
+# A Linux container can still write a Windows-backed Docker Desktop volume.
+# Host sharing violations are a mount property, not the process platform.
+_ATOMIC_REPLACE_ATTEMPTS = 20
 _ATOMIC_REPLACE_RETRY_SECONDS = 0.002
 
 

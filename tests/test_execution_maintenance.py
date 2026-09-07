@@ -21,7 +21,7 @@ from coding_agent_app.execution.store import ExecutionStore
 from coding_sandbox.docker_transport import DockerCLITransport
 from coding_sandbox.errors import SandboxError
 from coding_sandbox.local_docker import LocalDockerExecutionConfig, LocalDockerSandboxBackend
-from coding_sandbox.models import SandboxCommandResult, SandboxCreateSpec
+from coding_sandbox.models import SandboxCommand, SandboxCommandResult, SandboxCreateSpec
 from pi_agent_core_py.telemetry import InMemoryTelemetryContext
 from pi_agent_core_py.web.execution import WebExecutionRuntime
 from tests.test_execution_grants import active, intent, scope
@@ -354,12 +354,13 @@ async def test_two_same_account_workspaces_can_start_while_first_is_seeding(tmp_
         assert all(g.state == "active" and g.cleanup_pending for g in await store.list_grants())
 
 
+@pytest.mark.docker
 @pytest.mark.skipif(not os.environ.get("PI_TEST_DOCKER_IMAGE"), reason="explicit Docker opt-in")
 async def test_real_cleanup_reconciles_reserved_and_orphan_containers(tmp_path):
     config = CONFIG.model_copy(
         update={
             "image_id": os.environ["PI_TEST_DOCKER_IMAGE"],
-            "namespace": "stage4-" + uuid4().hex[:8],
+            "namespace": "stage5-" + uuid4().hex[:8],
         }
     )
     client_root = tmp_path / "docker-client"
@@ -376,22 +377,66 @@ async def test_real_cleanup_reconciles_reserved_and_orphan_containers(tmp_path):
         )
 
     value = task(1).model_copy(update={"runtime_id": config.image_id})
+    peer = task(2).model_copy(update={"runtime_id": config.image_id})
     control = ExecutionControl(tmp_path / "shared.sqlite")
     await control.init()
     control.register("account", AsyncMock(), factory, config)
     backend = factory(config)
     try:
-        await control.reserve(value, config.limits, namespace=config.namespace)
-        await backend.create(
-            SandboxCreateSpec(
-                operation_id=value.identity.operation_id,
-                runtime_id=config.image_id,
-                limits=config.limits,
+        handles = []
+        for item in (value, peer):
+            await control.reserve(item, config.limits, namespace=config.namespace)
+            handles.append(
+                await backend.create(
+                    SandboxCreateSpec(
+                        operation_id=item.identity.operation_id,
+                        runtime_id=config.image_id,
+                        limits=config.limits,
+                    )
+                )
             )
-        )
+        # Both copies are alive together. Neither inherits another Workspace's
+        # files, and there is no non-loopback interface to reach host services.
+        for index, handle in enumerate(handles):
+            source = (
+                "from pathlib import Path; import socket; "
+                "assert {name for _, name in socket.if_nameindex()} == {'lo'}; "
+                "assert not list(Path('/workspace').iterdir()); "
+                f"Path('/workspace/private.txt').write_text('workspace-{index}')"
+            )
+            result = await backend.execute(
+                handle,
+                SandboxCommand(
+                    command_id=f"seed-{index}",
+                    argv=("python3", "-I", "-S", "-B", "-c", source),
+                    timeout_seconds=10,
+                    max_output_bytes=1024,
+                ),
+            )
+            assert result.succeeded, result
+        for index, handle in enumerate(handles):
+            result = await backend.execute(
+                handle,
+                SandboxCommand(
+                    command_id=f"read-{index}",
+                    argv=("cat", "/workspace/private.txt"),
+                    timeout_seconds=10,
+                    max_output_bytes=1024,
+                ),
+            )
+            assert result.succeeded and result.stdout == f"workspace-{index}", result
+        for item in (value, peer):
+            await control.update(item.identity, heartbeat=True)
         await control.maintain()
-        assert len(await backend.managed_operations()) == 1
+        assert len(await backend.managed_operations()) == 2
+        assert (await control.summary())["active_tasks"] == 2
         await control.revoke(value.identity.task_id)
+        await control.maintain()
+        assert await backend.managed_operations() == (
+            (peer.identity.operation_id, config.image_id),
+        )
+        assert (await control.summary())["active_tasks"] == 1
+        await control.revoke(peer.identity.task_id)
         await control.maintain()
         assert not await backend.managed_operations()
         assert (await control.summary())["active_tasks"] == 0
@@ -406,5 +451,6 @@ async def test_real_cleanup_reconciles_reserved_and_orphan_containers(tmp_path):
         assert not await backend.managed_operations()
     finally:
         await backend.reconcile_operation(value.identity.operation_id)
+        await backend.reconcile_operation(peer.identity.operation_id)
         await backend.reconcile_operation("orphan")
         await control.close()

@@ -25,10 +25,10 @@
 - Session 只读历史检索与每轮结构化 Memory：来源回查、增量去重、用户纠正/固定、分支失效标记；
   见 [`session-history-memory.md`](docs/design/session-history-memory.md)；后续压缩已实现，见
   [`context-compaction.md`](docs/design/context-compaction.md)。
-- 本地账号登录；每账号独立 Session、文件、Skills、MCP、Wiki Space/Conversation 和 Provider 配置
+- 本地账号登录与侧栏 Password 改密；当前密码验证后撤销旧登录/旧 WebSocket，每账号独立 Session、文件、Skills、MCP、Wiki Space/Conversation 和 Provider 配置
 - `/chat/{session_id}` 路由；整页刷新恢复 Session、历史、文件树及当前进程中的 active request
 - Prompt、Stop、Regenerate 最新 Assistant、Markdown Export、SSE/WebSocket 实时事件
-- 产品入口以确定性规则把请求路由到 `read_only`、`coding` 或会话绑定的 `knowledge`；只读模式移除写入/执行工具，Coding 进入受管 Sandbox，路由依据在 Turn 卡与 API 中可审计
+- 产品入口路由到 `read_only`、`coding`、会话绑定的 `knowledge` 或明确执行意图的 `bash`；只读模式不含写入/执行工具，Coding/Plan 任务范围批准后进入受管副本，发布另行确认
 - Human Approval：高风险 ToolCall 在当前 Turn 内暂停，支持 Approve once / Deny
 - Web Context Budget：有效输入预算 70% 预警、80% 自动摘要、60% 目标、逐调用 hard stop；
   持久工作视图保留原聊天/来源，支持手动压缩、开关、来源回查与大工具结果只读分页
@@ -264,10 +264,21 @@ Compaction 默认只在完整 turn 边界切分，使用与 preflight 相同的 
 
 ## 测试
 
-当前代码基线的准确数字见 [`STATUS.md`](STATUS.md#2026-09-03-当前验证基线)。
+当前代码基线的准确数字见 [`STATUS.md`](STATUS.md#本轮验证)。
 默认门禁只覆盖当前产品代码：快速单元/组件测试、静态检查和少量关键浏览器旅程。
 退役 Chunk-RAG 的历史行为测试、重复阶段验收和重复 GLM live 用例已经移出当前套件；
 历史证据仍可在 `docs/validation/` 查阅。
+
+一键完整本地门禁（依赖和 Chromium 已安装，不自动下载）：
+
+```powershell
+$env:PYTHONPATH = "src"
+D:\miniconda\envs\pipy\python.exe scripts/run_local_gates.py
+```
+
+覆盖后端分支覆盖率、Worker、Evals、前端和 Chromium 零重试，失败时也恢复生产构建。
+Docker 与 MinerU 实机验收需显式运行，见 [本地门禁指南](docs/guides/local-gates.md)。
+离线备份/恢复及旧 Wiki 升级见 [数据维护指南](docs/guides/data-maintenance.md)。
 
 ### Backend offline
 

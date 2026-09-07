@@ -207,6 +207,7 @@ def mixed_scripts(plan: bool, valid: bool = True):
             "suggestions": [], "classification": None})]
 
 
+@pytest.mark.docker
 @pytest.mark.skipif(not os.environ.get("PI_TEST_DOCKER_IMAGE"), reason="explicit Docker opt-in")
 @pytest.mark.parametrize("plan,valid", [(False, True), (True, True), (False, False)])
 def test_real_task_bash_reuses_copy_after_failure_and_cannot_downgrade_evidence(

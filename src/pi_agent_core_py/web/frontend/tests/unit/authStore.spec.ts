@@ -13,7 +13,7 @@ const { api, FakeApiError } = vi.hoisted(() => {
     }
   }
   return {
-    api: { getAuthSession: vi.fn(), login: vi.fn(), logout: vi.fn() },
+    api: { getAuthSession: vi.fn(), login: vi.fn(), logout: vi.fn(), changePassword: vi.fn() },
     FakeApiError,
   }
 })
@@ -80,5 +80,29 @@ describe("auth store", () => {
     await store.logout()
     expect(store.status).toBe("anonymous")
     expect(store.user).toBeNull()
+  })
+
+  it("revokes local identity after password change without storing either secret", async () => {
+    const store = useAuthStore()
+    store.user = { id: "usr_1", name: "admin", is_admin: true }
+    store.status = "authenticated"
+    api.changePassword.mockResolvedValue({ authenticated: false })
+    expect(await store.changePassword("OLD_SECRET", "NEW_SECRET_123")).toBe(true)
+    expect(store.user).toBeNull()
+    expect(store.authenticated).toBe(false)
+    expect(JSON.stringify(store.$state)).not.toContain("SECRET")
+  })
+
+  it("keeps a valid login on rejected password change but clears expired login", async () => {
+    const store = useAuthStore()
+    store.user = { id: "usr_1", name: "admin", is_admin: true }
+    store.status = "authenticated"
+    api.changePassword.mockRejectedValue(new FakeApiError(400, "Change rejected."))
+    expect(await store.changePassword("wrong", "NEW_SECRET_123")).toBe(false)
+    expect(store.authenticated).toBe(true)
+    api.changePassword.mockRejectedValue(new FakeApiError(401, "Login required."))
+    expect(await store.changePassword("old", "NEW_SECRET_123")).toBe(false)
+    expect(store.authenticated).toBe(false)
+    expect(store.submitting).toBe(false)
   })
 })

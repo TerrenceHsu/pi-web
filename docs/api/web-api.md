@@ -2,13 +2,27 @@
 
 > 本文包含历史冻结接口与后续增补；当前产品状态以 [STATUS](../../STATUS.md) 为准。
 > 历史基线：P1-D2 Regenerate FROZEN @ `d53f331`（2026-07-16）。
-> 已发布最新 tag：`v0.0.26-export-markdown`（P1-D1 Export Markdown）。
+> 当前统一 release tag：`0.0.29`；上述 P1-D 接口记录为历史基线。
 > 详见 [CHANGELOG](../../CHANGELOG.md) / [STATUS](../../STATUS.md)。
 > P0 MVP 的 release notes 见 [v0.0.23-web-claude-p0-mvp](../releases/v0.0.23-web-claude-p0-mvp.md)；
 > P0 改造计划（已归档）见 [archived Web Claude plan](../archive/legacy-plans/WEB_CLAUDE_PLAN_ORIGINAL.md)。
 >
 > ⚠️ Web app **仅 localhost 使用**——当前已有本地账号登录、Cookie 网关与账号工作区隔离，但无 TLS / RBAC / OAuth / 公网部署加固；
 > **Localhost-first, authenticated local workspaces, not suitable for public exposure.**
+
+## 本地改密与 Telemetry 维护（2026-09-07）
+
+`POST /api/auth/password` 接收 `current_password`、`new_password`，不接受用户 ID。
+必须携带有效登录 Cookie、`X-PI-Agent-UI: 1`，Origin 按现有同源策略验证；请求最大 16 KiB。
+新密码为 12–128 字符且必须不同于当前密码。成功返回
+`{"authenticated": false, "password_changed": true}`，删除 Cookie，原子撤销该账号全部旧登录，
+关闭旧 WebSocket；需要重新登录。不删除聊天/文件，不回滚已接受的在途操作。
+400 表示当前密码或新密码不合规则；401 未登录；422 安全参数错误；429 过多失败。
+错误不回显密码。重启不会重置已经更改的管理员密码。
+
+`GET /api/admin/telemetry/summary` 新增可选 `retention`：
+`days`、`max_completed_spans`、`error_code`。仅 SQLite Recorder 提供；错误码固定，失败自动重试。
+这是终态历史策略，不是数据库硬磁盘配额；running span 不裁剪。
 
 ## Workspace Bash / 冻结制品发布（2026-09-06，阶段 3）
 
@@ -1512,3 +1526,13 @@ Connection: keep-alive
 默认并行上限账号 2 / 全局 4、总 CPU 8 / 内存 8192 MiB；账号缓存 2 GiB，准备时保守预留归档空间。
 每个 Web 安装的实际 Docker namespace 由配置前缀与控制账本路径摘要共同确定，防止不同安装/测试实例相互清理。
 已落盘任务恢复使用原 namespace 回执。控制面仅在本机 Web 进程运行时工作，重启只清理、绝不重放命令。
+
+### 交付与部署边界（阶段 5）
+
+验收命令见 [测试指南](../guides/web-testing.md)，完整结果见
+[阶段 5 验证记录](../validation/workspace-bash-stage5-2026-09-06.md)。
+通过验收不等于已开启业务部署：开发入口只有在部署者显式设置 `PI_LOCAL_DOCKER_ENABLED=1`、
+固定 `PI_LOCAL_DOCKER_IMAGE_ID` 和绝对路径 `PI_LOCAL_DOCKER_EXE` 后才装配本地后端。
+用户还需在 Workspace 选择 Local Docker 并选中 Bash；Python 分析仍走独立本地环境与逐次确认。
+管理员探针、清理重试和状态查询不会替代这些选择，也不会替代任务执行/精确制品发布的分别确认。
+不同账号可以使用不同 namespace 前缀，但同一网关账本的全局资源配额仍共享。

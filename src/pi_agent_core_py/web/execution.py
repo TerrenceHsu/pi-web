@@ -245,7 +245,7 @@ class WebExecutionRuntime:
     async def maintain(self) -> None:
         async with self._maintenance_lock:
             now = time.time_ns() // 1_000_000
-            grants = await self.runtime.store.list_grants()
+            grants = await self.runtime.store.list_grants(needs_maintenance=True)
             for grant in grants:
                 identity = grant.scope.identity
                 deadline = (
@@ -288,6 +288,7 @@ class WebExecutionRuntime:
                 )
                 await self.runtime.store.acknowledge_observation(identifier)
             await self.runtime.store.prune_history()
+            await self.runtime.release_terminal_resources()
             from .bash import BashHistory
 
             await BashHistory(self._db).prune()
@@ -303,7 +304,7 @@ class WebExecutionRuntime:
         # Slow disk IO must not delay grant heartbeats, revocation or expiration.
         try:
             protected = await self._lifecycle.retained_cache_paths()
-            for grant in await self.runtime.store.list_grants():
+            for grant in await self.runtime.store.list_grants(needs_maintenance=True):
                 if grant.state in {"pending", "approved", "active"} or grant.cleanup_pending:
                     protected.add(
                         (

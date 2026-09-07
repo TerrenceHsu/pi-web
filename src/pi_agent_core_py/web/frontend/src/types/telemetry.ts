@@ -36,6 +36,7 @@ export interface TelemetryTimelineBucket {
 }
 
 export interface TelemetrySummary {
+  retention?: { days: number; max_completed_spans: number; error_code: string | null }
   since_ms: number
   generated_at_ms: number
   requests: TelemetryRequestSummary

@@ -134,6 +134,14 @@ onBeforeUnmount(() => {
         </span>
       </section>
 
+      <p v-if="summary?.retention" data-testid="telemetry-retention">
+        Retention: {{ summary.retention.days }} days ·
+        up to {{ formatNumber(summary.retention.max_completed_spans) }} completed spans.
+        Running spans are protected.
+      </p>
+      <p v-if="summary?.retention?.error_code" role="alert">
+        Telemetry cleanup is failing; stored history may exceed its limits. Retrying automatically.
+      </p>
       <section class="metric-grid" aria-label="Telemetry overview">
         <article class="metric-card">
           <span>Requests</span>

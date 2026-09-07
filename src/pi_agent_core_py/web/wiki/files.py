@@ -60,6 +60,16 @@ def _is_link_or_reparse(path: Path) -> bool:
     return bool(attributes & reparse_flag)
 
 
+def _native_cleanup_path(path: Path) -> str:
+    """Only for already containment-checked paths; preserve Windows long paths."""
+    value = str(path.absolute())
+    if os.name != "nt" or value.startswith("\\\\?\\"):
+        return value
+    if value.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + value[2:]
+    return "\\\\?\\" + value
+
+
 def _canonical_manifest(space: WikiSpace) -> bytes:
     payload = WikiSpaceManifest(space=space).model_dump(mode="json", by_alias=True)
     return (
@@ -614,33 +624,38 @@ class WikiFileStore:
 
     def _remove_tree_no_links(self, directory: Path) -> None:
         self._assert_contained(directory)
-        if _is_link_or_reparse(directory):
-            raise WikiPathError("path_unsafe")
-        self._assert_directory(directory)
         try:
-            entries = tuple(os.scandir(directory))
+            info = os.lstat(_native_cleanup_path(directory))
+            if (
+                not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or getattr(info, "st_file_attributes", 0) & 0x400
+            ):
+                raise WikiPathError("path_unsafe")
+            with os.scandir(_native_cleanup_path(directory)) as scan:
+                entries = tuple(scan)
         except OSError as exc:
             raise WikiStoreError("file_io_failed") from exc
         for entry in entries:
-            path = Path(entry.path)
+            # Keep canonical policy paths separate from the native I/O spelling.
+            path = directory / entry.name
             self._assert_contained(path)
-            if entry.is_symlink() or _is_link_or_reparse(path):
-                raise WikiPathError("path_unsafe")
             try:
                 info = entry.stat(follow_symlinks=False)
             except OSError as exc:
                 raise WikiStoreError("file_io_failed") from exc
+            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                raise WikiPathError("path_unsafe")
             if stat.S_ISDIR(info.st_mode):
                 self._remove_tree_no_links(path)
             elif stat.S_ISREG(info.st_mode):
                 try:
-                    path.unlink()
+                    os.unlink(_native_cleanup_path(path))
                 except OSError as exc:
                     raise WikiStoreError("file_io_failed") from exc
             else:
                 raise WikiPathError("path_unsafe")
         try:
-            directory.rmdir()
+            os.rmdir(_native_cleanup_path(directory))
         except OSError as exc:
             raise WikiStoreError("file_io_failed") from exc
 

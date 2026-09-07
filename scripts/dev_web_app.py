@@ -208,6 +208,7 @@ def main() -> None:
         _workspace_app,
         auth_db_path=auth_db_path,
         user_data_root=user_data_root,
+        telemetry_db_path=telemetry_db_path,
         extra_ui_origins=extra_ui_origins,
     )
 

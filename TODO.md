@@ -1,6 +1,15 @@
 # Current TODO
 
-> 校准日期：**2026-09-06**。当前事项优先；下方已完成阶段为历史记录，最新事实以 [`STATUS.md`](STATUS.md) 为准。
+> 校准日期：**2026-09-07**。当前事项优先；下方已完成阶段为历史记录，最新事实以 [`STATUS.md`](STATUS.md) 为准。
+
+## 本轮工程化收敛
+
+- [x] Telemetry 周期裁剪/崩溃记录对账、MinerU 探针新鲜度、终态执行对象释放。
+- [x] 离线备份/校验/新目录恢复，Wiki v7 兼容升级与显式原件重建；临时数据恢复后真实 Web 登录/会话验证。
+- [x] 本地一键门禁、锁定依赖与 Worker/双平台 CI 配置、改密 API/UI/旧登录及 WebSocket 撤销。
+- [x] 定位并修复只读 OCI 内 PyTorch 2.14 可选 Triton JIT 不兼容；保留普通 CUDA 推理和原隔离边界。
+- [x] MinerU CPU/GPU medium/high 真实队列解析与销毁、GPU 运行中取消和强制重启恢复；最终镜像已复验，测试容器回收。
+- [ ] MinerU CPU 表格准确率与代表性中文/复杂文档质量及完整运行就绪门槛；合成 smoke 不代替质量基准，`runtime_ready=false`。
 
 ## Workspace Bash / 统一任务授权
 
@@ -32,9 +41,11 @@
 - [x] 阶段 4：Web 管理/运行/恢复/撤销、任务预算和 Telemetry。
   共享 SQLite 配额、后台租约/孤儿清理、缓存 TTL 与待审制品保护；管理员状态/探针/撤销/清理重试，
   Coding/Plan/Bash 私有历史和脱敏执行 Telemetry。默认每账号 2 / 全局 4，并发启动互不借权。
-  [验证记录](docs/validation/workspace-bash-stage4-2026-09-06.md)；随本次提交归档。
-- [ ] 阶段 5：完整后端/前端/E2E/Evals/真实 Docker 门禁及最终交付。
-  见 [`实施方案`](docs/design/workspace-bash-tool.md) 和 [`阶段 2F 记录`](docs/validation/workspace-bash-stage2f-2026-09-06.md)。
+  [验证记录](docs/validation/workspace-bash-stage4-2026-09-06.md)；已提交 `7908132`。
+- [x] 阶段 5：完整后端/前端/E2E/Evals/真实 Docker 门禁及最终交付。
+  后端 2650 passed / 7 skipped、覆盖率 78.41%；前端 232 passed、Chromium 26 passed（关闭重试），
+  真实 Docker 12 项用例与 25 项底层检查通过；阶段 5 改动随工程化收敛一同整理交付。
+  结果及证据边界见 [`阶段 5 记录`](docs/validation/workspace-bash-stage5-2026-09-06.md)。
 
 ## 会话历史与 Memory
 
@@ -45,8 +56,8 @@
 
 ## Workspace 上传与媒体解析
 
-- [ ] Wiki Windows 长路径兼容：过深的数据/测试根目录可能使 Raw parse 原子临时文件创建失败；
-  本轮以短测试根复核，不将测试路径调整视为产品长路径能力已修复。
+- [x] Wiki 清理重命名导致的 Windows MAX_PATH 失败：已校验路径使用原生扩展路径删除，保留归属及 reparse 检查；原失败用例通过。
+- [ ] Wiki 其它极深路径（例如 Raw 原子写入）的全面兼容；清理路径修复不等于所有文件操作均已支持长路径。
 - [x] Agent 调用独立本机 Python：`.venv-analysis`、逐次完整代码确认、pandas/NumPy/Matplotlib、错误反馈、结果预览保存；不使用 Docker，明确本机权限与非安全沙箱边界。见 [`python-data-analysis.md`](docs/design/python-data-analysis.md)。
 
 - [x] 按顺序完成可选 Data Analysis：Workspace 工具选择、结构化契约、本机受限进程、统计/图表、独立结果保存、前端及恢复链路；详见 [`data-analysis.md`](docs/design/data-analysis.md)。
@@ -151,6 +162,7 @@
     - [x] 实现持久 supervisor + 可重启 parser child：单并发 claim，cancel/timeout 硬终止 child 后重建，崩溃与重启遗留 running Job 安全终态化
     - [x] 实现三档固定 profile、质量拒绝、确定性 Artifact v2、配额及 source/artifact 篡改检测；源码级队列测试通过
     - [x] 固定 digest 基础镜像、完整 hash lock、构建期 MinerU 模型下载，以及断网/只读/非 root/no-cap/no-new-privileges 的 CPU/GPU Compose
+    - [x] 2026-09-07 最终镜像三档真实解析/来源及制品 SHA/销毁、GPU 取消及重启恢复通过；GPU 合成表格正确，CPU 表格错误，详见工程化验收报告。
     - [ ] 实际镜像复核 notices、runtime manifest、断网/只读/非 root/资源上限及代表性 digital/论文/扫描 PDF；GPU 档位必须在真实 CUDA 上验证
   - [x] 前端支持 Space、Source、解析状态和 Raw artifact 安全浏览；未复活 Chunk 检索 UI
 - [x] **阶段 4–6：按固定顺序完成页面中心主链路**
@@ -230,9 +242,14 @@ Modal 与 Local Docker 作为后续兼容后端，最终用户不需要安装 Py
 - [x] 整理并提交 LLM Wiki 阶段 3–10 发布候选（完成：清除并忽略 `.t/` 测试产物；设计/状态同步到阶段 10；Ruff、strict Mypy 168 files、Frontend ESLint/typecheck/build 通过；Backend 2091 passed / 7 skipped / 9 deselected，Frontend 180/180，Wiki 定向 Backend 67 passed / 1 skipped、Frontend 16/16、Playwright 1/1；修复测试精简后保留安全用例引用已删除 fixture 的问题）
 - [x] 创建 `0.0.28` annotated release tag（完成：指向通过发布候选回归并同步发布状态的提交）
 - [ ] 如需 push，先配置 Git remote；当前仓库没有 remote，push 仍需用户单独授权
-- [ ] 评估本地初始账号 `admin / 123456` 的改密入口；在此之前继续保持 localhost-only
+- [x] 本地改密入口：当前密码 + 12–128 字符新密码，原子撤销旧登录/并发登录拦截/旧 WebSocket 断开；仍保持 localhost-only，不提供未认证重置
 
 ## P1 — 可靠性与维护
+
+- [x] Telemetry 终态周期裁剪、错误观测及维护任务关闭；MinerU 心跳和 30 秒新鲜度门禁；释放已清理终态执行对象
+- [x] 离线安装备份/校验/新目录恢复与显式 Wiki 升级；见 `docs/guides/data-maintenance.md`，不自动操作业务库
+- [x] 本地统一门禁脚本与 frozen CI/Worker/Windows/Chromium 配置；实机结果仍须分别记录，见 `docs/guides/local-gates.md`
+- [x] Telemetry 产品网关在安装锁内、账户启动前对账崩溃遗留 running；通用 Recorder 不误终止其它写入者，终态上限不宣称硬磁盘配额
 
 - [x] 清理全量 Backend 的已知 warning（完成：Starlette 1.3+ TestClient 显式使用 HTTPX2；替换废弃 HTTP 422 常量与 raw-body API；移除同步测试误用的 asyncio module marker；修复测试文件句柄、SQLite 启动失败与 uvicorn pipe 资源泄漏；Backend 全量在 `-W error` 下 3852 passed / 5 skipped / 15 deselected，0 warning）
 - [x] 固定 pytest 可写状态目录（完成：`cache_dir=.pytest-cache-workspace`、`--basetemp=.pytest-tmp`，两者均已加入 `.gitignore`；不再访问 ACL 异常的旧 `.pytest_cache`，全量 Backend 已验证长时可写）
@@ -245,15 +262,14 @@ Modal 与 Local Docker 作为后续兼容后端，最终用户不需要安装 Py
 
 - [ ] **P2-D Session organization**：Session 搜索、收藏、归档
 - [ ] 接入 Provider 官方 tokenizer；保留当前 estimator 作为安全 fallback
-- [ ] 自动 compaction 策略；明确触发时机、失败回滚和请求并发边界
-- [ ] 可选 LLM compaction 摘要器；与 `/checkpointer` 的 Session Memory 语义保持区分
+- [x] 自动 compaction 策略与有界 LLM 摘要器；持久工作视图、失败回滚、逐调用预算和来源校验已实现，区别于 `/checkpointer`
 - [ ] 跨后端重启的 request/approval 持久化方案；当前仅浏览器刷新恢复
 - [ ] Human Approval 的持久规则/永久授权模型；需要新的安全与审计设计
 
 ## 明确延期 / Out of scope
 
 - [ ] 扩展 MinerU 语言配置与富版面质量语料：当前 UI 只公开固定三档；新增 OCR 语言或 VLM 参数前需独立版本/hash/许可证/资源 Gate
-- [ ] Local Docker/Git Sandbox provider integration；当前 Plan Mode 已复用 Managed Sandbox 完成，新的本地 Provider 仍需独立安全与隔离设计
+- [x] Local Docker Sandbox provider 与 Coding/Plan/Bash 任务复用已实现；Git 原生 worktree/分支自动化不在当前范围，部署不自动开启
 - [ ] RBAC、OAuth、企业级多租户、TLS 公网部署、横向扩展
 - [ ] 向量数据库、embedding、hybrid retrieval 与 Chunk RAG；LLM Wiki 仅保留已批准页面的 SQLite FTS5
 - [ ] 自动 provider fallback、模型负载均衡、长期后台任务调度

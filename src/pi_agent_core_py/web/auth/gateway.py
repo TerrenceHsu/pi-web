@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -16,7 +17,7 @@ from fastapi import APIRouter, FastAPI, Request, status
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from starlette.middleware.trustedhost import TrustedHostMiddleware
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from coding_agent_app.execution.control import ExecutionControl
 
@@ -140,10 +141,38 @@ class AuthDispatchMiddleware:
                 await send({"type": "http.response.body", "body": body})
             return
 
+        assert service is not None
+        revoked = service.revocation_event(user.id) if is_workspace_ws else None
         workspace = await self.runtime.manager.get_or_create(user)
         delegated_scope = dict(scope)
         delegated_scope["auth_user"] = user
-        await workspace(delegated_scope, receive, send)
+        if revoked is None:
+            await workspace(delegated_scope, receive, send)
+            return
+        # Register before awaiting startup, then revalidate to close the race
+        # between the initial cookie check and password rotation.
+        if await service.resolve_session(_cookie_token(scope)) is None:
+            await send({"type": "websocket.close", "code": 4401})
+            return
+
+        async def guarded_send(message: Message) -> None:
+            if not revoked.is_set():
+                await send(message)
+
+        connection = asyncio.create_task(workspace(delegated_scope, receive, guarded_send))
+        invalidated = asyncio.create_task(revoked.wait())
+        try:
+            done, _ = await asyncio.wait(
+                (connection, invalidated), return_when=asyncio.FIRST_COMPLETED,
+            )
+            if connection in done:
+                await connection
+            else:
+                await send({"type": "websocket.close", "code": 4401, "reason": "login required"})
+        finally:
+            connection.cancel()
+            invalidated.cancel()
+            await asyncio.gather(connection, invalidated, return_exceptions=True)
 
 
 class LoginAttemptLimiter:
@@ -177,6 +206,13 @@ class LoginRequest(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=64)
     password: SecretStr = Field(..., min_length=6, max_length=128)
+
+
+class ChangePasswordRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    current_password: SecretStr = Field(..., min_length=6, max_length=128)
+    new_password: SecretStr = Field(..., min_length=12, max_length=128)
 
 
 def _serialize_user(user: AuthUser) -> dict[str, str | bool]:
@@ -276,6 +312,35 @@ def _build_auth_router(
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    @router.post("/password", response_model=None)
+    async def change_password(payload: ChangePasswordRequest, request: Request) -> Response:
+        service = _get_auth_service(request)
+        user = await service.resolve_session(request.cookies.get(AUTH_COOKIE_NAME))
+        if user is None:
+            return JSONResponse(status_code=401, content={"error": {
+                "code": "authentication_required", "message": "Login required.",
+            }})
+        key = f"password:{user.id}"
+        if not await limiter.allowed(key):
+            return JSONResponse(status_code=429, content={"error": {
+                "code": "password_rate_limited", "message": "Too many attempts. Try again shortly.",
+            }})
+        changed = await service.change_password(
+            user.id, current_password=payload.current_password.get_secret_value(),
+            new_password=payload.new_password.get_secret_value(),
+        )
+        if not changed:
+            await limiter.record_failure(key)
+            return JSONResponse(status_code=400, content={"error": {
+                "code": "password_change_rejected",
+                "message": "Check your current password and use a different new password.",
+            }})
+        await limiter.clear(key)
+        response = JSONResponse(content={"authenticated": False, "password_changed": True})
+        response.delete_cookie(AUTH_COOKIE_NAME, path="/", samesite="strict", secure=secure_cookie)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     return router
 
 
@@ -288,6 +353,7 @@ def create_authenticated_app(
     extra_ui_origins: tuple[str, ...] = (),
     session_ttl_seconds: int = DEFAULT_SESSION_TTL_SECONDS,
     secure_cookie: bool = False,
+    telemetry_db_path: str | Path | None = None,
 ) -> FastAPI:
     """Create a login gateway with a fully isolated app workspace per user."""
 
@@ -299,28 +365,42 @@ def create_authenticated_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        from ...maintenance import installation_lock
+
         await asyncio.to_thread(auth_path.parent.mkdir, parents=True, exist_ok=True)
         await asyncio.to_thread(data_root.mkdir, parents=True, exist_ok=True)
-        store = await AuthStore.open(str(auth_path))
-        await manager.execution_control.init()
-        service = AuthService(store, session_ttl_seconds=session_ttl_seconds)
-        try:
-            # Login state belongs to this backend process lifetime. Accounts and
-            # per-user workspaces remain persistent, but a restarted gateway must
-            # require credentials again instead of accepting an old browser Cookie.
-            await store.revoke_all_sessions()
-            await service.ensure_initial_admin()
-            runtime.auth_service = service
-            app.state.auth_store = store
-            app.state.auth_service = service
-            app.state.workspace_manager = manager
-            yield
-        finally:
-            runtime.auth_service = None
-            await manager.close()
-            await store.close()
-            app.state.auth_store = None
-            app.state.auth_service = None
+        async with AsyncExitStack() as startup:
+            startup.enter_context(installation_lock(auth_path.parent))
+            if telemetry_db_path is not None:
+                from ...telemetry import SQLiteTelemetryContext
+
+                telemetry = SQLiteTelemetryContext(telemetry_db_path)
+                try:
+                    await telemetry.init()
+                    await telemetry.recover_interrupted()
+                except Exception:
+                    # Telemetry remains passive; no path, SQL or exception payload.
+                    logging.getLogger(__name__).warning("telemetry_startup_recovery_failed")
+                finally:
+                    await telemetry.close()
+            store = await AuthStore.open(str(auth_path))
+            startup.push_async_callback(store.close)
+            startup.push_async_callback(manager.close)
+            await manager.execution_control.init()
+            service = AuthService(store, session_ttl_seconds=session_ttl_seconds)
+            try:
+                # Login authority never survives a backend restart.
+                await store.revoke_all_sessions()
+                await service.ensure_initial_admin()
+                runtime.auth_service = service
+                app.state.auth_store = store
+                app.state.auth_service = service
+                app.state.workspace_manager = manager
+                yield
+            finally:
+                runtime.auth_service = None
+                app.state.auth_store = None
+                app.state.auth_service = None
 
     app = FastAPI(
         title="pi-agent-core-py Authenticated Web UI",
@@ -390,7 +470,7 @@ def create_authenticated_app(
     app.add_middleware(
         CredentialBodyLimitMiddleware,
         max_bytes=LOGIN_BODY_MAX_BYTES,
-        path_prefixes=("/api/auth/login",),
+        path_prefixes=("/api/auth/login", "/api/auth/password"),
     )
     app.add_middleware(AuthDispatchMiddleware, runtime=runtime)
     app.add_middleware(

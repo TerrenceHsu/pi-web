@@ -227,6 +227,55 @@ async def test_sqlite_filters_before_applying_result_limit(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_periodic_retention_preserves_live_spans_and_recovers_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = SQLiteTelemetryContext(
+        tmp_path / "telemetry.sqlite", max_spans=2, maintenance_interval_seconds=0.01,
+    )
+    await context.init()
+    release, entered = asyncio.Event(), asyncio.Event()
+
+    async def live(span: TelemetrySpan) -> None:
+        entered.set()
+        await release.wait()
+
+    live_task = asyncio.create_task(context.start_span(SpanOptions("live"), live))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        original = context.prune
+        failed, recovered = asyncio.Event(), asyncio.Event()
+
+        async def fail() -> None:
+            failed.set()
+            raise OSError("private disk detail")
+
+        monkeypatch.setattr(context, "prune", fail)
+        await asyncio.wait_for(failed.wait(), 2)
+        for _ in range(5):
+            assert await context.start_span(SpanOptions("done"), lambda span: 42) == 42
+        async def recover() -> None:
+            await original()
+            recovered.set()
+
+        monkeypatch.setattr(context, "prune", recover)
+        await asyncio.wait_for(recovered.wait(), 2)
+        assert len(await context.list_spans(since_ms=0, limit=20)) == 3
+        assert context.maintenance_error is None
+        assert len(await context.list_spans(since_ms=0, limit=20, status="running")) == 1
+        # TTL independently removes old terminal entries, never a live callback.
+        assert context._connection is not None
+        await context._connection.execute("UPDATE telemetry_spans SET started_at_ms=0")
+        await context.prune()
+        assert len(await context.list_spans(since_ms=0, limit=20)) == 1
+    finally:
+        release.set()
+        await live_task
+        await context.close()
+    assert context._maintenance_task is None
+
+
+@pytest.mark.asyncio
 async def test_agent_event_projection_records_only_safe_operational_metadata() -> None:
     context = InMemoryTelemetryContext()
     secret_argument = "TOOL_ARGUMENT_MUST_NOT_APPEAR"

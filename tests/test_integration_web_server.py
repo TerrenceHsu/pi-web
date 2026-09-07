@@ -492,6 +492,7 @@ def test_uvicon_subprocess_starts_and_serves_state(tmp_path):
 
     src_path = str(Path(__file__).resolve().parents[1] / "src")
     max_attempts = 3
+    startup_timeout = 20.0  # Windows cold imports under coverage can exceed five seconds.
     last_error: str | None = None
 
     for attempt in range(1, max_attempts + 1):
@@ -524,10 +525,10 @@ if __name__ == "__main__":
             text=True,
         )
         try:
-            # 等端口就绪（最多 5s）
-            deadline = time.time() + 5.0
+            # Only test-process startup gets extra time; HTTP/product timeouts stay unchanged.
+            deadline = time.monotonic() + startup_timeout
             ready = False
-            while time.time() < deadline:
+            while time.monotonic() < deadline:
                 if proc.poll() is not None:
                     out, err = proc.communicate(timeout=1)
                     last_error = (
@@ -545,12 +546,19 @@ if __name__ == "__main__":
                     time.sleep(0.2)
             if not ready:
                 # 端口竞态或启动失败——清理后重试
-                proc.terminate()
-                try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                    out, err = proc.communicate(timeout=1)
+                    last_error = (
+                        f"uvicorn listener not ready after {startup_timeout}s "
+                        f"on attempt {attempt}. "
+                        f"stderr={err}\nstdout={out}"
+                    )
                 continue
 
             # 发请求验证

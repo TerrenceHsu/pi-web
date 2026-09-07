@@ -174,6 +174,71 @@ async def test_exact_baseline_then_one_task_copy_and_finally_close(case: Case) -
     assert sum(call[:2] == ("container", "create") for call in case.driver.calls) == 1
 
 
+async def test_request_finish_and_maintenance_share_one_cleanup(
+    case: Case, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = await case.prepare()
+    await case.approve(prepared)
+    case.seed_replies(prepared)
+    identity = prepared.scope.identity
+    operation = await case.runtime.start(identity)
+    resource = case.runtime._resources[identity.task_id]
+    assert resource.backend is not None and operation is resource.operation
+    destroy, get = resource.backend.destroy, case.store.get
+    entered, release, both_read = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    readers: set[object] = set()
+
+    async def delayed_destroy(handle: SandboxHandle) -> None:
+        entered.set()
+        await release.wait()
+        await destroy(handle)
+
+    async def observed_get(*args: Any, **kwargs: Any) -> Any:
+        value = await get(*args, **kwargs)
+        readers.add(asyncio.current_task())
+        if len(readers) == 2:
+            both_read.set()
+        return value
+
+    removal = AsyncMock(side_effect=delayed_destroy)
+    monkeypatch.setattr(resource.backend, "destroy", removal)
+    monkeypatch.setattr(case.store, "get", observed_get)
+    # These are the same cleanup callback used by request completion and the
+    # maintenance revoker. Hold the first removal until both callers arrive.
+    jobs = [asyncio.create_task(case.runtime._cleanup(identity))]
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        jobs.append(asyncio.create_task(case.runtime._cleanup(identity)))
+        await asyncio.wait_for(both_read.wait(), 5)
+    finally:
+        release.set()
+        results = await asyncio.gather(*jobs)
+    assert results == [True, True]
+    removal.assert_awaited_once()
+    assert not case.driver.exists
+
+
+async def test_terminal_resources_release_preserves_durable_revocation(case: Case) -> None:
+    prepared = await case.prepare()
+    identity = prepared.scope.identity
+    assert await case.runtime.release_terminal_resources() == 0
+    assert len(await case.store.list_grants(needs_maintenance=True)) == 1
+    await case.approve(prepared)
+    case.seed_replies(prepared)
+    await case.runtime.start(identity)
+    assert await case.runtime.release_terminal_resources() == 0
+    await case.runtime.finish(identity)
+    assert await case.runtime.release_terminal_resources() == 1
+    assert not case.runtime._resources and not case.runtime._cleanup_locks
+    assert await case.store.list_grants(needs_maintenance=True) == []
+    assert (await case.store.get(identity)).state == "closed"
+    await case.runtime.cancel(identity)  # Idempotent after eviction; no second destroy.
+    assert not case.runtime._cleanup_locks
+    with pytest.raises(ExecutionDenied):
+        await case.runtime.start(identity)
+    assert sum(call[:2] == ("container", "create") for call in case.driver.calls) == 1
+
+
 @pytest.mark.parametrize("when", ["approve", "start"])
 @pytest.mark.parametrize("change", ["workspace", "config", "selection", "request"])
 async def test_changed_scope_is_rejected_before_creation(

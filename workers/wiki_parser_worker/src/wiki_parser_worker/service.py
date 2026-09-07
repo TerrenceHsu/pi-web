@@ -256,6 +256,7 @@ class QueueWorkerService:
         self._active_deadline_ms: int | None = None
         self._active_status: dict[str, object] | None = None
         self._started = False
+        self._last_probe_ms: int | None = None
 
     def _write_probe(self, *, available: bool, error_code: str | None) -> None:
         atomic_write_json(
@@ -289,6 +290,7 @@ class QueueWorkerService:
                 "worker_version": __version__,
             },
         )
+        self._last_probe_ms = self._clock_ms()
 
     def start(self) -> None:
         self._recover_interrupted_jobs()
@@ -352,7 +354,6 @@ class QueueWorkerService:
         for name in (
             ARTIFACT_NAME,
             CANCEL_NAME,
-            DESTROY_NAME,
             RECEIPT_NAME,
             REQUEST_NAME,
             SOURCE_NAME,
@@ -367,6 +368,9 @@ class QueueWorkerService:
             except OSError as error:
                 raise WorkerRuntimeError("invalid_source") from error
         atomic_write_json(job_dir / STATUS_NAME, destroyed)
+        # Keep the durable cleanup intent until the terminal receipt is stored.
+        # A failed replacement must remain retryable after supervisor restart.
+        (job_dir / DESTROY_NAME).unlink(missing_ok=True)
 
     def _status_for(self, job_dir: Path) -> dict[str, object]:
         for attempt in range(_STATUS_READ_ATTEMPTS):
@@ -472,6 +476,12 @@ class QueueWorkerService:
     def run_once(self) -> bool:
         if not self._started:
             raise WorkerRuntimeError("invalid_configuration")
+        now = self._clock_ms()
+        if self._last_probe_ms is None or now - self._last_probe_ms >= 5_000:
+            alive = self._controller.alive()
+            self._write_probe(
+                available=alive, error_code=None if alive else "provider_unavailable",
+            )
         if self._active_job_id is not None:
             return self._poll_active()
         if not self._controller.alive():
@@ -553,6 +563,7 @@ class QueueWorkerService:
     def close(self) -> None:
         self._controller.terminate()
         self._started = False
+        self._write_probe(available=False, error_code="provider_unavailable")
 
 
 def serve(

@@ -7,6 +7,7 @@ import hashlib
 import re
 import secrets
 import time
+import weakref
 from dataclasses import dataclass, field
 
 from .models import AuthUser, to_auth_user
@@ -60,6 +61,9 @@ class AuthService:
         self._store = store
         self.session_ttl_seconds = session_ttl_seconds
         self._dummy_hash: str | None = None
+        self._revocations: weakref.WeakValueDictionary[str, asyncio.Event] = (
+            weakref.WeakValueDictionary()
+        )
 
     async def ensure_initial_admin(self) -> tuple[AuthUser, bool]:
         """Idempotently create the initial ``admin / 123456`` account."""
@@ -91,17 +95,50 @@ class AuthService:
         token = secrets.token_urlsafe(48)
         created_at = int(time.time() * 1000)
         expires_at = created_at + self.session_ttl_seconds * 1000
-        await self._store.create_session(
+        issued = await self._store.create_session(
             token_hash=_token_hash(token),
             user_id=record.id,
             created_at=created_at,
             expires_at=expires_at,
+            expected_password_hash=record.password_hash,
         )
+        if not issued:
+            return None
         return LoginSession(
             user=to_auth_user(record),
             token=token,
             expires_at=expires_at,
         )
+
+    def revocation_event(self, user_id: str) -> asyncio.Event:
+        event = self._revocations.get(user_id)
+        if event is None:
+            event = asyncio.Event()
+            self._revocations[user_id] = event
+        return event
+
+    async def change_password(
+        self, user_id: str, *, current_password: str, new_password: str,
+    ) -> bool:
+        if (
+            not _valid_password(current_password) or not _valid_password(new_password)
+            or len(new_password) < 12 or new_password == current_password
+        ):
+            return False
+        record = await self._store.get_user(user_id)
+        if record is None or not await asyncio.to_thread(
+            verify_password, current_password, record.password_hash,
+        ):
+            return False
+        encoded = await asyncio.to_thread(hash_password, new_password)
+        changed = await self._store.change_password(
+            user_id, expected_hash=record.password_hash, new_hash=encoded,
+        )
+        if changed:
+            event = self._revocations.pop(user_id, None)
+            if event is not None:
+                event.set()
+        return changed
 
     async def resolve_session(self, token: str | None) -> AuthUser | None:
         if token is None or len(token) < 32 or len(token) > 256:

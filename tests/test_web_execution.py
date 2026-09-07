@@ -347,6 +347,7 @@ def test_plan_combined_approval_binds_exact_version_and_no_legacy_bypass(tmp_pat
         assert len(backend.created_specs) == 1 and backend.destroyed_sandbox_ids
 
 
+@pytest.mark.docker
 @pytest.mark.skipif(
     not os.environ.get("PI_TEST_DOCKER_IMAGE"), reason="explicit real Docker opt-in"
 )

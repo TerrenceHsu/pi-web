@@ -46,6 +46,11 @@ class MineruRunner(Protocol):
 def _load_runner() -> MineruRunner:
     verify_distribution_versions(("mineru",))
     try:
+        # PyTorch 2.14's optional Triton overrides JIT-compile on first GPU use.
+        # This immutable, compiler-free Worker uses the built-in CUDA kernels;
+        # do not make the model tree writable or remove /tmp's noexec boundary.
+        native = importlib.import_module("torch.backends.python_native")
+        native.triton.disable()
         module = importlib.import_module("mineru.cli.common")
         runner = module.do_parse
     except (AttributeError, ImportError) as error:

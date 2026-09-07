@@ -20,6 +20,7 @@ from pi_agent_core_py.model_client import (  # noqa: E402
     FakeClient,
     TextDeltaEvent,
 )
+from pi_agent_core_py.telemetry import SQLiteTelemetryContext  # noqa: E402
 from pi_agent_core_py.web.app import create_app  # noqa: E402
 from pi_agent_core_py.web.auth import AuthUser, create_authenticated_app  # noqa: E402
 from pi_agent_core_py.web.auth.passwords import hash_password  # noqa: E402
@@ -74,7 +75,34 @@ def _gateway(tmp_path: Path) -> FastAPI:
         auth_db_path=auth_database,
         user_data_root=tmp_path / "users",
         extra_hosts=("testserver",),
+        telemetry_db_path=telemetry_database,
     )
+
+
+def test_gateway_recovers_crash_spans_before_account_runtime_starts(tmp_path: Path) -> None:
+    async def seed_crash() -> None:
+        context = SQLiteTelemetryContext(tmp_path / "telemetry.sqlite")
+        await context.init()
+        try:
+            connection = context._require_connection()
+            await connection.execute(
+                "INSERT INTO telemetry_spans "
+                "(id, trace_id, name, started_at_ms, status, attributes_json) "
+                "VALUES ('crash', 'trace', 'web.request', ?, 'running', '{}')",
+                (time.time_ns() // 1_000_000,),
+            )
+        finally:
+            await context.close()
+
+    asyncio.run(seed_crash())
+    with TestClient(_gateway(tmp_path)) as client:
+        _login(client, "admin", "123456")
+        response = client.get("/api/admin/telemetry/spans/crash", headers=UI_HEADERS)
+        assert response.status_code == 200
+        assert response.json()["status"] == "error"
+        assert response.json()["error"]["name"] == "ProcessInterrupted"
+        summary = client.get("/api/admin/telemetry/summary", headers=UI_HEADERS).json()
+        assert summary["retention"]["error_code"] is None
 
 
 def _login(client: TestClient, name: str, password: str) -> None:

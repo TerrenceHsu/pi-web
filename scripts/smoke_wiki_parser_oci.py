@@ -127,9 +127,7 @@ async def _run_case(
         async with asyncio.timeout(timeout_seconds + 60):
             status = await provider.wait(handle)
         if status.state != "succeeded":
-            raise RuntimeError(
-                f"case {case.name} failed with safe error {status.safe_error_code}"
-            )
+            raise RuntimeError(f"case {case.name} failed with safe error {status.safe_error_code}")
         attempt_parsers = [attempt.parser for attempt in status.attempts]
         attempt_states = [attempt.state for attempt in status.attempts]
         if attempt_parsers != ["mineru"] or attempt_states != ["succeeded"]:
@@ -143,27 +141,22 @@ async def _run_case(
         manifest = _manifest_from_artifact(artifact_path)
         if manifest.source_sha256 != source_sha256:
             raise RuntimeError(f"case {case.name} changed source identity")
-        print(
-            json.dumps(
-                {
-                    "artifact_sha256": receipt.sha256,
-                    "artifact_size_bytes": receipt.size_bytes,
-                    "attempt_parsers": attempt_parsers,
-                    "attempt_states": attempt_states,
-                    "case": case.name,
-                    "mode": case.mode,
-                    "page_count": manifest.page_count,
-                    "selected_parser": manifest.parser,
-                    "source_sha256": source_sha256,
-                    "status": "passed",
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-        )
+        result = {
+            "artifact_sha256": receipt.sha256,
+            "artifact_size_bytes": receipt.size_bytes,
+            "attempt_parsers": attempt_parsers,
+            "attempt_states": attempt_states,
+            "case": case.name,
+            "mode": case.mode,
+            "page_count": manifest.page_count,
+            "selected_parser": manifest.parser,
+            "source_sha256": source_sha256,
+            "status": "passed",
+        }
     finally:
         await provider.destroy(handle)
+    # Cleanup is part of acceptance; never print success before destroy succeeds.
+    print(json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
 
 
 async def _run(arguments: argparse.Namespace) -> None:

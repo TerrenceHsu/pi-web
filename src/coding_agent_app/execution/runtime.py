@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -167,6 +168,9 @@ class ExecutionTaskRuntime:
         self._startup_timeout = startup_timeout_seconds
         self._resources: dict[str, _Resource] = {}
         self._starting: dict[str, asyncio.Task[SandboxOperation]] = {}
+        self._cleanup_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
         self._preparing: set[ExecutionRequest] = set()
         self._closing = False
         self.service = ExecutionService(
@@ -517,17 +521,31 @@ class ExecutionTaskRuntime:
 
     async def _cleanup_resource(self, identity: ExecutionIdentity) -> bool:
         grant = await self.store.get(identity)
-        resource = self._resources.get(identity.task_id)
-        if resource is not None:
-            if resource.closed or not resource.create_attempted:
-                return True
-            if resource.backend is not None and resource.handle is not None:
-                await resource.backend.destroy(resource.handle)
+        # Request finalization and background revocation may arrive together.
+        # Serialize the observed-absence check and removal, including recovery;
+        # a failed/unknown removal remains retryable, never marked closed early.
+        async with self._cleanup_locks.setdefault(identity.task_id, asyncio.Lock()):
+            resource = self._resources.get(identity.task_id)
+            if (
+                resource is None and not grant.cleanup_pending
+                and grant.state not in {"pending", "approved", "active"}
+            ):
+                return True  # Durable confirmation remains authoritative after eviction.
+            if resource is not None:
+                if resource.closed or not resource.create_attempted:
+                    return True
+                if resource.backend is not None and resource.handle is not None:
+                    await resource.backend.destroy(resource.handle)
+                    resource.closed = True
+                    return True
+            if self._reconcile is None:
+                return False
+            clean = await self._reconcile(
+                grant.scope, None if resource is None else resource.handle,
+            )
+            if clean and resource is not None:
                 resource.closed = True
-                return True
-        if self._reconcile is None:
-            return False
-        return await self._reconcile(grant.scope, None if resource is None else resource.handle)
+            return clean
 
     async def recover_startup(self) -> tuple[ExecutionIdentity, ...]:
         """Call before admitting Web traffic. Never replay or recreate a task."""
@@ -554,6 +572,22 @@ class ExecutionTaskRuntime:
         self._closing = True
         for resource in tuple(self._resources.values()):
             await self.cancel(resource.prepared.scope.identity)
+
+    async def release_terminal_resources(self) -> int:
+        """Drop compute references, not durable grants or frozen publication evidence."""
+        removed = 0
+        for task_id, resource in tuple(self._resources.items()):
+            if not resource.closed or task_id in self._starting:
+                continue
+            identity = resource.prepared.scope.identity
+            async with self._cleanup_locks.setdefault(task_id, asyncio.Lock()):
+                grant = await self.store.get(identity)
+                if grant.state in {"pending", "approved", "active"} or grant.cleanup_pending:
+                    continue
+                if self._resources.get(task_id) is resource:
+                    del self._resources[task_id]
+                    removed += 1
+        return removed
 
     async def finish(self, identity: ExecutionIdentity) -> None:
         """Close execution authority and the runtime, without publishing any file."""

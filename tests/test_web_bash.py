@@ -404,6 +404,7 @@ def test_timeout_is_not_success_and_closes_execution(tmp_path):
         assert backend.destroyed_sandbox_ids
 
 
+@pytest.mark.docker
 @pytest.mark.skipif(not os.environ.get("PI_TEST_DOCKER_IMAGE"), reason="explicit Docker opt-in")
 def test_real_standalone_bash_reads_upload_freezes_then_publishes_exact_artifact(tmp_path):
     from coding_sandbox.docker_transport import DockerCLITransport
@@ -468,6 +469,7 @@ def test_real_standalone_bash_reads_upload_freezes_then_publishes_exact_artifact
         )
 
 
+@pytest.mark.docker
 @pytest.mark.skipif(not os.environ.get("PI_TEST_DOCKER_IMAGE"), reason="explicit Docker opt-in")
 @pytest.mark.parametrize(
     "script,expected",

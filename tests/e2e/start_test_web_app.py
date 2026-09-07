@@ -311,6 +311,8 @@ def main() -> None:
             await service.ensure_initial_admin()
             if await store.get_user_by_name("alice") is None:
                 await store.create_user("alice", hash_password("alice-pass"))
+            if await store.get_user_by_name("password-user") is None:
+                await store.create_user("password-user", hash_password("initial-test-password"))
         finally:
             await store.close()
 

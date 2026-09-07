@@ -194,6 +194,12 @@ class PersistentOciParserProvider:
                 observed_at_ms=self._clock_ms(),
                 error_code="provider_unavailable",
             )
+        if not 0 <= self._clock_ms() - probe.observed_at_ms <= 30_000:
+            return probe.model_copy(update={
+                "available": False,
+                "error_code": "provider_unavailable",
+                "observed_at_ms": self._clock_ms(),
+            })
         if probe.routing_config != self._routing:
             return probe.model_copy(
                 update={

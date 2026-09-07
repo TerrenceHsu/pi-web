@@ -4,7 +4,7 @@ const { requestJsonMock } = vi.hoisted(() => ({ requestJsonMock: vi.fn() }))
 
 vi.mock("../../src/api/client", () => ({ requestJson: requestJsonMock }))
 
-import { getAuthSession, login, logout } from "../../src/api/auth"
+import { changePassword, getAuthSession, login, logout } from "../../src/api/auth"
 
 describe("auth API", () => {
   beforeEach(() => requestJsonMock.mockReset())
@@ -28,5 +28,12 @@ describe("auth API", () => {
     requestJsonMock.mockResolvedValue({ authenticated: false })
     await logout()
     expect(requestJsonMock).toHaveBeenCalledWith("/api/auth/logout", { method: "POST" })
+  })
+
+  it("posts both passwords only in the password endpoint body", async () => {
+    await changePassword("old-secret", "new-secret-123")
+    expect(requestJsonMock).toHaveBeenCalledWith("/api/auth/password", {
+      method: "POST", body: { current_password: "old-secret", new_password: "new-secret-123" },
+    })
   })
 })

@@ -23,13 +23,34 @@ from wiki_parser_worker.models import (  # noqa: E402
     WorkerParsedPage,
     WorkerPreflightReport,
 )
-from wiki_parser_worker.parsers import MineruParser  # noqa: E402
+from wiki_parser_worker.parsers import MineruParser, _load_runner  # noqa: E402
 from wiki_parser_worker.preflight import inspect_pdf, route_pdf  # noqa: E402
 from wiki_parser_worker.quality import QualityEvaluator  # noqa: E402
 
 _CONFIG = load_routing_config(_ROOT / "config" / "routing-quality-v1.json")
 _PDF = b"%PDF-1.7\nMinerU test\n%%EOF\n"
 _PNG = b"\x89PNG\r\n\x1a\n" + b"fixture"
+
+
+def test_runtime_loader_disables_optional_triton_before_loading_mineru(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    runner = _Runner()
+
+    def import_module(name: str) -> SimpleNamespace:
+        events.append(name)
+        if name == "torch.backends.python_native":
+            return SimpleNamespace(triton=SimpleNamespace(
+                disable=lambda: events.append("disable_triton"),
+            ))
+        assert name == "mineru.cli.common"
+        return SimpleNamespace(do_parse=runner)
+
+    monkeypatch.setattr("wiki_parser_worker.parsers.verify_distribution_versions", lambda _: None)
+    monkeypatch.setattr("wiki_parser_worker.parsers.importlib.import_module", import_module)
+    assert _load_runner() is runner
+    assert events == ["torch.backends.python_native", "disable_triton", "mineru.cli.common"]
 
 
 def _source(tmp_path: Path) -> tuple[Path, str]:

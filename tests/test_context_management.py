@@ -50,19 +50,21 @@ class SummaryAdapter(ProviderAdapter):
 
     async def stream(self, request: ProviderRequest):
         self.calls.append(request)
-        assert not request.tools
-        assert request.thinking_level == "off"
-        assert request.metadata["operation"] == "context_compaction"
-        assert any(
-            r["id"] == request.metadata["projection_id"] and r["status"] == "prepared"
-            for r in await self.store.records("mine")
-        )
-        data = json.loads(request.messages[0].content[0].text)
+        # Observe entry/closure even when timeout interrupts the SQLite preamble.
+        # The 20 ms timeout test must not depend on the host's IO scheduling speed.
         self.entered.set()
-        mode = self.modes.pop(0) if self.modes else "good"
-        if self.hook:
-            await self.hook()
         try:
+            assert not request.tools
+            assert request.thinking_level == "off"
+            assert request.metadata["operation"] == "context_compaction"
+            assert any(
+                r["id"] == request.metadata["projection_id"] and r["status"] == "prepared"
+                for r in await self.store.records("mine")
+            )
+            data = json.loads(request.messages[0].content[0].text)
+            mode = self.modes.pop(0) if self.modes else "good"
+            if self.hook:
+                await self.hook()
             if mode == "wait":
                 await asyncio.Event().wait()
             if mode == "provider_error":

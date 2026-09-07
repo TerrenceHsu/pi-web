@@ -63,6 +63,27 @@ export const useAuthStore = defineStore("auth", () => {
     }
   }
 
+  async function changePassword(currentPassword: string, newPassword: string): Promise<boolean> {
+    submitting.value = true
+    error.value = null
+    try {
+      await authApi.changePassword(currentPassword, newPassword)
+      user.value = null
+      status.value = "anonymous"
+      error.value = "Password changed. Sign in again with your new password."
+      return true
+    } catch (e: unknown) {
+      error.value = e instanceof ApiError ? e.detail : "Unable to change password."
+      if (e instanceof ApiError && e.status === 401) {
+        user.value = null
+        status.value = "anonymous"
+      }
+      return false
+    } finally {
+      submitting.value = false
+    }
+  }
+
   return {
     status,
     user,
@@ -72,5 +93,6 @@ export const useAuthStore = defineStore("auth", () => {
     restoreSession,
     login,
     logout,
+    changePassword,
   }
 })

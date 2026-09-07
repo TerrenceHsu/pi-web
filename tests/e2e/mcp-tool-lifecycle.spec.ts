@@ -63,6 +63,9 @@ test.describe("MCP tool lifecycle (Smoke 10)", () => {
       '[data-testid="mcp-env-value-input"]',
     ).first()
     await expect(envValueInput).toHaveAttribute("type", "password")
+    const secretCanary = "MCP_PRIVATE_VALUE_CANARY_20260907"
+    await page.getByTestId("mcp-env-key-input").first().fill("PI_E2E_CANARY")
+    await envValueInput.fill(secretCanary)
 
     // Add server
     await page
@@ -95,7 +98,8 @@ test.describe("MCP tool lifecycle (Smoke 10)", () => {
 
     // env value 不出现在 body innerText（#20 复检）
     const bodyText = await page.locator("body").innerText()
-    expect(bodyText).not.toMatch(/SECRET|PASSWORD|API_KEY/i)
+    // Check the actual submitted value, not ordinary UI labels such as Password.
+    expect(bodyText).not.toContain(secretCanary)
 
     // #18 — Enable server
     await card.locator('[data-testid="mcp-server-enable-btn"]').click()

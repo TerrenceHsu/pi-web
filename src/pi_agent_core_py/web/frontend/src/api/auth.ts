@@ -15,3 +15,10 @@ export function login(name: string, password: string): Promise<AuthSessionRespon
 export function logout(): Promise<LogoutResponse> {
   return requestJson<LogoutResponse>("/api/auth/logout", { method: "POST" })
 }
+
+export function changePassword(currentPassword: string, newPassword: string): Promise<LogoutResponse> {
+  return requestJson<LogoutResponse>("/api/auth/password", {
+    method: "POST",
+    body: { current_password: currentPassword, new_password: newPassword },
+  })
+}

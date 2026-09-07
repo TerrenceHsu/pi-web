@@ -17,6 +17,7 @@ from starlette.websockets import WebSocketDisconnect  # noqa: E402
 
 from pi_agent_core_py.agent import Agent  # noqa: E402
 from pi_agent_core_py.harness import AgentHarness  # noqa: E402
+from pi_agent_core_py.maintenance import backup_data, restore_data  # noqa: E402
 from pi_agent_core_py.model_client import DoneEvent, FakeClient, TextDeltaEvent  # noqa: E402
 from pi_agent_core_py.web.app import create_app  # noqa: E402
 from pi_agent_core_py.web.auth.gateway import (  # noqa: E402
@@ -30,6 +31,8 @@ from pi_agent_core_py.web.auth.service import AuthService  # noqa: E402
 from pi_agent_core_py.web.auth.store import AuthStore  # noqa: E402
 
 UI_HEADERS = {"X-PI-Agent-UI": "1"}
+
+NEW_PASSWORD = "new-test-password-2026"
 
 
 def _workspace_factory(user: AuthUser, root: Path) -> FastAPI:
@@ -72,6 +75,126 @@ def _build_gateway(tmp_path: Path) -> FastAPI:
         user_data_root=tmp_path / "users",
         extra_hosts=("testserver",),
     )
+
+
+def _login_admin(client: TestClient, password: str = "123456") -> str:
+    client.cookies.clear()
+    response = client.post("/api/auth/login", headers=UI_HEADERS,
+                           json={"name": "admin", "password": password})
+    assert response.status_code == 200
+    return str(client.cookies.get(AUTH_COOKIE_NAME))
+
+
+def test_change_password_revokes_all_old_sessions_and_survives_restart(tmp_path: Path) -> None:
+    payload = {"current_password": "123456", "new_password": NEW_PASSWORD}
+    with TestClient(_build_gateway(tmp_path)) as client:
+        anonymous = client.post("/api/auth/password", headers=UI_HEADERS, json=payload)
+        assert anonymous.status_code == 401
+        first = _login_admin(client)
+        second = _login_admin(client)
+        rejected = client.post("/api/auth/password", headers=UI_HEADERS,
+                               json={**payload, "current_password": "wrong-secret"})
+        assert rejected.status_code == 400
+        assert client.get("/api/profile").status_code == 200
+        changed = client.post("/api/auth/password", headers=UI_HEADERS, json=payload)
+        assert changed.status_code == 200
+        assert changed.headers["cache-control"] == "no-store"
+        assert NEW_PASSWORD not in changed.text
+        for token in (first, second):
+            client.cookies.clear()
+            client.cookies.set(AUTH_COOKIE_NAME, token)
+            assert client.get("/api/profile").status_code == 401
+        assert client.post("/api/auth/login", headers=UI_HEADERS,
+                           json={"name": "admin", "password": "123456"}).status_code == 401
+        _login_admin(client, NEW_PASSWORD)
+    with TestClient(_build_gateway(tmp_path)) as client:
+        _login_admin(client, NEW_PASSWORD)
+
+
+def test_change_password_security_boundaries(tmp_path: Path) -> None:
+    payload = {"current_password": "123456", "new_password": NEW_PASSWORD}
+    with TestClient(_build_gateway(tmp_path)) as client:
+        _login_admin(client)
+        assert client.post("/api/auth/password", json=payload).status_code == 400
+        assert client.post("/api/auth/password", headers={**UI_HEADERS, "Origin": "https://evil.test"},
+                           json=payload).status_code == 403
+        for invalid in (
+            {**payload, "user_id": "another-user"},
+            {**payload, "new_password": "short-secret"[:6]},
+            {**payload, "new_password": {"SECRET_MARKER": "secret"}},
+        ):
+            response = client.post("/api/auth/password", headers=UI_HEADERS, json=invalid)
+            assert response.status_code == 422
+            assert "SECRET_MARKER" not in response.text
+            assert NEW_PASSWORD not in response.text
+        oversized = client.post("/api/auth/password", headers=UI_HEADERS,
+                                json={**payload, "new_password": "x" * 17000})
+        assert oversized.status_code == 413
+        for _ in range(8):
+            response = client.post("/api/auth/password", headers=UI_HEADERS,
+                                   json={**payload, "current_password": "wrong-secret"})
+            assert response.status_code == 400
+        limited = client.post("/api/auth/password", headers=UI_HEADERS, json=payload)
+        assert limited.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_password_change_closes_concurrent_login_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = await AuthStore.open(str(tmp_path / "auth.sqlite"))
+    try:
+        service = AuthService(store)
+        user, _ = await service.ensure_initial_admin()
+        before_insert, resume = asyncio.Event(), asyncio.Event()
+        original = store.create_session
+
+        async def delayed_insert(**kwargs: Any) -> bool:
+            before_insert.set()
+            await resume.wait()
+            return await original(**kwargs)
+
+        monkeypatch.setattr(store, "create_session", delayed_insert)
+        login_task = asyncio.create_task(service.login(name="admin", password="123456"))
+        try:
+            await asyncio.wait_for(before_insert.wait(), 5)
+            assert await service.change_password(
+                user.id, current_password="123456", new_password=NEW_PASSWORD,
+            )
+        finally:
+            resume.set()
+        assert await login_task is None
+        assert not await service.change_password(
+            user.id, current_password=NEW_PASSWORD, new_password=NEW_PASSWORD,
+        )
+    finally:
+        await store.close()
+
+
+def test_password_change_closes_existing_websocket(tmp_path: Path) -> None:
+    def factory(user: AuthUser, root: Path) -> FastAPI:
+        app = _workspace_factory(user, root)
+
+        @app.websocket("/ws/live")
+        async def live(websocket: WebSocket) -> None:
+            await websocket.accept()
+            await websocket.send_text("ready")
+            await websocket.receive_text()
+
+        return app
+
+    app = create_authenticated_app(factory, auth_db_path=tmp_path / "auth.sqlite",
+                                   user_data_root=tmp_path / "users", extra_hosts=("testserver",))
+    with TestClient(app) as client:
+        _login_admin(client)
+        with client.websocket_connect("/ws/live") as socket:
+            assert socket.receive_text() == "ready"
+            assert client.post("/api/auth/password", headers=UI_HEADERS, json={
+                "current_password": "123456", "new_password": NEW_PASSWORD,
+            }).status_code == 200
+            with pytest.raises(WebSocketDisconnect) as disconnected:
+                socket.receive_text()
+            assert disconnected.value.code == 4401
 
 
 @pytest.mark.parametrize(
@@ -212,7 +335,7 @@ def test_gateway_restart_requires_login_again(tmp_path: Path) -> None:
 
 
 def test_relogin_preserves_conversation_and_agent_md(tmp_path: Path) -> None:
-    """Logout/login changes auth state only; the account workspace remains intact."""
+    """Relogin and offline restore preserve real account, messages and Workspace files."""
 
     def workspace_factory(user: AuthUser, root: Path) -> FastAPI:
         del user
@@ -225,10 +348,11 @@ def test_relogin_preserves_conversation_and_agent_md(tmp_path: Path) -> None:
             uploads_dir=root / "uploads",
         )
 
+    data = tmp_path / "data"
     app = create_authenticated_app(
         workspace_factory,
-        auth_db_path=tmp_path / "auth.sqlite",
-        user_data_root=tmp_path / "users",
+        auth_db_path=data / "auth.sqlite",
+        user_data_root=data / "users",
         extra_hosts=("testserver",),
     )
     with TestClient(app) as client:
@@ -268,6 +392,21 @@ def test_relogin_preserves_conversation_and_agent_md(tmp_path: Path) -> None:
         assert client.get(
             f"/api/sessions/{sid}/files/{restored_agent['id']}"
         ).text == custom
+        old_token = str(client.cookies.get(AUTH_COOKIE_NAME))
+
+    backup_data(data, tmp_path / "backup", offline=True)
+    restored = tmp_path / "restored"
+    restore_data(tmp_path / "backup", restored, offline=True)
+    recovered = create_authenticated_app(
+        workspace_factory, auth_db_path=restored / "auth.sqlite",
+        user_data_root=restored / "users", extra_hosts=("testserver",),
+    )
+    with TestClient(recovered) as client:
+        client.cookies.set(AUTH_COOKIE_NAME, old_token)
+        assert client.get("/api/sessions").status_code == 401
+        _login_admin(client)
+        assert client.get(f"/api/messages?session_id={sid}").json()["count"] == 2
+        assert client.get(f"/api/sessions/{sid}/files/{restored_agent['id']}").text == custom
 
 
 def test_login_security_envelope_does_not_echo_password(tmp_path: Path) -> None:

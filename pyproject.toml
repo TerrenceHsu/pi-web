@@ -96,7 +96,7 @@ testpaths = ["tests"]
 markers = [
     "slow: tests that hit real LLM APIs (require API key)",
     "integration: real external services; also requires PI_RUN_INTEGRATION=1",
-    "docker: tests that require Docker daemon (not used in this trimmed copy)",
+    "docker: disposable real Docker tests; select explicitly and set PI_TEST_DOCKER_IMAGE/EXE",
 ]
 addopts = [
     "--basetemp=.pytest-tmp",

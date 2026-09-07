@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     # The offline product suite can still take several minutes on a cold runner.
     # Keep the gate intact and allow enough time for dependency install + tests.
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -30,27 +30,31 @@ jobs:
 
       - name: Install package + dev extras
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-          pip install -e ".[web,data-analysis]"
-          pip install uv
+          python -m pip install uv==0.11.26
+          uv sync --frozen --extra dev --extra web --extra data-analysis
+          uv lock --check --offline
 
       - name: Install separate Python analysis environment
-        run: python scripts/setup_analysis_python.py
+        run: uv run --no-sync python scripts/setup_analysis_python.py
 
       - name: Ruff
-        run: ruff check src/ tests/ evals/
+        run: uv run --no-sync ruff check src/ tests/ scripts/ evals/ workers/wiki_parser_worker/
 
       - name: Mypy (strict)
-        run: mypy src evals
+        run: |
+          uv run --no-sync mypy src evals
+          uv run --no-sync mypy --config-file workers/wiki_parser_worker/pyproject.toml workers/wiki_parser_worker/src
 
       - name: Backend offline tests + coverage
         env:
           PYTHONDONTWRITEBYTECODE: "1"
-        run: pytest tests/ --tb=short -q
+        run: uv run --no-sync pytest tests/ --tb=short -q
+
+      - name: Worker offline tests
+        run: uv run --no-sync pytest workers/wiki_parser_worker/tests --no-cov --tb=short -q
 
       - name: Local coding-agent eval gate
-        run: python -m evals --gate --artifacts-dir .eval/ci
+        run: uv run --no-sync python -m evals --gate --artifacts-dir .eval/ci
 
       - name: Upload coverage XML
         if: always()
@@ -92,3 +96,48 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  browser-and-platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      PYTHONPATH: src
+      PYTHONDONTWRITEBYTECODE: "1"
+      E2E_PORT: "8121"
+      CI: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Locked Python dependencies
+        run: |
+          python -m pip install uv==0.11.26
+          uv sync --frozen --extra dev --extra web --extra data-analysis
+      - name: Platform persistence and lifecycle checks
+        run: uv run --no-sync pytest tests/test_data_maintenance.py tests/test_web_auth.py tests/test_telemetry.py tests/test_execution_runtime.py tests/test_wiki_parser_oci.py --no-cov --tb=short -q
+      - name: Separate Python analysis environment for browser journeys
+        run: uv run --no-sync python scripts/setup_analysis_python.py
+      - name: Browser dependencies
+        run: |
+          npm --prefix src/pi_agent_core_py/web/frontend ci
+          npm --prefix tests/e2e ci
+          npm --prefix tests/e2e exec -- playwright install --with-deps chromium
+      - name: Chromium gate (zero retries, production build restored)
+        run: uv run --no-sync python scripts/run_local_gates.py --group browser
+      - name: Upload gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-${{ matrix.os }}
+          path: |
+            .test-tmp/gate-*/
+            tests/e2e/test-results/
+          retention-days: 7
