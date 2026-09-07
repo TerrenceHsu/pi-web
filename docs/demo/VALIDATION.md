@@ -1,7 +1,8 @@
 # 发布与演示准备记录 / Publication and demo preparation
 
 日期 / Date: 2026-09-07. Application baseline before documentation changes: `d913234`.
-Target: `TerrenceHsu/pi-web`, **private**. Publishing source does not deploy the application.
+Target: `TerrenceHsu/pi-web`, initially **private**, subsequently **public** at the user's explicit request.
+Publishing source does not deploy the application. See the public-visibility update below.
 
 ## 本次变更 / Changes
 
@@ -45,14 +46,30 @@ The dedicated demo server was stopped after validation; its ignored test data wa
   key files; the tracked `.env.e2e` contains only the frontend test-hook switch.
 - `.env`, business data, uploads, login state, portable publishing tools and the demo
   data root remain ignored. They must not be force-added to Git.
-- Git history and author metadata are preserved, not rewritten. The repository is private.
+- Git history and author metadata were preserved, not rewritten. The initial upload was private.
 
-这些是有边界的启发式检查，不是“绝对无敏感信息”的保证。未来改为公开前需要再次审查
-提交历史、作者信息、历史日志与第三方许可；本次没有自动公开仓库。
+这些是有边界的启发式检查，不是“绝对无敏感信息”的保证。首次上传没有自动公开；
+后续明确授权公开时的复核记录见下节。
 
 These are bounded heuristic checks, not a guarantee of absence of sensitive data.
-Review history, author metadata, historical logs and third-party terms again before
-any future public release. This publication does not make the repository public.
+The initial upload did not make the repository public. The subsequent authorized
+visibility change and recheck are recorded below.
+
+## 公开状态更新 / Public visibility update
+
+- On 2026-09-07, the user explicitly requested public publication. GitHub confirmed
+  `isPrivate=false` for `TerrenceHsu/pi-web`; the repository name and history were retained.
+- The repeated heuristic scan covered 2,827 reachable blob versions, 66,210,967
+  logical bytes: 46 explicit synthetic test matches, no unclassified matches,
+  and no blobs at or above the 90 MiB review threshold.
+- Existing commits, author metadata and Actions logs are now within the public scope.
+  Business data, credentials, local environments and temporary files remain excluded.
+- Main/Worker licenses and third-party notices are retained. No Worker image, model
+  weights, new release tag, hosted service or public deployment was published.
+- The first remote [CI run](https://github.com/TerrenceHsu/pi-web/actions/runs/34095561462)
+  on `7ad03ea` failed: frontend passed, Mypy and Linux/Windows platform prechecks
+  failed, and downstream backend/browser stages were skipped. Public visibility
+  does not imply a stable release or a successful remote gate; follow-up is in [TODO](../../TODO.md).
 
 ## 未执行 / Not executed in this publication pass
 

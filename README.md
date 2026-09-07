@@ -139,7 +139,7 @@ npm --prefix src/pi_agent_core_py/web/frontend run build
 ```
 
 若 PowerShell 阻止激活脚本，无需修改系统执行策略：用 `.\.venv\Scripts\python.exe` 代替下面的 `python`。
-私有仓库需要获授权的 GitHub 登录。Linux/macOS 中创建并激活环境：
+仓库已公开，克隆源码无需 GitHub 登录。Linux/macOS 中创建并激活环境：
 
 ```bash
 git clone https://github.com/TerrenceHsu/pi-web.git

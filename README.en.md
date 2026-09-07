@@ -41,7 +41,7 @@ Dependencies need internet access to install. Real model calls may incur Provide
 
 ### 1. Install and build
 
-The repository is private; cloning requires authorized GitHub access.
+The repository is public; cloning the source does not require a GitHub login.
 
 Windows PowerShell:
 

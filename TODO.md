@@ -4,6 +4,7 @@
 
 ## 本轮工程化收敛
 
+- [ ] 修复首次 GitHub Actions（`7ad03ea`）的 Mypy 和 Linux/Windows 平台前置检查失败，并重新完成远端全量门禁；前端已通过，未执行的后续测试不能记为通过。[运行记录](https://github.com/TerrenceHsu/pi-web/actions/runs/34095561462)。
 - [x] Telemetry 周期裁剪/崩溃记录对账、MinerU 探针新鲜度、终态执行对象释放。
 - [x] 离线备份/校验/新目录恢复，Wiki v7 兼容升级与显式原件重建；临时数据恢复后真实 Web 登录/会话验证。
 - [x] 本地一键门禁、锁定依赖与 Worker/双平台 CI 配置、改密 API/UI/旧登录及 WebSocket 撤销。
