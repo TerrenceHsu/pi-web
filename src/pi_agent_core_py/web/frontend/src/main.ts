@@ -3,6 +3,7 @@ import { createPinia } from "pinia"
 
 import App from "./App.vue"
 import { useChatStore } from "./stores/chatStore"
+import "katex/dist/katex.min.css"
 import "./styles.css"
 
 const app = createApp(App)

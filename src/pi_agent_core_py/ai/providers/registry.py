@@ -21,7 +21,8 @@ P1-E1 只注册当前明确支持验证的内置 provider：
 - Anthropic：strategy=anthropic_models（GET /v1/models）
 - GLM：strategy=unsupported（远端验证暂未批准）
 
-`openai_compatible` 和 `custom` 留待 P1-E2 ProviderProfile 引入.
+此外提供 OpenAI-compatible / Anthropic-compatible 两个通用协议身份；
+新建通用 Profile 必须显式配置端点，由 Profile 边界校验，不从 Key 推断厂商。
 """
 from __future__ import annotations
 
@@ -235,10 +236,8 @@ _ANTHROPIC_DEFINITION = ProviderDefinition(
 #
 # Qwen M1 preset:
 #   China Beijing shared endpoint only.
-#   Aliyun 公开文档同时列出 Workspace 专属域名（含 Workspace ID），但 M1 不支持
-#   Custom Base URL / 不保存 Workspace ID——只接入 cn-beijing 共享 DashScope
-#   OpenAI-compatible endpoint. 其它地域（Singapore / US / Japan）、Workspace
-#   专属域名、Trial / Coding Plan / Token Plan endpoint 均不进入当前版本。
+#   旧预设保留 cn-beijing 共享 DashScope endpoint，以兼容已有 Profile；
+#   其它兼容地址由用户显式填写 Profile base_url，系统不自动选地域/套餐。
 #
 # Kimi M1 preset:
 #   https://api.moonshot.cn/v1 是 Moonshot 官方 OpenAI SDK base_url. M1 不引入
@@ -275,6 +274,28 @@ _KIMI_DEFINITION = ProviderDefinition(
 )
 
 
+# Generic identities select an API protocol, never a vendor alias. Profiles
+# must supply their own endpoint; these defaults are not used for new profiles.
+_OPENAI_COMPATIBLE_DEFINITION = ProviderDefinition(
+    id="openai_compatible",
+    display_name="OpenAI-compatible",
+    api_style="openai_compatible",
+    default_base_url="https://api.openai.com/v1",
+    credential_validation_strategy="unsupported",
+    credential_validation_endpoint=None,
+    supports_model_listing=False,
+)
+
+_ANTHROPIC_COMPATIBLE_DEFINITION = ProviderDefinition(
+    id="anthropic_compatible",
+    display_name="Anthropic-compatible",
+    api_style="anthropic_compatible",
+    default_base_url="https://api.anthropic.com",
+    credential_validation_strategy="unsupported",
+    credential_validation_endpoint=None,
+    supports_model_listing=False,
+)
+
 # ============================================================================
 # Built-in registry singleton + module-level accessors
 # ============================================================================
@@ -286,6 +307,8 @@ _DEFAULT_REGISTRY: ProviderRegistry = ProviderRegistry(
         _ANTHROPIC_DEFINITION,
         _QWEN_DEFINITION,
         _KIMI_DEFINITION,
+        _OPENAI_COMPATIBLE_DEFINITION,
+        _ANTHROPIC_COMPATIBLE_DEFINITION,
     ),
 )
 

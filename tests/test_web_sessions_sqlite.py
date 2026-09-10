@@ -295,7 +295,9 @@ def test_delete_session_stops_active_request_and_releases_harness() -> None:
 
         assert deleted.status_code == 200
         assert client.get(f"/api/messages?session_id={session_id}").status_code == 404
-        assert client.get(f"/api/requests/{request_id}").json()["status"] == "aborted"
+        # Deleted Session request payloads must not remain available via history.
+        assert client.get(f"/api/requests/{request_id}").status_code == 404
+        assert session_id not in app.state.web.active_request_by_session
         assert harness.context.phase == "idle"
         assert harness.agent.state.status == "idle"
 

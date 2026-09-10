@@ -176,6 +176,10 @@ async def provider_config_runtime_context(
         store = await SQLiteProviderConfigStore.open(database_path)
         # push_async_callback takes a no-arg async callable
         stack.push_async_callback(store.close)
+        # Web initializes its Session repository first. Keep this integration
+        # optional for standalone Provider stores, but persistent and atomic
+        # whenever both schemas share the configured database.
+        await store.install_session_lifecycle_guards()
 
         service = ProviderConfigService(
             store=store,

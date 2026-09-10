@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import httpx
 import pytest
 from openai import (
     APIConnectionError,
@@ -305,11 +306,16 @@ async def test_stream_error_message_has_no_authorization() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unknown_exception_maps_to_stream_error() -> None:
-    """非 SDK 异常也兜底为 ProviderStreamError."""
-    adapter = _adapter_with_raising_client(RuntimeError("unknown-error-with-detail"))
-    with pytest.raises(ProviderStreamError) as exc_info:
+@pytest.mark.parametrize("error_type", [
+    ValueError, TypeError, RuntimeError, httpx.LocalProtocolError, httpx.UnsupportedProtocol,
+])
+async def test_local_exception_maps_to_protocol_error(error_type: type[Exception]) -> None:
+    """本地校验/解析错误不应伪装为可重试的网络故障。"""
+    adapter = _adapter_with_raising_client(error_type("unknown-error-with-detail"))
+    with pytest.raises(ProviderProtocolError) as exc_info:
         async for _ in adapter.stream(_req()):
             pass
     # 固定短文本
     assert "unknown-error-with-detail" not in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__suppress_context__ is True

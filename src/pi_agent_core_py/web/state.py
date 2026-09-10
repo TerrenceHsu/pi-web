@@ -97,6 +97,13 @@ class TraceEventBuffer:
         self.first_sequence = None
         self.last_sequence = None
 
+    def remove_session(self, session_id: str) -> None:
+        """Drop deleted-session replay payloads without renumbering other events."""
+        remaining = [e for e in self._events if e.get("session_id") != session_id]
+        self.clear()
+        for event in remaining:
+            self.append(event)
+
     def __len__(self) -> int:
         return len(self._events)
 

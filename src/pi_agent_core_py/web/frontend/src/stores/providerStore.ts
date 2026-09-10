@@ -25,14 +25,11 @@ import type {
   ProviderModelOption,
   ResolvedModelCapabilitiesView,
   SessionModelBindingView,
-  VisibleProviderId,
 } from "../types"
 
 // ============================================================================
 // 常量
 // ============================================================================
-
-const VISIBLE_PROVIDER_IDS: ReadonlySet<VisibleProviderId> = new Set(["glm", "qwen", "kimi"])
 
 // 安全固定文案——不暴露后端 response body / exception / stack。
 const LOAD_ERROR_SAFE = "Provider configuration could not be loaded."
@@ -64,10 +61,6 @@ function toSafeProviderError(error: unknown, fallback: string): string {
     return fallback
   }
   return fallback
-}
-
-function isVisibleProvider(providerId: string): boolean {
-  return (VISIBLE_PROVIDER_IDS as Set<string>).has(providerId)
 }
 
 // ============================================================================
@@ -112,37 +105,10 @@ export const useProviderStore = defineStore("providers", () => {
   // Getters
   // ========================================================================
 
-  /** 只返回 GLM / Qwen / Kimi——隐藏 Anthropic。 */
-  const visibleDefinitions = computed(() =>
-    definitions.value.filter((d) => isVisibleProvider(d.id)),
-  )
-
-  /** 仅返回 visible + enabled + ready 的 Profile。 */
+  /** Flat, vendor-neutral choices; unavailable profiles remain visible in settings. */
   const usableProfiles = computed(() =>
-    profiles.value.filter(
-      (p) => isVisibleProvider(p.provider_id) && p.enabled && p.status === "ready",
-    ),
+    profiles.value.filter((p) => p.enabled && p.status === "ready"),
   )
-
-  /**
-   * 按 provider_id 分组的 Profile——Settings 使用。
-   *
-   * 包含 visible provider 下的所有 Profile（disabled / needs_key / etc）。
-   * 排除 Anthropic Profile（产品边界）。
-   */
-  const profilesByProvider = computed(() => {
-    const map = new Map<VisibleProviderId, ProviderProfileView[]>()
-    for (const p of profiles.value) {
-      if (!isVisibleProvider(p.provider_id)) continue
-      const list = map.get(p.provider_id as VisibleProviderId)
-      if (list) {
-        list.push(p)
-      } else {
-        map.set(p.provider_id as VisibleProviderId, [p])
-      }
-    }
-    return map
-  })
 
   /** 从 raw profiles 中按 currentBinding.profile_id 解析——不从 usableProfiles。 */
   const selectedProfile = computed(() => {
@@ -173,8 +139,8 @@ export const useProviderStore = defineStore("providers", () => {
   /**
    * 未被任何 Profile 引用的 Credential。
    *
-   * 引用计数必须遍历 raw profiles（含 Anthropic / disabled / needs_key）——
-   * 否则隐藏的 Anthropic Profile 会让其 Credential 被误判为 unused。
+   * 引用计数必须遍历全部 profiles（含 disabled / needs_key），
+   * 避免不可用的 Profile 让其 Credential 被误判为 unused。
    */
   const unusedCredentials = computed(() => {
     const usedIds = new Set<string>()
@@ -580,9 +546,7 @@ export const useProviderStore = defineStore("providers", () => {
     // 初始化
     initialized,
     // Getters
-    visibleDefinitions,
     usableProfiles,
-    profilesByProvider,
     selectedProfile,
     selectedProvider,
     selectedModel,

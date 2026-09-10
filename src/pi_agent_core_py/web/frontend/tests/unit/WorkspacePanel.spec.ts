@@ -258,7 +258,10 @@ describe("Workspace result panel", () => {
     filesApi.readTextFile.mockResolvedValue("# Plan\n")
     const wrapper = mountPanel()
 
-    await wrapper.findAll(".workspace-toolbar button")[1].trigger("click")
+    expect(
+      wrapper.findAll("button").filter((button) => button.text() === "New Markdown"),
+    ).toHaveLength(1)
+    await wrapper.get(".desk-toolbar button").trigger("click")
     await wrapper.get("input[aria-label='Markdown logical path']").setValue("notes/plan.md")
     await wrapper.get("textarea[aria-label='Initial Markdown content']").setValue("# Plan\n")
     await wrapper.get("form.create-markdown").trigger("submit")

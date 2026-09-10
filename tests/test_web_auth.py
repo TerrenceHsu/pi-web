@@ -6,6 +6,9 @@ import asyncio
 import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
+from threading import Event
+from time import time
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -195,6 +198,112 @@ def test_password_change_closes_existing_websocket(tmp_path: Path) -> None:
             with pytest.raises(WebSocketDisconnect) as disconnected:
                 socket.receive_text()
             assert disconnected.value.code == 4401
+
+
+def _build_live_gateway(tmp_path: Path, cleaned: dict[str, Event]) -> FastAPI:
+    def factory(user: AuthUser, root: Path) -> FastAPI:
+        app = _workspace_factory(user, root)
+
+        @app.websocket("/ws/live/{viewer}")
+        async def live(websocket: WebSocket, viewer: str) -> None:
+            finished = cleaned.setdefault(viewer, Event())
+            try:
+                await websocket.accept()
+                await websocket.send_text("ready")
+                while True:
+                    await websocket.send_text(await websocket.receive_text())
+            except WebSocketDisconnect:
+                pass
+            finally:
+                finished.set()
+
+        return app
+
+    return create_authenticated_app(
+        factory, auth_db_path=tmp_path / "auth.sqlite",
+        user_data_root=tmp_path / "users", extra_hosts=("testserver",),
+        session_ttl_seconds=60,
+    )
+
+
+def test_logout_closes_only_websockets_using_that_login(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "pi_agent_core_py.web.auth.gateway.WEBSOCKET_SESSION_CHECK_SECONDS", 0.01,
+    )
+    cleaned: dict[str, Event] = {}
+    with TestClient(_build_live_gateway(tmp_path, cleaned)) as client:
+        first = _login_admin(client)
+        with client.websocket_connect("/ws/live/first") as first_socket:
+            assert first_socket.receive_text() == "ready"
+            _login_admin(client)
+            with client.websocket_connect("/ws/live/second") as second_socket:
+                assert second_socket.receive_text() == "ready"
+                client.cookies.clear()
+                client.cookies.set(AUTH_COOKIE_NAME, first)
+                assert client.post("/api/auth/logout", headers=UI_HEADERS).status_code == 200
+                assert cleaned["first"].wait(5), "Revoked websocket handler did not clean up"
+                with pytest.raises(WebSocketDisconnect) as disconnected:
+                    first_socket.receive_text()
+                assert disconnected.value.code == 4401
+                second_socket.send_text("still authenticated")
+                assert second_socket.receive_text() == "still authenticated"
+                assert not cleaned["second"].is_set()
+        assert cleaned["second"].wait(5)
+
+
+def test_login_expiry_closes_existing_websocket_and_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "pi_agent_core_py.web.auth.gateway.WEBSOCKET_SESSION_CHECK_SECONDS", 0.01,
+    )
+    now = [time()]
+    monkeypatch.setattr(
+        "pi_agent_core_py.web.auth.service.time", SimpleNamespace(time=lambda: now[0]),
+    )
+    cleaned: dict[str, Event] = {}
+    with TestClient(_build_live_gateway(tmp_path, cleaned)) as client:
+        _login_admin(client)
+        with client.websocket_connect("/ws/live/expired") as socket:
+            assert socket.receive_text() == "ready"
+            now[0] += 61
+            assert cleaned["expired"].wait(5), "Expired websocket handler did not clean up"
+            with pytest.raises(WebSocketDisconnect) as disconnected:
+                socket.receive_text()
+            assert disconnected.value.code == 4401
+
+
+@pytest.mark.parametrize("failure", ["error", "timeout"])
+def test_websocket_revalidation_failure_stops_stream_and_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    monkeypatch.setattr(
+        "pi_agent_core_py.web.auth.gateway.WEBSOCKET_SESSION_CHECK_SECONDS", 0.01,
+    )
+    monkeypatch.setattr(
+        "pi_agent_core_py.web.auth.gateway.WEBSOCKET_SESSION_CHECK_TIMEOUT_SECONDS", 0.02,
+    )
+    cleaned: dict[str, Event] = {}
+    app = _build_live_gateway(tmp_path, cleaned)
+    with TestClient(app) as client:
+        _login_admin(client)
+        with client.websocket_connect("/ws/live/unavailable") as socket:
+            assert socket.receive_text() == "ready"
+
+            async def unavailable(token: str | None) -> AuthUser | None:
+                if failure == "error":
+                    raise RuntimeError("private-auth-error")
+                await asyncio.Event().wait()
+                return None
+
+            monkeypatch.setattr(app.state.auth_service, "resolve_session", unavailable)
+            assert cleaned["unavailable"].wait(5), "Unauthenticated handler did not clean up"
+            with pytest.raises(WebSocketDisconnect) as disconnected:
+                socket.receive_text()
+            assert disconnected.value.code == 4401
+            assert "private-auth-error" not in disconnected.value.reason
 
 
 @pytest.mark.parametrize(

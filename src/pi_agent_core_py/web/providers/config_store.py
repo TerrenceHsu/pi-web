@@ -1,10 +1,10 @@
 """SQLite-backed Provider Profile + Session Model Binding store（P1-E2-1）.
 
 持久化用户配置的 Provider Profile 与每 Session 的 Model Binding——**不**含
-Secret / API Key / Base URL / Capability 等任何敏感或派生字段。
+Secret / API Key；规范化的协议与端点属于非密钥连接配置。
 
 **职责边界（E2-1）**：
-- ✅ `web_provider_config_schema_meta` 独立 schema 版本管理（v1）
+- ✅ `web_provider_config_schema_meta` 独立 schema 版本管理（v2，v1 增量升级）
 - ✅ `web_provider_profiles` 表 + CHECK 约束 + 索引（含 partial unique default）
 - ✅ `web_session_model_bindings` 表 + FK ON DELETE RESTRICT + 索引
 - ✅ Profile CRUD（`provider_id` 创建后 immutable）
@@ -17,7 +17,7 @@ Secret / API Key / Base URL / Capability 等任何敏感或派生字段。
 - ❌ 不调 ProviderRegistry（E2-2）
 - ❌ 不调 LLM / network / 静态 model_options（E2-2）
 - ❌ 不修改 `web_credentials_schema_meta` / `extension_store` schema
-- ❌ 不持久化 base_url / masked_value / fingerprint / validation_status
+- ❌ 不持久化 masked_value / fingerprint / validation_status
 
 **事务隔离**：
 - 生产路径拥有**独立 aiosqlite.Connection**（与 session/extension/credentials store
@@ -29,7 +29,7 @@ Secret / API Key / Base URL / Capability 等任何敏感或派生字段。
 
 **安全约束**：
 - SQLite 行 / 列不得含 api_key / secret / secret_value / secret_ref / fingerprint /
-  masked_value / authorization / headers / base_url / validation_endpoint
+  masked_value / authorization / headers / validation_endpoint
 - Error 消息可含 profile_id / session_id（短 ID），但**不得**含完整 row dump /
   SQL 参数 / credential_id / model_id / 原始 sqlite exception / DDL
 - `ProviderConfigRecordDecodeError` 不得 dump row
@@ -47,6 +47,8 @@ from typing import Any, Literal
 
 import aiosqlite
 
+from ...ai.providers.endpoints import ApiStyle, normalize_api_style, normalize_base_url
+
 # ============================================================================
 # Types
 # ============================================================================
@@ -62,7 +64,7 @@ BindingSource = Literal["default", "explicit"]
 
 @dataclass(frozen=True)
 class ProviderProfile:
-    """Persisted Provider Profile. **Never** contains Secret / API Key / Base URL."""
+    """Persisted configuration. Endpoint URLs cannot embed credentials or queries."""
 
     id: str
     name: str
@@ -73,6 +75,8 @@ class ProviderProfile:
     is_default: bool
     created_at: int                 # ms epoch
     updated_at: int                 # ms epoch
+    api_style: ApiStyle | None = None
+    base_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -105,7 +109,7 @@ class ProviderConfigSchemaVersionError(ProviderConfigSchemaError):
 
 
 class ProviderConfigSchemaValidationError(ProviderConfigSchemaError):
-    """Raised when version=1 but expected tables/columns/checks/constraints missing."""
+    """Raised when expected tables/columns/checks/constraints are missing."""
 
 
 class ProviderProfileNotFoundError(ProviderConfigStoreError):
@@ -132,6 +136,10 @@ class SessionModelBindingConflictError(ProviderConfigStoreError):
     """Raised when upsert_binding hits an unexpected integrity conflict."""
 
 
+class SessionModelBindingSessionNotFoundError(ProviderConfigStoreError):
+    """The Session disappeared before its binding write could commit."""
+
+
 class ProviderConfigRecordDecodeError(ProviderConfigStoreError):
     """Raised when a row cannot be decoded.
 
@@ -144,7 +152,7 @@ class ProviderConfigRecordDecodeError(ProviderConfigStoreError):
 # ============================================================================
 
 
-WEB_PROVIDER_CONFIG_SCHEMA_VERSION = 1
+WEB_PROVIDER_CONFIG_SCHEMA_VERSION = 2
 
 _SCHEMA_META_KEY = "version"
 
@@ -181,7 +189,9 @@ CREATE TABLE IF NOT EXISTS web_provider_profiles (
                         CHECK(is_default IN (0, 1)),
 
     created_at      INTEGER NOT NULL,
-    updated_at      INTEGER NOT NULL
+    updated_at      INTEGER NOT NULL,
+    api_style       TEXT CHECK(api_style IN ('anthropic_compatible', 'openai_compatible')),
+    base_url        TEXT CHECK(base_url IS NULL OR length(base_url) BETWEEN 1 AND 2048)
 )
 """
 
@@ -226,6 +236,47 @@ _BINDING_INDEX_DDL: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS ix_session_bindings_profile
     ON web_session_model_bindings(profile_id)
     """,
+)
+
+
+_BINDING_SESSION_MISSING = "provider_binding_session_not_found"
+
+# Installed only by the Web composition root, after the Session schema exists.
+# Persistent triggers protect writes through every connection, including the
+# Session repository's DELETE transaction, without changing standalone storage.
+_SESSION_LIFECYCLE_TRIGGERS: tuple[tuple[str, str], ...] = (
+    (
+        "web_provider_binding_session_delete",
+        """
+        CREATE TRIGGER web_provider_binding_session_delete
+        AFTER DELETE ON sessions
+        BEGIN
+            DELETE FROM web_session_model_bindings WHERE session_id = OLD.id;
+        END
+        """,
+    ),
+    (
+        "web_provider_binding_session_insert",
+        """
+        CREATE TRIGGER web_provider_binding_session_insert
+        BEFORE INSERT ON web_session_model_bindings
+        WHEN NOT EXISTS (SELECT 1 FROM sessions WHERE id = NEW.session_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'provider_binding_session_not_found');
+        END
+        """,
+    ),
+    (
+        "web_provider_binding_session_update",
+        """
+        CREATE TRIGGER web_provider_binding_session_update
+        BEFORE UPDATE ON web_session_model_bindings
+        WHEN NOT EXISTS (SELECT 1 FROM sessions WHERE id = NEW.session_id)
+        BEGIN
+            SELECT RAISE(ABORT, 'provider_binding_session_not_found');
+        END
+        """,
+    ),
 )
 
 
@@ -402,6 +453,8 @@ def _encode_profile(p: ProviderProfile) -> tuple[Any, ...]:
         1 if p.is_default else 0,
         p.created_at,
         p.updated_at,
+        p.api_style,
+        p.base_url,
     )
 
 
@@ -424,6 +477,8 @@ def _decode_profile(row: aiosqlite.Row | dict[str, Any]) -> ProviderProfile:
             is_default=bool(row["is_default"]),
             created_at=int(row["created_at"]),
             updated_at=int(row["updated_at"]),
+            api_style=normalize_api_style(row["api_style"]),
+            base_url=normalize_base_url(row["base_url"]),
         )
     except (KeyError, IndexError, TypeError, ValueError) as e:
         suffix = (
@@ -469,7 +524,7 @@ class SQLiteProviderConfigStore:
     session/extension/credentials store 共享 connection 对象。多 Store 写同一
     DB 文件时由 SQLite 跨连接写锁保证一致性。
 
-    Schema 版本通过 ``web_provider_config_schema_meta`` 独立管理（v1）——不污染
+    Schema 版本通过 ``web_provider_config_schema_meta`` 独立管理（v2）——不污染
     E1 ``web_credentials_schema_meta`` 或 ``extension_store.SCHEMA_VERSION``.
     """
 
@@ -506,7 +561,7 @@ class SQLiteProviderConfigStore:
             now_ms: 时间注入（测试用固定时钟）.
 
         Returns:
-            Initialized store with v1 schema ready.
+            Initialized store with the current schema ready.
         """
         path_str = _validate_database_path(database_path)
 
@@ -626,6 +681,67 @@ class SQLiteProviderConfigStore:
                 "schema meta version is not an integer"
             ) from e
 
+    async def install_session_lifecycle_guards(self) -> int:
+        """Connect bindings to an existing Web Session table and prune only orphans.
+
+        Session deletion and binding removal commit or roll back together, even
+        through another connection. INSERT/UPDATE guards close the race between
+        the Service's existence check and a concurrent Session deletion. Startup
+        repair shares the installation transaction and never touches profiles,
+        credentials, or bindings whose Session still exists.
+
+        Returns the number of orphan bindings removed. A standalone Provider
+        database without ``sessions`` remains unchanged and returns zero.
+        """
+        db = self._require_db()
+        async with self._write_lock:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                async with db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sessions'"
+                ) as cursor:
+                    has_sessions = await cursor.fetchone() is not None
+                if not has_sessions:
+                    await db.execute("COMMIT")
+                    return 0
+
+                async with db.execute("PRAGMA table_info(sessions)") as cursor:
+                    columns = {row["name"] for row in await cursor.fetchall()}
+                if "id" not in columns:
+                    raise ProviderConfigSchemaValidationError("Session identity column is missing")
+
+                for name, ddl in _SESSION_LIFECYCLE_TRIGGERS:
+                    async with db.execute(
+                        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+                        (name,),
+                    ) as cursor:
+                        existing = await cursor.fetchone()
+                    if existing is None:
+                        await db.execute(ddl)
+                    elif (
+                        _normalize_ddl(existing["sql"] or "").strip()
+                        != _normalize_ddl(ddl).strip()
+                    ):
+                        raise ProviderConfigSchemaValidationError(
+                            "Provider Session lifecycle trigger does not match expected schema"
+                        )
+
+                cursor = await db.execute(
+                    "DELETE FROM web_session_model_bindings "
+                    "WHERE NOT EXISTS (SELECT 1 FROM sessions "
+                    "WHERE sessions.id = web_session_model_bindings.session_id)"
+                )
+                removed = cursor.rowcount
+                await cursor.close()
+                await db.execute("COMMIT")
+                return removed
+            except BaseException:
+                try:
+                    await db.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+
     # ------------------------------------------------------------------
     # Schema init / validate
     # ------------------------------------------------------------------
@@ -636,9 +752,10 @@ class SQLiteProviderConfigStore:
         1. 确保 schema_meta 表存在（CREATE IF NOT EXISTS）
         2. 读 version
         3. 按 version 分支：
-           - None → fresh DB，建 v1 schema（单事务原子）
-           - 1 → 只 validate，不重建
-           - >1 → raise（防 downgrade）
+           - None → fresh DB，建当前 schema（单事务原子）
+           - 1 → 验证旧结构，再原子追加协议与地址列，不重建数据
+           - 2 → 只 validate，不重建
+           - >2 → raise（防 downgrade）
            - 其它 → raise
         """
         db = self._db
@@ -650,6 +767,8 @@ class SQLiteProviderConfigStore:
 
         if version is None:
             await self._initialize_fresh_v1_schema()
+        elif version == 1:
+            await self._upgrade_v1_schema()
         elif version == WEB_PROVIDER_CONFIG_SCHEMA_VERSION:
             await self._validate_v1_schema()
         elif version > WEB_PROVIDER_CONFIG_SCHEMA_VERSION:
@@ -687,8 +806,38 @@ class SQLiteProviderConfigStore:
                 pass
             raise
 
-    async def _validate_v1_schema(self) -> None:
-        """version=1: read-only validation of tables / columns / indexes / CHECK / FK.
+    async def _upgrade_v1_schema(self) -> None:
+        """Add non-secret endpoint settings atomically; retain all existing rows and IDs."""
+        db = self._require_db()
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            version = await self.get_schema_version()
+            if version == 1:
+                await self._validate_v1_schema(legacy=True)
+                await db.execute(
+                    "ALTER TABLE web_provider_profiles ADD COLUMN api_style TEXT "
+                    "CHECK(api_style IN ('anthropic_compatible', 'openai_compatible'))"
+                )
+                await db.execute(
+                    "ALTER TABLE web_provider_profiles ADD COLUMN base_url TEXT "
+                    "CHECK(base_url IS NULL OR length(base_url) BETWEEN 1 AND 2048)"
+                )
+                await db.execute(
+                    "UPDATE web_provider_config_schema_meta SET value = ? WHERE key = ?",
+                    (str(WEB_PROVIDER_CONFIG_SCHEMA_VERSION), _SCHEMA_META_KEY),
+                )
+            elif version != WEB_PROVIDER_CONFIG_SCHEMA_VERSION:
+                raise ProviderConfigSchemaVersionError("Provider schema changed during upgrade")
+            await self._validate_v1_schema()
+            await db.execute("COMMIT")
+        except BaseException:
+            await db.execute("ROLLBACK")
+            raise
+
+    async def _validate_v1_schema(self, *, legacy: bool = False) -> None:
+        """Read-only validation of tables / columns / indexes / CHECK / FK.
+
+        ``legacy=True`` validates v1 before the additive migration.
 
         **Never** auto-repair—拒绝任何 schema 漂移。
         """
@@ -726,8 +875,12 @@ class SQLiteProviderConfigStore:
         forbidden_columns = {
             "api_key", "secret", "secret_value", "secret_ref",
             "fingerprint", "masked_value", "authorization",
-            "headers", "base_url", "validation_endpoint",
+            "headers", "validation_endpoint",
         }
+        if legacy:
+            forbidden_columns |= {"api_style", "base_url"}
+        elif not {"api_style", "base_url"}.issubset(columns):
+            raise ProviderConfigSchemaValidationError("Provider endpoint columns are missing")
         present_forbidden = forbidden_columns & columns
         if present_forbidden:
             raise ProviderConfigSchemaValidationError(
@@ -739,6 +892,19 @@ class SQLiteProviderConfigStore:
         # SQLite quirk: TEXT PRIMARY KEY columns report notnull=0 in PRAGMA
         # table_info; rely on pk > 0 for those instead.
         col_meta = {r["name"]: r for r in rows}
+        if not legacy:
+            for col in ("api_style", "base_url"):
+                if col_meta[col]["type"].upper() != "TEXT" or col_meta[col]["notnull"] != 0:
+                    raise ProviderConfigSchemaValidationError("Provider endpoint column is invalid")
+            if _extract_check_enum_values(profiles_row["sql"], "api_style") != frozenset({
+                "anthropic_compatible", "openai_compatible",
+            }):
+                raise ProviderConfigSchemaValidationError("Provider protocol constraint is missing")
+            if not re.search(
+                r"length\s*\(\s*base_url\s*\)\s+BETWEEN\s+1\s+AND\s+2048",
+                profiles_row["sql"], re.IGNORECASE,
+            ):
+                raise ProviderConfigSchemaValidationError("Provider endpoint constraint is missing")
         for col in required_profile_columns:
             meta = col_meta[col]
             if meta["pk"] > 0:
@@ -774,7 +940,7 @@ class SQLiteProviderConfigStore:
                 f"version=1 but web_session_model_bindings missing columns: "
                 f"{sorted(bmissing)}"
             )
-        present_forbidden_b = forbidden_columns & bcolumns
+        present_forbidden_b = (forbidden_columns | {"api_style", "base_url"}) & bcolumns
         if present_forbidden_b:
             raise ProviderConfigSchemaValidationError(
                 f"version=1 but web_session_model_bindings contains forbidden "
@@ -950,6 +1116,8 @@ class SQLiteProviderConfigStore:
         default_model: str,
         enabled: bool = True,
         is_default: bool = False,
+        api_style: ApiStyle | None = None,
+        base_url: str | None = None,
     ) -> ProviderProfile:
         """Insert a new ProviderProfile. Raises on duplicate id or invalid state."""
         _validate_profile_id(profile_id)
@@ -957,6 +1125,8 @@ class SQLiteProviderConfigStore:
         _validate_provider_id_field(provider_id)
         _validate_credential_id_field(credential_id)
         _validate_model_id_field(default_model)
+        api_style = normalize_api_style(api_style)
+        base_url = normalize_base_url(base_url)
 
         if is_default and not enabled:
             raise ProviderProfileStateError(
@@ -979,8 +1149,8 @@ class SQLiteProviderConfigStore:
                     """
                     INSERT INTO web_provider_profiles (
                         id, name, provider_id, credential_id, default_model,
-                        enabled, is_default, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        enabled, is_default, created_at, updated_at, api_style, base_url
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         profile_id,
@@ -992,6 +1162,8 @@ class SQLiteProviderConfigStore:
                         1 if is_default else 0,
                         now,
                         now,
+                        api_style,
+                        base_url,
                     ),
                 )
                 await db.execute("COMMIT")
@@ -1071,6 +1243,8 @@ class SQLiteProviderConfigStore:
         default_model: str | None = None,
         enabled: bool | None = None,
         is_default: bool | None = None,
+        api_style: ApiStyle | None = None,
+        base_url: str | None = None,
     ) -> ProviderProfile:
         """Update mutable fields of a Profile.
 
@@ -1090,6 +1264,8 @@ class SQLiteProviderConfigStore:
             _validate_credential_id_field(credential_id)
         if default_model is not None:
             _validate_model_id_field(default_model)
+        api_style = normalize_api_style(api_style)
+        base_url = normalize_base_url(base_url)
 
         # Pre-resolve new state to detect illegal combination early (pre-lock).
         # Final resolution happens inside the transaction with current row.
@@ -1151,7 +1327,9 @@ class SQLiteProviderConfigStore:
                         default_model = ?,
                         enabled = ?,
                         is_default = ?,
-                        updated_at = ?
+                        updated_at = ?,
+                        api_style = ?,
+                        base_url = ?
                     WHERE id = ?
                     """,
                     (
@@ -1165,6 +1343,8 @@ class SQLiteProviderConfigStore:
                         1 if new_enabled else 0,
                         1 if new_is_default else 0,
                         new_updated,
+                        api_style if api_style is not None else current.api_style,
+                        base_url if base_url is not None else current.base_url,
                         profile_id,
                     ),
                 )
@@ -1322,6 +1502,18 @@ class SQLiteProviderConfigStore:
                         """,
                         (profile_id, model_id, source, new_updated, session_id),
                     )
+                # Capture the committed write's snapshot before releasing the
+                # database lock. A concurrent Session DELETE may remove this
+                # binding immediately after commit; a second read must not turn
+                # that valid ordering into an AssertionError.
+                async with db.execute(
+                    "SELECT * FROM web_session_model_bindings WHERE session_id = ?",
+                    (session_id,),
+                ) as cursor:
+                    result_row = await cursor.fetchone()
+                if result_row is None:
+                    raise ProviderConfigStoreError("session binding write produced no row")
+                result = _decode_binding(result_row)
                 await db.execute("COMMIT")
             except aiosqlite.IntegrityError as e:
                 try:
@@ -1329,6 +1521,10 @@ class SQLiteProviderConfigStore:
                 except Exception:
                     pass
                 msg = str(e).lower()
+                if msg == _BINDING_SESSION_MISSING:
+                    raise SessionModelBindingSessionNotFoundError(
+                        "session referenced by binding does not exist"
+                    ) from None
                 if "foreign key" in msg or "profile_id" in msg:
                     # FK RESTRICT—profile doesn't exist
                     raise ProviderProfileNotFoundError(
@@ -1345,8 +1541,6 @@ class SQLiteProviderConfigStore:
                     pass
                 raise
 
-        result = await self.get_binding(session_id)
-        assert result is not None
         return result
 
     async def delete_binding(
@@ -1421,6 +1615,7 @@ __all__ = [
     "ProviderProfileInUseError",
     "ProviderProfileStateError",
     "SessionModelBindingConflictError",
+    "SessionModelBindingSessionNotFoundError",
     "ProviderConfigRecordDecodeError",
     # Constants
     "WEB_PROVIDER_CONFIG_SCHEMA_VERSION",

@@ -62,6 +62,8 @@ const { api, FakeApiError } = vi.hoisted(() => {
       updateProviderProfile: vi.fn(),
       deleteProviderProfile: vi.fn(),
       getProviderProfileModels: vi.fn(),
+      getModelCapabilities: vi.fn(),
+      putModelCapabilities: vi.fn(),
       getSessionModelBinding: vi.fn(),
       putSessionModelBinding: vi.fn(),
     },
@@ -125,6 +127,8 @@ function makeProfile(overrides: Partial<ProviderProfileView> = {}): ProviderProf
     name: "GLM Work",
     provider_id: "glm",
     provider_display_name: "GLM",
+    api_style: "anthropic_compatible",
+    base_url: "https://open.bigmodel.cn/api/anthropic",
     credential_id: "cred-1",
     credential_masked_value: "sk***aaaa",
     default_model: "glm-4.5-flash",
@@ -480,6 +484,45 @@ describe("Scenario B: A/B session switch discards stale binding response", () =>
 // ============================================================================
 // Scenario E: 请求运行中 Selector + Settings 入口 disabled
 // ============================================================================
+
+describe("unified provider selector", () => {
+  it("lists all enabled ready profiles without vendor optgroups, including legacy Anthropic", async () => {
+    const profiles = [
+      makeProfile({ id: "prof-glm", provider_id: "glm", name: "Original gateway" }),
+      makeProfile({ id: "prof-anthropic", provider_id: "anthropic", name: "Legacy Anthropic" }),
+      makeProfile({ id: "prof-qwen", provider_id: "qwen", name: "Legacy Qwen" }),
+      makeProfile({ id: "prof-kimi", provider_id: "kimi", name: "Legacy Kimi" }),
+      makeProfile({ id: "prof-openai", provider_id: "openai_compatible", name: "Custom OpenAI" }),
+      makeProfile({ id: "prof-custom-anthropic", provider_id: "anthropic_compatible", name: "Custom Anthropic" }),
+      makeProfile({ id: "prof-disabled", enabled: false, status: "disabled" }),
+      makeProfile({ id: "prof-needs-key", status: "needs_key" }),
+    ]
+    const { providerStore } = await bootProviderStore({ profiles })
+    seedSessionStore([{ id: "sess-1", title: "S1" }]).activeSessionId = "sess-1"
+    api.getSessionModelBinding.mockResolvedValue(makeBindingResponse(makeBinding({
+      profile_id: "prof-anthropic", model_id: "session-selected-model",
+    })))
+    await providerStore.refreshForSession("sess-1")
+    const wrapper = mount(ChatPanel)
+    await flushAll()
+
+    const select = wrapper.get('[data-testid="provider-profile-select"]')
+    const profileIds = select.findAll("option")
+      .map((option) => option.attributes("value"))
+      .filter((value) => value?.startsWith("prof-"))
+    expect(profileIds).toEqual(profiles.slice(0, 6).map((profile) => profile.id))
+    expect(select.findAll("optgroup")).toHaveLength(0)
+    expect((select.element as HTMLSelectElement).value).toBe("prof-anthropic")
+    expect(wrapper.get('[data-testid="provider-selector"]').text())
+      .toContain("Legacy Anthropic · session-selected-model")
+    expect(wrapper.get('[data-testid="provider-selector"]').text())
+      .not.toContain("当前模型由旧配置管理")
+    expect(api.getProviderProfileModels).not.toHaveBeenCalled()
+    expect(api.getModelCapabilities).not.toHaveBeenCalled()
+    expect(api.putModelCapabilities).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+})
 
 describe("Scenario E: request running disables Selector + Settings entry", () => {
   it("chatStore.sending=true 时 ProviderSelector disabled", async () => {

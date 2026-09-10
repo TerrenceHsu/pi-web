@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Session browser media bridge",
+  "version": "1.0.0",
+  "permissions": ["tabCapture", "activeTab", "tabs"],
+  "incognito": "split",
+  "background": {"service_worker": "worker.js"},
+  "action": {"default_title": "Session browser media"},
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; connect-src 'none'; frame-src 'none'"
+  }
+}

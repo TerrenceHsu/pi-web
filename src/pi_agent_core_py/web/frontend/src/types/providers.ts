@@ -12,9 +12,13 @@
 // Provider 标识
 // ============================================================================
 
-export type ProviderId = "anthropic" | "glm" | "qwen" | "kimi"
-
-export type VisibleProviderId = "glm" | "qwen" | "kimi"
+export type ProviderId =
+  | "anthropic"
+  | "glm"
+  | "qwen"
+  | "kimi"
+  | "openai_compatible"
+  | "anthropic_compatible"
 
 export type ProviderApiStyle = "anthropic_compatible" | "openai_compatible"
 
@@ -88,6 +92,8 @@ export interface ProviderProfileView {
   name: string
   provider_id: ProviderId
   provider_display_name: string
+  api_style: ProviderApiStyle
+  base_url: string
   credential_id: string
   credential_masked_value: string | null
   default_model: string
@@ -165,6 +171,8 @@ export interface CredentialRotateRequest {
 export interface ProviderProfileCreateRequest {
   name: string
   provider_id: ProviderId
+  api_style?: ProviderApiStyle
+  base_url?: string
   credential_id: string
   default_model: string
   enabled?: boolean
@@ -174,6 +182,8 @@ export interface ProviderProfileCreateRequest {
 // 不含 provider_id——后端 immutable。
 export interface ProviderProfileUpdateRequest {
   name?: string
+  api_style?: ProviderApiStyle
+  base_url?: string
   credential_id?: string
   default_model?: string
   enabled?: boolean

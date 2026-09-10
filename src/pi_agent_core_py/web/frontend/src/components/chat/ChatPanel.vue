@@ -485,6 +485,7 @@ function dismissError() {
   flex-direction: column;
   height: 100%;
   overflow: hidden;
+  container: chat-pane / inline-size;
 }
 .chat-header {
   display: flex;
@@ -586,5 +587,31 @@ function dismissError() {
   background: transparent;
   color: inherit;
   cursor: pointer;
+}
+
+/* A wide browser window can still contain a narrow, user-resized chat pane. */
+@container chat-pane (max-width: 800px) {
+  .chat-header {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 12px;
+  }
+  .header-title {
+    flex: 1 1 calc(100% - 80px);
+    min-width: 0;
+  }
+  .header-status {
+    order: 1;
+    flex-shrink: 0;
+  }
+  .chat-header :deep(.provider-selector) {
+    order: 2;
+    flex: 1 1 100%;
+  }
+  .chat-header :deep(.context-budget) {
+    order: 3;
+    flex-wrap: wrap;
+    max-width: 100%;
+  }
 }
 </style>

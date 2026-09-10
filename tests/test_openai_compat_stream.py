@@ -47,7 +47,6 @@ from tests._openai_compat_fakes import (
     _FakeClient,
     empty_delta_chunk,
     make_event,
-    make_non_chunk_event,
     make_usage,
     mixed_delta_chunk,
     reasoning_chunk,
@@ -379,20 +378,16 @@ async def test_only_one_done_event_emitted() -> None:
 
 
 # ============================================================================
-# 非 chunk event 跳过
+# 原始 chunk 扩展字段
 # ============================================================================
 
 
 @pytest.mark.asyncio
-async def test_non_chunk_events_skipped() -> None:
-    """SDK 可能产生 content_part / tool_choice 等非 chunk 事件——continue."""
-    stream = _FakeAsyncStream(
-        [
-            make_non_chunk_event("content_part"),
-            make_event(text_delta_chunk("hi", finish_reason="stop")),
-            make_non_chunk_event("tool_choice"),
-        ]
-    )
+async def test_unknown_chunk_fields_ignored() -> None:
+    """兼容端点的未知字段不干扰正文解析。"""
+    chunk = text_delta_chunk("hi", finish_reason="stop")
+    chunk.provider_extension = {"vendor": "test"}
+    stream = _FakeAsyncStream([chunk])
     adapter, _ = _adapter(stream)
     events = await _collect(adapter, _req())
     assert any(isinstance(e, TextDeltaEvent) for e in events)

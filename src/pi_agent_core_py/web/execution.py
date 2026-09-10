@@ -599,6 +599,102 @@ class WebExecutionRuntime:
                 await self._approvals.cancel_request(identity.request_id)
                 await self.runtime.cancel(identity)
 
+    async def prepare_session_deletion(self, session_id: str) -> None:
+        """Revoke owned work and prove cleanup before removing its session rows.
+
+        The caller must first stop prompts and block new session operations.
+        Durable grants, cleanup debts, control leases and audit records stay intact;
+        an unknown cleanup result must remain retryable, never become a cascade.
+        """
+        try:
+            async with asyncio.timeout(35), self._maintenance_lock:
+                grants = await self.runtime.store.list_grants(session_id=session_id)
+                identities = {
+                    grant.scope.identity.task_id: grant.scope.identity for grant in grants
+                }
+                tracked_operations = {grant.scope.identity.operation_id for grant in grants}
+                requests = {
+                    task.request.request_id for task in tuple(self._tasks.values())
+                    if task.request.session_id == session_id
+                }
+                for prepared in tuple(self.bash_tasks.values()):
+                    identity = prepared.scope.identity
+                    if identity.session_id == session_id:
+                        identities[identity.task_id] = identity
+                for task in tuple(self._tasks.values()):
+                    if task.request.session_id == session_id and task.prepared is not None:
+                        identity = task.prepared.scope.identity
+                        identities[identity.task_id] = identity
+
+                # The shared control database can outlive an account runtime.
+                # Stop only exact account+session identities, never sweep globally.
+                for item in (await self.control.summary())["tasks"]:
+                    if (
+                        item["account_id"] == self._account
+                        and item["session_id"] == session_id
+                        and not item["released"]
+                    ):
+                        identity = ExecutionIdentity(
+                            **{field: item[field] for field in ExecutionIdentity.model_fields}
+                        )
+                        identities[identity.task_id] = identity
+                        await self.control.update(identity, stop=True)
+                if any(identity.account_id != self._account for identity in identities.values()):
+                    raise ExecutionDenied("session_cleanup_pending")
+                requests.update(identity.request_id for identity in identities.values())
+                for request_id in requests:
+                    await self._approvals.cancel_request(request_id)
+
+                pending = False
+                for identity in identities.values():
+                    try:
+                        await self.runtime.cancel(identity)
+                    except Exception:
+                        pending = True
+                # Include retained artifacts and operations recovered from SQLite,
+                # not just live request wrappers. Discard removes publish authority.
+                for record in await self._lifecycle.active_records(session_id=session_id):
+                    try:
+                        current = await self._lifecycle.get(record.operation_id)
+                        if not current.terminal and record.operation_id not in tracked_operations:
+                            # Legacy unbound operations have no durable container
+                            # cleanup proof. Keep their evidence instead of guessing.
+                            pending = True
+                            continue
+                        if "discard" in current.allowed_actions:
+                            current = await self._lifecycle.discard(record.operation_id)
+                        elif "cancel" in current.allowed_actions:
+                            current = await self._lifecycle.cancel(record.operation_id)
+                        if not current.terminal:
+                            pending = True
+                    except Exception:
+                        pending = True
+                if pending:
+                    raise ExecutionDenied("session_cleanup_pending")
+
+                for request_id, task in tuple(self._tasks.items()):
+                    if task.request.session_id == session_id:
+                        await self.close_task(request_id)
+                for request_id, prepared in tuple(self.bash_tasks.items()):
+                    if prepared.scope.identity.session_id == session_id:
+                        self.bash_tasks.pop(request_id, None)
+
+                if await self.runtime.store.list_grants(
+                    session_id=session_id, needs_maintenance=True,
+                ) or await self._lifecycle.active_records(session_id=session_id):
+                    raise ExecutionDenied("session_cleanup_pending")
+                if any(
+                    item["account_id"] == self._account
+                    and item["session_id"] == session_id
+                    and not item["released"]
+                    for item in (await self.control.summary())["tasks"]
+                ):
+                    raise ExecutionDenied("session_cleanup_pending")
+        except Exception:
+            # Do not expose backend exceptions or discard recovery evidence.
+            self.control.request_cleanup()
+            raise ExecutionDenied("session_cleanup_pending") from None
+
     async def revoke_task(self, identity: ExecutionIdentity) -> None:
         await self.runtime.store.get(identity)
         await self.runtime.cancel(identity)

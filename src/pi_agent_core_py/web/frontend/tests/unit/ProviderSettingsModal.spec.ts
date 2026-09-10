@@ -44,6 +44,8 @@ const { api, FakeApiError } = vi.hoisted(() => {
       updateProviderProfile: vi.fn(),
       deleteProviderProfile: vi.fn(),
       getProviderProfileModels: vi.fn(),
+      getModelCapabilities: vi.fn(),
+      putModelCapabilities: vi.fn(),
       getSessionModelBinding: vi.fn(),
       putSessionModelBinding: vi.fn(),
     },
@@ -86,6 +88,8 @@ function makeProfile(overrides: Partial<ProviderProfileView> = {}): ProviderProf
     name: "Profile",
     provider_id: "glm",
     provider_display_name: "GLM",
+    api_style: "anthropic_compatible",
+    base_url: "https://open.bigmodel.cn/api/anthropic",
     credential_id: "cred-1",
     credential_masked_value: "sk***aaaa",
     default_model: "glm-4.5-flash",
@@ -203,7 +207,7 @@ describe("open / close / layout", () => {
     expect(api.listCredentials).toHaveBeenCalledTimes(1)
   })
 
-  it("renders only GLM / Qwen / Kimi sections", async () => {
+  it("renders one unified section with one Add Profile button", async () => {
     api.getProviderDefinitions.mockResolvedValue(ALL_DEFINITIONS)
     api.listProviderProfiles.mockResolvedValue({ profiles: [] })
     api.listCredentials.mockResolvedValue({ credentials: [] })
@@ -212,10 +216,12 @@ describe("open / close / layout", () => {
     await flushAll()
 
     const sections = bodyFindAll(".provider-section")
-    expect(sections).toHaveLength(3)
+    expect(sections).toHaveLength(1)
+    expect(bodyFindAll('[data-testid="add-profile-btn"]')).toHaveLength(1)
+    expect(bodyFindAll("[data-provider-id]")).toHaveLength(0)
   })
 
-  it("does not render Anthropic section", async () => {
+  it("includes legacy Anthropic and GLM profiles in the same section", async () => {
     api.getProviderDefinitions.mockResolvedValue(ALL_DEFINITIONS)
     api.listProviderProfiles.mockResolvedValue({
       profiles: [
@@ -228,8 +234,10 @@ describe("open / close / layout", () => {
     mountModal({ open: true })
     await flushAll()
 
-    expect(bodyExists('[data-provider-id="anthropic"]')).toBe(false)
-    expect(bodyExists('[data-provider-id="glm"]')).toBe(true)
+    expect(bodyFindAll(".provider-section")).toHaveLength(1)
+    expect(bodyExists('[data-profile-id="p-anthropic"]')).toBe(true)
+    expect(bodyExists('[data-profile-id="p-glm"]')).toBe(true)
+    expect(bodyFindAll("[data-provider-id]")).toHaveLength(0)
   })
 
   it("shows all profiles for a provider including disabled", async () => {
@@ -259,7 +267,7 @@ describe("open / close / layout", () => {
     expect(forms.length).toBeGreaterThanOrEqual(3)
   })
 
-  it("Add Profile button creates at most one draft per provider", async () => {
+  it("Add Profile button creates at most one draft", async () => {
     api.getProviderDefinitions.mockResolvedValue(ALL_DEFINITIONS)
     api.listProviderProfiles.mockResolvedValue({ profiles: [] })
     api.listCredentials.mockResolvedValue({ credentials: [] })
@@ -267,11 +275,11 @@ describe("open / close / layout", () => {
     mountModal({ open: true })
     await flushAll()
 
-    // 点击 GLM 的 Add Profile
-    await bodyGet('[data-provider-id="glm"] [data-testid="add-profile-btn"]').trigger("click")
+    await bodyGet('[data-testid="add-profile-btn"]').trigger("click")
     await flushAll()
     // 第二次——按钮应消失
-    expect(bodyFind('[data-provider-id="glm"] [data-testid="add-profile-btn"]')).toBeNull()
+    expect(bodyFind('[data-testid="add-profile-btn"]')).toBeNull()
+    expect(bodyFindAll('[data-profile-id="draft"]')).toHaveLength(1)
   })
 
   it("cancel draft clears draft form", async () => {
@@ -281,7 +289,7 @@ describe("open / close / layout", () => {
 
     mountModal({ open: true })
     await flushAll()
-    await bodyGet('[data-provider-id="glm"] [data-testid="add-profile-btn"]').trigger("click")
+    await bodyGet('[data-testid="add-profile-btn"]').trigger("click")
     await flushAll()
     expect(bodyExists('[data-profile-id="draft"]')).toBe(true)
 
@@ -308,6 +316,154 @@ describe("open / close / layout", () => {
 // ============================================================================
 // Session switch
 // ============================================================================
+
+describe("unified protocol and endpoint configuration", () => {
+  async function openSettings(profiles: ProviderProfileView[] = []) {
+    useSessionStore().activeSessionId = "sess-1"
+    api.getProviderDefinitions.mockResolvedValue(ALL_DEFINITIONS)
+    api.listProviderProfiles.mockResolvedValue({ profiles })
+    api.listCredentials.mockResolvedValue({ credentials: profiles.length ? [makeCredential()] : [] })
+    const wrapper = mountModal()
+    await flushAll()
+    return wrapper
+  }
+
+  async function fillDraft(baseUrl: string) {
+    await bodyGet('[data-testid="add-profile-btn"]').trigger("click")
+    await flushAll()
+    await bodyGet('[data-testid="profile-name-input"]').setValue("My gateway")
+    await bodyGet('[data-testid="model-input"]').setValue("custom-model")
+    await bodyGet('[data-testid="base-url-input"]').setValue(baseUrl)
+    await bodyGet('[data-testid="credential-label-input"]').setValue("Gateway key")
+    await bodyGet('[data-testid="api-key-input"]').setValue(SECRET_MARKER)
+  }
+
+  function expectNoModelMetadataCalls() {
+    expect(api.getProviderProfileModels).not.toHaveBeenCalled()
+    expect(api.getModelCapabilities).not.toHaveBeenCalled()
+    expect(api.putModelCapabilities).not.toHaveBeenCalled()
+  }
+
+  it.each(["openai_compatible", "anthropic_compatible"] as const)(
+    "creates a generic %s profile without a vendor selector or model limit writes",
+    async (apiStyle) => {
+      const wrapper = await openSettings()
+      await fillDraft("https://gateway.example.test/v1")
+      const protocol = bodyGet('[data-testid="api-style-select"]')
+      expect((protocol.element as HTMLSelectElement).value).toBe("openai_compatible")
+      expect(protocol.findAll("option").map((option) => option.attributes("value"))).toEqual([
+        "openai_compatible", "anthropic_compatible",
+      ])
+      await protocol.setValue(apiStyle)
+      api.createCredential.mockResolvedValue({ credential: makeCredential(), warnings: [] })
+      api.createProviderProfile.mockResolvedValue({
+        profile: makeProfile({ provider_id: apiStyle, api_style: apiStyle }),
+      })
+
+      await bodyGet('[data-testid="save-configuration-btn"]').trigger("click")
+      await flushAll()
+
+      expect(api.createCredential).toHaveBeenCalledTimes(1)
+      expect(api.createProviderProfile).toHaveBeenCalledWith({
+        name: "My gateway",
+        provider_id: apiStyle,
+        api_style: apiStyle,
+        base_url: "https://gateway.example.test/v1",
+        credential_id: "cred-1",
+        default_model: "custom-model",
+        enabled: true,
+        is_default: false,
+      })
+      expectNoModelMetadataCalls()
+      expect(bodyExists('[data-testid="context-window-input"]')).toBe(false)
+      expect(bodyExists('[data-testid="max-output-tokens-input"]')).toBe(false)
+      wrapper.unmount()
+    },
+  )
+
+  it.each([
+    "http://localhost:8080/v1",
+    "http://127.0.0.1:8080/v1",
+    "http://[::1]:8080/v1",
+    "https://gateway.example.test/v1",
+  ])("updates a legacy profile to %s while retaining profile and credential IDs", async (baseUrl) => {
+    const profile = makeProfile()
+    const wrapper = await openSettings([profile])
+    expect((bodyGet('[data-testid="api-style-select"]').element as HTMLSelectElement).value)
+      .toBe("anthropic_compatible")
+    expect((bodyGet('[data-testid="base-url-input"]').element as HTMLInputElement).value)
+      .toBe(profile.base_url)
+    await bodyGet('[data-testid="api-style-select"]').setValue("openai_compatible")
+    await bodyGet('[data-testid="base-url-input"]').setValue(baseUrl)
+    api.updateProviderProfile.mockResolvedValue({ profile })
+
+    await bodyGet('[data-testid="save-configuration-btn"]').trigger("click")
+    await flushAll()
+
+    expect(api.updateProviderProfile).toHaveBeenCalledWith("prof-1", {
+      name: "Profile",
+      api_style: "openai_compatible",
+      base_url: baseUrl,
+      credential_id: "cred-1",
+      default_model: "glm-4.5-flash",
+      enabled: true,
+      is_default: true,
+    })
+    expect(api.createProviderProfile).not.toHaveBeenCalled()
+    expect(api.createCredential).not.toHaveBeenCalled()
+    expect(api.rotateCredentialSecret).not.toHaveBeenCalled()
+    expect(api.updateCredentialLabel).not.toHaveBeenCalled()
+    expectNoModelMetadataCalls()
+    wrapper.unmount()
+  })
+
+  it("does not render or read context and output limits for existing profiles", async () => {
+    const wrapper = await openSettings([makeProfile()])
+    expect(bodyExists('[data-testid="context-window-input"]')).toBe(false)
+    expect(bodyExists('[data-testid="max-output-tokens-input"]')).toBe(false)
+    expect(document.body.textContent).not.toContain("Context window")
+    expect(document.body.textContent).not.toContain("Max output tokens")
+    expectNoModelMetadataCalls()
+    wrapper.unmount()
+  })
+
+  it.each([
+    "",
+    "http://remote.example.test/v1",
+    "http://127.1/v1",
+    "https://user:password@gateway.example.test/v1",
+    "https://@gateway.example.test/v1",
+    "https://gateway.example.test:0/v1",
+    "https://gateway%2eexample.test/v1",
+    "https://gateway.example.test/v1?api_key=secret",
+    "https://gateway.example.test/v1#secret",
+  ])("rejects invalid endpoint %j before creating a credential", async (baseUrl) => {
+    const wrapper = await openSettings()
+    await fillDraft(baseUrl)
+    await bodyGet('[data-testid="save-configuration-btn"]').trigger("click")
+    await flushAll()
+    expect(api.createCredential).not.toHaveBeenCalled()
+    expect(api.rotateCredentialSecret).not.toHaveBeenCalled()
+    expect(api.updateCredentialLabel).not.toHaveBeenCalled()
+    expect(api.createProviderProfile).not.toHaveBeenCalled()
+    expect(bodyFindAll(".field-error").length).toBeGreaterThan(0)
+    expectNoModelMetadataCalls()
+    wrapper.unmount()
+  })
+
+  it("rejects an invalid edited endpoint before rotating an existing key", async () => {
+    const wrapper = await openSettings([makeProfile()])
+    await bodyGet('[data-testid="api-key-input"]').setValue(SECRET_MARKER)
+    await bodyGet('[data-testid="base-url-input"]').setValue("https://user:pass@gateway.example.test")
+    await bodyGet('[data-testid="save-configuration-btn"]').trigger("click")
+    await flushAll()
+    expect(bodyFindAll(".field-error").length).toBeGreaterThan(0)
+    expect(api.createCredential).not.toHaveBeenCalled()
+    expect(api.rotateCredentialSecret).not.toHaveBeenCalled()
+    expect(api.updateProviderProfile).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+})
 
 describe("session switch", () => {
   it("emits close when activeSessionId changes during open", async () => {
@@ -691,7 +847,7 @@ describe("secret safety", () => {
     const store = useProviderStore()
     const wrapper = mountModal({ open: true })
     await flushAll()
-    await bodyGet('[data-provider-id="glm"] [data-testid="add-profile-btn"]').trigger("click")
+    await bodyGet('[data-testid="add-profile-btn"]').trigger("click")
     await flushAll()
     await bodyGet('[data-profile-id="draft"] [data-testid="storage-mode-env"]').setValue(true)
     await bodyGet('[data-profile-id="draft"] [data-testid="env-var-name-input"]').setValue("MY_VAR")

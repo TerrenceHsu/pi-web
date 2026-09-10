@@ -14,9 +14,9 @@ type ResizeColumn = "sidebar" | "workspace"
 const SIDEBAR_MIN = 180
 const SIDEBAR_MAX = 440
 const WORKSPACE_MIN = 280
-const WORKSPACE_MAX = 760
-const MAIN_MIN = 420
-const RESIZER_TOTAL = 12
+const MAIN_MIN = 320
+const RESIZER_TOTAL = 16
+const DESKTOP_MIN = 1050
 const SIDEBAR_WIDTH_KEY = "pi-agent-layout-sidebar-width"
 const WORKSPACE_WIDTH_KEY = "pi-agent-layout-workspace-width"
 
@@ -26,81 +26,157 @@ function clamp(value: number, minimum: number, maximum: number): number {
 
 function storedWidth(key: string, fallback: number, minimum: number, maximum: number): number {
   try {
-    const value = Number.parseInt(window.localStorage.getItem(key) ?? "", 10)
+    const stored = window.localStorage.getItem(key)
+    const value = stored?.trim() ? Number(stored) : Number.NaN
     return Number.isFinite(value) ? clamp(value, minimum, maximum) : fallback
   } catch {
     return fallback
   }
 }
 
-const sidebarWidth = ref(storedWidth(SIDEBAR_WIDTH_KEY, 260, SIDEBAR_MIN, SIDEBAR_MAX))
-const workspaceWidth = ref(storedWidth(WORKSPACE_WIDTH_KEY, 380, WORKSPACE_MIN, WORKSPACE_MAX))
+// Store the user's preferred sizes separately from the fitted sizes. Resizing the
+// window must not overwrite a wide-screen preference with a temporary clamp.
+const preferredSidebarWidth = ref(storedWidth(SIDEBAR_WIDTH_KEY, 260, SIDEBAR_MIN, SIDEBAR_MAX))
+const preferredWorkspaceWidth = ref(
+  storedWidth(WORKSPACE_WIDTH_KEY, 380, WORKSPACE_MIN, Number.MAX_SAFE_INTEGER),
+)
+const viewportWidth = ref(window.innerWidth)
+const desktop = computed(() => viewportWidth.value > DESKTOP_MIN)
+const sidebarWidth = computed(() =>
+  clamp(
+    preferredSidebarWidth.value,
+    SIDEBAR_MIN,
+    Math.max(
+      SIDEBAR_MIN,
+      Math.min(SIDEBAR_MAX, viewportWidth.value - WORKSPACE_MIN - MAIN_MIN - RESIZER_TOTAL),
+    ),
+  ),
+)
+const workspaceMaximum = computed(() =>
+  Math.max(WORKSPACE_MIN, viewportWidth.value - sidebarWidth.value - MAIN_MIN - RESIZER_TOTAL),
+)
+const workspaceWidth = computed(() =>
+  clamp(preferredWorkspaceWidth.value, WORKSPACE_MIN, workspaceMaximum.value),
+)
+const sidebarMaximum = computed(() =>
+  Math.max(
+    SIDEBAR_MIN,
+    Math.min(SIDEBAR_MAX, viewportWidth.value - workspaceWidth.value - MAIN_MIN - RESIZER_TOTAL),
+  ),
+)
+const mainWidth = computed(() =>
+  Math.max(0, viewportWidth.value - sidebarWidth.value - workspaceWidth.value - RESIZER_TOTAL),
+)
 const resizing = ref<ResizeColumn | null>(null)
 const gridStyle = computed<Record<string, string>>(() => ({
   "--sidebar-width": `${sidebarWidth.value}px`,
   "--workspace-width": `${workspaceWidth.value}px`,
 }))
 
-let resizeStartX = 0
-let resizeStartWidth = 0
-
-function availableMaximum(column: ResizeColumn): number {
-  const total = shell.value?.clientWidth || window.innerWidth
-  if (window.innerWidth <= 1050) return column === "sidebar" ? SIDEBAR_MAX : WORKSPACE_MAX
-  if (column === "sidebar") {
-    return Math.min(SIDEBAR_MAX, total - workspaceWidth.value - MAIN_MIN - RESIZER_TOTAL)
-  }
-  return Math.min(WORKSPACE_MAX, total - sidebarWidth.value - MAIN_MIN - RESIZER_TOTAL)
-}
+let drag: {
+  column: ResizeColumn
+  pointerId: number
+  target: HTMLElement
+  startX: number
+  startWidth: number
+} | null = null
 
 function setColumnWidth(column: ResizeColumn, nextWidth: number): void {
+  if (!Number.isFinite(nextWidth)) return
   const minimum = column === "sidebar" ? SIDEBAR_MIN : WORKSPACE_MIN
-  const configuredMaximum = column === "sidebar" ? SIDEBAR_MAX : WORKSPACE_MAX
-  const maximum = Math.max(minimum, Math.min(configuredMaximum, availableMaximum(column)))
-  if (column === "sidebar") sidebarWidth.value = clamp(nextWidth, minimum, maximum)
-  else workspaceWidth.value = clamp(nextWidth, minimum, maximum)
+  const maximum = column === "sidebar" ? sidebarMaximum.value : workspaceMaximum.value
+  const fitted = Math.round(clamp(nextWidth, minimum, maximum))
+  if (column === "sidebar") preferredSidebarWidth.value = fitted
+  else preferredWorkspaceWidth.value = fitted
 }
 
 function persistWidths(): void {
   try {
-    window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth.value))
-    window.localStorage.setItem(WORKSPACE_WIDTH_KEY, String(workspaceWidth.value))
+    window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(preferredSidebarWidth.value))
+    window.localStorage.setItem(WORKSPACE_WIDTH_KEY, String(preferredWorkspaceWidth.value))
   } catch {
     // Layout persistence is optional (for example, storage can be disabled in private mode).
   }
 }
 
 function beginResize(column: ResizeColumn, event: PointerEvent): void {
-  if (window.innerWidth <= 1050) return
+  if (!desktop.value || drag || event.button !== 0 || event.isPrimary === false) return
   event.preventDefault()
+  const target = event.currentTarget as HTMLElement
+  target.focus({ preventScroll: true })
+  drag = {
+    column,
+    pointerId: event.pointerId,
+    target,
+    startX: event.clientX,
+    startWidth: column === "sidebar" ? sidebarWidth.value : workspaceWidth.value,
+  }
   resizing.value = column
-  resizeStartX = event.clientX
-  resizeStartWidth = column === "sidebar" ? sidebarWidth.value : workspaceWidth.value
+  try {
+    target.setPointerCapture(event.pointerId)
+  } catch {
+    // Window listeners also support environments without pointer capture.
+  }
 }
 
 function onPointerMove(event: PointerEvent): void {
-  if (!resizing.value) return
-  setColumnWidth(resizing.value, resizeStartWidth + event.clientX - resizeStartX)
+  if (!drag || event.pointerId !== drag.pointerId) return
+  setColumnWidth(drag.column, drag.startWidth + event.clientX - drag.startX)
 }
 
-function stopResize(): void {
-  if (!resizing.value) return
+function finishResize(persist = true): void {
+  if (!drag) return
+  const previous = drag
+  drag = null
   resizing.value = null
-  persistWidths()
+  try {
+    if (previous.target.hasPointerCapture(previous.pointerId)) {
+      previous.target.releasePointerCapture(previous.pointerId)
+    }
+  } catch {
+    // The element/pointer may already be detached (cancel, lost capture, unmount).
+  }
+  if (persist) persistWidths()
+}
+
+function stopResize(event: PointerEvent): void {
+  if (event.pointerId === drag?.pointerId) finishResize()
+}
+
+function onWindowBlur(): void {
+  finishResize()
 }
 
 function resizeWithKeyboard(column: ResizeColumn, event: KeyboardEvent): void {
-  if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return
+  if (!desktop.value || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return
   event.preventDefault()
+  finishResize()
   const current = column === "sidebar" ? sidebarWidth.value : workspaceWidth.value
-  setColumnWidth(column, current + (event.key === "ArrowRight" ? 16 : -16))
+  const step = event.shiftKey ? 64 : 16
+  const next =
+    event.key === "Home"
+      ? column === "sidebar"
+        ? SIDEBAR_MIN
+        : WORKSPACE_MIN
+      : event.key === "End"
+        ? column === "sidebar"
+          ? sidebarMaximum.value
+          : workspaceMaximum.value
+        : current + (event.key === "ArrowRight" ? step : -step)
+  setColumnWidth(column, next)
   persistWidths()
 }
 
-function normalizeWidths(): void {
-  if (window.innerWidth <= 1050) return
-  setColumnWidth("sidebar", sidebarWidth.value)
-  setColumnWidth("workspace", workspaceWidth.value)
+function resetColumn(column: ResizeColumn): void {
+  if (!desktop.value) return
+  finishResize()
+  setColumnWidth(column, column === "sidebar" ? 260 : 380)
+  persistWidths()
+}
+
+function measureWidth(): void {
+  finishResize()
+  viewportWidth.value = shell.value?.clientWidth || window.innerWidth
 }
 
 function openWorkspace(): void {
@@ -119,25 +195,28 @@ function onKeydown(event: KeyboardEvent): void {
 }
 
 onMounted(() => {
-  normalizeWidths()
+  measureWidth()
   window.addEventListener("keydown", onKeydown)
   window.addEventListener("pointermove", onPointerMove)
   window.addEventListener("pointerup", stopResize)
   window.addEventListener("pointercancel", stopResize)
-  window.addEventListener("resize", normalizeWidths)
+  window.addEventListener("resize", measureWidth)
+  window.addEventListener("blur", onWindowBlur)
 })
 onBeforeUnmount(() => {
+  finishResize(false)
   window.removeEventListener("keydown", onKeydown)
   window.removeEventListener("pointermove", onPointerMove)
   window.removeEventListener("pointerup", stopResize)
   window.removeEventListener("pointercancel", stopResize)
-  window.removeEventListener("resize", normalizeWidths)
+  window.removeEventListener("resize", measureWidth)
+  window.removeEventListener("blur", onWindowBlur)
 })
 </script>
 
 <template>
   <div ref="shell" class="app-shell" :class="{ resizing }" :style="gridStyle">
-    <aside class="app-sidebar" data-testid="session-sidebar">
+    <aside id="session-sidebar" class="app-sidebar" data-testid="session-sidebar">
       <slot name="sidebar" />
     </aside>
     <div
@@ -145,10 +224,17 @@ onBeforeUnmount(() => {
       role="separator"
       aria-label="Resize session sidebar"
       aria-orientation="vertical"
+      aria-controls="session-sidebar"
+      :aria-valuemin="SIDEBAR_MIN"
+      :aria-valuemax="sidebarMaximum"
+      :aria-valuenow="sidebarWidth"
+      title="Drag to resize sessions · Double-click to reset"
       tabindex="0"
       data-testid="sidebar-resizer"
       @pointerdown="beginResize('sidebar', $event)"
+      @lostpointercapture="stopResize"
       @keydown="resizeWithKeyboard('sidebar', $event)"
+      @dblclick="resetColumn('sidebar')"
     ></div>
 
     <aside
@@ -169,14 +255,22 @@ onBeforeUnmount(() => {
     <div
       class="column-resizer workspace-resizer"
       role="separator"
-      aria-label="Resize Workspace panel"
+      aria-label="Resize Workspace and chat panels"
       aria-orientation="vertical"
+      aria-controls="workspace-sidebar main-chat-panel"
+      :aria-valuemin="WORKSPACE_MIN"
+      :aria-valuemax="workspaceMaximum"
+      :aria-valuenow="workspaceWidth"
+      :aria-valuetext="`Workspace ${workspaceWidth}px, chat ${mainWidth}px`"
+      title="Drag to resize Workspace and chat · Double-click to reset"
       tabindex="0"
       data-testid="workspace-resizer"
       @pointerdown="beginResize('workspace', $event)"
+      @lostpointercapture="stopResize"
       @keydown="resizeWithKeyboard('workspace', $event)"
+      @dblclick="resetColumn('workspace')"
     ></div>
-    <main class="app-main" data-testid="chat-panel">
+    <main id="main-chat-panel" class="app-main" data-testid="chat-panel">
       <slot name="main" />
     </main>
 
@@ -206,7 +300,7 @@ onBeforeUnmount(() => {
 .app-shell {
   display: grid;
   grid-template-columns:
-    var(--sidebar-width) 6px var(--workspace-width) 6px
+    var(--sidebar-width) 8px var(--workspace-width) 8px
     minmax(0, 1fr);
   width: 100vw;
   height: 100vh;
@@ -230,14 +324,30 @@ onBeforeUnmount(() => {
 }
 .column-resizer::after {
   position: absolute;
-  inset: 0 -3px;
+  inset: 0 -4px;
   content: "";
+}
+.column-resizer::before {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 3px;
+  height: 36px;
+  border-radius: 3px;
+  background: #94a3b8;
+  content: "";
+  transform: translate(-50%, -50%);
 }
 .column-resizer:hover,
 .column-resizer:focus-visible,
 .app-shell.resizing .column-resizer {
-  background: var(--accent);
+  background: #dbeafe;
   outline: none;
+}
+.column-resizer:hover::before,
+.column-resizer:focus-visible::before,
+.app-shell.resizing .column-resizer::before {
+  background: var(--accent);
 }
 .app-shell.resizing {
   cursor: col-resize;

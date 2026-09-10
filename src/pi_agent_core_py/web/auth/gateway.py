@@ -31,6 +31,8 @@ from .store import AuthStore
 
 AUTH_COOKIE_NAME = "pi_auth_session"
 LOGIN_BODY_MAX_BYTES = 16 * 1024
+WEBSOCKET_SESSION_CHECK_SECONDS = 10.0
+WEBSOCKET_SESSION_CHECK_TIMEOUT_SECONDS = 5.0
 
 
 class WorkspaceAppFactory(Protocol):
@@ -119,7 +121,8 @@ class AuthDispatchMiddleware:
             return
 
         service = self.runtime.auth_service
-        user = await service.resolve_session(_cookie_token(scope)) if service else None
+        token = _cookie_token(scope)
+        user = await service.resolve_session(token) if service else None
         if user is None:
             if scope_type == "websocket":
                 await send({"type": "websocket.close", "code": 4401, "reason": "login required"})
@@ -151,16 +154,35 @@ class AuthDispatchMiddleware:
             return
         # Register before awaiting startup, then revalidate to close the race
         # between the initial cookie check and password rotation.
-        if await service.resolve_session(_cookie_token(scope)) is None:
+        current_user = await service.resolve_session(token)
+        if current_user is None or current_user.id != user.id:
             await send({"type": "websocket.close", "code": 4401})
             return
 
+        session_invalidated = asyncio.Event()
+
         async def guarded_send(message: Message) -> None:
-            if not revoked.is_set():
+            if not revoked.is_set() and not session_invalidated.is_set():
                 await send(message)
 
+        async def watch_session() -> None:
+            # Password rotation invalidates every login immediately. Logout and
+            # expiry invalidate only this connection's original login token.
+            while not revoked.is_set():
+                try:
+                    await asyncio.wait_for(revoked.wait(), WEBSOCKET_SESSION_CHECK_SECONDS)
+                except TimeoutError:
+                    try:
+                        async with asyncio.timeout(WEBSOCKET_SESSION_CHECK_TIMEOUT_SECONDS):
+                            resolved = await service.resolve_session(token)
+                    except Exception:
+                        break  # Do not keep streaming when login authority is unavailable.
+                    if resolved is None or resolved.id != user.id:
+                        break
+            session_invalidated.set()
+
         connection = asyncio.create_task(workspace(delegated_scope, receive, guarded_send))
-        invalidated = asyncio.create_task(revoked.wait())
+        invalidated = asyncio.create_task(watch_session())
         try:
             done, _ = await asyncio.wait(
                 (connection, invalidated), return_when=asyncio.FIRST_COMPLETED,

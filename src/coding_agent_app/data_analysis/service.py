@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 import time
 import weakref
@@ -681,21 +682,41 @@ class DataAnalysisService:
 
     async def _delete(self, session_id: str, run_id: str) -> None:
         await self.cancel(session_id, run_id)
+        # Remove artifacts before the durable lookup, so a filesystem failure
+        # leaves a discoverable record that the next deletion attempt can retry.
+        directory = self._directory(run_id)
+        raw_directory = self._root / run_id
+        try:
+            info = raw_directory.lstat()
+        except FileNotFoundError:
+            info = None
+        if info is not None:
+            if (
+                stat.S_ISLNK(info.st_mode)
+                or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                or directory != raw_directory
+            ):
+                raise AnalysisError("analysis_cleanup_unsafe_path")
+            shutil.rmtree(directory)
         async with self._lock:
             db = self._database()
             await db.execute(
                 "DELETE FROM analysis_runs WHERE id=? AND session_id=?", (run_id, session_id)
             )
             await db.commit()
-        directory = self._directory(run_id)
-        if directory.exists():
-            shutil.rmtree(directory)
+        self._tasks.pop(run_id, None)
 
     async def delete_session(self, session_id: str) -> None:
         async with self._operation_lock(session_id):
             self._deleted_sessions.add(session_id)
-            for run in await self.list_runs(session_id):
-                await self._delete(session_id, run["id"])
+            # list_runs is a UI page (LIMIT 20), not the deletion inventory.
+            async with self._lock:
+                async with self._database().execute(
+                    "SELECT id FROM analysis_runs WHERE session_id=?", (session_id,),
+                ) as cursor:
+                    run_ids = [str(row[0]) for row in await cursor.fetchall()]
+            for run_id in run_ids:
+                await self._delete(session_id, run_id)
 
     async def close(self) -> None:
         self._closed = True

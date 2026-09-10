@@ -25,7 +25,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
-from typing import Annotated, Any, cast
+from dataclasses import replace
+from typing import Annotated, Any, Literal, cast
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.exceptions import RequestValidationError
@@ -34,6 +35,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.requests import Request as StarletteRequest
 
+from ...ai.providers.endpoints import InvalidProviderEndpointError, capability_provider_id
 from ..credentials.api import (
     CredentialBodyLimitMiddleware,
     SafeValidationErrorResponse,
@@ -64,6 +66,7 @@ from .config_service import (
 from .config_store import (
     ProviderProfileInUseError,
     ProviderProfileNotFoundError,
+    SessionModelBindingSessionNotFoundError,
 )
 
 # ============================================================================
@@ -127,6 +130,8 @@ class ProviderProfileCreateRequest(BaseModel):
     default_model: str = Field(..., min_length=1, max_length=256)
     enabled: bool = True
     is_default: bool = False
+    api_style: Literal["anthropic_compatible", "openai_compatible"] | None = None
+    base_url: str | None = Field(default=None, min_length=1, max_length=2048)
 
 
 class ProviderProfileUpdateRequest(BaseModel):
@@ -139,11 +144,16 @@ class ProviderProfileUpdateRequest(BaseModel):
     default_model: str | None = Field(default=None, min_length=1, max_length=256)
     enabled: bool | None = None
     is_default: bool | None = None
+    api_style: Literal["anthropic_compatible", "openai_compatible"] | None = None
+    base_url: str | None = Field(default=None, min_length=1, max_length=2048)
 
     def model_post_init(self, __context: Any) -> None:
         if all(
             getattr(self, f) is None
-            for f in ("name", "credential_id", "default_model", "enabled", "is_default")
+            for f in (
+                "name", "credential_id", "default_model", "enabled", "is_default",
+                "api_style", "base_url",
+            )
         ):
             raise ValueError("at least one field must be provided")
 
@@ -187,6 +197,8 @@ class ProviderProfileResponse(BaseModel):
     status: str
     created_at: int
     updated_at: int
+    api_style: Literal["anthropic_compatible", "openai_compatible"] | None = None
+    base_url: str | None = None
 
 
 class SessionModelBindingResponse(BaseModel):
@@ -235,6 +247,8 @@ def serialize_profile_view(view: Any) -> dict[str, Any]:
         "id": view.id,
         "name": view.name,
         "provider_id": view.provider_id,
+        "api_style": view.api_style,
+        "base_url": view.base_url,
         "provider_display_name": view.provider_display_name,
         "credential_id": view.credential_id,
         "credential_masked_value": view.credential_masked_value,
@@ -333,7 +347,7 @@ def provider_profile_error_to_response(
             "profile_disabled",
             "Profile is disabled.",
         )
-    if isinstance(exc, SessionNotFoundError):
+    if isinstance(exc, (SessionNotFoundError, SessionModelBindingSessionNotFoundError)):
         return _provider_profile_error_response(
             status.HTTP_404_NOT_FOUND,
             "session_not_found",
@@ -343,6 +357,7 @@ def provider_profile_error_to_response(
         InvalidModelIdError,
         InvalidProfileNameError,
         ModelCapabilityValidationError,
+        InvalidProviderEndpointError,
     )):
         # These are service-level normalization errors——422 safe validation
         return _provider_profile_error_response(
@@ -528,6 +543,8 @@ def register_provider_profile_endpoints(router: APIRouter) -> None:
             default_model=req.default_model,
             enabled=req.enabled,
             is_default=req.is_default,
+            api_style=req.api_style,
+            base_url=req.base_url,
         )
         return JSONResponse(
             status_code=status.HTTP_201_CREATED,
@@ -552,6 +569,8 @@ def register_provider_profile_endpoints(router: APIRouter) -> None:
             default_model=req.default_model,
             enabled=req.enabled,
             is_default=req.is_default,
+            api_style=req.api_style,
+            base_url=req.base_url,
         )
         return JSONResponse(content={"profile": serialize_profile_view(view)})
 
@@ -567,9 +586,11 @@ def register_provider_profile_endpoints(router: APIRouter) -> None:
         service: Annotated[
             ProviderConfigService, Depends(get_provider_config_service)
         ],
-    ) -> JSONResponse:
+    ) -> Response:
         await service.delete_profile(profile_id)
-        return JSONResponse(status_code=status.HTTP_204_NO_CONTENT, content=None)
+        # 204 has no response body. JSONResponse(None) emits "null" and breaks
+        # HTTP/1.1 keep-alive after the successful deletion under Uvicorn/h11.
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     # ========================================================================
     # GET /api/provider-profiles/{profile_id}/models
@@ -598,9 +619,12 @@ def register_provider_profile_endpoints(router: APIRouter) -> None:
         ],
     ) -> JSONResponse:
         profile = await service.get_profile(profile_id)
-        resolved = await store.resolve(profile.provider_id, model_id)
+        scope = capability_provider_id(profile.provider_id, profile.api_style, profile.base_url)
+        resolved = await store.resolve(scope, model_id)
         return JSONResponse(content={
-            "capabilities": serialize_model_capabilities(resolved)
+            "capabilities": serialize_model_capabilities(
+                replace(resolved, provider_id=profile.provider_id),
+            )
         })
 
     @router.put("/api/provider-profiles/{profile_id}/model-capabilities")
@@ -616,13 +640,17 @@ def register_provider_profile_endpoints(router: APIRouter) -> None:
     ) -> JSONResponse:
         profile = await service.get_profile(profile_id)
         resolved = await store.upsert(
-            provider_id=profile.provider_id,
+            provider_id=capability_provider_id(
+                profile.provider_id, profile.api_style, profile.base_url,
+            ),
             model_id=req.model_id,
             context_window=req.context_window,
             max_output_tokens=req.max_output_tokens,
         )
         return JSONResponse(content={
-            "capabilities": serialize_model_capabilities(resolved)
+            "capabilities": serialize_model_capabilities(
+                replace(resolved, provider_id=profile.provider_id),
+            )
         })
 
     # ========================================================================

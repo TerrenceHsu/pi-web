@@ -551,8 +551,10 @@ async def test_forbidden_columns_never_appear_in_schema(tmp_path: Path) -> None:
             forbidden = {
                 "api_key", "secret", "secret_value", "secret_ref",
                 "fingerprint", "masked_value", "authorization",
-                "headers", "base_url", "validation_endpoint",
+                "headers", "validation_endpoint",
             }
+            if table != "web_provider_profiles":
+                forbidden |= {"api_style", "base_url"}
             overlap = col_names & forbidden
             assert not overlap, (
                 f"table {table} contains forbidden columns: {overlap}"

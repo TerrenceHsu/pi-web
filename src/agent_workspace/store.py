@@ -1174,6 +1174,9 @@ class WorkspaceStore:
         self._max_session_size = max_session_size
         self._initialized = False
         self._session_locks: dict[str, asyncio.Lock] = {}
+        # Reject stale in-flight writes that acquire their lock after deletion.
+        # Authoritative session existence across restarts belongs to the caller.
+        self._deleted_session_ids: set[str] = set()
 
     # ------------------------------------------------------------------
     # 属性
@@ -1207,6 +1210,8 @@ class WorkspaceStore:
         """创建并返回 session 工作目录（幂等且强制限制在 root_dir 内）。"""
         if not self._initialized:
             await self.init()
+        if session_id in self._deleted_session_ids:
+            raise FileStoreError("Session workspace has been deleted")
         session_dir = self._session_dir(session_id)
         resolved = self._resolve_and_check(
             session_dir,
@@ -3192,41 +3197,61 @@ class WorkspaceStore:
             return ref
 
     async def delete_session_files(self, session_id: str) -> int:
-        """删除 session 下所有文件；返回删除的文件数。
+        """删除本 session 的完整托管树；返回非隐藏文件桶的数量。
 
-        幂等：session_dir 不存在不报错。
+        只有目标已不存在时才幂等成功。路径异常或 IO 失败必须向调用方传播，
+        使调用方保留 session 并允许重试，而不是报告一个部分完成的删除。
         """
         session_dir = self._session_dir(session_id)
-        try:
-            self._resolve_and_check(session_dir, expect_under=self._root_dir)
-        except UnsafeFilenameError:
-            return 0
-        if not session_dir.is_dir():
-            return 0
-        count = 0
-        # 删 session_dir 整个目录树
-        try:
-            for file_dir in session_dir.iterdir():
-                if not file_dir.is_dir():
-                    continue
-                count_as_file = not file_dir.name.startswith(".")
+        async with self._session_lock(session_id):
+            resolved = self._resolve_and_check(session_dir, expect_under=self._root_dir)
+            root = self._root_dir.resolve(strict=False)
+            # In particular, reject session_id="." rather than deleting uploads/.
+            if resolved == root or resolved.parent != root:
+                raise UnsafeFilenameError(
+                    "Session cleanup target must be a direct child of uploads"
+                )
+            try:
                 try:
-                    for child in file_dir.iterdir():
-                        child.unlink(missing_ok=True)
-                    file_dir.rmdir()
-                    if count_as_file:
+                    root_info = self._root_dir.lstat()
+                    session_info = session_dir.lstat()
+                except FileNotFoundError:
+                    self._deleted_session_ids.add(session_id)
+                    return 0
+                # Preflight the entire tree before removing any contents. Never
+                # follow symlinks, junctions, or other Windows reparse points.
+                pending = [(session_dir, session_info), (self._root_dir, root_info)]
+                count = 0
+                while pending:
+                    path, info = pending.pop()
+                    if (
+                        stat.S_ISLNK(info.st_mode)
+                        or bool(
+                            getattr(info, "st_file_attributes", 0)
+                            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+                        )
+                        or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
+                    ):
+                        raise UnsafeFilenameError("Session cleanup tree contains an unsafe path")
+                    if path == self._root_dir:
+                        if not stat.S_ISDIR(info.st_mode):
+                            raise UnsafeFilenameError("Session cleanup root is not a directory")
+                        continue
+                    self._resolve_and_check(path, expect_under=resolved)
+                    if not stat.S_ISDIR(info.st_mode):
+                        if path == session_dir:
+                            raise UnsafeFilenameError("Session cleanup target is not a directory")
+                        continue
+                    if path.parent == session_dir and not path.name.startswith("."):
                         count += 1
-                except Exception:
-                    continue
-            for child in session_dir.iterdir():
-                if child.is_file() and (
-                    child.name == WORKSPACE_STATE_FILENAME or child.name.startswith(".workspace.")
-                ):
-                    child.unlink(missing_ok=True)
-            session_dir.rmdir()
-        except Exception:
-            pass
-        return count
+                    pending.extend((child, child.lstat()) for child in path.iterdir())
+                shutil.rmtree(session_dir)
+            except OSError as exc:
+                raise FileStoreError(
+                    "Session workspace cleanup failed; deletion can be retried"
+                ) from exc
+            self._deleted_session_ids.add(session_id)
+            return count
 
 
 # Backward-compatible import for downstream users. Both names reference the

@@ -4,7 +4,7 @@ import { computed } from "vue"
 import { useChatStore } from "../../stores/chatStore"
 import { useProviderStore } from "../../stores/providerStore"
 import { useSessionStore } from "../../stores/sessionStore"
-import type { ProviderProfileView, VisibleProviderId } from "../../types"
+import type { ProviderProfileView } from "../../types"
 
 // ============================================================================
 // Stores
@@ -17,30 +17,6 @@ const chatStore = useChatStore()
 // ============================================================================
 // 候选数据
 // ============================================================================
-
-const SECTION_PROVIDER_IDS: VisibleProviderId[] = ["glm", "qwen", "kimi"]
-
-function displayNameFor(id: VisibleProviderId): string {
-  const match = providerStore.visibleDefinitions.find((d) => d.id === id)
-  return match?.display_name ?? id.toUpperCase()
-}
-
-/** 按 provider 分组的 usable Profiles——只含 ready + enabled + visible。 */
-const profilesByProvider = computed(() => {
-  const map = new Map<VisibleProviderId, ProviderProfileView[]>()
-  for (const p of providerStore.usableProfiles) {
-    if (!SECTION_PROVIDER_IDS.includes(p.provider_id as VisibleProviderId)) continue
-    const id = p.provider_id as VisibleProviderId
-    const list = map.get(id)
-    if (list) list.push(p)
-    else map.set(id, [p])
-  }
-  return map
-})
-
-function profilesFor(id: VisibleProviderId): ProviderProfileView[] {
-  return profilesByProvider.value.get(id) ?? []
-}
 
 function optionLabel(profile: ProviderProfileView): string {
   return `${profile.name} · ${profile.default_model}`
@@ -57,12 +33,6 @@ const currentProfile = computed<ProviderProfileView | null>(() => providerStore.
 const currentProfileMissing = computed(
   () => currentBinding.value !== null && currentProfile.value === null,
 )
-
-/** 当前 Profile 是否属于 Anthropic（隐藏）。 */
-const currentIsAnthropic = computed(() => {
-  if (!currentProfile.value) return false
-  return !SECTION_PROVIDER_IDS.includes(currentProfile.value.provider_id as VisibleProviderId)
-})
 
 const currentProfileInvalid = computed(() => {
   if (!currentProfile.value) return false
@@ -91,7 +61,7 @@ const disabled = computed(() => {
   if (providerStore.bindingSessionId !== sessionStore.activeSessionId) return true
   if (requestRunning.value) return true
   if (switchPending.value) return true
-  // 当前是 invalid/missing/Anthropic 且没有可选 Profile——禁用
+  // No available profile for an invalid or missing binding.
   if (!hasUsableProfiles.value) {
     if (currentBinding.value === null) return true // legacy 但无可选
     if (currentProfileInvalid.value || currentProfileMissing.value) return true
@@ -119,14 +89,14 @@ const disabledTitle = computed(() => {
  * `<select>` value——由 store currentBinding 派生。
  * - loaded + null → ""（Legacy）
  * - loaded + ready → profile_id
- * - loaded + invalid/Anthropic → ""（不可选，但 store 仍持 binding）
+ * - loaded + invalid → ""（不可选，但 store 仍持 binding）
  * - missing Profile → ""（store 仍持 binding.profile_id，但不在 option 中）
  */
 const selectValue = computed(() => {
   if (bindingLoadState.value !== "loaded") return ""
   if (!currentBinding.value) return ""
   // binding 存在——若 Profile 可选展示其 id，否则空（store 已脱敏仍持有真实 id）
-  if (currentProfile.value && !currentProfileInvalid.value && !currentIsAnthropic.value) {
+  if (currentProfile.value && !currentProfileInvalid.value) {
     return currentProfile.value.id
   }
   return ""
@@ -144,7 +114,6 @@ const currentDisplayLabel = computed(() => {
   // loaded
   if (!currentBinding.value) return "默认模型"
   if (currentProfileMissing.value) return "配置不可用"
-  if (currentIsAnthropic.value) return "当前模型由旧配置管理"
   if (currentProfileInvalid.value) return "当前 Provider 配置不可用"
   // 当前已绑定 ready Profile——用 binding.model_id（非 Profile.default_model）
   const profile = currentProfile.value!
@@ -241,16 +210,14 @@ defineExpose({
         {{ currentDisplayLabel }}
       </option>
 
-      <optgroup v-for="id in SECTION_PROVIDER_IDS" :key="id" :label="displayNameFor(id)">
-        <option
-          v-for="p in profilesFor(id)"
-          :key="p.id"
-          :value="p.id"
-          :title="`${p.name} · ${p.default_model}`"
-        >
-          {{ optionLabel(p) }}
-        </option>
-      </optgroup>
+      <option
+        v-for="p in providerStore.usableProfiles"
+        :key="p.id"
+        :value="p.id"
+        :title="`${p.name} · ${p.default_model}`"
+      >
+        {{ optionLabel(p) }}
+      </option>
     </select>
 
     <span class="selector-current" :title="currentDisplayTitle">{{ currentDisplayLabel }}</span>
@@ -330,5 +297,20 @@ defineExpose({
   border: 1px solid #fecaca;
   padding: 2px 6px;
   border-radius: 4px;
+}
+
+@container chat-pane (max-width: 800px) {
+  .provider-selector {
+    flex-wrap: wrap;
+  }
+  .selector-select {
+    min-width: 0;
+    max-width: 100%;
+  }
+  .selector-hint-warn,
+  .selector-error {
+    flex-basis: 100%;
+    overflow-wrap: anywhere;
+  }
 }
 </style>

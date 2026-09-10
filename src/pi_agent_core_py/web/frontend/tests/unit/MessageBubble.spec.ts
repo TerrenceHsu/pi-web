@@ -53,6 +53,7 @@ vi.mock("../../src/api/client", () => ({
 import MessageBubble from "../../src/components/chat/MessageBubble.vue"
 import { useProviderStore } from "../../src/stores/providerStore"
 import { useChatStore } from "../../src/stores/chatStore"
+import { PPO_MATH } from "../fixtures/math"
 
 // ============================================================================
 // Fixtures
@@ -170,6 +171,8 @@ describe("canSendPrompt gating", () => {
         name: "P",
         provider_id: "glm",
         provider_display_name: "GLM",
+        api_style: "anthropic_compatible",
+        base_url: "https://open.bigmodel.cn/api/anthropic",
         credential_id: "c",
         credential_masked_value: null,
         default_model: "m",
@@ -249,6 +252,8 @@ describe("canSendPrompt gating", () => {
         name: "P",
         provider_id: "glm",
         provider_display_name: "GLM",
+        api_style: "anthropic_compatible",
+        base_url: "https://open.bigmodel.cn/api/anthropic",
         credential_id: "c",
         credential_masked_value: null,
         default_model: "m",
@@ -278,6 +283,8 @@ describe("canSendPrompt gating", () => {
         name: "Bad",
         provider_id: "glm",
         provider_display_name: "GLM",
+        api_style: "anthropic_compatible",
+        base_url: "https://open.bigmodel.cn/api/anthropic",
         credential_id: "c",
         credential_masked_value: null,
         default_model: "m",
@@ -323,6 +330,22 @@ describe("canSendPrompt gating", () => {
 // ============================================================================
 
 describe("assistant Markdown rendering", () => {
+  it("renders PPO math in persisted replies and updates incomplete streaming formulas", async () => {
+    const wrapper = mountBubble(makeAssistantItem({ content: PPO_MATH }))
+    expect(wrapper.findAll(".katex-display")).toHaveLength(2)
+    expect(wrapper.find("strong .katex").exists()).toBe(true)
+    await wrapper.setProps({
+      item: makeAssistantItem({ persisted: false, streaming: true, content: String.raw`$$\frac{a` }),
+    })
+    expect(wrapper.find(".math-source").exists()).toBe(true)
+    expect(wrapper.find(".stream-cursor").exists()).toBe(true)
+    await wrapper.setProps({
+      item: makeAssistantItem({ persisted: false, streaming: true, content: String.raw`$$\frac{a}{b}$$` }),
+    })
+    expect(wrapper.find(".katex-display mfrac").exists()).toBe(true)
+    expect(wrapper.find(".math-source").exists()).toBe(false)
+  })
+
   it("renders common Markdown structures", () => {
     const wrapper = mountBubble(
       makeAssistantItem({

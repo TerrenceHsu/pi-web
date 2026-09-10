@@ -6,6 +6,7 @@ import type { FileRef } from "../../types"
 import { formatFileSize, isSupported, refFormat } from "../../utils/files"
 import { renderMarkdown } from "../../utils/markdown"
 import { highlightPython } from "../../utils/pythonHighlight"
+import type { FileDraft } from "../../stores/workspaceDeskStore"
 
 const props = defineProps<{
   file: FileRef
@@ -13,22 +14,26 @@ const props = defineProps<{
   loadContent: (fileId: string) => Promise<string>
   saveContent: (fileId: string, content: string, expectedSha256: string) => Promise<FileRef>
   downloadFile?: () => Promise<void>
+  draft?: FileDraft
 }>()
 
 const emit = defineEmits<{
   (event: "saved", file: FileRef): void
+  (event: "draft", draft: FileDraft): void
 }>()
 
-const content = ref("")
-const baseline = ref("")
+const content = ref(props.draft?.content ?? "")
+const baseline = ref(props.draft?.baseline ?? "")
+const baselineSha = ref(props.draft?.sha ?? props.file.sha256)
 const busy = ref(false)
 const error = ref("")
-const editing = ref(false)
+const editing = ref(props.draft?.editing ?? false)
 const downloading = ref(false)
 const fileRevision = computed(() =>
   JSON.stringify([props.sessionId, props.file.id, props.file.sha256]),
 )
 let viewGeneration = 0
+let loadedIdentity = props.draft ? `${props.sessionId}:${props.file.id}` : ""
 
 function isCurrent(generation: number, revision: string): boolean {
   return generation === viewGeneration && revision === fileRevision.value
@@ -70,6 +75,14 @@ const originLabel = computed(() => {
 })
 
 async function load(): Promise<void> {
+  const identity = `${props.sessionId}:${props.file.id}`
+  if (identity === loadedIdentity && dirty.value) {
+    if (props.file.sha256 !== baselineSha.value) {
+      error.value = "File changed on disk. Your draft is preserved; saving will check for conflicts."
+    }
+    return
+  }
+  loadedIdentity = identity
   const generation = ++viewGeneration
   const revision = fileRevision.value
   const file = props.file
@@ -86,6 +99,7 @@ async function load(): Promise<void> {
     if (!isCurrent(generation, revision)) return
     content.value = loaded
     baseline.value = loaded
+    baselineSha.value = file.sha256
   } catch (cause: any) {
     if (isCurrent(generation, revision)) {
       error.value = String(cause?.message || `Unable to load ${file.name}`)
@@ -104,9 +118,13 @@ async function save(): Promise<void> {
   busy.value = true
   error.value = ""
   try {
-    const updated = await props.saveContent(file.id, submittedContent, file.sha256)
-    if (!isCurrent(generation, revision)) return
+    const updated = await props.saveContent(file.id, submittedContent, baselineSha.value)
+    // The file store can publish this save's new SHA before the promise resolves.
+    // Accept our own version, but never a different file/session or external version.
+    if (generation !== viewGeneration || props.file.id !== file.id ||
+      (props.file.sha256 !== file.sha256 && props.file.sha256 !== updated.sha256)) return
     baseline.value = submittedContent
+    baselineSha.value = updated.sha256
     editing.value = false
     emit("saved", updated)
   } catch (cause: any) {
@@ -138,6 +156,9 @@ async function download(): Promise<void> {
 
 // A late read/save from another file, version or Session cannot update this view.
 watch(fileRevision, load, { immediate: true })
+watch([content, baseline, baselineSha, editing], () => {
+  emit("draft", { content: content.value, baseline: baseline.value, sha: baselineSha.value, editing: editing.value })
+})
 onBeforeUnmount(() => { viewGeneration += 1 })
 </script>
 
@@ -193,8 +214,8 @@ onBeforeUnmount(() => { viewGeneration += 1 })
       </button>
     </div>
 
+    <div v-if="error" class="preview-error" role="alert">{{ error }}</div>
     <div v-if="busy && !content" class="preview-state">Loading result…</div>
-    <div v-else-if="error" class="preview-error" role="alert">{{ error }}</div>
     <template v-else-if="canRead">
       <template v-if="isMarkdown">
         <div v-if="isReadOnly" class="preview-readonly">{{ readOnlyMessage }}</div>

@@ -787,3 +787,27 @@ table.data th {
   background: var(--danger);
   color: white;
 }
+
+/* Shared by assistant messages, context summaries, Workspace Markdown and Wiki. */
+.markdown-body .math-display {
+  display: block;
+  max-width: 100%;
+  margin: 0.75em 0;
+  padding: 0.25em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overflow-wrap: normal;
+}
+
+.markdown-body .math-display .katex-display {
+  margin: 0;
+  width: max-content;
+  min-width: 100%;
+}
+
+.markdown-body .math-source {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

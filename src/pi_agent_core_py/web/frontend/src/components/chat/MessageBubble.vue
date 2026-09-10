@@ -366,6 +366,9 @@ _watch(
   align-items: flex-start;
 }
 .row-assistant .body {
+  /* Override legacy global .row > * { flex: 0 0 auto }; formulas must shrink
+     with the message pane so their own horizontal scroller can take over. */
+  flex: 0 1 auto;
   max-width: var(--content-max-width);
   min-width: 0;
   display: flex;

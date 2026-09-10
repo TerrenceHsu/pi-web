@@ -54,12 +54,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from ...agent.harness import AgentHarness
 from ...ai.model_client import ModelClient
 from ...ai.providers.base import ProviderAdapter
+from ...ai.providers.endpoints import ApiStyle, capability_provider_id, normalize_base_url
 from ...ai.providers.errors import ProviderConfigError
 from ...ai.providers.factory import create_provider
 from ...ai.providers.registry import ProviderRegistry
@@ -96,9 +97,10 @@ class RequestProviderSelection:
     M1-0 已冻结：请求启动后 Provider/Model 不可变——运行中修改 Binding 只影响
     下一次请求.
 
+    有效协议与端点也在启动时冻结；Profile 后续编辑不改变本次请求目的地。
     ``credential_id`` 仅用于 ``build_adapter`` 阶段调用
     ``CredentialService.resolve_secret_for_request``；不进入 repr、日志、事件
-    或持久化. ``field(repr=False)`` 防止 ``repr(selection)`` 暴露内部 ID.
+    或持久化. ``field(repr=False)`` 防止 ``repr(selection)`` 暴露内部 ID 与端点。
     """
 
     profile_id: str
@@ -106,6 +108,8 @@ class RequestProviderSelection:
     model_id: str
     selection_source: Literal["default", "explicit"]
     credential_id: str = field(repr=False)
+    api_style: ApiStyle | None = None
+    base_url: str | None = field(default=None, repr=False)
 
 
 # ============================================================================
@@ -228,6 +232,8 @@ class RequestProviderRuntime:
             model_id=binding.model_id,
             selection_source=binding.source,
             credential_id=profile.credential_id,
+            api_style=profile.api_style or definition.api_style,
+            base_url=profile.base_url or definition.default_base_url,
         )
 
     # ------------------------------------------------------------------
@@ -268,11 +274,21 @@ class RequestProviderRuntime:
                 ) from None
 
             try:
-                return self._provider_factory(
+                definition = replace(
+                    definition,
+                    api_style=selection.api_style or definition.api_style,
+                    default_base_url=normalize_base_url(selection.base_url)
+                    or definition.default_base_url,
+                )
+                adapter = self._provider_factory(
                     provider_definition=definition,
                     api_key=secret,
                     model_id=selection.model_id,
                 )
+                adapter.capability_provider_id = capability_provider_id(
+                    selection.provider_id, definition.api_style, definition.default_base_url,
+                )
+                return adapter
             except ProviderConfigError:
                 raise ProviderInitializationError(
                     _MSG_INITIALIZATION_FAILED

@@ -852,6 +852,15 @@ class ManagedSandboxLifecycle:
                 protected.add(retained.artifact.archive_path.resolve())
         return protected
 
+    async def active_records(
+        self, *, session_id: str | None = None,
+    ) -> tuple[ManagedSandboxOperationRecord, ...]:
+        """Read durable nonterminal operations, including recovered approvals."""
+        return tuple(
+            record for record in await self._store.active_records()
+            if session_id is None or record.session_id == session_id
+        )
+
     async def start(self, session_id: str) -> ManagedSandboxOperationRecord:
         if self._require_execution_approval:
             raise SandboxLifecycleError("approval_required")
@@ -1741,6 +1750,13 @@ class ManagedSandboxLifecycle:
         event_type: str,
         action: Callable[[ManagedSandboxOperationRecord], Awaitable[None]],
     ) -> ManagedSandboxOperationRecord:
+        # The Web host also reports deleting Sessions as unavailable. Check at
+        # the common action boundary, not only at operation creation, so retained
+        # artifacts cannot start a publication while their Workspace is removed.
+        if not await self._session_exists(record.session_id):
+            raise SandboxLifecycleError(
+                "operation_not_ready", operation_id=record.operation_id,
+            )
         current_task = self._actions.get(record.operation_id)
         if current_task is not None and not current_task.done():
             raise SandboxLifecycleError(

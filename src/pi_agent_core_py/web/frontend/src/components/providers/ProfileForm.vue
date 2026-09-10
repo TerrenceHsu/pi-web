@@ -1,14 +1,13 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
+import { computed, onBeforeUnmount, ref, watch } from "vue"
 
 import { useProviderStore } from "../../stores/providerStore"
 import { useSessionStore } from "../../stores/sessionStore"
 import type {
   CredentialStorageMode,
   CredentialView,
-  ProviderModelOption,
+  ProviderApiStyle,
   ProviderProfileView,
-  VisibleProviderId,
 } from "../../types"
 import ErrorBanner from "../common/ErrorBanner.vue"
 
@@ -17,8 +16,6 @@ import ErrorBanner from "../common/ErrorBanner.vue"
 // ============================================================================
 
 const props = defineProps<{
-  providerId: VisibleProviderId
-  providerDisplayName: string
   /** null = 新建草稿。 */
   profile: ProviderProfileView | null
   /** null = 无匹配 Credential（新 Profile 或 Profile 引用丢失）。 */
@@ -46,8 +43,8 @@ const sessionStore = useSessionStore()
 
 const profileName = ref("")
 const modelInput = ref("")
-const contextWindowInput = ref("")
-const maxOutputTokensInput = ref("")
+const apiStyle = ref<ProviderApiStyle>("openai_compatible")
+const baseUrl = ref("")
 const enabled = ref(true)
 const isDefault = ref(false)
 
@@ -55,10 +52,6 @@ const credentialLabel = ref("")
 const selectedStorageMode = ref<CredentialStorageMode>("keyring")
 const apiKey = ref("")
 const envVarName = ref("")
-
-/** Per-profile static model suggestions——仅已有 Profile 在 onMounted 加载。
- * 新 Profile 不调用 /models（spec §10）。 */
-const modelOptions = ref<ProviderModelOption[]>([])
 
 /** Stage A 成功后写入——Stage B 复用。Stage B 失败时保留以便重试。 */
 const effectiveCredentialId = ref<string | null>(null)
@@ -77,25 +70,27 @@ function initializeFromProps() {
   if (props.profile) {
     profileName.value = props.profile.name
     modelInput.value = props.profile.default_model
+    apiStyle.value = props.profile.api_style
+    baseUrl.value = props.profile.base_url
     enabled.value = props.profile.enabled
     isDefault.value = props.profile.is_default
     effectiveCredentialId.value = props.profile.credential_id
   } else {
     profileName.value = ""
     modelInput.value = ""
+    apiStyle.value = "openai_compatible"
+    baseUrl.value = ""
     enabled.value = true
     isDefault.value = false
     effectiveCredentialId.value = null
   }
-  contextWindowInput.value = ""
-  maxOutputTokensInput.value = ""
   credentialStageCompleted.value = false
 
   if (props.credential) {
     credentialLabel.value = props.credential.label
     selectedStorageMode.value = props.credential.storage_mode
   } else {
-    credentialLabel.value = props.profile ? "" : `${props.providerDisplayName} key`
+    credentialLabel.value = props.profile ? "" : "Provider key"
     selectedStorageMode.value = "keyring"
   }
   apiKey.value = ""
@@ -107,27 +102,6 @@ function initializeFromProps() {
 }
 
 initializeFromProps()
-
-// ============================================================================
-// 模型建议——只对已有 Profile 在 mount 时加载一次（spec §10）
-// ============================================================================
-
-onMounted(async () => {
-  if (props.profile) {
-    try {
-      modelOptions.value = await providerStore.loadProfileModels(props.profile.id)
-      const capabilities = await providerStore.loadModelCapabilities(
-        props.profile.id,
-        props.profile.default_model,
-      )
-      contextWindowInput.value = capabilities?.context_window?.toString() ?? ""
-      maxOutputTokensInput.value = capabilities?.max_output_tokens?.toString() ?? ""
-    } catch {
-      // 模型加载失败不阻塞表单——用户仍可手动输入
-      modelOptions.value = []
-    }
-  }
-})
 
 // ============================================================================
 // Helpers
@@ -178,7 +152,6 @@ const duplicateNameWarning = computed(() => {
   if (props.profile && props.profile.name === profileName.value.trim()) return null
   const duplicate = providerStore.profiles.some(
     (p) =>
-      p.provider_id === props.providerId &&
       p.name === profileName.value.trim() &&
       p.id !== props.profile?.id,
   )
@@ -193,16 +166,11 @@ function validateFields(): boolean {
   const errors: Record<string, string> = {}
   if (!profileName.value.trim()) errors.profileName = "Profile name is required."
   if (!modelInput.value.trim()) errors.modelInput = "Model ID is required."
-  const contextWindow = contextWindowInput.value.trim()
-  const maxOutput = maxOutputTokensInput.value.trim()
-  if (contextWindow && (!/^\d+$/.test(contextWindow) || Number(contextWindow) < 1024)) {
-    errors.contextWindowInput = "Context window must be at least 1,024 tokens."
+  if (!["openai_compatible", "anthropic_compatible"].includes(apiStyle.value)) {
+    errors.apiStyle = "Select a supported API protocol."
   }
-  if (maxOutput && (!/^\d+$/.test(maxOutput) || Number(maxOutput) < 1)) {
-    errors.maxOutputTokensInput = "Max output tokens must be a positive integer."
-  }
-  if (contextWindow && maxOutput && Number(maxOutput) > Number(contextWindow)) {
-    errors.maxOutputTokensInput = "Max output tokens cannot exceed the context window."
+  if (!isValidBaseUrl(baseUrl.value)) {
+    errors.baseUrl = "Use an HTTPS Base URL without credentials, query or fragment. HTTP is allowed only for localhost or a loopback IP."
   }
   if (!credentialLabel.value.trim()) {
     errors.credentialLabel = "Credential label is required."
@@ -221,6 +189,32 @@ function validateFields(): boolean {
   }
   fieldErrors.value = errors
   return Object.keys(errors).length === 0
+}
+
+/** Early UI feedback only; the server independently validates every endpoint. */
+function isValidBaseUrl(value: string): boolean {
+  const trimmed = value.trim()
+  if (!trimmed || trimmed.length > 2048 || /[\s\\?#]/.test(trimmed)) return false
+  if (Array.from(trimmed).some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)) return false
+  // Inspect the original authority before URL normalizes shorthand IPs or userinfo.
+  const authority = /^https?:\/\/([^/]+)/i.exec(trimmed)?.[1]
+  if (!authority || /[@%]/.test(authority)) return false
+  const address = /^(\[[^\]]+\]|[^:]+)(?::(\d+))?$/.exec(authority)
+  if (!address || (address[2] !== undefined && Number(address[2]) === 0)) return false
+  const host = address[1]!.toLowerCase()
+  try {
+    const url = new URL(trimmed)
+    if (!url.hostname || url.username || url.password) return false
+    if (url.protocol === "https:") return true
+    const ipv4Loopback = /^127(?:\.(?:0|[1-9]\d{0,2})){3}$/.test(host) &&
+      host.split(".").every((part) => Number(part) <= 255)
+    return url.protocol === "http:" && (
+      host === "localhost" || (host.startsWith("[") && url.hostname === "[::1]") ||
+      ipv4Loopback
+    )
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -333,6 +327,8 @@ async function runStageB(): Promise<ProviderProfileView | null> {
   if (props.profile) {
     const updated = await providerStore.updateProfile(props.profile.id, {
       name: profileName.value.trim(),
+      api_style: apiStyle.value,
+      base_url: baseUrl.value.trim(),
       credential_id: effectiveCredentialId.value!,
       default_model: modelInput.value.trim(),
       enabled: enabled.value,
@@ -346,7 +342,9 @@ async function runStageB(): Promise<ProviderProfileView | null> {
   } else {
     const created = await providerStore.createProfile({
       name: profileName.value.trim(),
-      provider_id: props.providerId,
+      provider_id: apiStyle.value,
+      api_style: apiStyle.value,
+      base_url: baseUrl.value.trim(),
       credential_id: effectiveCredentialId.value!,
       default_model: modelInput.value.trim(),
       enabled: enabled.value,
@@ -357,19 +355,6 @@ async function runStageB(): Promise<ProviderProfileView | null> {
       return null
     }
     savedProfile = created
-  }
-  const contextWindow = contextWindowInput.value.trim()
-  const maxOutput = maxOutputTokensInput.value.trim()
-  if (contextWindow || maxOutput) {
-    const capabilities = await providerStore.saveModelCapabilities(savedProfile.id, {
-      model_id: modelInput.value.trim(),
-      context_window: contextWindow ? Number(contextWindow) : null,
-      max_output_tokens: maxOutput ? Number(maxOutput) : null,
-    })
-    if (!capabilities) {
-      localError.value = "Profile saved, but model limits could not be saved."
-      return null
-    }
   }
   return savedProfile
 }
@@ -525,49 +510,39 @@ watch(
       </label>
 
       <label class="form-field">
+        <span class="form-label">API protocol</span>
+        <select v-model="apiStyle" class="form-input" data-testid="api-style-select">
+          <option value="openai_compatible">OpenAI compatible</option>
+          <option value="anthropic_compatible">Anthropic compatible</option>
+        </select>
+        <span v-if="fieldErrors.apiStyle" class="field-error">{{ fieldErrors.apiStyle }}</span>
+      </label>
+
+      <label class="form-field form-field-wide">
+        <span class="form-label">Base URL</span>
+        <input
+          v-model="baseUrl"
+          type="url"
+          class="form-input"
+          data-testid="base-url-input"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="https://your-service.example/v1"
+        />
+        <span v-if="fieldErrors.baseUrl" class="field-error">{{ fieldErrors.baseUrl }}</span>
+        <span class="form-hint endpoint-hint">Use only a service you trust: model requests send this profile's API key to this address. Saving does not test the connection.</span>
+      </label>
+
+      <label class="form-field">
         <span class="form-label">Model ID</span>
         <input
           v-model="modelInput"
           type="text"
-          list="provider-model-options"
           class="form-input"
           data-testid="model-input"
           autocomplete="off"
         />
-        <datalist id="provider-model-options">
-          <option v-for="m in modelOptions" :key="m.id" :value="m.id">
-            {{ m.display_name }}
-          </option>
-        </datalist>
         <span v-if="fieldErrors.modelInput" class="field-error">{{ fieldErrors.modelInput }}</span>
-      </label>
-
-      <label class="form-field">
-        <span class="form-label">Context window (tokens)</span>
-        <input
-          v-model="contextWindowInput"
-          type="number"
-          min="1024"
-          max="10000000"
-          class="form-input"
-          data-testid="context-window-input"
-          placeholder="Unknown"
-        />
-        <span v-if="fieldErrors.contextWindowInput" class="field-error">{{ fieldErrors.contextWindowInput }}</span>
-      </label>
-
-      <label class="form-field">
-        <span class="form-label">Max output tokens</span>
-        <input
-          v-model="maxOutputTokensInput"
-          type="number"
-          min="1"
-          max="1000000"
-          class="form-input"
-          data-testid="max-output-tokens-input"
-          placeholder="Provider default"
-        />
-        <span v-if="fieldErrors.maxOutputTokensInput" class="field-error">{{ fieldErrors.maxOutputTokensInput }}</span>
       </label>
 
       <div class="form-row">
@@ -786,6 +761,13 @@ watch(
 }
 .form-label {
   font-weight: 500;
+}
+.form-field-wide {
+  grid-column: 1 / -1;
+}
+.endpoint-hint {
+  margin-left: 0;
+  line-height: 1.5;
 }
 .form-hint {
   font-weight: 400;

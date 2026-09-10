@@ -1,6 +1,6 @@
 # Project Status
 
-> 当前事实快照：2026-09-07。未完成事项只维护于 [TODO](TODO.md)；
+> 当前事实快照：2026-09-10。未完成事项只维护于 [TODO](TODO.md)；
 > 历史数字见 [验证报告](docs/validation/) 与 [CHANGELOG](CHANGELOG.md)，不将不同批次累加为全量结果。
 
 ## 基线与范围
@@ -12,6 +12,70 @@
 - 主工程 MIT；Worker 另附 MinerU 第三方许可、Notice、SBOM 与对应源码入口。
 
 ## 本轮工程化修复
+
+2026-09-10 浏览器停帧恢复：连续错误时有界重建帧源，耗尽预算后明确报错；只有真正解码了
+当前视口的画面才显示 Live，显式 Reconnect 可重试。截图/配置失败、旧尺寸帧与静默帧源均有回归。
+退出登录/登录过期会终止已有 WebSocket；代理改为 180 秒共享空闲期限与独立 6 小时硬上限。
+前端 312 项、相关后端 84 项、真实 Chromium 4 项及 Web E2E 11 项通过（不同层级，不算全仓门禁）。
+用户确认“下一步”后，单标签媒体已接通：项目专用扩展精确绑定 Session/page/tab，
+VP8/Opus 通过有界认证 WebSocket/MSE 播放；固定 1080p、目标 30 fps，支持用户播放解锁、
+静音/音量、停止恢复图片，隐藏/切换/关闭/删除/登录撤销回收，单账号一路，失败不提前释放配额。
+修复媒体头分片、启动时间线间隙与跨 Session 旧导航竞态；无日常浏览器扩展安装或远程 CDP 端口。
+完整 Chromium 149、151 的页面音视频验收均通过：连续 30 秒约 29.49 fps、音频非零、
+最大缓冲约 4.6 秒；headless shell 路径未通过，不以该测试壳作为普通浏览器媒体验收环境。
+当前相关后端 191 项、真实 Chromium 5 项、前端 336 项和最终 Web E2E 13 项通过，类型/静态检查与正式构建通过，
+仍非全仓门禁；媒体代码需随生产后端重启加载，前端刷新生效。60 fps、多路媒体与后台音频留待阶段 3。见
+[设计](docs/design/workspace-browser-media.md) 与 [验证记录](docs/validation/workspace-browser-media-2026-09-10.md)。
+
+2026-09-10 栏宽调节：加强 Workspace 与聊天之间的可拖动分隔线，移除中栏 760px 固定上限，
+按窗口空间联动调宽并保护中栏 280px / 聊天 320px 最小宽度；支持双击复位、键盘操作和本地记忆。
+临时收窄窗口不覆盖桌面偏好；窄聊天栏的输入框与顶部状态按栏宽换行。
+验证与操作说明见 [栏宽调节记录](docs/validation/panel-resize-2026-09-10.md)。
+
+2026-09-10 公式显示：公共 Markdown 渲染器接入本地 KaTeX，支持行内/块级公式及 LaTeX 括号分隔符，
+助手回复、Context Summary、Workspace Markdown 和 Wiki 共用；代码与用户原文保持字面显示。
+修复旧 `.row > *` 样式阻止消息收缩导致的长公式裁切，公式内部可横向滚动；
+无效/未完成公式安全回退为原文，禁止可信 HTML/URL 命令，不改写历史公式的转义字符。
+本轮验证与输入边界见 [公式显示修复记录](docs/validation/markdown-math-2026-09-10.md)。
+
+2026-09-10 浏览器比例跳变修复：视口重绘完成后才启动动态帧；前后端拒绝尺寸不匹配的帧，
+帧携带采集时坐标，前端以固定 CSS 比例显示。新增合成色块的像素位置回归，覆盖动态/静态切换、
+HD、滚动、分屏尺寸和跨页面导航；不操作 Google 验证码。见 [补充验证](docs/validation/workspace-browser-performance-2026-09-09.md#画面比例跳变修复2026-09-10)。
+
+2026-09-09 浏览器优化：移除前端 450ms 截图轮询，改为有背压的二进制 WebSocket 推送，
+动态 JPEG 88 + 静态无损 PNG、最高 2× HD 与 CSS 坐标/视口版本校验；拆分页面导航/输入锁，
+合并连续输入/滚轮，补已校验公网 IP 连接回退。Google 全新未登录上下文与高清像素已验证；
+这是传输和渲染优化，不宣称 Google 外网速度固定或已恢复 HTTP 缓存。
+详见 [性能验证](docs/validation/workspace-browser-performance-2026-09-09.md)。
+
+2026-09-09 补充：Workspace 分隔线下已实现浏览器式 Markdown/网页多标签、左右/上下分屏、
+独立关闭与草稿保留；New Markdown 去重，末尾“＋”打开真实本机 Chromium。
+按账号/Session 隔离临时网页登录状态，公网校验代理、配额、15 分钟空闲回收与 Session 删除联动。
+不提供 Agent 浏览器工具，不复用日常浏览器；普通网页与合成登录/弹出页已实测，
+完整桌面 Chrome 的扩展/文件选择器/音视频能力不属于已验收范围。
+操作见 [Workspace 浏览器说明](docs/design/workspace-browser.md)，本轮分批结果见
+[多标签与浏览器验证](docs/validation/workspace-browser-2026-09-09.md)。
+
+2026-09-09 补充：侧栏 Session 删除已接通绑定同事务清理、完整 Workspace/分析结果删除、
+执行资源回收确认、请求/事件缓存清理与前端迟到响应隔离；失败保留会话供重试。
+本机 25 条历史孤儿 Provider 绑定已清为 0，唯一会话及 4 条消息、共享 Profile/凭证均保留。
+删除专项 50 passed / 3 skipped，前端 277 passed，新增 Chromium 删除链路通过；
+并修复 Provider DELETE 的 204 非空正文错误。前后端已加载，详见
+[Session 删除闭环记录](docs/validation/session-deletion-closure-2026-09-09.md)。
+共享知识与独立执行审计不随聊天误删；最后会话删除后仍按原策略新建空白 default（新 ID）。
+
+2026-09-09 补充：Provider 设置统一为名称、API 协议（OpenAI / Anthropic 兼容）、
+Base URL、Model ID 与凭证；不再按厂商分区，不再显示两项 Token 限额输入。
+旧 Profile / Keyring / Session binding 保留，协议与地址在每次请求开始时冻结；
+后端模型预算仍保留，自定义端点按独立作用域解析，未知窗口不推测百分比。
+本轮独立验证见 [Provider 统一配置记录](docs/validation/provider-neutral-settings-2026-09-09.md)，
+下方旧 CI/工程化批次不代表本轮全量验收。
+
+同日修复 OpenAI-compatible 带工具请求在 SDK strict 自动解析校验处失败的问题：
+改用原始流，保留工具 schema/取消释放；本地协议错误不再误报连接失败或自动重试。
+相关后端 505 passed / 1 skipped，最终适配器专项 95 passed（重叠批次不累加），
+双平台 Mypy/Ruff 通过；已加载本机后端，真实模型响应待重新登录后重试。
+见 [流式工具修复记录](docs/validation/openai-compatible-stream-fix-2026-09-09.md)。
 
 本次 GitHub 发布补充中英文 README、双语演示与合成输入；具体新增验证和未演示边界见
 [发布准备记录](docs/demo/VALIDATION.md)。下方工程化测试数字保留原批次，不将演示测试累加进去。
@@ -34,7 +98,7 @@
 最终修复验收见 [GitHub Actions 34108827664](https://github.com/TerrenceHsu/pi-web/actions/runs/34108827664)；
 首次失败、三轮修复及本机/远端分批结果见 [CI 修复记录](docs/validation/github-ci-repair-2026-09-07.md)。
 下方本地测试结果仍为原批次，不与远端结果累加。公开仓库及离线 CI 通过不改变 localhost-only 和 MinerU 未就绪边界。
-所有维护演练和密码测试均使用临时数据；没有改业务密码、迁业务库、替换业务解析容器或自动开启 Bash。
+上述 2026-09-07 维护演练和密码测试均使用临时数据；该批次没有改业务密码、迁业务库、替换业务解析容器或自动开启 Bash。
 
 ## 工程化本地验证（CI 修复前批次）
 
@@ -62,7 +126,7 @@
 | Workspace | 拖拽原件统一 `upload/**`，工作代码 `scripts/**`，Agent 成果 `artifacts/**`；revision/SHA 冲突检查、预览、下载和固定 PDF/DOCX/XLSX 转换 |
 | 连续性 | `AGENT.md`、`Memory.md`、revision-bound 代码摘要与统一上下文装配；stale 摘要、待审批制品不会冒充当前代码 |
 | MCP / Skills | 账号级全局目录 + Workspace 选择；stdio、Streamable HTTP；DDGS 为不可删除内置选项；HTTP 认证只持久化环境变量引用 |
-| Provider | Web Profile/Model/Session binding；OS Keyring、session-only 或显式环境变量，不在 SQLite 存明文 Key |
+| Provider | 厂商无关的协议/Base URL/Profile/Model/Session binding；OS Keyring、session-only 或显式环境变量，不在 SQLite 存明文 Key |
 | Coding / Plan | Planner–Executor–Verifier；任务范围许可、固定验证、签名冻结、独立审阅批准和事务发布；Local Docker 与 Managed E2B 支持 |
 | Bash | 五阶段代码与验收链路已实现；独立脚本逐次确认，Coding/Plan Executor 任务内复用；Planner/Verifier/read-only/Knowledge 不获得 Bash |
 | 执行维护 | 账号/全局共享配额、Workspace 互斥、后台心跳/撤销/孤儿清理/缓存 TTL；未知清理保留债务，管理员可观测并重试 |

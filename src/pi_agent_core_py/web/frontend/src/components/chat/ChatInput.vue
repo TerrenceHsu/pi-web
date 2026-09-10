@@ -399,6 +399,7 @@ function onDragOver(e: DragEvent) {
 }
 .input-field {
   flex: 1;
+  min-width: 0;
   border: none;
   outline: none;
   resize: none;
@@ -450,5 +451,23 @@ function onDragOver(e: DragEvent) {
 }
 .context-blocked {
   color: #991b1b;
+}
+
+@container chat-pane (max-width: 600px) {
+  .chat-input {
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+  .input-row {
+    flex-wrap: wrap;
+  }
+  .input-field {
+    order: -1;
+    flex: 0 0 100%;
+    min-height: 64px;
+  }
+  .send-btn {
+    margin-left: auto;
+  }
 }
 </style>

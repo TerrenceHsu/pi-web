@@ -9,9 +9,10 @@ import { useChatStore } from "../../stores/chatStore"
 import { useCodingSandboxStore } from "../../stores/codingSandboxStore"
 import { useFileStore } from "../../stores/fileStore"
 import { useSessionStore } from "../../stores/sessionStore"
+import { useWorkspaceDeskStore } from "../../stores/workspaceDeskStore"
 import CodingSandboxModal from "../coding-sandbox/CodingSandboxModal.vue"
 import FileTreeNode from "../chat/FileTreeNode.vue"
-import WorkspaceFilePreview from "./WorkspaceFilePreview.vue"
+import WorkspaceDesk from "./WorkspaceDesk.vue"
 import WorkspaceExtensions from "./WorkspaceExtensions.vue"
 import DataAnalysisPanel from "./DataAnalysisPanel.vue"
 
@@ -25,6 +26,7 @@ interface AgentArtifactSignal {
 }
 
 const sessionStore = useSessionStore()
+const workspaceDeskStore = useWorkspaceDeskStore()
 const chatStore = useChatStore()
 const fileStore = useFileStore()
 const sandboxStore = useCodingSandboxStore()
@@ -62,6 +64,12 @@ let filesResizeStartY = 0
 let filesResizeStartHeight = 0
 
 const sessionId = computed(() => sessionStore.activeSessionId)
+watch(
+  () => (sessionId.value ? workspaceDeskStore.sessions[sessionId.value]?.split : undefined),
+  (split) => {
+    if (split && split !== "none" && filesPaneHeight.value > 140) setFilesPaneHeight(140)
+  },
+)
 const files = computed(() => {
   const sid = sessionId.value
   return sid ? (fileStore.filesBySession[sid] ?? []) : []
@@ -125,19 +133,12 @@ const selectedFileId = computed(() => {
   const sid = sessionId.value
   return selectedSandboxFileId.value || (sid ? fileStore.selectedFileIdBySession[sid] : null)
 })
-const selectedFile = computed(() =>
-  displayedFiles.value.find((file) => file.id === selectedFileId.value),
-)
 const latestArtifact = computed(() => {
   const sid = sessionId.value
   return sid ? fileStore.latestArtifactBySession[sid] : null
 })
 const tree = computed(() => buildSessionFileTree(displayedFiles.value))
 const operation = computed(() => sandboxStore.operation)
-const selectedSandboxPath = computed(() => {
-  if (selectedFile.value?.origin !== "sandbox") return null
-  return selectedFile.value.logical_path || null
-})
 
 function recordOf(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : null
@@ -233,6 +234,19 @@ async function refresh(): Promise<void> {
 
 function selectFile(fileId: string): void {
   if (!sessionId.value) return
+  const file = displayedFiles.value.find((item) => item.id === fileId)
+  if (file) {
+    try {
+      workspaceDeskStore.open(sessionId.value, {
+        id: `file:${file.id}`,
+        kind: "file",
+        resourceId: file.id,
+        title: file.name,
+      })
+    } catch {
+      return
+    }
+  }
   if (pendingSandboxFiles.value.some((file) => file.id === fileId)) {
     selectedSandboxFileId.value = fileId
     return
@@ -265,9 +279,9 @@ async function saveContent(
   return fileStore.updateTextFile(sessionId.value, fileId, content, expectedSha256)
 }
 
-async function downloadSelectedSandboxFile(): Promise<void> {
+async function downloadSelectedSandboxFile(fileId: string): Promise<void> {
   const current = operation.value
-  const path = selectedSandboxPath.value
+  const path = pendingSandboxFiles.value.find((file) => file.id === fileId)?.logical_path
   if (!current || !path) throw new Error("Frozen Sandbox file is unavailable")
   await downloadSandboxArtifactFile(current.operation_id, path)
 }
@@ -423,7 +437,7 @@ onBeforeUnmount(() => {
       </button>
     </nav>
 
-    <template v-if="activeTab === 'files'">
+    <div v-show="activeTab === 'files'" class="workspace-files-content">
       <div
         ref="filesPane"
         class="workspace-files-pane"
@@ -436,7 +450,6 @@ onBeforeUnmount(() => {
           <button type="button" :disabled="fileStore.loading" @click="refresh">
             {{ fileStore.loading ? "Refreshing…" : "Refresh" }}
           </button>
-          <button type="button" @click="createOpen = !createOpen">New Markdown</button>
           <button type="button" :disabled="fileStore.uploading" @click="openUpload">
             {{ fileStore.uploading ? "Uploading…" : "Upload" }}
           </button>
@@ -524,22 +537,27 @@ onBeforeUnmount(() => {
         @dblclick="resetFilesPaneHeight"
       ></div>
 
-      <WorkspaceFilePreview
-        v-if="selectedFile && sessionId"
-        :file="selectedFile"
+      <WorkspaceDesk
+        v-if="sessionId"
+        :key="sessionId"
+        :active="activeTab === 'files'"
+        :files="displayedFiles"
+        :files-ready="!!workspace"
+        :selected-file-id="selectedFileId"
         :session-id="sessionId"
         :load-content="loadContent"
         :save-content="saveContent"
-        :download-file="selectedFile.origin === 'sandbox' ? downloadSelectedSandboxFile : undefined"
+        :download-file="downloadSelectedSandboxFile"
+        @new-markdown="createOpen = true"
       />
       <div v-else class="workspace-placeholder">
         <span>⌘</span>
         <strong>Agent results appear here</strong>
         <p>Select a file, or ask the Agent to create Markdown or code.</p>
       </div>
-    </template>
+    </div>
 
-    <WorkspaceExtensions v-else-if="activeTab === 'extensions'" />
+    <WorkspaceExtensions v-if="activeTab === 'extensions'" />
 
     <DataAnalysisPanel v-else-if="activeTab === 'analysis'" />
 
@@ -575,7 +593,7 @@ onBeforeUnmount(() => {
       </template>
     </div>
 
-    <div v-else class="workspace-tab-body">
+    <div v-else-if="activeTab === 'changes'" class="workspace-tab-body">
       <div v-if="!operation?.diff" class="workspace-empty">
         <p>No Sandbox changes captured.</p>
         <button type="button" :disabled="!operation" @click="sandboxStore.refreshDiff">
@@ -602,6 +620,13 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.workspace-files-content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
 .upload-hint,
 .upload-error {
   margin: 4px 12px 8px;

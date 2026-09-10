@@ -332,6 +332,9 @@ async def test_delete_unused_profile(client: TestClient) -> None:
         f"/api/provider-profiles/{pid}", headers=_headers()
     )
     assert r.status_code == 204
+    assert r.content == b""
+    assert "content-type" not in r.headers
+    assert client.get("/api/provider-profiles", headers=_headers()).status_code == 200
 
 
 async def test_delete_in_use_returns_409(client: TestClient) -> None:

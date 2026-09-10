@@ -48,7 +48,7 @@ const details = computed(() => {
   if (estimate.context_window) {
     parts.push(`Window ${estimate.context_window.toLocaleString()}`)
   } else {
-    parts.push("Configure this model's context window in Provider settings")
+    parts.push("Context window is unknown; a percentage estimate is unavailable")
   }
   if (estimate.reserved_output_tokens) {
     parts.push(`Output reserve ${estimate.reserved_output_tokens.toLocaleString()}`)

@@ -128,7 +128,7 @@ async function openPage(pageId: string): Promise<void> {
         <!-- eslint-disable vue/no-v-html -->
         <div
           v-if="viewedRevision"
-          class="wiki-markdown"
+          class="wiki-markdown markdown-body"
           data-testid="wiki-page-markdown"
           v-html="renderedPage"
         ></div>

@@ -339,7 +339,7 @@ def main() -> None:
         wiki_root = workspace_root / "knowledge"
         uploads_dir.mkdir(parents=True, exist_ok=True)
         wiki_root.mkdir(parents=True, exist_ok=True)
-        return create_app(
+        workspace_app = create_app(
             _build_test_harness(),
             db_path=str(workspace_db),
             telemetry_db_path=tmp_root / "telemetry.sqlite",
@@ -354,6 +354,10 @@ def main() -> None:
             credential_extra_ui_origins=(f"http://{host}:{port}",),
             enable_builtin_ddgs=False,
         )
+        if os.environ.get("PI_E2E_BROWSER") == "1":
+            from browser_fixture import FixtureBrowserEngine
+            workspace_app.state.browser_runtime.engine_factory = FixtureBrowserEngine
+        return workspace_app
 
     app = create_authenticated_app(
         workspace_factory,

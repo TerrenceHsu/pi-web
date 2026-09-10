@@ -500,6 +500,7 @@ class ExtensionSQLiteStore:
                 raise ExtensionStoreError(
                     f"Unsupported extension database schema version: {version}"
                 )
+            await self._install_session_cleanup()
         except BaseException:
             # Injected connections are shared with SessionStore and remain the
             # caller's responsibility.  Always detach the failed Store state.
@@ -510,6 +511,42 @@ class ExtensionSQLiteStore:
                 await db.close()
             raise
         self._closed = False
+
+    async def _install_session_cleanup(self) -> None:
+        """Tie workspace selections to the owning Session, including old rows.
+
+        These optional Web tables predate their Session FK. A trigger preserves
+        the existing schema while making cleanup part of the Session transaction.
+        Global Skills/MCP definitions and credentials are deliberately untouched.
+        """
+        db = self._require_db()
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            async with db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'"
+            ) as cursor:
+                has_sessions = await cursor.fetchone() is not None
+            if has_sessions:
+                tables = (
+                    "web_workspace_extension_selection", "web_workspace_mcp_selection",
+                    "web_workspace_skill_selection", "web_workspace_tool_selection",
+                )
+                statements = " ".join(
+                    f"DELETE FROM {table} WHERE session_id=OLD.id;" for table in tables
+                )
+                await db.execute(
+                    "CREATE TRIGGER IF NOT EXISTS web_workspace_session_delete "
+                    "AFTER DELETE ON sessions BEGIN " + statements + " END"
+                )
+                for table in tables:
+                    await db.execute(
+                        f"DELETE FROM {table} WHERE NOT EXISTS "
+                        f"(SELECT 1 FROM sessions WHERE id={table}.session_id)"
+                    )
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
 
     # ------------------------------------------------------------------
     # schema 初始化 / migration 内部方法

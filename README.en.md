@@ -19,7 +19,7 @@ The repository is named `pi-web`; the Python distribution and import remain
 | --- | --- |
 | Chat | Streaming text/tool events, Stop, latest-response Regenerate, Markdown export, refresh recovery |
 | Workspaces | Independent runtime per Web Session, uploads, previews, downloads, revision-aware edits |
-| Providers | GLM/Anthropic-compatible and OpenAI-compatible adapters; GLM, Qwen and Kimi profiles in the UI |
+| Providers | Unified OpenAI-compatible / Anthropic-compatible profiles with a custom Base URL, model ID and credential; no vendor-specific UI sections |
 | MCP and Skills | Account-level catalogs with per-Workspace selection; stdio and Streamable HTTP; built-in DDGS |
 | Memory | SQLite history search, source-linked structured memory, session `Memory.md`, context compaction |
 | Coding / Plan | Planner–Executor–Verifier, task-scoped execution approval, fixed validation, artifact review and publication |
@@ -112,7 +112,7 @@ Password: 123456
 ```
 
 1. Open **Password**, replace the initial password with 12–128 characters, and sign in again.
-2. Open **Providers**, create a GLM/Qwen/Kimi profile, and enter its model ID and API key.
+2. Open **Providers**, create a profile, and enter its name, API protocol, Base URL, model ID and API key. Use only a trusted compatible service: model calls send the credential to that address. HTTPS or loopback HTTP is required; saving does not test the connection. Existing profiles and keys are preserved. Context/output budget fields are no longer shown in this form; backend budget safeguards remain.
 3. Select that profile as the current Session binding.
 4. Create or select a chat and send a message.
 
@@ -149,6 +149,40 @@ For normal use, the production build at port 8000 is sufficient.
   current lane after successful publication. Do not use it merely to preview a summary.
 - Refresh can recover an active request only while the backend process still owns it.
   Restart retains stored history but does not replay pending execution or approval.
+
+### Markdown and local browser tabs
+
+Below the Workspace file-list divider, **New Markdown** is the single document-creation
+entry. The tab-strip **+** opens a real, independent Chromium page. Switch/close tabs,
+or choose **Split left/right** / **Split top/bottom** to keep Markdown and a website visible.
+Arrow keys and Home/End switch focused tabs; closing a Markdown tab does not delete its file.
+
+Install in the backend Python environment, then restart the backend:
+
+```powershell
+python -m pip install -e ".[web,browser]"
+python -m playwright install chromium
+```
+
+The browser supports public HTTP/HTTPS navigation, user clicks, scrolling, typing,
+manual login and popup tabs. Each Session has a separate temporary browser context;
+closing its last web tab, restarting the backend or 15 minutes without interaction
+clears that context's login state. It does not reuse your everyday browser profile.
+Local/private addresses, browser file uploads/downloads, user-installed extensions and Agent control
+are not supported. DRM, Passkeys and anti-bot sites are not guaranteed.
+Markdown drafts stay in frontend memory only; save before refreshing.
+Frames are pushed over an authenticated, backpressured WebSocket. HD defaults to up to
+2× rendering with lossless PNG stills and JPEG motion frames (15 fps send cap).
+The status line shows actual received pixels/FPS and navigation-to-response timing,
+not full page load time. Turn HD off to reduce rendering cost; external website latency
+still depends on the network. Full request interception and its HTTP-cache limitation remain.
+For moving video with sound, click **Video + audio** (then **Play video + audio** if prompted).
+This uses a bundled project-only tab-capture extension, not your everyday browser profile,
+and requires Playwright >=1.62 with full Chromium. One media stream per account uses fixed
+1080p with a 30 fps target; the UI reports actual presentation FPS, not a guaranteed rate.
+Mute/volume are available. **Stop video** restores HD screenshots; hiding or switching the
+tab/Session stops media. Background audio, multiple media streams and 60 fps are not implemented.
+See [design and limits](docs/design/workspace-browser.md).
 
 ### Account catalogs and Workspace extensions
 

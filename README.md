@@ -57,6 +57,9 @@ GitHub 仓库名为 `pi-web`；Python 包名与导入路径仍为 `pi-agent-core
 - 每个 Session 通过唯一 `WorkspaceStore` 初始化独立目录和唯一根 `AGENT.md`、`Memory.md`；旧 `VirtualFileStore` 名称仅为兼容别名
 - 聊天区和 Workspace 面板支持拖拽上传；所有新上传原件统一归入只读 `upload/**`，目录首次上传成功时创建，同名文件自动避让。工作代码放在 `scripts/**`；Agent 的非代码交付物默认归入 `artifacts/**`
 - 文件树可查看、下载、删除和刷新；API/右栏共享路径的 category、owner 与编辑/发布权限，`AGENT.md`、`Memory.md` 可用 SHA-256 乐观锁编辑
+- Workspace 分隔线下支持 Markdown/网页多标签、左右/上下分屏；只保留一个 New Markdown，“＋”打开本机独立 Chromium，支持公网浏览、点击、输入及手动登录。需可选 `browser` 依赖；登录不持久化，不接管日常浏览器、不支持内网/本机网址及文件上传下载。见 [安装、操作与边界](docs/design/workspace-browser.md)。
+- 点击 **Video + audio** 开启单标签 1080p、目标 30 fps 有声播放，支持静音/音量及停止后恢复 HD 图片；每账号一路，隐藏/切换即停止。需要完整 Chromium 与项目自带标签采集扩展；不保证恒定帧率，后台音频、多路媒体、60 fps 和 DRM 不属于当前验收范围。
+- 网页画面通过有背压的 WebSocket 实时推送；默认 HD 最高 2×、静止时无损 PNG，操作时较高质量 JPEG。页面显示实际像素/帧率与导航响应耗时，取消 HD 可降低资源消耗；Google 外网延迟不由渲染帧率保证。
 - 用户代码上传/删除或批准 Sandbox 发布后，可信 renderer 从对应 revision 的实际代码字节更新只读 `docs/architecture.md`、`docs/code-flow.md`、`docs/validation.md`；右栏显示代码摘要 current/stale/failed 状态
 - `validation.md` 只投影真实 Sandbox 验证证据；普通上传明确标为未验证，不把 Agent 自述当作通过证据
 - 普通 Prompt、Regenerate 与 Context Budget 使用同一 Workspace 上下文组装器；进程重启且没有聊天历史时仍可从 `AGENT.md`、`Memory.md`、可信代码摘要和文件树续作，stale 摘要及未发布 Sandbox Artifact 不会冒充当前代码
@@ -65,8 +68,8 @@ GitHub 仓库名为 `pi-web`；Python 包名与导入路径仍为 `pi-agent-core
 
 ### Provider 与凭证
 
-- Provider adapters：GLM/Anthropic-compatible 与 OpenAI-compatible；Web UI 管理 GLM、Qwen、Kimi Profile
-- Provider Profile、Model、Session binding、Context Window、Max Output Tokens 持久化
+- Provider 统一按 OpenAI-compatible / Anthropic-compatible 协议配置，不按厂商分区；填写名称、Base URL、Model ID 与 API Key
+- Profile、Model 与 Session binding 持久化；上下文预算仍在后端管理，表单不再提供 Context window / Max output tokens 输入
 - API Key 可存 OS Keyring、session-only memory 或显式环境变量；不写入 SQLite 明文
 - 开发启动器默认要求持久化 Keyring，并在监听端口前执行非敏感 write/read/delete 探针
 - 未配置可用 Profile 时，开发启动器保留 delayed FakeClient 作为本地 UI fallback；真实回答需要在 Providers 中保存并绑定真实 Profile
@@ -202,7 +205,7 @@ Password: 123456
 登录后：
 
 1. 先在侧栏 `Password` 将初始密码改为 12–128 字符的新密码，随后重新登录；再打开 `Providers`。
-2. 为 GLM、Qwen 或 Kimi 创建 Profile，填写 Model ID 与 API Key。
+2. 创建 Profile，填写名称、API 协议、Base URL、Model ID 与 API Key。地址应为你信任的兼容服务；仅允许 HTTPS 或本机 loopback HTTP，模型调用会向该地址发送所选凭证，保存配置不会测试连接。
 3. 保存后将 Profile 设为当前 Session binding。
 4. 新建或选择 Session，再发送消息。
 
@@ -228,7 +231,7 @@ python scripts/dev_web_app.py
 5. `Skills` 上传并启用 `SKILL.md`，按 Turn 选择使用。
 6. `Knowledge` 创建 Wiki Space，上传 PDF/HTML，审核 Summary/页面 Change Set，并在 Space 对话中检索或提出修改。
 7. `MCP` 配置账号级 stdio / Streamable HTTP server，再在 Workspace → extensions 选择；内置 DDGS 参数可直接编辑且不能删除。Skills 同样先全局启用，再由 Workspace 选择。
-8. `Providers` 管理凭证/Profile/模型窗口，并切换当前 Session binding。
+8. `Providers` 统一管理凭证、Profile、API 协议与地址，并切换当前 Session binding；旧 Profile 与密钥保留。
 9. Admin 可打开 `Telemetry` 查看跨账号请求量、错误率、P95、token、Provider、工具与安全事件详情。
 10. 对最新 Assistant 使用 Regenerate；从 Session 菜单导出 Markdown。
 11. 遇到高风险工具，在内联 Approval Card 中选择 Approve once 或 Deny。

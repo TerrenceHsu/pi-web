@@ -58,15 +58,15 @@ function formatTime(ts?: number): string {
 }
 
 async function activateSession(id: string) {
-  if (id === activeId.value) return
+  if (id === activeId.value || sessionStore.deletingSessionIds.includes(id)) return
   sessionStore.setActiveSession(id)
 }
 
 async function newChat() {
   try {
     await sessionStore.createNewSession()
-  } catch (e) {
-    console.error("newChat failed", e)
+  } catch {
+    // The session error is visible below the list heading.
   }
 }
 
@@ -75,21 +75,22 @@ async function renameSession(id: string, currentTitle: string) {
   if (!title || !title.trim()) return
   try {
     await sessionStore.renameSession(id, title.trim())
-  } catch (e) {
-    console.error("renameSession failed", e)
+  } catch {
+    // The session error is visible below the list heading.
   }
 }
 
 async function deleteSession(id: string) {
+  if (sessionStore.deletingSessionIds.includes(id)) return
   if (!window.confirm("Delete this session? Messages and uploaded files will be lost.")) return
   try {
-    await sessionStore.deleteSession(id)
+    const deleted = await sessionStore.deleteSession(id)
     // 删的是 active → 切到剩余第一个；没有则创建新的
-    if (!sessionStore.activeSessionId) {
+    if (deleted && !sessionStore.activeSessionId) {
       await newChat()
     }
-  } catch (e) {
-    console.error("deleteSession failed", e)
+  } catch {
+    // The store exposes a safe visible error; do not log response bodies.
   }
 }
 
@@ -193,6 +194,14 @@ async function signOut(): Promise<void> {
     </nav>
 
     <div class="sidebar-section-title">Sessions</div>
+    <div
+      v-if="sessionStore.error"
+      class="session-error"
+      data-testid="session-error"
+      role="alert"
+    >
+      {{ sessionStore.error }}
+    </div>
     <div class="session-list">
       <div v-if="sessionStore.loading && sessions.length === 0" class="loading-row">
         <LoadingSpinner :size="14" />
@@ -203,6 +212,7 @@ async function signOut(): Promise<void> {
         :key="s.id"
         :class="['session-item', { active: s.id === activeId }]"
         data-testid="session-item"
+        :aria-busy="sessionStore.deletingSessionIds.includes(s.id)"
         @click="activateSession(s.id)"
       >
         <div class="session-item-main">
@@ -215,6 +225,7 @@ async function signOut(): Promise<void> {
             data-testid="session-export-btn"
             title="Export Markdown"
             aria-label="Export Markdown"
+            :disabled="sessionStore.deletingSessionIds.includes(s.id)"
             @click="exportSession(s.id)"
           >
             ⤓
@@ -224,6 +235,7 @@ async function signOut(): Promise<void> {
             data-testid="session-rename-btn"
             title="Rename"
             aria-label="Rename"
+            :disabled="sessionStore.deletingSessionIds.includes(s.id)"
             @click="renameSession(s.id, s.title || '')"
           >
             ✎
@@ -231,8 +243,9 @@ async function signOut(): Promise<void> {
           <button
             class="icon-btn danger"
             data-testid="session-delete-btn"
-            title="Delete"
-            aria-label="Delete"
+            :title="sessionStore.deletingSessionIds.includes(s.id) ? 'Deleting…' : 'Delete'"
+            :aria-label="sessionStore.deletingSessionIds.includes(s.id) ? 'Deleting session' : 'Delete'"
+            :disabled="sessionStore.deletingSessionIds.includes(s.id)"
             @click="deleteSession(s.id)"
           >
             ×
@@ -389,6 +402,15 @@ async function signOut(): Promise<void> {
   overflow-y: auto;
   padding: 4px 0;
 }
+.session-error {
+  margin: 4px 8px;
+  padding: 8px;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  color: var(--danger);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
 .loading-row,
 .empty-row {
   display: flex;
@@ -450,6 +472,10 @@ async function signOut(): Promise<void> {
 .icon-btn:hover {
   background: rgba(0, 0, 0, 0.06);
   color: var(--fg);
+}
+.icon-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 .icon-btn.danger:hover {
   color: var(--danger);

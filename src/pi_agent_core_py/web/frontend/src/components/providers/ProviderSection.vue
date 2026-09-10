@@ -1,18 +1,16 @@
 <script setup lang="ts">
 import { ref } from "vue"
 
-import type { CredentialView, ProviderProfileView, VisibleProviderId } from "../../types"
+import type { CredentialView, ProviderProfileView } from "../../types"
 import ProfileForm from "./ProfileForm.vue"
 
 const props = defineProps<{
-  providerId: VisibleProviderId
-  providerDisplayName: string
   profiles: ProviderProfileView[]
   credentials: CredentialView[]
   sessionId: string | null
 }>()
 
-// 每个 Provider 同时只允许一个未保存 draft
+// A single unsaved draft across all API protocols.
 const showDraft = ref(false)
 
 function findCredential(profile: ProviderProfileView): CredentialView | null {
@@ -33,9 +31,9 @@ function onSaved() {
 </script>
 
 <template>
-  <section class="provider-section" :data-provider-id="providerId">
+  <section class="provider-section" data-testid="provider-profiles">
     <header class="provider-section-header">
-      <h3 class="provider-display-name">{{ providerDisplayName }}</h3>
+      <h3 class="provider-display-name">Profiles</h3>
       <button
         v-if="!showDraft"
         type="button"
@@ -51,8 +49,6 @@ function onSaved() {
       <ProfileForm
         v-for="p in profiles"
         :key="p.id"
-        :provider-id="providerId"
-        :provider-display-name="providerDisplayName"
         :profile="p"
         :credential="findCredential(p)"
         :session-id="sessionId"
@@ -60,9 +56,7 @@ function onSaved() {
 
       <ProfileForm
         v-if="showDraft"
-        :key="`draft-${providerId}`"
-        :provider-id="providerId"
-        :provider-display-name="providerDisplayName"
+        key="draft"
         :profile="null"
         :credential="null"
         :session-id="sessionId"

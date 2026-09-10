@@ -50,12 +50,14 @@ def transform_messages_for_provider(
     target_model: str,
     supports_images: bool,
     normalize_tool_call_id: Callable[[str], str] | None = None,
+    allow_reasoning_signatures: bool = True,
 ) -> list[LLMMessage]:
     """Return a provider-safe copy of ``messages``.
 
     Rules mirror pi-ai's important replay invariants:
 
     * signed/redacted thinking is replayed only to the exact source model;
+    * callers without a verified endpoint identity can disable signature replay;
     * cross-model thinking becomes ordinary text and redacted blocks vanish;
     * unsupported images become an explicit placeholder;
     * tool-call IDs and results are normalized together;
@@ -85,7 +87,8 @@ def transform_messages_for_provider(
                 continue
 
             same_model = (
-                message.provider == target_provider
+                allow_reasoning_signatures
+                and message.provider == target_provider
                 and message.api == target_api
                 and message.model == target_model
             )

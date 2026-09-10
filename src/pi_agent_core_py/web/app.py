@@ -92,6 +92,7 @@ from coding_agent_app.intent_router import (
 from .. import __version__
 from ..agent.harness import AgentHarness
 from ..agent.harness.skills import SkillSelection
+from ..ai.providers.endpoints import capability_provider_id
 from ..session_backends.sqlite import SessionOperationConflictError
 from ..telemetry import (
     NOOP_TELEMETRY_CONTEXT,
@@ -1082,13 +1083,13 @@ def create_app(
             try:
 
                 async def _session_exists_cb(session_id: str) -> bool:
-                    if state.session_store is None:
+                    if state.session_store is None or session_id in deleting_session_ids:
                         return False
                     try:
                         session = await state.session_store.get_session(session_id)
                     except Exception:
                         return False
-                    return session is not None
+                    return session is not None and session_id not in deleting_session_ids
 
                 sandbox_runtime_cm = None
                 if _sandbox_resolved.runtime_enabled:
@@ -1524,13 +1525,28 @@ def create_app(
         coding_agent_services.telemetry = NOOP_TELEMETRY_CONTEXT
         _app.state.telemetry_reader = None
 
+    from .browser.api import BrowserBodyLimitMiddleware, build_browser_router
+    from .browser.media_api import build_browser_media_router
+    from .browser.runtime import LocalBrowserRuntime
+    from .browser.stream_api import build_browser_stream_router
+
+    browser_runtime = LocalBrowserRuntime()
+
+    @asynccontextmanager
+    async def _lifespan_with_browser(_app: FastAPI) -> AsyncIterator[None]:
+        try:
+            async with _lifespan(_app):
+                yield
+        finally:
+            await browser_runtime.close()
+
     app = FastAPI(
         title="pi-agent-core-py · Trace Viewer",
         description=(
             "Local-only development UI for inspecting Agent runtime state. DO NOT expose publicly."
         ),
         version=__version__,
-        lifespan=_lifespan,
+        lifespan=_lifespan_with_browser,
     )
 
     state = WebAppState(
@@ -1553,6 +1569,7 @@ def create_app(
     # P1-C3: mcp_mutation_lock 同理
     state.mcp_mutation_lock = asyncio.Lock()
     app.state.web = state
+    app.state.browser_runtime = browser_runtime
     app.state.allow_prompt_preview = allow_prompt_preview
     app.state.event_buffer_max_size = event_buffer_max_size
     # P1-E1-4A: credential_runtime placeholder——lifespan 启动时填入
@@ -1576,6 +1593,32 @@ def create_app(
     app.include_router(build_telemetry_router(telemetry_security_config))
     from .execution_api import build_execution_router
     app.include_router(build_execution_router(telemetry_security_config))
+
+    async def require_browser_session(sid: str) -> None:
+        from ..session_backends.sqlite import SessionNotFoundError
+        if state.shutting_down or sid in deleting_session_ids:
+            raise HTTPException(409, "Session is closing.")
+        if state.session_store is None:
+            raise HTTPException(503, "Session store unavailable.")
+        try:
+            session = await state.session_store.get_session(sid)
+        except SessionNotFoundError:
+            raise HTTPException(404, "Session not found.") from None
+        if session is None:
+            raise HTTPException(404, "Session not found.")
+        if sid in deleting_session_ids:
+            raise HTTPException(409, "Session is closing.")
+
+    app.include_router(build_browser_router(
+        telemetry_security_config, browser_runtime, require_browser_session,
+    ))
+    app.include_router(build_browser_stream_router(
+        telemetry_security_config, browser_runtime, require_browser_session,
+    ))
+    app.include_router(build_browser_media_router(
+        telemetry_security_config, browser_runtime, require_browser_session,
+    ))
+    app.add_middleware(BrowserBodyLimitMiddleware, max_bytes=24_576)
     from .source_offer import (
         SourceOfferError,
         build_about_router,
@@ -1930,7 +1973,8 @@ def create_app(
         capabilities = None
         if capability_store is not None:
             capabilities = await capability_store.resolve(
-                context.client.provider_id or "legacy",
+                getattr(context.client, "capability_provider_id", None)
+                or context.client.provider_id or "legacy",
                 getattr(context.client, "model", "unknown") or "unknown",
             )
         estimate = estimate_context(
@@ -4190,6 +4234,9 @@ def create_app(
         llm_messages = convert_to_llm(transformed)
 
         provider_id = session_harness.agent.client.provider_id or "legacy"
+        capability_scope = (
+            getattr(session_harness.agent.client, "capability_provider_id", None) or provider_id
+        )
         model_id = getattr(session_harness.agent.client, "model", "unknown") or "unknown"
         # Context preview is read-only and must not enter the request-scoped
         # Provider binding path.  Read only the public, non-secret config
@@ -4205,6 +4252,11 @@ def create_app(
                     binding.profile_id,
                 )
                 provider_id = profile.provider_id
+                capability_scope = capability_provider_id(
+                    profile.provider_id,
+                    getattr(profile, "api_style", None),
+                    getattr(profile, "base_url", None),
+                )
                 model_id = binding.model_id
                 from ..ai.providers.factory import default_output_tokens
 
@@ -4212,7 +4264,7 @@ def create_app(
 
         capability_store = state.model_capability_store
         capabilities = (
-            await capability_store.resolve(provider_id, model_id)
+            await capability_store.resolve(capability_scope, model_id)
             if capability_store is not None
             else None
         )
@@ -4633,7 +4685,8 @@ def create_app(
                         # the budgeter is reapplied to the resulting view below.
                         capabilities = (
                             await state.model_capability_store.resolve(
-                                model_context.client.provider_id or "legacy",
+                                getattr(model_context.client, "capability_provider_id", None)
+                                or model_context.client.provider_id or "legacy",
                                 model_context.client.model or "unknown",
                             )
                             if model_context is not None and state.model_capability_store else None
@@ -6723,7 +6776,7 @@ def create_app(
 
         活动请求必须先 abort 并确认 Harness idle；停止失败时保留 Session。
         P0-2：确认停稳后先删 uploads/{sid}/，再删 sqlite session——避免孤儿目录。
-        文件删除失败不阻塞 sqlite 删除（记 warning 到 metadata）。
+        关联资源删除失败则保留 Session 行并返回可重试错误，不冒充删除成功。
         """
         from ..session_backends.sqlite import SessionNotFoundError
 
@@ -6756,18 +6809,43 @@ def create_app(
             if stop_error is not None:
                 return stop_error
 
-            # P0-2：先删 uploads/{sid}/
-            if state.data_analysis_service is not None:
-                await state.data_analysis_service.delete_session(sid)
-            deleted_files = 0
-            if state.file_store is not None:
+            execution = cast(WebExecutionRuntime | None, app.state.execution_runtime)
+            if execution is not None:
                 try:
-                    deleted_files = await state.file_store.delete_session_files(sid)
-                except Exception as e:
-                    # 文件删除失败不阻塞 sqlite 删除；记 warning
-                    state.last_error = (
-                        f"delete_session_files({sid}) failed: {type(e).__name__}: {e}"
+                    await execution.prepare_session_deletion(sid)
+                except Exception:
+                    state.last_error = "session_cleanup_pending"
+                    return JSONResponse(
+                        status_code=409,
+                        content={"detail": {
+                            "code": "session_cleanup_pending",
+                            "message": (
+                                "Execution cleanup is not confirmed. Session was not deleted; "
+                                "finish or retry sandbox cleanup, then retry deletion."
+                            ),
+                        }},
                     )
+
+            deleted_files = 0
+            try:
+                await browser_runtime.delete_session(sid)
+                if state.data_analysis_service is not None:
+                    await state.data_analysis_service.delete_session(sid)
+                if state.file_store is not None:
+                    deleted_files = await state.file_store.delete_session_files(sid)
+                await _remove_coding_agent_session(sid)
+            except Exception:
+                state.last_error = "session_cleanup_failed"
+                return JSONResponse(
+                    status_code=500,
+                    content={"detail": {
+                        "code": "session_cleanup_failed",
+                        "message": (
+                            "Session cleanup did not complete. The session remains listed; "
+                            "some resources may already be removed. Retry deletion."
+                        ),
+                    }},
+                )
 
             try:
                 await store.delete_session(sid)
@@ -6777,15 +6855,14 @@ def create_app(
                     status_code=404,
                     content={"detail": f"session {sid!r} not found"},
                 )
-            if state.extension_store is not None:
-                try:
-                    await state.extension_store.delete_workspace_extension_selection(sid)
-                except Exception as e:
-                    state.last_error = (
-                        "delete_workspace_extension_selection failed: "
-                        f"{type(e).__name__}"
-                    )
-            await _remove_coding_agent_session(sid)
+            # Provider/extension triggers and Session FKs run in the same
+            # transaction above; no cross-connection gap can leave orphan bindings.
+            remaining_requests = [
+                item for item in state.request_history if item.session_id != sid
+            ]
+            state.request_history.clear()
+            state.request_history.extend(remaining_requests)
+            state.event_buffer.remove_session(sid)
             wiki_store = state.wiki_store
             if wiki_store is not None:
                 try:
@@ -8243,6 +8320,8 @@ def create_app(
         )
 
     async def _require_workspace_session(session_id: str) -> None:
+        if session_id in deleting_session_ids:
+            raise HTTPException(status_code=409, detail="Session deletion is in progress.")
         if state.session_store is None:
             raise HTTPException(status_code=503, detail="session store not initialized")
         from ..session_backends.sqlite import SessionNotFoundError

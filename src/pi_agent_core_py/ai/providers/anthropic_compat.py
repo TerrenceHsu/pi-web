@@ -33,6 +33,7 @@ from anthropic import (
     AsyncAnthropic,
     AuthenticationError,
     BadRequestError,
+    DefaultAsyncHttpxClient,
     InternalServerError,
     PermissionDeniedError,
     RateLimitError,
@@ -295,6 +296,7 @@ class AnthropicCompatAdapter(ProviderAdapter):
             base_url=config.base_url,
             timeout=config.timeout_s,
             default_headers=config.extra_headers or None,
+            http_client=DefaultAsyncHttpxClient(follow_redirects=False, verify=True),
         )
         self._closed: bool = False
 

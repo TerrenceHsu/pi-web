@@ -36,13 +36,22 @@ export const useFileStore = defineStore("files", () => {
   const uploading = ref(false)
   const error = ref<string | null>(null)
   let loadVersion = 0
+  let workspaceVersion = 0
+  const deletedSessionIds = new Set<string>()
+
+  function isCurrentSession(sessionId: string, workspace: number): boolean {
+    return workspace === workspaceVersion && !deletedSessionIds.has(sessionId)
+  }
 
   async function loadFiles(sessionId: string) {
+    if (deletedSessionIds.has(sessionId)) return undefined
+    const workspace = workspaceVersion
     const version = ++loadVersion
     loading.value = true
     error.value = null
     try {
       const resp = await filesApi.listFiles(sessionId)
+      if (!isCurrentSession(sessionId, workspace)) return undefined
       if (version !== loadVersion) return resp
       filesBySession.value[sessionId] = resp.files
       workspaceBySession.value[sessionId] = resp.workspace
@@ -52,7 +61,7 @@ export const useFileStore = defineStore("files", () => {
       }
       return resp
     } catch (e: any) {
-      if (version !== loadVersion) return undefined
+      if (version !== loadVersion || !isCurrentSession(sessionId, workspace)) return undefined
       error.value = e instanceof ApiError ? e.detail : String(e?.message ?? e)
     } finally {
       if (version === loadVersion) loading.value = false
@@ -64,6 +73,8 @@ export const useFileStore = defineStore("files", () => {
     files: FileList | File[],
     options: { attachToPrompt?: boolean; relativeFolder?: string } = {},
   ) {
+    if (deletedSessionIds.has(sessionId)) return undefined
+    const workspace = workspaceVersion
     uploading.value = true
     error.value = null
     try {
@@ -71,10 +82,12 @@ export const useFileStore = defineStore("files", () => {
         relativeFolder: options.relativeFolder,
         expectedWorkspaceRevision: workspaceBySession.value[sessionId]?.revision,
       })
+      if (!isCurrentSession(sessionId, workspace)) return undefined
       workspaceBySession.value[sessionId] = resp.workspace
       // 富文档会同步产生只读 content.md/manifest/tables/assets；重新读取
       // 完整树，避免只合并原件而让右侧栏暂时看不到转换成果。
       const refreshed = await loadFiles(sessionId)
+      if (!isCurrentSession(sessionId, workspace)) return undefined
       const visibleFiles = refreshed?.files ?? resp.files
       // 对普通上传附加原文件；对富文档优先附加可读 content.md。
       const attachmentFiles = resp.files.map((uploaded) => {
@@ -96,10 +109,12 @@ export const useFileStore = defineStore("files", () => {
       }
       return resp
     } catch (e: any) {
-      error.value = e instanceof ApiError ? e.detail : String(e?.message ?? e)
+      if (isCurrentSession(sessionId, workspace)) {
+        error.value = e instanceof ApiError ? e.detail : String(e?.message ?? e)
+      }
       throw e
     } finally {
-      uploading.value = false
+      if (workspace === workspaceVersion) uploading.value = false
     }
   }
 
@@ -112,6 +127,8 @@ export const useFileStore = defineStore("files", () => {
   }
 
   async function deleteFile(sessionId: string, fileId: string) {
+    if (deletedSessionIds.has(sessionId)) return
+    const workspace = workspaceVersion
     error.value = null
     try {
       const existing = filesBySession.value[sessionId] ?? []
@@ -120,6 +137,7 @@ export const useFileStore = defineStore("files", () => {
         expectedSha256: current?.sha256,
         expectedWorkspaceRevision: workspaceBySession.value[sessionId]?.revision,
       })
+      if (!isCurrentSession(sessionId, workspace)) return
       filesBySession.value[sessionId] = existing.filter((f) => f.id !== fileId)
       workspaceBySession.value[sessionId] = resp.workspace
       if (selectedFileIdBySession.value[sessionId] === fileId) {
@@ -131,7 +149,9 @@ export const useFileStore = defineStore("files", () => {
       // 同时从 pending 中移除
       removePendingAttachment(fileId)
     } catch (e: any) {
-      error.value = e instanceof ApiError ? e.detail : String(e?.message ?? e)
+      if (isCurrentSession(sessionId, workspace)) {
+        error.value = e instanceof ApiError ? e.detail : String(e?.message ?? e)
+      }
       throw e
     }
   }
@@ -152,6 +172,8 @@ export const useFileStore = defineStore("files", () => {
     content: string,
     expectedSha256: string,
   ) {
+    if (deletedSessionIds.has(sessionId)) throw new Error("Session is no longer available.")
+    const workspace = workspaceVersion
     error.value = null
     try {
       const resp = await filesApi.updateTextFile(
@@ -161,6 +183,7 @@ export const useFileStore = defineStore("files", () => {
         expectedSha256,
         workspaceBySession.value[sessionId]?.revision,
       )
+      if (!isCurrentSession(sessionId, workspace)) throw new Error("Session is no longer available.")
       const existing = filesBySession.value[sessionId] ?? []
       filesBySession.value[sessionId] = existing.map((file) =>
         file.id === fileId ? resp.file : file,
@@ -168,12 +191,16 @@ export const useFileStore = defineStore("files", () => {
       workspaceBySession.value[sessionId] = resp.workspace
       return resp.file
     } catch (e: any) {
-      error.value = e instanceof ApiError ? e.detail : String(e?.message ?? e)
+      if (isCurrentSession(sessionId, workspace)) {
+        error.value = e instanceof ApiError ? e.detail : String(e?.message ?? e)
+      }
       throw e
     }
   }
 
   async function createMarkdownFile(sessionId: string, logicalPath: string, content: string) {
+    if (deletedSessionIds.has(sessionId)) return undefined
+    const workspace = workspaceVersion
     error.value = null
     try {
       const resp = await filesApi.createMarkdownFile(
@@ -182,18 +209,22 @@ export const useFileStore = defineStore("files", () => {
         content,
         workspaceBySession.value[sessionId]?.revision,
       )
+      if (!isCurrentSession(sessionId, workspace)) return undefined
       const existing = filesBySession.value[sessionId] ?? []
       filesBySession.value[sessionId] = [...existing, resp.file]
       workspaceBySession.value[sessionId] = resp.workspace
       selectedFileIdBySession.value[sessionId] = resp.file.id
       return resp.file
     } catch (e: any) {
-      error.value = e instanceof ApiError ? e.detail : String(e?.message ?? e)
+      if (isCurrentSession(sessionId, workspace)) {
+        error.value = e instanceof ApiError ? e.detail : String(e?.message ?? e)
+      }
       throw e
     }
   }
 
   function selectFile(sessionId: string, fileId: string | null) {
+    if (deletedSessionIds.has(sessionId)) return
     selectedFileIdBySession.value[sessionId] = fileId
     if (fileId && latestArtifactBySession.value[sessionId]?.fileId === fileId) {
       acknowledgeArtifact(sessionId)
@@ -204,6 +235,7 @@ export const useFileStore = defineStore("files", () => {
     sessionId: string,
     artifact: Omit<WorkspaceArtifactFocus, "unseen">,
   ) {
+    if (deletedSessionIds.has(sessionId)) return false
     const currentRevision = workspaceBySession.value[sessionId]?.revision
     const files = filesBySession.value[sessionId] ?? []
     if (
@@ -227,6 +259,7 @@ export const useFileStore = defineStore("files", () => {
     revision: number,
     signalId: string,
   ) {
+    if (deletedSessionIds.has(sessionId)) return
     const cached = filesBySession.value[sessionId] ?? []
     if (
       workspaceBySession.value[sessionId]?.revision !== revision ||
@@ -269,7 +302,22 @@ export const useFileStore = defineStore("files", () => {
     pendingAttachments.value = []
   }
 
+  function forgetSession(sessionId: string): void {
+    // Keep only a tombstone, not file contents or paths. It also rejects late
+    // uploads, list responses and live artifact events for a deleted session.
+    deletedSessionIds.add(sessionId)
+    const fileIds = new Set((filesBySession.value[sessionId] ?? []).map((file) => file.id))
+    pendingAttachments.value = pendingAttachments.value.filter((file) => !fileIds.has(file.id))
+    delete filesBySession.value[sessionId]
+    delete workspaceBySession.value[sessionId]
+    delete selectedFileIdBySession.value[sessionId]
+    delete latestArtifactBySession.value[sessionId]
+  }
+
   function resetWorkspace() {
+    workspaceVersion += 1
+    loadVersion += 1
+    deletedSessionIds.clear()
     filesBySession.value = {}
     workspaceBySession.value = {}
     selectedFileIdBySession.value = {}
@@ -302,6 +350,7 @@ export const useFileStore = defineStore("files", () => {
     revealPublishedWorkspace,
     acknowledgeArtifact,
     resetForSession,
+    forgetSession,
     resetWorkspace,
   }
 })

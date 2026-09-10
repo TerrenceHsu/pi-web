@@ -20,6 +20,7 @@ export const useContextBudgetStore = defineStore("contextBudget", () => {
   let requestVersion = 0
   let workspaceVersion = 0
   const statusVersions = new Map<string, number>()
+  const deletedSessionIds = new Set<string>()
 
   const loading = computed(() => loadingSessionId.value !== null)
   const compacting = computed(() => compactingSessionId.value !== null)
@@ -33,6 +34,7 @@ export const useContextBudgetStore = defineStore("contextBudget", () => {
   }
 
   function applyCompaction(sessionId: string, status: ContextCompactionStatus | null): void {
+    if (deletedSessionIds.has(sessionId)) return
     const previous = compactionsBySession.value[sessionId]
     if (!status) {
       const remaining = { ...compactionsBySession.value }
@@ -55,6 +57,7 @@ export const useContextBudgetStore = defineStore("contextBudget", () => {
   }
 
   function applyBudget(sessionId: string, response: ContextBudgetResponse): void {
+    if (deletedSessionIds.has(sessionId)) return
     if (response.compaction !== undefined
       && response.compaction?.active_projection_id !== compactionsBySession.value[sessionId]?.active_projection_id) {
       statusVersions.set(sessionId, (statusVersions.get(sessionId) ?? 0) + 1)
@@ -64,6 +67,7 @@ export const useContextBudgetStore = defineStore("contextBudget", () => {
   }
 
   async function loadCompaction(sessionId: string): Promise<ContextCompactionStatus | null> {
+    if (deletedSessionIds.has(sessionId)) return null
     const workspace = workspaceVersion
     const version = (statusVersions.get(sessionId) ?? 0) + 1
     statusVersions.set(sessionId, version)
@@ -82,7 +86,7 @@ export const useContextBudgetStore = defineStore("contextBudget", () => {
   }
 
   async function setAutoCompaction(sessionId: string, enabled: boolean): Promise<boolean> {
-    if (settingsSessionId.value) return false
+    if (settingsSessionId.value || deletedSessionIds.has(sessionId)) return false
     const workspace = workspaceVersion
     settingsSessionId.value = sessionId
     // A previous GET must not restore a stale toggle after the PUT completes.
@@ -90,20 +94,21 @@ export const useContextBudgetStore = defineStore("contextBudget", () => {
     error.value = null
     try {
       const status = await contextApi.setContextAutoCompaction(sessionId, enabled)
-      if (workspace !== workspaceVersion) return false
+      if (workspace !== workspaceVersion || deletedSessionIds.has(sessionId)) return false
       applyCompaction(sessionId, status)
       return true
     } catch (cause) {
-      if (workspace === workspaceVersion) {
+      if (workspace === workspaceVersion && !deletedSessionIds.has(sessionId)) {
         error.value = cause instanceof ApiError ? cause.detail : "Auto-compaction setting could not be saved."
       }
       return false
     } finally {
-      if (workspace === workspaceVersion) settingsSessionId.value = null
+      if (workspace === workspaceVersion && settingsSessionId.value === sessionId) settingsSessionId.value = null
     }
   }
 
   async function load(sessionId: string): Promise<ContextBudgetResponse | null> {
+    if (deletedSessionIds.has(sessionId)) return null
     const version = ++requestVersion
     loadingSessionId.value = sessionId
     error.value = null
@@ -126,15 +131,16 @@ export const useContextBudgetStore = defineStore("contextBudget", () => {
     sessionId: string,
     payload: ContextBudgetEstimateRequest,
   ): Promise<ContextBudgetResponse | null> {
+    if (deletedSessionIds.has(sessionId)) return null
     const workspace = workspaceVersion
     error.value = null
     try {
       const response = await contextApi.estimateContextBudget(sessionId, payload)
-      if (workspace !== workspaceVersion || response.session_id !== sessionId) return null
+      if (workspace !== workspaceVersion || deletedSessionIds.has(sessionId) || response.session_id !== sessionId) return null
       applyBudget(sessionId, response)
       return response
     } catch (cause) {
-      if (workspace === workspaceVersion) {
+      if (workspace === workspaceVersion && !deletedSessionIds.has(sessionId)) {
         error.value = cause instanceof ApiError ? cause.detail : "Context estimate failed."
       }
       return null
@@ -157,26 +163,26 @@ export const useContextBudgetStore = defineStore("contextBudget", () => {
   }
 
   async function compact(sessionId: string): Promise<boolean> {
-    if (compactingSessionId.value) return false
+    if (compactingSessionId.value || deletedSessionIds.has(sessionId)) return false
     const workspace = workspaceVersion
     compactingSessionId.value = sessionId
     error.value = null
     try {
       const response = await contextApi.compactContext(sessionId)
-      if (workspace !== workspaceVersion || response.session_id !== sessionId) return false
+      if (workspace !== workspaceVersion || deletedSessionIds.has(sessionId) || response.session_id !== sessionId) return false
       applyBudget(sessionId, response.budget)
       await loadCompaction(sessionId)
       return true
     } catch (cause) {
-      if (workspace === workspaceVersion) {
+      if (workspace === workspaceVersion && !deletedSessionIds.has(sessionId)) {
         await loadCompaction(sessionId)
-        if (workspace === workspaceVersion) {
+        if (workspace === workspaceVersion && !deletedSessionIds.has(sessionId)) {
           error.value = cause instanceof ApiError ? cause.detail : "Context compaction failed."
         }
       }
       return false
     } finally {
-      if (workspace === workspaceVersion) compactingSessionId.value = null
+      if (workspace === workspaceVersion && compactingSessionId.value === sessionId) compactingSessionId.value = null
     }
   }
 
@@ -190,12 +196,26 @@ export const useContextBudgetStore = defineStore("contextBudget", () => {
     workspaceVersion += 1
     requestVersion += 1
     statusVersions.clear()
+    deletedSessionIds.clear()
     budgetsBySession.value = {}
     compactionsBySession.value = {}
     loadingSessionId.value = null
     compactingSessionId.value = null
     settingsSessionId.value = null
     error.value = null
+  }
+
+  function forgetSession(sessionId: string): void {
+    deletedSessionIds.add(sessionId)
+    statusVersions.delete(sessionId)
+    delete budgetsBySession.value[sessionId]
+    delete compactionsBySession.value[sessionId]
+    if (loadingSessionId.value === sessionId) {
+      requestVersion += 1
+      loadingSessionId.value = null
+    }
+    if (compactingSessionId.value === sessionId) compactingSessionId.value = null
+    if (settingsSessionId.value === sessionId) settingsSessionId.value = null
   }
 
   return {
@@ -216,6 +236,7 @@ export const useContextBudgetStore = defineStore("contextBudget", () => {
     applyEvent,
     compact,
     resetForSession,
+    forgetSession,
     resetWorkspace,
   }
 })

@@ -33,7 +33,7 @@ export const UI_HEADER_VALUE = "1"
  * 用 Headers API（而非 plain object）以便调用方传入 HeadersInit 多形态
  * （Record / Headers / array）。
  */
-function createUiHeaders(initial?: HeadersInit): Headers {
+export function createUiHeaders(initial?: HeadersInit): Headers {
   const headers = new Headers(initial)
   headers.set(UI_HEADER_NAME, UI_HEADER_VALUE)
   return headers
@@ -51,7 +51,7 @@ function createUiHeaders(initial?: HeadersInit): Headers {
  * - **不**用 `String(obj)` 兜底——会让对象变成 "[object Object]"
  * - 兜底用 statusText 或 fallback 固定文案
  */
-function safeErrorDetail(payload: unknown, statusText: string, fallback: string): string {
+export function safeErrorDetail(payload: unknown, statusText: string, fallback: string): string {
   if (typeof payload === "string" && payload.length > 0) return payload
   if (payload && typeof payload === "object") {
     const obj = payload as Record<string, unknown>

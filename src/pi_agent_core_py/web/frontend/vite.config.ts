@@ -9,12 +9,15 @@ export default defineConfig({
   build: {
     outDir: path.resolve(__dirname, "../static"),
     emptyOutDir: true,
+    rollupOptions: {
+      output: { manualChunks: { math: ["katex"] } },
+    },
   },
   server: {
     port: 5173,
     proxy: {
       "/api": "http://127.0.0.1:8000",
-      "/ws/events": {
+      "/ws/": {
         target: "ws://127.0.0.1:8000",
         ws: true,
       },

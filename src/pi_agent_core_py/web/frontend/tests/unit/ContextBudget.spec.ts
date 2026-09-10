@@ -79,7 +79,8 @@ describe("ContextBudgetBadge", () => {
   it("does not invent a percentage when the model window is unknown", () => {
     const wrapper = mount(ContextBudgetBadge, { props: { budget: budget("unknown", null) } })
     expect(wrapper.get('[data-testid="context-budget-label"]').text()).toBe("Context unknown")
-    expect(wrapper.attributes("title")).toContain("Configure this model's context window")
+    expect(wrapper.attributes("title")).toContain("Context window is unknown")
+    expect(wrapper.attributes("title")).not.toContain("Provider settings")
   })
 
   it("emits compact from blocked state", async () => {

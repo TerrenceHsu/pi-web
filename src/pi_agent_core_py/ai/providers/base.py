@@ -66,6 +66,7 @@ class ProviderAdapter(abc.ABC):
     """
 
     provider_id: str = ""
+    capability_provider_id: str = ""
     api_id: str = ""
     model: str = ""
     supports_images: bool = False

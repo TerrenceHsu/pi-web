@@ -72,7 +72,7 @@ async def test_58_schema_has_no_secret_fields(tmp_path: Path) -> None:
             forbidden = [
                 "api_key", "secret", "secret_value", "secret_ref",
                 "fingerprint", "masked_value", "authorization",
-                "headers", "base_url", "validation_endpoint",
+                "headers", "validation_endpoint",
             ]
             # Verify column-by-column via PRAGMA
             for row in rows:
@@ -82,6 +82,8 @@ async def test_58_schema_has_no_secret_fields(tmp_path: Path) -> None:
                 ) as cursor:
                     cols = await cursor.fetchall()
                 col_names = {c["name"].lower() for c in cols}
+                if table != "web_provider_profiles":
+                    assert not {"base_url", "api_style"} & col_names
                 for bad in forbidden:
                     assert bad not in col_names, (
                         f"table {table} defines forbidden column '{bad}'"
@@ -101,12 +103,14 @@ def test_59_dataclasses_have_no_secret_fields() -> None:
     """ProviderProfile / SessionModelBinding fields must NEVER carry Secret semantics."""
     forbidden_substrings = (
         "api_key", "secret", "authorization", "headers",
-        "base_url", "validation_endpoint", "masked_value",
+        "validation_endpoint", "masked_value",
         "fingerprint", "secret_ref", "secret_value",
     )
 
     for cls in (ProviderProfile, SessionModelBinding):
         fields = {f.name.lower() for f in dataclasses.fields(cls)}
+        if cls is SessionModelBinding:
+            assert not {"base_url", "api_style"} & fields
         for bad in forbidden_substrings:
             assert bad not in fields, (
                 f"{cls.__name__} defines forbidden field '{bad}'"

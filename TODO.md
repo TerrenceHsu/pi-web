@@ -1,6 +1,30 @@
 # Current TODO
 
-> 校准日期：**2026-09-07**。当前事项优先；下方已完成阶段为历史记录，最新事实以 [`STATUS.md`](STATUS.md) 为准。
+> 校准日期：**2026-09-10**。当前事项优先；下方已完成阶段为历史记录，最新事实以 [`STATUS.md`](STATUS.md) 为准。
+
+## Workspace 多标签与本机浏览器
+
+- [x] 中栏/右栏拖动调宽：动态上限、最小宽度、双击复位、键盘与本地记忆、窗口收窄恢复；窄聊天栏输入/模型状态自动换行。见 [验证记录](docs/validation/panel-resize-2026-09-10.md)。
+- [x] 内嵌浏览器调宽停帧：旧尺寸/截图异常触发最多两次帧源恢复，耗尽后明确错误而非无限心跳；新像素解码前不显示 Live。真实 Chromium 故障注入、连续 16 次 popup resize 和 Web E2E 原失败用例通过；历史 trace 保留。
+- [x] 媒体基础安全与连接期限：退出/过期的登录及时停止旧 WebSocket，代理双向活动共用空闲期限并保留硬寿命/写超时。
+- [x] 单标签 1080p/目标 30 fps 有声播放：确认后采用项目专用扩展、精确 Session/page/tab 绑定、VP8/Opus 有界 WebSocket/MSE，用户播放解锁、静音/音量、停止恢复图片、配额与多路径回收。完整 Chromium 149/151 各通过 30 秒实际页面播放约 29.49 fps、非零音频和停止/删除回收；不保证恒定帧率或 DRM。阶段 2 证据见 [验证记录](docs/validation/workspace-browser-media-2026-09-10.md)。
+- [ ] 多标签媒体配额、显式后台音频、观看租约和 60 fps 档位实测；以单标签真实音视频闭环为前置。见 [实施约定](docs/design/workspace-browser-media.md)。
+- [x] 公共 Markdown 数学公式：本地 KaTeX/字体、美元与括号分隔符、流式容错、长公式滚动、恶意命令拦截；保留代码/用户原文及 LaTeX 字面下划线语义。
+- [x] 修复画面比例跳变：视口重绘同步、异常尺寸帧过滤、采集坐标与显示比例固定；新增真实 Chromium 与 Web 连续像素几何回归，避免只检查图片尺寸。
+- [x] 高清/实时帧推送、最新帧背压、Page 级导航与输入调度、受控公网地址回退、HD/FPS/像素/导航计时；见 [性能验证](docs/validation/workspace-browser-performance-2026-09-09.md)。
+- [ ] 如需进一步提升重复访问速度：完成安全校验等价测试后再调整全量请求拦截与 HTTP 缓存；当前未删除拦截，也未自动接入系统/上游代理。
+
+- [x] 浏览器式文件/网页多标签、关闭/相邻切换、键盘切换、左右/上下分屏与 Session 草稿隔离；New Markdown 只保留分隔线下一个入口。
+- [x] 独立 Chromium：手动导航/点击/输入/登录/弹出新标签，公网固定 IP 代理、身份与 Session 校验、配额、空闲/删除/关闭清理。见 [说明](docs/design/workspace-browser.md) 和 [验证记录](docs/validation/workspace-browser-2026-09-09.md)。
+- 当前边界：未保存 Markdown 草稿与网页登录不跨进程持久化；无内网/本机网址、浏览器文件上传下载、用户安装扩展、Agent 自动控制。仅内部使用项目自带采集扩展；新增能力单独评估权限，不视为完整桌面 Chrome 已交付。
+
+## Provider 统一配置
+
+- [x] Session 删除完整链路与 Provider 孤儿绑定修复：同事务清理绑定/扩展选择、文件和分析结果清理失败可重试、执行回收确认及前端缓存防回填；本机 25 条孤儿绑定已删除，唯一会话保留。额外修复 Provider DELETE 204 正文造成的断连，隔离 Chromium 验收通过。见 [Session 删除闭环记录](docs/validation/session-deletion-closure-2026-09-09.md)。
+- [x] 修复 OpenAI-compatible SDK strict helper 阻断普通工具请求及错误重试分类；真实 SDK 离线回归、取消释放和 Web Provider 相关测试通过，已重启加载。见 [流式工具修复记录](docs/validation/openai-compatible-stream-fix-2026-09-09.md)。
+- [ ] 当前 OpenAI-compatible Profile 的真实模型响应：本轮修复只做离线验证，需重新登录后在符合服务使用范围的前提下重试，不将 SDK 修复视为实际认证或模型调用成功。
+- [x] 厂商无关的 Profile 列表、协议与 Base URL 编辑；移除两项 Token 限额表单输入，保留后端预算与旧配置/密钥。前端 259、Chromium 28、Provider/凭证后端 891 项通过；补充批次分别记录，见 [验证记录](docs/validation/provider-neutral-settings-2026-09-09.md)。
+- [ ] 现有真实 GLM Profile 的认证问题：需用户确认对应服务地址与 Key 归属后再次显式测试；本轮未发送密钥到其他域名，也未以离线测试冒充真实连接通过。
 
 ## 本轮工程化收敛
 

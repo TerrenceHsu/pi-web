@@ -7,17 +7,16 @@
     CredentialService            (E1-3A)  安全 get/list CredentialView
     session_exists callable      (E2-3 接入点)  Session 存在性
 
-**职责边界（E2-2）**：
+**职责边界**：
 - ✅ ``ProviderProfileView`` 业务投影（含 status 派生 + masked_value 投影）
 - ✅ ``derive_profile_status`` 纯函数（provider-scoped validation 状态）
 - ✅ Profile CRUD（provider_id 校验 + credential 存在性校验 + 名称/模型规范化）
+- ✅ 可选协议/端点校验与旧 Profile 默认回退；不读凭证原文
 - ✅ list_models（按 ``provider_id`` 返回静态建议）
 - ✅ Session binding get/set（依赖注入的 ``session_exists`` callable）
 - ❌ 不读取 Secret（``CredentialService`` 只调 ``get`` / ``list`` 安全 API）
 - ❌ 不调 SecretStore / SecretStoreRouter
 - ❌ 不创建 HTTP client / 不访问网络
-- ❌ 不实现 ``initialize_new_session_binding``（E2-3A 审计后）
-- ❌ 不修改 ``provider_config_store.py`` / ``web/app.py`` / Core Runtime
 - ❌ 不暴露 ``secret_ref`` / ``fingerprint`` / 完整 ``CredentialRecord`` / Keyring service name
 """
 from __future__ import annotations
@@ -27,6 +26,14 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal
 
+from ...ai.providers.endpoints import (
+    GENERIC_PROVIDER_IDS,
+    ApiStyle,
+    InvalidProviderEndpointError,
+    capability_provider_id,
+    normalize_api_style,
+    normalize_base_url,
+)
 from ...ai.providers.registry import ProviderDefinition, ProviderRegistry
 from ..credentials.service import CredentialService, CredentialView
 from ..credentials.store import CredentialNotFoundError
@@ -132,6 +139,8 @@ class ProviderProfileView:
     status: ProfileStatus
     created_at: int
     updated_at: int
+    api_style: ApiStyle | None = None
+    base_url: str | None = None
 
 
 # ============================================================================
@@ -172,7 +181,11 @@ def derive_profile_status(
         return "needs_key"
     if credential.storage_status == "backend_unavailable":
         return "backend_unavailable"
-    if credential.last_validated_provider_id == profile.provider_id:
+    if (
+        capability_provider_id(profile.provider_id, profile.api_style, profile.base_url)
+        == profile.provider_id
+        and credential.last_validated_provider_id == profile.provider_id
+    ):
         if credential.validation_status == "invalid":
             return "credential_invalid"
         if credential.validation_status == "error":
@@ -278,6 +291,8 @@ class ProviderConfigService:
         default_model: str,
         enabled: bool = True,
         is_default: bool = False,
+        api_style: ApiStyle | None = None,
+        base_url: str | None = None,
     ) -> ProviderProfileView:
         """Create a new ProviderProfile.
 
@@ -302,6 +317,10 @@ class ProviderConfigService:
                 "credential_id must be non-empty"
             )
         normalized_model = normalize_model_id(default_model)
+        normalized_style = normalize_api_style(api_style)
+        normalized_url = normalize_base_url(base_url)
+        if provider_id in GENERIC_PROVIDER_IDS and normalized_url is None:
+            raise InvalidProviderEndpointError("A base URL is required for this provider.")
 
         # Provider existence
         if self._registry.get(provider_id) is None:
@@ -333,6 +352,8 @@ class ProviderConfigService:
                 default_model=normalized_model,
                 enabled=enabled,
                 is_default=is_default,
+                api_style=normalized_style,
+                base_url=normalized_url,
             )
         except ProviderConfigStoreError:
             raise
@@ -349,6 +370,8 @@ class ProviderConfigService:
         default_model: str | None = None,
         enabled: bool | None = None,
         is_default: bool | None = None,
+        api_style: ApiStyle | None = None,
+        base_url: str | None = None,
     ) -> ProviderProfileView:
         """Update mutable fields of a Profile.
 
@@ -367,6 +390,8 @@ class ProviderConfigService:
         normalized_name = (
             normalize_profile_name(name) if name is not None else None
         )
+        normalized_style = normalize_api_style(api_style)
+        normalized_url = normalize_base_url(base_url)
         normalized_model = (
             normalize_model_id(default_model)
             if default_model is not None
@@ -409,6 +434,8 @@ class ProviderConfigService:
                 default_model=normalized_model,
                 enabled=enabled,
                 is_default=is_default,
+                api_style=normalized_style,
+                base_url=normalized_url,
             )
         except ProviderConfigStoreError:
             raise
@@ -464,6 +491,12 @@ class ProviderConfigService:
             ProviderProfileNotFoundError: profile does not exist.
         """
         profile = await self._store.get_profile(profile_id)
+        if (
+            profile.provider_id in GENERIC_PROVIDER_IDS
+            or capability_provider_id(profile.provider_id, profile.api_style, profile.base_url)
+            != profile.provider_id
+        ):
+            return ()
         return get_static_model_options(profile.provider_id)
 
     # ------------------------------------------------------------------
@@ -644,6 +677,8 @@ class ProviderConfigService:
             status=status,
             created_at=profile.created_at,
             updated_at=profile.updated_at,
+            api_style=profile.api_style or (provider_def.api_style if provider_def else None),
+            base_url=profile.base_url or (provider_def.default_base_url if provider_def else None),
         )
 
 

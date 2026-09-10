@@ -20,6 +20,7 @@ import { useSkillStore } from "./stores/skillStore"
 import { useTelemetryStore } from "./stores/telemetryStore"
 import { useWikiStore } from "./stores/wikiStore"
 import { useWorkspaceExtensionStore } from "./stores/workspaceExtensionStore"
+import { useWorkspaceDeskStore } from "./stores/workspaceDeskStore"
 import { pushKnowledgeRoute, pushTelemetryRoute, readAppView, type AppView } from "./utils/appRoute"
 import { pushSessionRoute, readSessionRoute, replaceSessionRoute } from "./utils/sessionRoute"
 
@@ -35,6 +36,12 @@ const providerStore = useProviderStore()
 const wikiStore = useWikiStore()
 const telemetryStore = useTelemetryStore()
 const workspaceExtensionStore = useWorkspaceExtensionStore()
+const workspaceDeskStore = useWorkspaceDeskStore()
+function warnUnsavedDrafts(event: BeforeUnloadEvent) {
+  if (workspaceDeskStore.hasDrafts()) { event.preventDefault(); event.returnValue = "" }
+}
+onMounted(() => window.addEventListener("beforeunload", warnUnsavedDrafts))
+onBeforeUnmount(() => window.removeEventListener("beforeunload", warnUnsavedDrafts))
 const activeView = ref<AppView>(readAppView())
 const appShellRef = ref<InstanceType<typeof AppShell> | null>(null)
 const workspaceStarted = ref(false)
@@ -60,6 +67,24 @@ function acknowledgeWorkspace(): void {
 function openWorkspaceResults(): void {
   appShellRef.value?.openWorkspace()
 }
+
+watch(
+  () => sessionStore.sessions.map((session) => session.id),
+  (sessionIds, previousIds) => {
+    // Account resets own the whole-cache reset. Only remove individual
+    // sessions after workspace bootstrap; keep other sessions and profiles.
+    if (!sessionCoordinatorReady.value) return
+    const remaining = new Set(sessionIds)
+    for (const sessionId of previousIds) {
+      if (remaining.has(sessionId)) continue
+      fileStore.forgetSession(sessionId)
+      workspaceDeskStore.forgetSession(sessionId)
+      contextBudgetStore.forgetSession(sessionId)
+      delete chatStore.lastSequenceBySession[sessionId]
+      if (providerStore.bindingSessionId === sessionId) providerStore.clearSessionState()
+    }
+  },
+)
 
 // Provider Binding 跟随 active session 切换——协调只发生在 App.vue。
 // 切到 null（无 session）→ 清状态；切到 id → 异步刷新 binding。
@@ -172,6 +197,7 @@ function resetWorkspaceState(): void {
   chatStore.resetWorkspace()
   contextBudgetStore.resetWorkspace()
   fileStore.resetWorkspace()
+  workspaceDeskStore.resetWorkspace()
   skillStore.resetWorkspace()
   mcpStore.resetWorkspace()
   workspaceExtensionStore.reset()
@@ -206,12 +232,19 @@ watch(
 
 watch(
   () => sessionStore.activeSessionId,
-  (sessionId) => {
+  (sessionId, previousSessionId) => {
     if (!sessionCoordinatorReady.value || !authStore.authenticated) return
     if (activeView.value === "chat") {
       if (sessionId) {
         const route = readSessionRoute()
-        if (route.sessionId !== sessionId) pushSessionRoute(sessionId)
+        if (route.sessionId !== sessionId) {
+          const previousWasDeleted = previousSessionId &&
+            !sessionStore.sessions.some((session) => session.id === previousSessionId)
+          // Deletion replaces the current history entry; normal navigation
+          // still pushes. Back must not immediately reopen the deleted URL.
+          if (previousWasDeleted) replaceSessionRoute(sessionId)
+          else pushSessionRoute(sessionId)
+        }
       } else {
         replaceSessionRoute(null)
       }

@@ -8,8 +8,8 @@
 
 - 继承 ProviderAdapter；provider_id 由构造参数传入（不在 Config 中）
 - `aclose()` 幂等，最多实际关闭一次
-- `stream()` 用 `async with client.chat.completions.stream(...)`——SDK 保证
-  退出时关闭底层 response，无需手动 close raw stream
+- `stream()` 用 `create(stream=True)` 获取原始 chunk，不启用 strict 工具自动解析；
+  AsyncStream 上下文负责退出时关闭底层 response
 - usage 优先（先读 chunk.usage 再看 choices）
 - ToolCall buffer 按 index 升序 flush；finish_reason="tool_calls" 或正常流结束
   时统一 flush
@@ -30,7 +30,8 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from openai import AsyncOpenAI
+import httpx
+from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 from openai.types.chat import ChatCompletionChunk
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
@@ -501,7 +502,7 @@ def _map_to_provider_error(exc: Exception) -> ProviderError:
     # 局部 import 避免顶部硬依赖整个 openai 异常层级
     from openai import (
         APIConnectionError,
-        APIError,
+        APIStatusError,
         APITimeoutError,
         AuthenticationError,
         BadRequestError,
@@ -519,12 +520,17 @@ def _map_to_provider_error(exc: Exception) -> ProviderError:
         return ProviderRateLimitError("provider rate limit exceeded")
     if isinstance(exc, (APIConnectionError, APITimeoutError, InternalServerError)):
         return ProviderStreamError("provider connection failed")
+    if isinstance(exc, APIStatusError) and exc.status_code == 408:
+        return ProviderStreamError("provider connection failed")
     if isinstance(exc, (BadRequestError, NotFoundError, ConflictError, UnprocessableEntityError)):
         return ProviderProtocolError("provider rejected request")
-    if isinstance(exc, APIError):
-        # 其它非认证 APIError——按 stream 错误兜底
+    if isinstance(exc, httpx.TransportError) and not isinstance(
+        exc, (httpx.LocalProtocolError, httpx.UnsupportedProtocol)
+    ):
+        # Raw SSE 读取失败可能直接抛 HTTPX 异常，而非 SDK APIConnectionError。
         return ProviderStreamError("provider connection failed")
-    return ProviderStreamError("provider connection failed")
+    # 通用 SSE APIError、本地参数/解析错误不能触发 ModelClient 的连接重试。
+    return ProviderProtocolError("provider returned invalid response")
 
 
 # ============================================================================
@@ -571,6 +577,7 @@ class OpenAICompatibleProvider(ProviderAdapter):
                 base_url=config.base_url,
                 timeout=config.timeout_s,
                 max_retries=0,
+                http_client=DefaultAsyncHttpxClient(follow_redirects=False, verify=True),
             )
             self._owns_client = True
 
@@ -582,7 +589,7 @@ class OpenAICompatibleProvider(ProviderAdapter):
         self,
         request: ProviderRequest,
     ) -> AsyncIterator[StreamEvent]:
-        """调 OpenAI Chat Completions stream helper，转成内部 StreamEvent.
+        """将 OpenAI Chat Completions 原始流转换成内部 StreamEvent.
 
         修订 E + F + I：
         - usage 优先（先读 chunk.usage）
@@ -604,8 +611,6 @@ class OpenAICompatibleProvider(ProviderAdapter):
             yield DoneEvent(stop_reason="aborted", usage=Usage())
             return
 
-        kwargs = self._build_request_kwargs(request)
-
         final_stop: Literal["stop", "length", "tool_use"] = "stop"
         final_usage = Usage()
         tool_buffers: dict[int, _ToolCallBuffer] = {}
@@ -623,36 +628,33 @@ class OpenAICompatibleProvider(ProviderAdapter):
             return index
 
         signal = request.signal
-        stream_manager: Any = None
         try:
-            # chat.completions.stream(...) 返回 AsyncChatCompletionStreamManager
-            # ——必须用 async with 才能进入 stream 状态；SDK 保证退出时关闭 response
-            stream_manager = self._client.chat.completions.stream(**kwargs)
-            async with stream_manager as s:
-                async for event in s:
-                    # OpenAI SDK 的 stream helper 产生 ChatCompletionStreamEvent
-                    # ——只处理 "chunk" 类型；其它（tool_choice / content_part 等）跳过
-                    event_type = getattr(event, "type", None)
-                    if event_type != "chunk":
-                        continue
-                    chunk = event.chunk
+            kwargs = self._build_request_kwargs(request)
+            # 自动解析 helper 要求 strict 工具，但本项目自行累积和校验工具参数。
+            # 使用原始流保留普通 JSON Schema，并让上下文覆盖错误/取消/提前返回。
+            raw_stream = await self._client.chat.completions.create(stream=True, **kwargs)
+            async with raw_stream:
+                if _signal_set(signal):
+                    yield DoneEvent(stop_reason="aborted", usage=final_usage)
+                    return
+                async for chunk in raw_stream:
 
                     # 1. 先读 usage（usage-only chunk 时 choices 为空）
                     new_usage = _extract_usage(chunk)
                     if new_usage is not None:
                         final_usage = _merge_usage(final_usage, new_usage)
 
-                    # 2. choices 为空时 continue
+                    # 2. signal 检查先于空 choices，usage-only chunk 也响应中止。
+                    if _signal_set(signal):
+                        yield DoneEvent(stop_reason="aborted", usage=final_usage)
+                        return
+
+                    # 3. choices 为空时 continue
                     if not chunk.choices:
                         continue
 
                     choice = chunk.choices[0]
                     delta = choice.delta
-
-                    # 3. signal 检查（协作式中止）——立刻 yield aborted 并退出
-                    if _signal_set(signal):
-                        yield DoneEvent(stop_reason="aborted", usage=final_usage)
-                        return
 
                     # 4. text delta
                     content = getattr(delta, "content", None)
@@ -745,9 +747,9 @@ class OpenAICompatibleProvider(ProviderAdapter):
                         # function_call 是旧式——按项目既有 stop-reason 处理映射为 tool_use
                         final_stop = "tool_use"
 
-                # /async for event
+                # /async for chunk
 
-            # /async with stream_manager
+            # /async with raw_stream
 
             # 8. 正常结束：按内容块出现顺序发出 canonical end。
             end_events: list[tuple[int, StreamEvent]] = []
@@ -820,10 +822,10 @@ class OpenAICompatibleProvider(ProviderAdapter):
     # ----------------------------------------------------------------------
 
     def _build_request_kwargs(self, request: ProviderRequest) -> dict[str, Any]:
-        """构造 chat.completions.stream() 的 kwargs.
+        """构造 chat.completions.create() 的 kwargs.
 
         固定：
-          - stream 由 helper 处理（不在 kwargs 中）
+          - stream=True 在调用处传入
           - stream_options.include_usage = True
 
         仅在值存在时发送：

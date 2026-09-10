@@ -85,6 +85,7 @@ class ModelClient:
     """
 
     provider_id: str = ""
+    capability_provider_id: str = ""
     api_id: str = ""
     model: str = ""
 
@@ -98,6 +99,14 @@ class ModelClient:
         self.retry_policy = retry_policy or ProviderRetryPolicy()
         # 暴露 adapter 的 provider_id / model，便于上层 metadata 使用
         self.provider_id = getattr(adapter, "provider_id", "") or self.provider_id
+        # Runtime freezes endpoint-scoped limits on the request adapter. Keep
+        # that scope separate from the provider identity written to messages.
+        capability_scope = getattr(adapter, "capability_provider_id", None)
+        self.capability_provider_id = (
+            capability_scope
+            if isinstance(capability_scope, str) and capability_scope
+            else self.provider_id
+        )
         self.api_id = getattr(adapter, "api_id", "") or self.api_id
         self.model = getattr(adapter, "model", "") or self.model
 
@@ -120,6 +129,7 @@ class ModelClient:
 
         注意：子类**不应**覆盖此方法；如需自定义行为，覆盖 adapter 即可。
         """
+        allow_reasoning_signatures = not self.capability_provider_id.startswith("custom:")
         transformed_messages = transform_messages_for_provider(
             messages,
             target_provider=self.provider_id,
@@ -127,6 +137,9 @@ class ModelClient:
             target_model=self.model,
             supports_images=bool(getattr(self.adapter, "supports_images", False)),
             normalize_tool_call_id=self.adapter.normalize_tool_call_id,
+            # History stores provider/API/model, not an endpoint identity. Two
+            # custom gateways can share those labels without sharing signatures.
+            allow_reasoning_signatures=allow_reasoning_signatures,
         )
         base_request = ProviderRequest(
             system_prompt=system_prompt,
@@ -139,6 +152,7 @@ class ModelClient:
         retry_index = 0
         while True:
             emitted = False
+            redacted_indices: set[int | None] = set()
             request_metadata = dict(base_request.metadata)
             if retry_index:
                 request_metadata["pi_agent_retry_attempt"] = retry_index
@@ -153,6 +167,17 @@ class ModelClient:
             try:
                 async for ev in self.adapter.stream(request):
                     emitted = True
+                    if not allow_reasoning_signatures and isinstance(
+                        ev, (ThinkingStartEvent, ThinkingDeltaEvent, ThinkingEndEvent),
+                    ):
+                        # Do not persist custom signatures under a legacy
+                        # provider label: a later switch back to the official
+                        # endpoint cannot establish that signature's origin.
+                        if ev.redacted:
+                            redacted_indices.add(ev.content_index)
+                        if ev.content_index in redacted_indices:
+                            continue
+                        ev = ev.model_copy(update={"thinking_signature": None}, deep=True)
                     yield ev
                 return
             except asyncio.CancelledError:

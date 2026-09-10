@@ -3,7 +3,7 @@ import { computed, ref, watch } from "vue"
 
 import { useProviderStore } from "../../stores/providerStore"
 import { useSessionStore } from "../../stores/sessionStore"
-import type { CredentialView, ProviderProfileView, VisibleProviderId } from "../../types"
+import type { CredentialView } from "../../types"
 import ErrorBanner from "../common/ErrorBanner.vue"
 import LoadingSpinner from "../common/LoadingSpinner.vue"
 import Modal from "../common/Modal.vue"
@@ -18,23 +18,6 @@ const emit = defineEmits<{ (e: "close"): void }>()
 
 const providerStore = useProviderStore()
 const sessionStore = useSessionStore()
-
-// ============================================================================
-// 静态 display name fallback——避免 definitions 加载前空白
-// ============================================================================
-
-const DISPLAY_NAME_FALLBACK: Record<VisibleProviderId, string> = {
-  glm: "GLM",
-  qwen: "Qwen",
-  kimi: "Kimi",
-}
-
-const SECTION_PROVIDER_IDS: VisibleProviderId[] = ["glm", "qwen", "kimi"]
-
-function displayNameFor(id: VisibleProviderId): string {
-  const match = providerStore.visibleDefinitions.find((d) => d.id === id)
-  return match?.display_name ?? DISPLAY_NAME_FALLBACK[id]
-}
 
 // ============================================================================
 // 每次 Modal 打开时捕获 openedSessionId——后续任何 mutation 都用它做 guard
@@ -92,14 +75,6 @@ watch(
 )
 
 // ============================================================================
-// Section 数据——从 store 直接派生
-// ============================================================================
-
-function profilesByProvider(id: VisibleProviderId): ProviderProfileView[] {
-  return providerStore.profiles.filter((p) => p.provider_id === id)
-}
-
-// ============================================================================
 // Unused credentials 折叠区
 // ============================================================================
 
@@ -136,8 +111,8 @@ const isLoading = computed(
 <template>
   <Modal :open="open" title="Provider settings" @close="emit('close')">
     <p class="modal-intro">
-      Manage provider profiles for GLM, Qwen, and Kimi. Configuration changes apply to future
-      sessions only after you click Apply.
+      Configure any compatible model service using its API protocol, Base URL and Model ID.
+      Save configuration, then apply the profile to the current session. Set as default for new sessions.
     </p>
 
     <ErrorBanner
@@ -154,11 +129,7 @@ const isLoading = computed(
     </div>
 
     <ProviderSection
-      v-for="id in SECTION_PROVIDER_IDS"
-      :key="id"
-      :provider-id="id"
-      :provider-display-name="displayNameFor(id)"
-      :profiles="profilesByProvider(id)"
+      :profiles="providerStore.profiles"
       :credentials="providerStore.credentials"
       :session-id="sessionId"
     />

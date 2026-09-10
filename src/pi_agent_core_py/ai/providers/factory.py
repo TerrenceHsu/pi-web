@@ -17,16 +17,10 @@ ProviderAdapter 实例。这是项目里**唯一**知道「哪个 Provider 用�
 - ❌ 不做自动 fallback
 - ❌ 不发任何网络请求（构造阶段纯本地）
 
-固定映射：
-- `provider_id == "glm"`           → GLMProviderAdapter
-- `provider_id == "anthropic"`     → AnthropicCompatAdapter
-- `api_style == "openai_compatible"` → OpenAICompatibleProvider
-- 其它                              → UnsupportedProviderError
-
-GLM / Anthropic 分支**必须**先于 api_style 分支判断——否则 Anthropic-compatible
-的 GLM/Anthropic 会被误路由到 OpenAI-compatible Adapter。未知
-`anthropic_compatible` Definition（既非 glm 也非 anthropic）必须拒绝，
-**不得**自动套用 Anthropic Adapter。
+按请求快照的有效协议路由：OpenAI-compatible 使用统一 Adapter；
+Anthropic-compatible 的已知身份（含两个通用身份）使用 Anthropic Adapter。
+GLM 仍为 Anthropic 协议时保留其 Adapter 特性，改为 OpenAI 协议时正确换 Adapter。
+未知的 Anthropic-compatible identity 仍拒绝，不进行隐式猜测或自动 fallback。
 
 安全约束：
 - API Key 仅用于构造 Config，不保存为 Factory 字段、不写日志、不进异常消息
@@ -70,7 +64,7 @@ def default_output_tokens(provider_id: str) -> int | None:
         return None
     if provider_id == "glm":
         value = GLMConfig.model_fields["max_tokens"].default
-    elif provider_id == "anthropic":
+    elif provider_id in ("anthropic", "anthropic_compatible"):
         value = AnthropicCompatConfig.model_fields["max_tokens"].default
     elif definition.api_style == "openai_compatible":
         value = OpenAICompatConfig.model_fields["max_tokens"].default
@@ -101,7 +95,7 @@ def create_provider(
     provider_id = provider_definition.id
 
     try:
-        if provider_id == "glm":
+        if provider_id == "glm" and provider_definition.api_style == "anthropic_compatible":
             return GLMProviderAdapter(
                 GLMConfig(
                     api_key=api_key,
@@ -110,14 +104,16 @@ def create_provider(
                 ),
             )
 
-        if provider_id == "anthropic":
+        if provider_definition.api_style == "anthropic_compatible" and provider_id in (
+            "anthropic", "anthropic_compatible", "openai_compatible", "qwen", "kimi",
+        ):
             return AnthropicCompatAdapter(
                 AnthropicCompatConfig(
                     api_key=api_key,
                     base_url=base_url,
                     model=model_id,
                 ),
-                provider_id="anthropic",
+                provider_id=provider_id,
                 supports_images=True,
             )
 

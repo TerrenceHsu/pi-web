@@ -254,7 +254,7 @@ def test_5_profile_view_has_no_secret_fields() -> None:
     import dataclasses
     forbidden = (
         "secret_ref", "fingerprint", "secret", "api_key",
-        "authorization", "headers", "base_url", "validation_endpoint",
+        "authorization", "headers", "validation_endpoint",
     )
     fields = {f.name.lower() for f in dataclasses.fields(ProviderProfileView)}
     for bad in forbidden:

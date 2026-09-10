@@ -154,6 +154,8 @@ function setupStores(opts: {
         name: "P",
         provider_id: "glm",
         provider_display_name: "GLM",
+        api_style: "anthropic_compatible",
+        base_url: "https://open.bigmodel.cn/api/anthropic",
         credential_id: "c",
         credential_masked_value: null,
         default_model: opts.binding.model_id,

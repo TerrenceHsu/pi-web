@@ -45,7 +45,7 @@ test("Agent Python result automatically appears and survives reload", async ({ p
 
   const latest = page.locator("[data-testid='workspace-latest-artifact']")
   await expect(latest).toContainText("scripts/workspace-result-e2e.py")
-  await expect(page.locator("[data-testid='workspace-file-preview']")).toContainText(
+  await expect(page.locator("[data-testid='workspace-file-preview']:visible")).toContainText(
     "scripts/workspace-result-e2e.py",
   )
   await expect(page.locator("[aria-label='workspace-result-e2e.py code']")).toContainText(
@@ -73,7 +73,7 @@ test("Workspace panel creates Markdown and uploads code without attaching it to 
   await page.getByLabel("Markdown logical path").fill("notes/ui-result.md")
   await page.getByLabel("Initial Markdown content").fill("# UI result\n\nReady.")
   await page.locator("form.create-markdown").getByRole("button", { name: "Create" }).click()
-  await expect(page.locator("[data-testid='workspace-file-preview']")).toContainText(
+  await expect(page.locator("[data-testid='workspace-file-preview']:visible")).toContainText(
     "notes/ui-result.md",
   )
   await expect(page.locator(".markdown-preview")).toContainText("UI result")
@@ -87,7 +87,7 @@ test("Workspace panel creates Markdown and uploads code without attaching it to 
     mimeType: "text/x-python",
     buffer: Buffer.from("print('uploaded result')\n", "utf8"),
   })
-  await expect(page.locator("[data-testid='workspace-file-preview']")).toContainText(
+  await expect(page.locator("[data-testid='workspace-file-preview']:visible")).toContainText(
     "upload/uploaded-result.py",
   )
   await expect(page.locator("[aria-label='uploaded-result.py code']")).toContainText(
@@ -120,7 +120,7 @@ test("dropped workbook keeps its original in upload and converts in the Workspac
   })
   await transfer.dispose()
 
-  const preview = page.locator("[data-testid='workspace-file-preview']")
+  const preview = page.locator("[data-testid='workspace-file-preview']:visible")
   await expect(preview).toContainText("content.md")
   await expect(preview).toContainText("Generated document")
   await expect(preview).toContainText("Workbook summary")
@@ -152,7 +152,7 @@ test("chat file drops create upload lazily and preserve duplicate originals afte
   await page.locator("[data-testid='chat-input']").dispatchEvent("drop", { dataTransfer: transfer })
   await transfer.dispose()
   await expect(page.locator("[data-testid='attachment-bar'] [data-testid='file-chip']")).toHaveCount(3)
-  await expect(page.locator("[data-testid='workspace-file-preview']")).toContainText("upload/demo.py")
+  await expect(page.locator("[data-testid='workspace-file-preview']:visible")).toContainText("upload/demo.py")
   await page.reload()
   await waitForApp(page)
   const files = await listFiles()

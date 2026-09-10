@@ -85,34 +85,13 @@ class _Chunk:
         self.usage = usage
 
 
-class _StreamEvent:
-    """模拟 ChatCompletionStreamEvent——只暴露 type / chunk."""
-
-    def __init__(
-        self,
-        *,
-        type: str = "chunk",
-        chunk: _Chunk | None = None,
-    ) -> None:
-        self.type = type
-        self.chunk = chunk
-
-
-class _NonChunkEvent:
-    """模拟非 chunk 事件（content_part / tool_choice 等）——adapter 应跳过."""
-
-    def __init__(self, *, type: str = "content_part") -> None:
-        self.type = type
-        # 不含 chunk 属性
-
-
 # ============================================================================
-# Fake stream + manager
+# Fake raw stream
 # ============================================================================
 
 
 class _FakeAsyncStream:
-    """模拟 AsyncStream——async iterable of _StreamEvent.
+    """模拟 AsyncStream——async iterable of raw chunks + context manager.
 
     raise_on_iter：第一次迭代时抛该异常（模拟 SDK 错误）.
     """
@@ -127,7 +106,8 @@ class _FakeAsyncStream:
         self._raise_on_iter = raise_on_iter
         self.iter_started = False
         self.iter_completed = False
-        self.manager: _FakeStreamManager | None = None
+        self.entered = False
+        self.exited = False
 
     def __aiter__(self) -> AsyncIterator[Any]:
         async def gen() -> AsyncIterator[Any]:
@@ -140,20 +120,9 @@ class _FakeAsyncStream:
 
         return gen()
 
-
-class _FakeStreamManager:
-    """模拟 AsyncChatCompletionStreamManager——async with 进入返回 stream."""
-
-    def __init__(self, stream: _FakeAsyncStream) -> None:
-        self._stream = stream
-        self.entered = False
-        self.exited = False
-        # back-reference 让测试断言 stream 在 with 退出后才 exited
-        stream.manager = self
-
     async def __aenter__(self) -> _FakeAsyncStream:
         self.entered = True
-        return self._stream
+        return self
 
     async def __aexit__(self, *args: Any) -> bool:
         self.exited = True
@@ -161,17 +130,18 @@ class _FakeStreamManager:
 
 
 class _FakeCompletionsNamespace:
-    """模拟 client.chat.completions——stream(**kwargs) 返回 manager."""
+    """模拟 client.chat.completions——await create(stream=True) 返回原始流."""
 
     def __init__(self, stream: _FakeAsyncStream) -> None:
         self._stream = stream
         self.last_kwargs: dict[str, Any] | None = None
         self.stream_call_count: int = 0
 
-    def stream(self, **kwargs: Any) -> _FakeStreamManager:
+    async def create(self, **kwargs: Any) -> _FakeAsyncStream:
+        assert kwargs.get("stream") is True
         self.last_kwargs = kwargs
         self.stream_call_count += 1
-        return _FakeStreamManager(self._stream)
+        return self._stream
 
 
 class _FakeChatNamespace:
@@ -201,40 +171,22 @@ class _FakeClient:
         self.closed = True
 
 
-class _RaisingClient:
-    """模拟 AsyncOpenAI，但 chat.completions.stream() 抛异常（构造期错误）."""
-
-    def __init__(self, exc: BaseException) -> None:
-        self._exc = exc
-        self.closed = False
-        self.close_count = 0
-        # 仍暴露 chat 结构以便 getattr 不会失败
-        # placeholder namespace——不会被调用（stream 会立刻抛异常）
-        _ph_stream = _FakeAsyncStream([])
-        _ph_ns = _FakeCompletionsNamespace(_ph_stream)
-        self.chat = _FakeChatNamespace(_ph_ns)
-
-    async def close(self) -> None:
-        self.close_count += 1
-        self.closed = True
-
-
 class _RaisingCompletionsNamespace:
-    """模拟 client.chat.completions——stream(**kwargs) 直接抛异常."""
+    """模拟 client.chat.completions——await create(**kwargs) 直接抛异常."""
 
     def __init__(self, exc: BaseException) -> None:
         self._exc = exc
         self.last_kwargs: dict[str, Any] | None = None
         self.stream_call_count: int = 0
 
-    def stream(self, **kwargs: Any) -> Any:
+    async def create(self, **kwargs: Any) -> Any:
         self.last_kwargs = kwargs
         self.stream_call_count += 1
         raise self._exc
 
 
 class _RaisingStreamClient:
-    """模拟 AsyncOpenAI，stream() 调用时抛异常（HTTP 级错误模拟）."""
+    """模拟 AsyncOpenAI，create() 调用时抛异常（HTTP 级错误模拟）."""
 
     def __init__(self, exc: BaseException) -> None:
         self._completions_ns = _RaisingCompletionsNamespace(exc)
@@ -336,7 +288,7 @@ def reasoning_chunk(
     *,
     finish_reason: str | None = None,
 ) -> _Chunk:
-    """Delta 只含 reasoning_content——adapter 应忽略."""
+    """Delta 只含 reasoning_content——adapter 应保留思考事件."""
     return _Chunk(
         choices=[_Choice(delta=_Delta(reasoning_content=text), finish_reason=finish_reason)],
     )
@@ -366,13 +318,9 @@ def mixed_delta_chunk(
     )
 
 
-def make_event(chunk: _Chunk | None = None) -> _StreamEvent:
-    return _StreamEvent(type="chunk", chunk=chunk)
-
-
-def make_non_chunk_event(event_type: str = "content_part") -> _NonChunkEvent:
-    """非 chunk 事件——adapter 应 continue."""
-    return _NonChunkEvent(type=event_type)
+def make_event(chunk: _Chunk) -> _Chunk:
+    """原始流直接返回 chunk，不使用自动解析 helper 的事件封装。"""
+    return chunk
 
 
 __all__ = [
@@ -383,7 +331,6 @@ __all__ = [
     # builders
     "make_usage",
     "make_event",
-    "make_non_chunk_event",
     "text_delta_chunk",
     "empty_delta_chunk",
     "usage_only_chunk",

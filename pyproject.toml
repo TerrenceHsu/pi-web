@@ -9,7 +9,7 @@ authors = [{ name = "Pi Python Port" }]
 dependencies = [
     "pydantic>=2.7",
     # M1-1：openai 2.x 用于 OpenAICompatibleProvider（Qwen / Kimi 共用）。
-    # 2.x 提供 chat.completions.stream() async context manager + 完整异常层级
+    # 2.x 提供 create(stream=True) 原始 AsyncStream 上下文 + 完整异常层级
     # （AuthenticationError / RateLimitError / APIConnectionError 等）。
     # 受控范围 >=2.0,<3；具体版本由 uv.lock 固定（当前 2.44.0）。
     "openai>=2.0,<3",
@@ -67,6 +67,10 @@ web = [
 # provider-neutral core remains importable without the cloud SDK.
 sandbox-e2b = [
     "e2b>=2.39,<3",
+]
+browser = [
+    # Full Chromium 151+ is required by the private tab-capture bridge.
+    "playwright>=1.62,<2",
 ]
 data-analysis = [
     "pandas>=2.2,<4",
