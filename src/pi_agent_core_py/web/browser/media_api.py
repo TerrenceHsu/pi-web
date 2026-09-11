@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import struct
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
@@ -14,6 +15,7 @@ from ..local_web_security import WebSecurityConfig
 from .runtime import BrowserError
 
 PROTOCOL = "pi-browser-media-v1"
+PROTOCOL_V2 = "pi-browser-media-v2"
 MIME = "video/webm;codecs=vp8,opus"
 MAX_CHUNK_BYTES = 2 * 1024 * 1024
 MAX_HEADER_BYTES = 16 * 1024
@@ -161,13 +163,15 @@ def build_browser_media_router(
         same_origin = (
             ("https" if websocket.url.scheme == "wss" else "http") + "://" + websocket.url.netloc
         )
+        offered = websocket.scope.get("subprotocols", [])
+        protocol = PROTOCOL_V2 if PROTOCOL_V2 in offered else PROTOCOL
         # The application's /ws/* Cookie/revocation gateway remains in front of
         # this router. Neither this endpoint nor the media runtime exports CDP.
         if (
             not origin
             or origin == "null"
             or origin not in (*config.allowed_ui_origins, same_origin)
-            or PROTOCOL not in websocket.scope.get("subprotocols", [])
+            or protocol not in offered
         ):
             await websocket.close(code=4403)
             return
@@ -188,9 +192,17 @@ def build_browser_media_router(
 
         try:
             await require_session(sid)
-            await websocket.accept(subprotocol=PROTOCOL)
+            await websocket.accept(subprotocol=protocol)
             accepted = True
             token = await runtime.subscribe_media(sid, pid)
+            if protocol == PROTOCOL_V2:
+                if not isinstance(token, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", token):
+                    raise BrowserError("browser_media_stream_failed")
+                await require_session(sid)
+                async with asyncio.timeout(SEND_TIMEOUT_SECONDS):
+                    await websocket.send_json({
+                        "type": "started", "generation": token, "page_id": pid,
+                    })
             generation: str | None = None
             sequence = 0
             while True:
@@ -200,6 +212,8 @@ def build_browser_media_router(
                     if chunk is None:
                         await websocket.send_json({"type": "heartbeat"})
                     else:
+                        if protocol == PROTOCOL_V2 and chunk.get("generation") != token:
+                            raise BrowserError("browser_media_stream_failed")
                         packet, generation, sequence = media_packet(
                             chunk, pid, generation, sequence
                         )

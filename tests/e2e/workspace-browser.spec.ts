@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test"
 
+test.use({ channel: "chromium" })
+
 test("browser pixels keep the same geometry across motion and HD frames", async ({ page }) => {
   test.skip(process.env.PI_E2E_BROWSER !== "1", "Explicit installed Chromium opt-in")
   test.setTimeout(60_000)
@@ -9,6 +11,7 @@ test("browser pixels keep the same geometry across motion and HD frames", async 
   try {
     await page.goto(`/chat/${sid}`)
     await page.getByTestId("desk-new-browser").click()
+    await page.getByLabel("Browser rendering mode").selectOption("screenshots")
     await page.getByLabel("Browser address").fill("https://browser-fixture.example.test/geometry")
     await page.getByRole("button", { name: "Go", exact: true }).click()
     await expect(page.getByTestId("desk-tab-browser")).toContainText("Geometry fixture")
@@ -107,6 +110,7 @@ test("real Chromium coexists with Markdown and accepts user login and popup clic
   await page.locator("form.create-markdown").getByRole("button", { name: "Create", exact: true }).click()
   await expect(page.locator(".markdown-preview:visible")).toContainText("Browser notes")
   await page.getByTestId("desk-new-browser").click()
+  await page.getByLabel("Browser rendering mode").selectOption("screenshots")
   await expect(page.getByTestId("workspace-browser")).toBeVisible()
   await page.getByLabel("Browser address").fill("https://browser-fixture.example.test/login")
   await page.getByRole("button", { name: "Go", exact: true }).click()

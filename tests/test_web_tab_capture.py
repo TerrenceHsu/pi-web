@@ -474,9 +474,10 @@ def test_extension_has_only_approved_permissions_and_no_public_transport() -> No
     assert "local_echo=false" in script and "audioSafe: localSuppressed" in script
     assert "record.queuedBytes + event.data.size > MAX_QUEUE" in script
     assert "new MediaRecorder" in script and "record.recorder.start(100)" in script
-    assert "videoKeyFrameIntervalDuration:" not in script
-    assert "videoKeyFrameIntervalCount: 30" in script
+    assert "videoKeyFrameIntervalCount:" not in script
+    assert "videoKeyFrameIntervalDuration: 1000" in script
     assert "minWidth: 1920" in script and "minHeight: 1080" in script
+    assert "minFrameRate: 30, maxFrameRate: 30" in script
     assert "if (record.prefixBytes < 4) return" in script
     assert "new Blob(record.prefix)" in script
     assert "initial.slice(offset, offset + MAX_CHUNK)" in script
@@ -499,8 +500,8 @@ class Recorder {
   constructor(stream, options) {
     recorder = this;
     this.state = 'inactive';
-    assert.equal(options.videoKeyFrameIntervalDuration, undefined);
-    assert.equal(options.videoKeyFrameIntervalCount, 30);
+    assert.equal(options.videoKeyFrameIntervalDuration, 1000);
+    assert.equal(options.videoKeyFrameIntervalCount, undefined);
   }
   start(interval) { assert.equal(interval, 100); this.state = 'recording'; }
   stop() { this.state = 'inactive'; }
@@ -529,7 +530,11 @@ const sandbox = {
       getCapturedTabs: async () => [{tabId: 7, status: 'active'}],
     },
   },
-  navigator: {mediaDevices: {getUserMedia: async () => {
+  navigator: {mediaDevices: {getUserMedia: async options => {
+    assert.equal(options.video.mandatory.minFrameRate, 30);
+    assert.equal(options.video.mandatory.maxFrameRate, 30);
+    assert.equal(options.video.mandatory.chromeMediaSource, 'tab');
+    assert.equal(options.audio.mandatory.chromeMediaSource, 'tab');
     const audio = track('audio'), video = track('video');
     return {getAudioTracks: () => [audio], getVideoTracks: () => [video],
       getTracks: () => [audio, video]};

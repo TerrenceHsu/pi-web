@@ -1,10 +1,20 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import * as api from "../../api/browser"
+import { ApiError } from "../../api/client"
 import { BrowserStream, frameMatchesViewport, type FrameMetadata } from "../../api/browserStream"
 import { BrowserMediaStream, browserVideoPoint } from "../../api/browserMediaStream"
+import {
+  browserRenderingPreference,
+  rememberBrowserRendering,
+  releaseBrowserMedia,
+  reserveBrowserMedia,
+} from "../../api/browserMediaCoordinator"
 
-const props = defineProps<{ sessionId: string; pageId: string; active: boolean }>()
+const props = withDefaults(
+  defineProps<{ sessionId: string; pageId: string; active: boolean; mediaPreferred?: boolean }>(),
+  { mediaPreferred: true },
+)
 const address = ref("")
 const editingAddress = ref(false)
 const error = ref("")
@@ -17,7 +27,11 @@ const mediaStarting = ref(false)
 const mediaPlaying = ref(false)
 const mediaWaiting = ref(false)
 const playRequired = ref(false)
-const muted = ref(false)
+const muted = ref(true)
+const savedRendering = browserRenderingPreference(props.sessionId, props.pageId)
+const renderingMode = ref<"media" | "screenshots">(savedRendering.mode)
+const mediaFailed = ref(savedRendering.failed)
+const mediaStatic = ref(false)
 const volume = ref(0.8)
 const viewport = ref<HTMLElement | null>(null)
 const keyboard = ref<HTMLTextAreaElement | null>(null)
@@ -39,12 +53,26 @@ let inputTimer: ReturnType<typeof setTimeout> | undefined
 let observer: ResizeObserver | undefined
 let stream: BrowserStream | undefined
 let mediaStream: BrowserMediaStream | undefined
-let mediaTarget: { sid: string; pid: string } | undefined
-let mediaStopping: Promise<void> | undefined
+let mediaTarget: { sid: string; pid: string; generation?: string } | undefined
+let mediaStopping: Promise<boolean> | undefined
+type MediaStartupResult = "ready" | "failed" | "cancelled"
+let mediaStartup:
+  | {
+      promise: Promise<MediaStartupResult>
+      finish: (result: MediaStartupResult) => void
+      timer: ReturnType<typeof setTimeout>
+    }
+  | undefined
+const mediaOwner = Symbol("workspace-browser-media")
+let viewRevision = 0
+let unmounted = false
 let mediaResize: Promise<api.BrowserPage> | undefined
 let videoFrameCallback: number | undefined
 let mediaHealthTimer: ReturnType<typeof setInterval> | undefined
 let lastVideoFrameAt = 0
+let lastMediaSourceAt = 0
+let lastMediaClockAt = 0
+let presentedVideo = false
 let retries = 0
 let resizing: Promise<void> | undefined
 let forceResizePending = false
@@ -178,19 +206,24 @@ async function connect(forceResize = false) {
 }
 function mediaMessage(code: string) {
   if (["browser_media_unsupported", "browser_media_codec_unsupported"].includes(code))
-    return "Video + audio is not supported by this browser. Screenshot view is available."
+    return "1080p streaming is not supported by this browser. HD screenshots are available."
+  if (["browser_media_busy", "browser_media_limit", "browser_stream_limit"].includes(code))
+    return "Another browser view is using the account's media stream. HD screenshots are available; retry after that stream stops."
   if (code === "browser_media_slow_consumer")
-    return "Video playback could not keep up. The stream stopped; use Video + audio to try again."
-  return "Video + audio is unavailable. The stream stopped; screenshot view is available."
+    return "Video playback could not keep up. HD screenshots are available; retry 1080p streaming when ready."
+  return "1080p streaming is unavailable. HD screenshots are available; retry when ready."
 }
 function countVideoFrames() {
   if (!video.value?.requestVideoFrameCallback || !mediaMode.value) return
+  const version = generation
   videoFrameCallback = video.value.requestVideoFrameCallback((now) => {
-    if (!mediaMode.value || !video.value) return
+    if (version !== generation || !mediaMode.value || !video.value) return
     mediaStream?.notePresentedFrame()
+    presentedVideo = true
     lastVideoFrameAt = performance.now()
     mediaPlaying.value = !video.value.paused
     mediaWaiting.value = false
+    mediaStatic.value = false
     frameTimes = frameTimes.filter((time) => now - time < 2000)
     frameTimes.push(now)
     fps.value =
@@ -203,25 +236,34 @@ function countVideoFrames() {
 }
 function watchMediaHealth() {
   clearInterval(mediaHealthTimer)
+  const version = generation
   lastVideoFrameAt = performance.now()
+  lastMediaSourceAt = lastVideoFrameAt
+  lastMediaClockAt = lastVideoFrameAt
+  presentedVideo = false
   let previousTime = video.value?.currentTime ?? 0
   mediaHealthTimer = setInterval(() => {
-    if (!mediaMode.value) return
+    if (version !== generation || !mediaMode.value) return
+    const now = performance.now()
     const currentTime = video.value?.currentTime ?? 0
-    if (!video.value?.requestVideoFrameCallback && currentTime > previousTime) {
-      lastVideoFrameAt = performance.now()
-      mediaWaiting.value = false
-    }
+    if (!video.value?.paused && currentTime > previousTime + 0.001) lastMediaClockAt = now
     previousTime = currentTime
-    const staleMs = performance.now() - lastVideoFrameAt
+    const staleMs = now - lastVideoFrameAt
+    // A static tab can provide continuous audio/container timestamps without
+    // presenting new video frames. Source progress is not proof of playback:
+    // require an advancing element clock too, and never synthesize FPS.
+    mediaStatic.value =
+      presentedVideo &&
+      staleMs >= 2000 &&
+      now - lastMediaSourceAt < 2000 &&
+      now - lastMediaClockAt < 2000
     if (staleMs >= 2000) {
       fps.value = 0
       mediaPlaying.value = false
     }
-    if (staleMs >= 8000 && !playRequired.value)
-      void stopMedia(
-        true,
-        "Video stopped producing frames. Screenshot view is available; start Video + audio to try again.",
+    if (now - lastMediaSourceAt >= 8000 || (now - lastMediaClockAt >= 8000 && !playRequired.value))
+      failMedia(
+        "Video playback stopped progressing. HD screenshots are available; retry 1080p streaming when ready.",
       )
   }, 500)
 }
@@ -242,23 +284,79 @@ async function playMedia() {
     playRequired.value = true
   }
 }
+function mediaWanted() {
+  return (
+    !unmounted &&
+    props.active &&
+    props.mediaPreferred &&
+    !document.hidden &&
+    renderingMode.value === "media" &&
+    !mediaFailed.value
+  )
+}
+function failMedia(message: string) {
+  mediaFailed.value = true
+  void stopMedia(true, message, "failed")
+}
+function finishMediaStartup(result: MediaStartupResult) {
+  const startup = mediaStartup
+  mediaStartup = undefined
+  mediaStarting.value = false
+  if (!startup) return
+  clearTimeout(startup.timer)
+  startup.finish(result)
+}
+function soundChanged(event: Event) {
+  muted.value = !(event.target as HTMLInputElement).checked
+  // The unmute and play call both run inside the actual user gesture, including
+  // browsers that reject an asynchronous watcher as sound authorization.
+  if (video.value) {
+    video.value.muted = muted.value
+    video.value.volume = volume.value
+    if (!muted.value) void playMedia()
+  }
+}
 async function startMedia() {
-  if (mediaMode.value || mediaStarting.value || !props.active || document.hidden) return
+  if (mediaMode.value || mediaStarting.value || !mediaWanted()) return
   if (!BrowserMediaStream.supported()) {
+    mediaFailed.value = true
     error.value = mediaMessage("browser_media_unsupported")
+    void connect()
     return
   }
   reset()
   const version = generation
-  const target = { sid: props.sessionId, pid: props.pageId }
-  mediaTarget = target
+  const target: NonNullable<typeof mediaTarget> = { sid: props.sessionId, pid: props.pageId }
   mediaMode.value = true
   mediaStarting.value = true
+  let finish!: (result: MediaStartupResult) => void
+  const promise = new Promise<MediaStartupResult>((resolve) => {
+    finish = resolve
+  })
+  mediaStartup = {
+    promise,
+    finish,
+    timer: setTimeout(() => {
+      if (version === generation && mediaStarting.value)
+        failMedia(
+          "1080p streaming did not start in time. HD screenshots are available; retry when ready.",
+        )
+    }, 10_000),
+  }
   mediaWaiting.value = true
   playRequired.value = false
+  muted.value = true
+  mediaStatic.value = false
   error.value = ""
   try {
-    if (mediaStopping) await mediaStopping
+    if (mediaStopping && !(await mediaStopping)) throw new Error("Media stop unconfirmed")
+    const reserved = await reserveBrowserMedia(
+      mediaOwner,
+      () => stopMedia(false),
+      () => version === generation && mediaWanted(),
+    )
+    if (!reserved || version !== generation) return
+    mediaTarget = target
     if (resizing) await resizing
     await queue
     if (version !== generation) return
@@ -277,37 +375,52 @@ async function startMedia() {
     await nextTick()
     if (version !== generation || !video.value) return
     mediaStream = new BrowserMediaStream(target.sid, target.pid, video.value, {
-      page: (info) => {
+      started: (token) => {
+        if (version === generation) {
+          target.generation = token
+          finishMediaStartup("ready")
+        }
+      },
+      page: (info, token) => {
         if (version !== generation) return
+        target.generation = token
+        lastMediaSourceAt = performance.now()
         update(info)
         renderedPage.value = info
         connected.value = true
       },
       error: (code) => {
-        if (version === generation) void stopMedia(true, mediaMessage(code))
+        if (version === generation) failMedia(mediaMessage(code))
       },
       closed: () => {
-        if (version === generation) void stopMedia(true, mediaMessage("browser_media_unavailable"))
+        if (version === generation) failMedia(mediaMessage("browser_media_unavailable"))
       },
       watch: () =>
         version === generation &&
         props.active &&
         !document.hidden &&
         mediaMode.value &&
-        (mediaPlaying.value || mediaWaiting.value),
+        !playRequired.value &&
+        (mediaPlaying.value || mediaWaiting.value || mediaStatic.value),
     })
     countVideoFrames()
     watchMediaHealth()
     void playMedia()
   } catch {
-    if (version === generation) await stopMedia(true, mediaMessage("browser_media_unavailable"))
-  } finally {
-    if (version === generation) mediaStarting.value = false
+    if (version === generation) failMedia(mediaMessage("browser_media_unavailable"))
   }
 }
-async function stopMedia(restore = true, message = "") {
+async function stopMedia(
+  restore = true,
+  message = "",
+  startupResult: MediaStartupResult = "cancelled",
+) {
+  if (mediaStopping) return mediaStopping
+  finishMediaStartup(startupResult)
   const target = mediaTarget
   mediaTarget = undefined
+  muted.value = true
+  if (video.value) video.value.muted = true
   mediaStream?.close()
   mediaStream = undefined
   clearInterval(mediaHealthTimer)
@@ -318,36 +431,94 @@ async function stopMedia(restore = true, message = "") {
   mediaStarting.value = false
   mediaPlaying.value = false
   mediaWaiting.value = false
+  mediaStatic.value = false
   playRequired.value = false
   reset()
   const version = generation
-  if (!target) return
   const pending = (async () => {
+    const abort = new AbortController()
+    let timeout: ReturnType<typeof setTimeout> | undefined
     try {
-      if (mediaResize) await mediaResize.catch(() => undefined)
-      if (resizing) await resizing
-      await api.action(target.sid, target.pid, { action: "media_stop" })
-    } catch {
+      const cleanup = (async () => {
+        if (mediaResize) await mediaResize.catch(() => undefined)
+        if (resizing) await resizing
+        if (abort.signal.aborted) throw new Error("Media stop timed out")
+        // An early quota rejection belongs to no local generation. Never use a
+        // page-wide stop which could terminate another application window.
+        if (target?.generation)
+          await api.action(
+            target.sid,
+            target.pid,
+            {
+              action: "media_stop",
+              media_generation: target.generation,
+            },
+            abort.signal,
+          )
+      })()
+      await Promise.race([
+        cleanup,
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => {
+            abort.abort()
+            reject(new Error("Media stop timed out"))
+          }, 10_000)
+        }),
+      ])
+      return true
+    } catch (cause) {
+      if (
+        target?.generation &&
+        cause instanceof ApiError &&
+        cause.status === 404 &&
+        ["browser_page_not_found", "browser_session_not_found"].includes(
+          cause.payload?.detail?.code,
+        )
+      )
+        return true
       if (version === generation)
         error.value = "Unable to confirm that video stopped. Reconnect this view."
-      throw new Error("Media stop failed")
+      if (target) mediaTarget = target
+      return false
+    } finally {
+      clearTimeout(timeout)
     }
   })()
   mediaStopping = pending
+  releaseBrowserMedia(mediaOwner, pending)
   try {
-    await pending
-    if (version === generation && restore && props.active && !document.hidden) {
+    const stopped = await pending
+    if (stopped && version === generation && restore && props.active && !document.hidden) {
       if (mediaStopping === pending) mediaStopping = undefined
       await connect(true)
     }
     if (version === generation && message) error.value = message
-  } catch {
-    /* The fixed message above is safe to display. */
+    return stopped
   } finally {
     if (mediaStopping === pending) mediaStopping = undefined
   }
 }
 async function act(body: Record<string, unknown>) {
+  const waiting = mediaStartup
+  const originalGeneration = generation
+  const revision = viewRevision
+  const target = { sid: props.sessionId, pid: props.pageId }
+  if (waiting && ["navigate", "back", "forward", "reload"].includes(String(body.action))) {
+    const outcome = await waiting.promise
+    // Capture's activeTab grant must be consumed before a cross-origin
+    // navigation can revoke it. On failed startup, wait for scoped cleanup
+    // before allowing navigation in the same still-visible view.
+    if (outcome === "cancelled") return
+    if (outcome === "failed" && mediaStopping && !(await mediaStopping)) return
+    if (
+      unmounted ||
+      revision !== viewRevision ||
+      target.sid !== props.sessionId ||
+      target.pid !== props.pageId ||
+      (outcome === "ready" && originalGeneration !== generation)
+    )
+      return
+  }
   const version = generation
   try {
     const result = await api.action(props.sessionId, props.pageId, body)
@@ -519,6 +690,11 @@ function reset() {
   imageUrl.value = ""
 }
 function reconnect() {
+  if (renderingMode.value === "media" && props.mediaPreferred) {
+    mediaFailed.value = false
+    void reconcileView()
+    return
+  }
   if (mediaTarget) {
     void stopMedia(true)
     return
@@ -528,27 +704,47 @@ function reconnect() {
   error.value = ""
   void connect(true)
 }
-function visibilityChanged() {
-  if (mediaTarget) {
-    void stopMedia(!document.hidden)
-    return
+async function reconcileView() {
+  const revision = ++viewRevision
+  // Stop locally before waiting for network cleanup, including rapid focus
+  // changes between two visible split panes.
+  if (mediaTarget || mediaMode.value || mediaStopping) {
+    if (!(await stopMedia(false))) return
+    if (revision !== viewRevision || unmounted) return
   }
   reset()
-  if (!document.hidden) void connect()
+  if (!props.active || document.hidden || unmounted) return
+  if (mediaWanted()) void startMedia()
+  else void connect()
+}
+function visibilityChanged() {
+  void reconcileView()
+}
+function chooseScreenshots() {
+  renderingMode.value = "screenshots"
+}
+function renderingChanged(event: Event) {
+  mediaFailed.value = false
+  renderingMode.value =
+    (event.target as HTMLSelectElement).value === "screenshots" ? "screenshots" : "media"
 }
 watch(
-  () => [props.sessionId, props.pageId, props.active],
-  async () => {
-    if (mediaTarget) {
-      const stopped = stopMedia(false)
-      const version = generation
-      await stopped
-      if (version === generation && props.active) void connect()
-      return
-    }
-    reset()
-    if (props.active) void connect()
+  () => [props.sessionId, props.pageId],
+  () => {
+    const saved = browserRenderingPreference(props.sessionId, props.pageId)
+    renderingMode.value = saved.mode
+    mediaFailed.value = saved.failed
   },
+)
+watch([renderingMode, mediaFailed], () => {
+  rememberBrowserRendering(props.sessionId, props.pageId, {
+    mode: renderingMode.value,
+    failed: mediaFailed.value,
+  })
+})
+watch(
+  () => [props.sessionId, props.pageId, props.active, props.mediaPreferred, renderingMode.value],
+  () => void reconcileView(),
   { immediate: true },
 )
 watch(hd, scheduleResize)
@@ -560,8 +756,10 @@ watch([muted, volume], () => {
 })
 onMounted(() => document.addEventListener("visibilitychange", visibilityChanged))
 onBeforeUnmount(() => {
+  unmounted = true
+  viewRevision++
   document.removeEventListener("visibilitychange", visibilityChanged)
-  if (mediaTarget) void stopMedia(false)
+  if (mediaTarget || mediaMode.value) void stopMedia(false)
   else reset()
 })
 </script>
@@ -569,9 +767,25 @@ onBeforeUnmount(() => {
 <template>
   <section class="browser-view" data-testid="workspace-browser">
     <form class="browser-toolbar" @submit.prevent="navigate">
-      <button type="button" title="Back" @click="act({ action: 'back' })">←</button>
-      <button type="button" title="Forward" @click="act({ action: 'forward' })">→</button>
-      <button type="button" title="Reload" @click="act({ action: 'reload' })">↻</button>
+      <button type="button" title="Back" :disabled="mediaStarting" @click="act({ action: 'back' })">
+        ←
+      </button>
+      <button
+        type="button"
+        title="Forward"
+        :disabled="mediaStarting"
+        @click="act({ action: 'forward' })"
+      >
+        →
+      </button>
+      <button
+        type="button"
+        title="Reload"
+        :disabled="mediaStarting"
+        @click="act({ action: 'reload' })"
+      >
+        ↻
+      </button>
       <input
         v-model="address"
         aria-label="Browser address"
@@ -581,7 +795,9 @@ onBeforeUnmount(() => {
         @focus="editingAddress = true"
         @blur="editingAddress = false"
       />
-      <button :disabled="navigating" type="submit">{{ navigating ? "…" : "Go" }}</button>
+      <button :disabled="navigating || mediaStarting" type="submit">
+        {{ navigating ? "…" : "Go" }}
+      </button>
     </form>
     <p class="browser-boundary">
       Private to this Session · Public websites only · No file upload/download · Login clears on
@@ -604,7 +820,9 @@ onBeforeUnmount(() => {
               ? "Playing"
               : playRequired
                 ? "Playback paused"
-                : "Waiting for video"
+                : mediaStatic
+                  ? "Static page · stream healthy"
+                  : "Waiting for video"
             : frameCurrent
               ? "Live"
               : connected
@@ -622,13 +840,32 @@ onBeforeUnmount(() => {
       >
     </div>
     <div class="browser-media-controls">
-      <button v-if="!mediaMode" type="button" :disabled="mediaStarting" @click="startMedia">
-        Video + audio
+      <select :value="renderingMode" aria-label="Browser rendering mode" @change="renderingChanged">
+        <option value="media">1080p / 30 fps</option>
+        <option value="screenshots">HD screenshots</option>
+      </select>
+      <button
+        v-if="mediaFailed && renderingMode === 'media' && mediaPreferred"
+        type="button"
+        @click="reconnect"
+      >
+        Retry 1080p / 30 fps
       </button>
-      <template v-else>
-        <button type="button" @click="stopMedia(true)">Stop video</button>
-        <button v-if="playRequired" type="button" @click="playMedia">Play video + audio</button>
-        <label><input v-model="muted" type="checkbox" /> Mute</label>
+      <span v-if="renderingMode === 'media' && !mediaPreferred"
+        >Focus this browser pane for 1080p streaming.</span
+      >
+      <template v-if="mediaMode">
+        <button type="button" @click="chooseScreenshots">Stop video</button>
+        <button v-if="playRequired" type="button" @click="playMedia">Play video</button>
+        <label
+          ><input
+            :checked="!muted"
+            type="checkbox"
+            aria-label="Browser sound"
+            @change="soundChanged"
+          />
+          Sound</label
+        >
         <input
           v-model.number="volume"
           type="range"
@@ -637,6 +874,7 @@ onBeforeUnmount(() => {
           step="0.05"
           aria-label="Browser audio volume"
         />
+        <span>Sound off on resume · hidden views stop</span>
       </template>
     </div>
     <p v-if="error" class="browser-error" role="alert">
@@ -665,7 +903,7 @@ onBeforeUnmount(() => {
         @stalled="mediaPlaying = false"
         @pause="mediaPlaying = false"
         @ended="mediaPlaying = false"
-        @error="mediaMode && stopMedia(true, mediaMessage('browser_media_stream_failed'))"
+        @error="mediaMode && failMedia(mediaMessage('browser_media_stream_failed'))"
       />
       <img
         v-if="imageUrl && !mediaMode"

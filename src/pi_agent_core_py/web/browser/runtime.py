@@ -488,9 +488,16 @@ class BrowserEngine:
                         {"width": action["width"], "height": action["height"]}
                     )
         elif kind == "media_stop":
-            for token, item in list(self.media.items()):
-                if (item.sid, item.pid) == (sid, pid):
-                    await self.unsubscribe_media(token)
+            # Automatic view handoff must not stop a newer generation (or a
+            # same-page stream owned by another Web window). Missing generation
+            # retains the explicit legacy stop action for older UI clients.
+            expected = action.get("media_generation")
+            async with self.media_lock:
+                for token, item in list(self.media.items()):
+                    if (item.sid, item.pid) == (sid, pid) and (
+                        expected is None or expected == token
+                    ):
+                        await self._stop_media(token)
         elif kind == "wheel":
             await page.mouse.wheel(action["dx"], action["dy"])
         elif kind == "text":

@@ -86,7 +86,7 @@ class Source extends EventTarget {
   }
 }
 const streams: BrowserMediaStream[] = []
-function create() {
+function create(started = true) {
   const video = {
     src: "",
     currentTime: 0,
@@ -95,7 +95,13 @@ function create() {
     load: vi.fn(),
     removeAttribute: vi.fn(),
   }
-  const callbacks = { page: vi.fn(), error: vi.fn(), closed: vi.fn(), watch: vi.fn(() => true) }
+  const callbacks = {
+    started: vi.fn(),
+    page: vi.fn(),
+    error: vi.fn(),
+    closed: vi.fn(),
+    watch: vi.fn(() => true),
+  }
   const stream = new BrowserMediaStream(
     "session",
     "page",
@@ -103,6 +109,8 @@ function create() {
     callbacks,
   )
   streams.push(stream)
+  if (started)
+    Socket.last.receive('{"type":"started","generation":"generation-a","page_id":"page"}')
   return { stream, video, callbacks, socket: Socket.last, source: Source.instances.at(-1)! }
 }
 beforeEach(() => {
@@ -136,7 +144,8 @@ describe("Browser media transport", () => {
   it("serializes dependent chunks and ACKs only completed appends", () => {
     const { socket, source, callbacks } = create()
     expect(socket.url.pathname).toBe("/ws/browser-media/session/page")
-    expect(socket.protocol).toBe("pi-browser-media-v1")
+    expect(socket.protocol).toBe("pi-browser-media-v2")
+    expect(callbacks.started).toHaveBeenCalledWith("generation-a")
     socket.receive(packet(1))
     socket.receive(packet(2))
     expect(socket.send).not.toHaveBeenCalled()
@@ -159,19 +168,38 @@ describe("Browser media transport", () => {
     source.buffer.finish()
     expect(socket.send).not.toHaveBeenCalled()
   })
-  it("requires seq 1 and a fresh MediaSource when generation changes", () => {
-    const { socket, source } = create()
+  it("rejects foreign generations instead of replacing the owned MediaSource", () => {
+    const { socket, source, callbacks } = create()
     source.open()
     socket.receive(packet(1))
     socket.receive(packet(1, "generation-b"))
-    expect(Source.instances).toHaveLength(2)
+    expect(Source.instances).toHaveLength(1)
     source.buffer.finish()
     expect(socket.send).not.toHaveBeenCalled()
-    const next = Source.instances[1]
-    next.open()
-    next.buffer.finish()
-    expect(socket.send).toHaveBeenCalledTimes(1)
-    expect(socket.send).toHaveBeenCalledWith('{"ack":1}')
+    expect(callbacks.error).toHaveBeenCalledWith("browser_media_invalid_message")
+    expect(callbacks.started).toHaveBeenCalledOnce()
+  })
+  it("requires the started receipt before accepting chunks or generation ownership", () => {
+    const { socket, callbacks } = create(false)
+    socket.receive(packet())
+    expect(callbacks.started).not.toHaveBeenCalled()
+    expect(callbacks.error).toHaveBeenCalledWith("browser_media_invalid_message")
+  })
+  it.each([
+    { type: "started", generation: "generation-a", page_id: "foreign-page" },
+    { type: "started", generation: "invalid token", page_id: "page" },
+    { type: "started", generation: "generation-a", page_id: "page", extra: true },
+  ])("rejects a malformed started receipt %j", (message) => {
+    const { socket, callbacks } = create(false)
+    socket.receive(JSON.stringify(message))
+    expect(callbacks.started).not.toHaveBeenCalled()
+    expect(callbacks.error).toHaveBeenCalledWith("browser_media_invalid_message")
+  })
+  it("never accepts a duplicate started receipt even with the same generation", () => {
+    const { socket, callbacks } = create()
+    socket.receive('{"type":"started","generation":"generation-a","page_id":"page"}')
+    expect(callbacks.started).toHaveBeenCalledOnce()
+    expect(callbacks.error).toHaveBeenCalledWith("browser_media_invalid_message")
   })
   it("bounds the sum of pending and in-flight bytes at 8 MiB", () => {
     const { socket, callbacks } = create()
@@ -274,7 +302,7 @@ describe("Browser media transport", () => {
     expect(callbacks.error).toHaveBeenCalledWith("browser_media_stream_failed")
     expect(socket.send).toHaveBeenCalledTimes(4)
   })
-  it("resets gap repair limits and boundaries with a new generation", () => {
+  it("keeps ownership fixed even after exhausting gap repairs", () => {
     const { socket, source, video, callbacks } = create()
     source.open()
     for (let index = 0; index < 2; index++) {
@@ -287,17 +315,9 @@ describe("Browser media transport", () => {
       source.buffer.finish()
     }
     socket.receive(packet(1, "generation-b"))
-    const next = Source.instances.at(-1)!
-    next.buffer.ranges = [
-      [0, 0.398],
-      [0.7, 1.2],
-    ]
-    video.currentTime = 0.36
-    next.open()
-    next.buffer.finish()
-    expect(video.currentTime).toBeCloseTo(0.71)
-    expect(callbacks.error).not.toHaveBeenCalled()
-    expect(socket.send).toHaveBeenLastCalledWith('{"ack":1}')
+    expect(Source.instances).toHaveLength(1)
+    expect(callbacks.error).toHaveBeenCalledWith("browser_media_invalid_message")
+    expect(socket.send).toHaveBeenLastCalledWith('{"ack":2}')
   })
   it("stops a stalled append or more than eight seconds of unconsumed media", () => {
     const first = create()

@@ -6,7 +6,11 @@ test.use({ channel: "chromium" });
 
 // Optional local decoder comparison; CI keeps its installed Playwright browser.
 if (process.env.PI_E2E_MEDIA_BROWSER_EXECUTABLE) {
-  test.use({ launchOptions: { executablePath: process.env.PI_E2E_MEDIA_BROWSER_EXECUTABLE } });
+  test.use({
+    launchOptions: {
+      executablePath: process.env.PI_E2E_MEDIA_BROWSER_EXECUTABLE,
+    },
+  });
 }
 
 const headers = { "X-PI-Agent-UI": "1" };
@@ -55,6 +59,12 @@ async function prepareSilentReceiver(page: Page) {
         updateEnds: 0,
         seekingEvents: 0,
         mediaFrames: 0,
+        removeCalls: 0,
+        lastRemoval: null as {
+          start: number;
+          end: number;
+          currentTime: number;
+        } | null,
         sourceBuffers: [] as SourceBuffer[],
         history: [] as unknown[],
         timer: 0,
@@ -83,6 +93,8 @@ async function prepareSilentReceiver(page: Page) {
           appendCalls: diagnostics.appendCalls,
           appendBytes: diagnostics.appendBytes,
           updateEnds: diagnostics.updateEnds,
+          removeCalls: diagnostics.removeCalls,
+          lastRemoval: diagnostics.lastRemoval,
           sourceBuffers: diagnostics.sourceBuffers.map((buffer) => {
             try {
               return {
@@ -104,20 +116,30 @@ async function prepareSilentReceiver(page: Page) {
         if (diagnostics.history.length < 64) diagnostics.history.push(result);
         return result;
       };
-      const addSourceBuffer = MediaSource.prototype.addSourceBuffer;
-      MediaSource.prototype.addSourceBuffer = function (mime: string) {
-        const buffer = addSourceBuffer.call(this, mime);
-        diagnostics.sourceBuffers.push(buffer);
-        const append = buffer.appendBuffer.bind(buffer);
-        buffer.appendBuffer = (bytes) => {
-          diagnostics.appendCalls += 1;
-          diagnostics.appendBytes += bytes.byteLength;
-          append(bytes);
+      // Auto-start may have created SourceBuffer before this analyser is attached.
+      // Instrument prototype operations so both the existing stream and retries
+      // are observed without replacing or altering any media data.
+      const append = SourceBuffer.prototype.appendBuffer;
+      SourceBuffer.prototype.appendBuffer = function (bytes) {
+        if (!diagnostics.sourceBuffers.includes(this)) {
+          diagnostics.sourceBuffers.push(this);
+          this.addEventListener("updateend", () => {
+            diagnostics.updateEnds += 1;
+          });
+        }
+        diagnostics.appendCalls += 1;
+        diagnostics.appendBytes += bytes.byteLength;
+        append.call(this, bytes);
+      };
+      const remove = SourceBuffer.prototype.remove;
+      SourceBuffer.prototype.remove = function (start: number, end: number) {
+        diagnostics.removeCalls += 1;
+        diagnostics.lastRemoval = {
+          start,
+          end,
+          currentTime: video.currentTime,
         };
-        buffer.addEventListener("updateend", () => {
-          diagnostics.updateEnds += 1;
-        });
-        return buffer;
+        remove.call(this, start, end);
       };
       video.addEventListener("seeking", () => {
         diagnostics.seekingEvents += 1;
@@ -153,13 +175,12 @@ async function prepareSilentReceiver(page: Page) {
 
 async function enableMedia(page: Page) {
   const started = Date.now();
-  const startButton = page.getByRole("button", {
-    name: "Video + audio",
-    exact: true,
-  });
-  await startButton.evaluate((button) => {
-    button.addEventListener(
-      "click",
+  await page.getByLabel("Browser rendering mode").selectOption("media");
+  const sound = page.getByLabel("Browser sound", { exact: true });
+  await expect(sound).toBeVisible();
+  await sound.evaluate((checkbox) => {
+    checkbox.addEventListener(
+      "change",
       () => {
         const probe = (
           window as unknown as {
@@ -175,7 +196,7 @@ async function enableMedia(page: Page) {
       { capture: true, once: true },
     );
   });
-  await startButton.click();
+  await sound.check();
   await expect
     .poll(() =>
       page.evaluate(
@@ -191,7 +212,7 @@ async function enableMedia(page: Page) {
     .poll(
       async () => {
         const play = page.getByRole("button", {
-          name: "Play video + audio",
+          name: "Play video",
           exact: true,
         });
         if (await play.isVisible()) await play.click();
@@ -306,6 +327,14 @@ test("1080p browser media delivers moving pixels and isolated audio, then restor
     "browser-media-playback",
   );
   try {
+    await expect(
+      page.getByLabel("Browser sound", { exact: true }),
+    ).not.toBeChecked();
+    expect(
+      await page
+        .locator("video.browser-video")
+        .evaluate((element: HTMLVideoElement) => element.muted),
+    ).toBe(true);
     await prepareSilentReceiver(page);
     const { video, startupMs } = await enableMedia(page);
     await startToneThroughVideo(page);
@@ -319,6 +348,7 @@ test("1080p browser media delivers moving pixels and isolated audio, then restor
       const samples = new Float32Array(probe.analyser.fftSize);
       const times: number[] = [];
       let maxRms = 0;
+      let tailAudioRms = 0;
       let maxBufferedSeconds = 0;
       let handle = 0;
       let ended = false;
@@ -330,13 +360,13 @@ test("1080p browser media delivers moving pixels and isolated audio, then restor
       const started = performance.now();
       while (performance.now() - started < 30000) {
         probe.analyser.getFloatTimeDomainData(samples);
-        maxRms = Math.max(
-          maxRms,
-          Math.sqrt(
-            samples.reduce((sum, sample) => sum + sample * sample, 0) /
-              samples.length,
-          ),
+        const rms = Math.sqrt(
+          samples.reduce((sum, sample) => sum + sample * sample, 0) /
+            samples.length,
         );
+        maxRms = Math.max(maxRms, rms);
+        if (performance.now() - started >= 20_000)
+          tailAudioRms = Math.max(tailAudioRms, rms);
         if (element.buffered.length)
           maxBufferedSeconds = Math.max(
             maxBufferedSeconds,
@@ -360,6 +390,7 @@ test("1080p browser media delivers moving pixels and isolated audio, then restor
         lastFrameStallMs: performance.now() - (times.at(-1) ?? started),
         maxBufferedSeconds,
         audioRms: maxRms,
+        tailAudioRms,
         paused: element.paused,
         bufferedSeconds: element.buffered.length
           ? element.buffered.end(element.buffered.length - 1) -
@@ -380,10 +411,11 @@ test("1080p browser media delivers moving pixels and isolated audio, then restor
     expect(measured.tailFps).toBeGreaterThanOrEqual(20);
     expect(measured.lastFrameStallMs).toBeLessThan(1000);
     expect(measured.audioRms).toBeGreaterThan(0.005);
+    expect(measured.tailAudioRms).toBeGreaterThan(0.005);
     expect(measured.bufferedSeconds).toBeLessThanOrEqual(8.5);
     expect(measured.maxBufferedSeconds).toBeLessThanOrEqual(8.5);
     expect(measured.paused).toBe(false);
-    await page.getByLabel("Mute", { exact: true }).check();
+    await page.getByLabel("Browser sound", { exact: true }).uncheck();
     expect(
       await video.evaluate((element: HTMLVideoElement) => element.muted),
     ).toBe(true);
@@ -394,11 +426,11 @@ test("1080p browser media delivers moving pixels and isolated audio, then restor
     expect(
       await video.evaluate((element: HTMLVideoElement) => element.volume),
     ).toBeCloseTo(0.35);
-    await page.getByLabel("Mute", { exact: true }).uncheck();
+    await page.getByLabel("Browser sound", { exact: true }).check();
     expect(
       await video.evaluate((element: HTMLVideoElement) => element.muted),
     ).toBe(false);
-    await page.getByRole("button", { name: "Stop video", exact: true }).click();
+    await page.getByLabel("Browser rendering mode").selectOption("screenshots");
     await expect(page.getByAltText("Interactive browser page")).toBeVisible({
       timeout: 15_000,
     });
@@ -478,7 +510,7 @@ test("media requires authenticated access and stops when its Session is deleted"
               window.location.href,
             );
             url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-            const socket = new WebSocket(url, "pi-browser-media-v1");
+            const socket = new WebSocket(url, "pi-browser-media-v2");
             const timer = setTimeout(() => {
               socket.close();
               resolve(false);

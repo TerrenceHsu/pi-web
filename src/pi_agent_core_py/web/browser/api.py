@@ -31,6 +31,7 @@ MESSAGES = {
     "browser_context_limit": "Close tabs in another Session first (3 Sessions per account).",
     "browser_page_limit": "Close a browser tab first (limit: 6 pages per Session).",
     "browser_page_not_found": "This browser page is closed or expired. Open a new browser tab.",
+    "browser_session_not_found": "This Session no longer exists.",
     "browser_session_deleted": "This Session is closing or deleted.",
     "browser_invalid_key": "This keyboard shortcut is not supported.",
     "browser_timeout": "The browser did not respond in time. Retry or close this page.",
@@ -124,6 +125,9 @@ class BrowserAction(BaseModel):
     height: int = Field(default=800, ge=200, le=1400)
     dpr: float = Field(default=1, ge=1, le=2)
     view_version: int | None = Field(default=None, ge=0)
+    media_generation: str | None = Field(
+        default=None, min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$"
+    )
     dx: float = Field(default=0, ge=-1500, le=1500)
     dy: float = Field(default=0, ge=-1500, le=1500)
     button: Literal["left", "right"] = "left"
@@ -143,7 +147,14 @@ def build_browser_router(
         if origin is not None and origin not in config.allowed_ui_origins:
             if origin == "null" or origin != str(request.base_url).rstrip("/"):
                 raise HTTPException(403, "Origin is not allowed.")
-        await require_session(sid)
+        try:
+            await require_session(sid)
+        except HTTPException as exc:
+            # A confirmed missing Session also confirms its owned captures have
+            # been released. Keep this distinct from authorization/transient errors.
+            if exc.status_code == 404:
+                raise BrowserError("browser_session_not_found") from None
+            raise
 
     router = APIRouter(
         prefix="/api/sessions/{sid}/browser",

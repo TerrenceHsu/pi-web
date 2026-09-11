@@ -67,6 +67,47 @@ async def engine() -> AsyncIterator[BrowserEngine]:
         await instance.close()
 
 
+@pytest.mark.parametrize("requested", ["obsolete-generation", "foreign-generation"])
+async def test_scoped_stop_does_not_release_a_different_capture(
+    engine: BrowserEngine, requested: str,
+) -> None:
+    subscription = MediaSubscription("s", "p", "current-generation")
+    stop = AsyncMock()
+    subscription.handle = SimpleNamespace(stop=stop)
+    engine.media[subscription.token] = subscription
+    await engine.command("s", "p", {"action": "media_stop", "media_generation": requested})
+    assert engine.media[subscription.token] is subscription and not subscription.closed
+    stop.assert_not_awaited()
+
+
+async def test_scoped_stop_checks_page_and_then_releases_only_matching_generation(
+    engine: BrowserEngine,
+) -> None:
+    subscription = MediaSubscription("s", "p", "owned-generation")
+    stop = AsyncMock()
+    subscription.handle = SimpleNamespace(stop=stop)
+    engine.media[subscription.token] = subscription
+    action = {"action": "media_stop", "media_generation": "owned-generation"}
+    await engine.command("s", "other", action)
+    stop.assert_not_awaited()
+    await engine.command("s", "p", action)
+    stop.assert_awaited_once()
+    assert not engine.media
+    # Late retries remain harmless after the original generation has closed.
+    await engine.command("s", "p", action)
+    stop.assert_awaited_once()
+
+
+@pytest.mark.parametrize("generation", ["", "bad token", "x" * 129, 1])
+def test_media_stop_generation_is_a_bounded_opaque_id(generation: Any) -> None:
+    from pydantic import ValidationError
+
+    from pi_agent_core_py.web.browser.api import BrowserAction
+
+    with pytest.raises(ValidationError):
+        BrowserAction(action="media_stop", media_generation=generation)
+
+
 @pytest.mark.parametrize(
     ("sequence", "data"),
     [(0, INIT), (2, INIT), (True, INIT), (1, b""), (1, b"no-init"), (1, "text")],

@@ -130,7 +130,9 @@ def test_api_ownership_validation_no_secret_echo_and_session_cleanup(tmp_path: P
             client.get(prefix, headers={**headers, "Origin": "https://hostile.example"}).status_code
             == 403
         )
-        assert client.get("/api/sessions/missing/browser", headers=headers).status_code == 404
+        missing = client.get("/api/sessions/missing/browser", headers=headers)
+        assert missing.status_code == 404
+        assert missing.json()["detail"]["code"] == "browser_session_not_found"
         result = client.get(prefix, headers=headers)
         assert result.status_code == 200 and result.headers["cache-control"] == "no-store"
         result = client.post(
@@ -151,7 +153,18 @@ def test_api_ownership_validation_no_secret_echo_and_session_cleanup(tmp_path: P
         assert client.get(f"/api/sessions/{sid}").status_code == 200
         runtime.delete_session.side_effect = None
         assert client.delete(f"/api/sessions/{sid}").status_code == 200
-        assert client.get(prefix, headers=headers).status_code == 404
+        missing = client.post(
+            prefix + "/pages/p/action", headers=headers,
+            json={"action": "media_stop", "media_generation": "owned-generation"},
+        )
+        assert missing.status_code == 404
+        assert missing.json()["detail"]["code"] == "browser_session_not_found"
+        denied = client.post(
+            prefix + "/pages/p/action",
+            json={"action": "media_stop", "media_generation": "owned-generation"},
+        )
+        assert denied.status_code == 403
+        assert denied.json()["detail"]["code"] == "browser_request_rejected"
         assert runtime.delete_session.await_count == 2
 
 

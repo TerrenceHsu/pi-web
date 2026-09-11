@@ -31,6 +31,13 @@ function visible(id: string) {
     state.value.primary === id || (state.value.split !== "none" && state.value.secondary === id)
   )
 }
+// Keep the single account media slot on a visible browser. Focusing Markdown
+// must not restart its neighboring browser; two browser panes follow focus.
+const preferredMediaTab = computed(() => {
+  const browsers = state.value.tabs.filter((tab) => tab.kind === "browser" && visible(tab.id))
+  const focused = state.value[state.value.focused]
+  return browsers.find((tab) => tab.id === focused)?.id ?? browsers[0]?.id ?? null
+})
 function select(id: string) {
   store.activate(props.sessionId, id)
 }
@@ -295,6 +302,7 @@ onBeforeUnmount(() => {
           :session-id="sessionId"
           :page-id="tab.resourceId"
           :active="active !== false && visible(tab.id)"
+          :media-preferred="preferredMediaTab === tab.id"
         />
       </section>
       <div v-if="!state.primary" class="desk-placeholder">

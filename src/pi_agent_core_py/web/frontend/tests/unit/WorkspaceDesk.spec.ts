@@ -3,6 +3,7 @@ import { flushPromises, mount } from "@vue/test-utils"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { useWorkspaceDeskStore } from "../../src/stores/workspaceDeskStore"
 import WorkspaceDesk from "../../src/components/workspace/WorkspaceDesk.vue"
+import WorkspaceBrowser from "../../src/components/workspace/WorkspaceBrowser.vue"
 import WorkspaceFilePreview from "../../src/components/workspace/WorkspaceFilePreview.vue"
 import type { FileRef } from "../../src/types"
 
@@ -104,6 +105,121 @@ describe("Workspace tab ownership", () => {
     expect(useWorkspaceDeskStore().desk("s").focused).toBe("secondary")
     expect(wrapper.findAll(".desk-tabs [aria-selected='true']")).toHaveLength(1)
     wrapper.unmount()
+  })
+  describe("preferred browser media ownership", () => {
+    const browserTab = (id: string) => ({
+      id: `browser:${id}`,
+      kind: "browser" as const,
+      resourceId: id,
+      title: id,
+    })
+    async function mountDesk() {
+      const wrapper = mount(WorkspaceDesk, {
+        props: {
+          sessionId: "s",
+          files: [file],
+          filesReady: true,
+          selectedFileId: null,
+          active: true,
+          loadContent: vi.fn(),
+          saveContent: vi.fn(),
+        },
+        global: { stubs: { WorkspaceBrowser: true, WorkspaceFilePreview: true } },
+      })
+      // Finish the initial empty server poll before opening the fixture tabs;
+      // otherwise that response correctly removes the unlisted local pages.
+      await flushPromises()
+      return wrapper
+    }
+    function preferredPages(wrapper: Awaited<ReturnType<typeof mountDesk>>) {
+      return wrapper
+        .findAllComponents(WorkspaceBrowser)
+        .filter((browser) => browser.props("mediaPreferred"))
+        .map((browser) => browser.props("pageId"))
+    }
+    it("prefers exactly the visible browser in a single pane", async () => {
+      const wrapper = await mountDesk()
+      try {
+        const store = useWorkspaceDeskStore()
+        store.open("s", browserTab("one"))
+        store.open("s", browserTab("two"))
+        await flushPromises()
+        expect(preferredPages(wrapper)).toEqual(["two"])
+        const browsers = wrapper.findAllComponents(WorkspaceBrowser)
+        expect(browsers.map((browser) => browser.props("active"))).toEqual([false, true])
+        await wrapper.get('[id="desk-tab-s-browser:one"]').trigger("click")
+        expect(preferredPages(wrapper)).toEqual(["one"])
+        expect(browsers.map((browser) => browser.props("active"))).toEqual([true, false])
+      } finally {
+        wrapper.unmount()
+      }
+    })
+    it.each(["columns", "rows"] as const)(
+      "transfers one media preference when focus moves between two %s browser panes",
+      async (split) => {
+        const wrapper = await mountDesk()
+        try {
+          const store = useWorkspaceDeskStore()
+          store.open("s", browserTab("one"))
+          store.open("s", browserTab("two"))
+          store.setSplit("s", split)
+          await flushPromises()
+          expect(preferredPages(wrapper)).toEqual(["two"])
+          expect(
+            wrapper.findAllComponents(WorkspaceBrowser).map((browser) => browser.props("active")),
+          ).toEqual([true, true])
+          await wrapper.get(".desk-view.secondary").trigger("pointerdown")
+          expect(store.desk("s").focused).toBe("secondary")
+          expect(preferredPages(wrapper)).toEqual(["one"])
+          await wrapper.get(".desk-view:not(.secondary)").trigger("pointerdown")
+          expect(store.desk("s").focused).toBe("primary")
+          expect(preferredPages(wrapper)).toEqual(["two"])
+        } finally {
+          wrapper.unmount()
+        }
+      },
+    )
+    it("keeps the sole browser preferred when its neighboring Markdown pane is focused", async () => {
+      const wrapper = await mountDesk()
+      try {
+        const store = useWorkspaceDeskStore()
+        store.open("s", browserTab("one"))
+        store.open("s", { id: "file:one", kind: "file", resourceId: "one", title: "one.md" })
+        store.setSplit("s", "columns")
+        await flushPromises()
+        expect(store.desk("s").primary).toBe("file:one")
+        expect(preferredPages(wrapper)).toEqual(["one"])
+        await wrapper.get(".desk-view.secondary").trigger("pointerdown")
+        expect(store.desk("s").focused).toBe("secondary")
+        expect(preferredPages(wrapper)).toEqual(["one"])
+        await wrapper.get(".desk-view:not(.secondary)").trigger("pointerdown")
+        expect(store.desk("s").focused).toBe("primary")
+        expect(preferredPages(wrapper)).toEqual(["one"])
+        expect(wrapper.findComponent(WorkspaceBrowser).props("active")).toBe(true)
+      } finally {
+        wrapper.unmount()
+      }
+    })
+    it("does not prefer a browser hidden behind a Markdown tab", async () => {
+      const wrapper = await mountDesk()
+      try {
+        const store = useWorkspaceDeskStore()
+        store.open("s", browserTab("one"))
+        store.open("s", { id: "file:one", kind: "file", resourceId: "one", title: "one.md" })
+        await flushPromises()
+        expect(preferredPages(wrapper)).toEqual([])
+        expect(wrapper.findComponent(WorkspaceBrowser).props("active")).toBe(false)
+        store.setSplit("s", "columns")
+        await flushPromises()
+        expect(preferredPages(wrapper)).toEqual(["one"])
+        store.setSplit("s", "none")
+        await flushPromises()
+        expect(preferredPages(wrapper)).toEqual([])
+        expect(wrapper.findComponent(WorkspaceBrowser).props("active")).toBe(false)
+      } finally {
+        wrapper.unmount()
+      }
+    })
   })
   it("renders multiple documents and keeps edited Markdown while switching", async () => {
     const files = [file, { ...file, id: "two", name: "two.md" }]

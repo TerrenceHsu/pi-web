@@ -16,7 +16,12 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from pi_agent_core_py.web.browser import media_api
-from pi_agent_core_py.web.browser.media_api import MIME, PROTOCOL, build_browser_media_router
+from pi_agent_core_py.web.browser.media_api import (
+    MIME,
+    PROTOCOL,
+    PROTOCOL_V2,
+    build_browser_media_router,
+)
 from pi_agent_core_py.web.browser.runtime import BrowserError
 from pi_agent_core_py.web.local_web_security import WebSecurityConfig
 
@@ -174,6 +179,61 @@ def test_media_heartbeat_renews_only_after_explicit_watch_response(
         assert decode(websocket.receive_bytes())[0]["seq"] == 1
         runtime.renew_media.assert_awaited_once_with("viewer-token")
     runtime.unsubscribe_media.assert_awaited_once_with("viewer-token")
+
+
+def test_v2_announces_owned_capture_before_data_and_does_not_need_start_ack(
+    media_client: tuple[TestClient, SimpleNamespace, AsyncMock],
+) -> None:
+    client, runtime, _ = media_client
+    runtime.subscribe_media.return_value = "generation-one"
+    with client.websocket_connect(
+        URL, headers={"Origin": "http://testserver"}, subprotocols=[PROTOCOL_V2]
+    ) as websocket:
+        assert websocket.accepted_subprotocol == PROTOCOL_V2
+        assert websocket.receive_json() == {
+            "type": "started", "generation": "generation-one", "page_id": "page",
+        }
+        assert decode(websocket.receive_bytes())[0]["generation"] == "generation-one"
+        runtime.renew_media.assert_not_awaited()
+    runtime.unsubscribe_media.assert_awaited_once_with("generation-one")
+
+
+def test_v2_never_delivers_a_foreign_generation(
+    media_client: tuple[TestClient, SimpleNamespace, AsyncMock],
+) -> None:
+    client, runtime, _ = media_client
+    with client.websocket_connect(
+        URL, headers={"Origin": "http://testserver"}, subprotocols=[PROTOCOL_V2]
+    ) as websocket:
+        assert websocket.receive_json()["generation"] == "viewer-token"
+        assert_error(websocket, "browser_media_stream_failed")
+    runtime.renew_media.assert_not_awaited()
+    runtime.unsubscribe_media.assert_awaited_once_with("viewer-token")
+
+
+def test_v2_rechecks_session_before_exposing_generation(
+    media_client: tuple[TestClient, SimpleNamespace, AsyncMock],
+) -> None:
+    client, runtime, guard = media_client
+    guard.side_effect = [None, HTTPException(404, PRIVATE)]
+    with client.websocket_connect(
+        URL, headers={"Origin": "http://testserver"}, subprotocols=[PROTOCOL_V2]
+    ) as websocket:
+        assert_error(websocket, "browser_session_deleted")
+    runtime.next_media.assert_not_awaited()
+    runtime.unsubscribe_media.assert_awaited_once_with("viewer-token")
+
+
+def test_v2_denied_subscription_does_not_announce_or_stop_a_capture(
+    media_client: tuple[TestClient, SimpleNamespace, AsyncMock],
+) -> None:
+    client, runtime, _ = media_client
+    runtime.subscribe_media.side_effect = BrowserError("browser_media_limit")
+    with client.websocket_connect(
+        URL, headers={"Origin": "http://testserver"}, subprotocols=[PROTOCOL_V2]
+    ) as websocket:
+        assert_error(websocket, "browser_media_limit")
+    runtime.unsubscribe_media.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

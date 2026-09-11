@@ -8,7 +8,8 @@
 - [x] 内嵌浏览器调宽停帧：旧尺寸/截图异常触发最多两次帧源恢复，耗尽后明确错误而非无限心跳；新像素解码前不显示 Live。真实 Chromium 故障注入、连续 16 次 popup resize 和 Web E2E 原失败用例通过；历史 trace 保留。
 - [x] 媒体基础安全与连接期限：退出/过期的登录及时停止旧 WebSocket，代理双向活动共用空闲期限并保留硬寿命/写超时。
 - [x] 单标签 1080p/目标 30 fps 有声播放：确认后采用项目专用扩展、精确 Session/page/tab 绑定、VP8/Opus 有界 WebSocket/MSE，用户播放解锁、静音/音量、停止恢复图片、配额与多路径回收。完整 Chromium 149/151 各通过 30 秒实际页面播放约 29.49 fps、非零音频和停止/删除回收；不保证恒定帧率或 DRM。阶段 2 证据见 [验证记录](docs/validation/workspace-browser-media-2026-09-10.md)。
-- [ ] 多标签媒体配额、显式后台音频、观看租约和 60 fps 档位实测；以单标签真实音视频闭环为前置。见 [实施约定](docs/design/workspace-browser-media.md)。
+- [x] 默认优先可见网页常驻 1080p/目标 30 fps，Sound 单独解锁、返回静音恢复、单路分屏交接与有界故障回退；修复启动导航竞争、静态稀疏时间线和跨 generation 清理。见 [常驻验证](docs/validation/workspace-browser-persistent-2026-09-11.md)。
+- [ ] 多路媒体配额、显式后台音频和 60 fps 档位实测；以单路真实音视频闭环为前置。现有单路观看租约已实现。见 [实施约定](docs/design/workspace-browser-media.md)。
 - [x] 公共 Markdown 数学公式：本地 KaTeX/字体、美元与括号分隔符、流式容错、长公式滚动、恶意命令拦截；保留代码/用户原文及 LaTeX 字面下划线语义。
 - [x] 修复画面比例跳变：视口重绘同步、异常尺寸帧过滤、采集坐标与显示比例固定；新增真实 Chromium 与 Web 连续像素几何回归，避免只检查图片尺寸。
 - [x] 高清/实时帧推送、最新帧背压、Page 级导航与输入调度、受控公网地址回退、HD/FPS/像素/导航计时；见 [性能验证](docs/validation/workspace-browser-performance-2026-09-09.md)。

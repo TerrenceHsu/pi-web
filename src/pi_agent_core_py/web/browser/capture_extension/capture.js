@@ -91,7 +91,11 @@
       record.stream = await navigator.mediaDevices.getUserMedia({
         audio: {mandatory: {chromeMediaSource: 'tab', chromeMediaSourceId: id}},
         video: {mandatory: {chromeMediaSource: 'tab', chromeMediaSourceId: id,
-          minWidth: 1920, maxWidth: 1920, minHeight: 1080, maxHeight: 1080, maxFrameRate: 30}},
+          minWidth: 1920, maxWidth: 1920, minHeight: 1080, maxHeight: 1080,
+          // Keep native refresh frames arriving even when the tab is static.
+          // Sparse one-frame WebM clusters otherwise leave undecodable time gaps.
+          // This is a capture hint; the UI still measures actual presented frames.
+          minFrameRate: 30, maxFrameRate: 30}},
       });
       if (record.stopped) {
         record.stream.getTracks().forEach(track => track.stop());
@@ -116,9 +120,10 @@
       if (!captureActive || record.stopped) throw new Error('browser_media_capture_failed');
       record.recorder = new MediaRecorder(record.stream, {
         mimeType: MIME, videoBitsPerSecond: 4000000, audioBitsPerSecond: 96000,
-        // Shorter frame-count spacing aids bounded MSE pruning; it does not
-        // guarantee a wall-clock interval on static or low-frame-rate pages.
-        videoKeyFrameIntervalCount: 30,
+        // Request random-access frames by elapsed time, not frame count: static
+        // tabs emit far fewer frames and must remain safe for bounded MSE pruning.
+        // This requests a keyframe on the next arriving frame, not synthetic FPS.
+        videoKeyFrameIntervalDuration: 1000,
       });
       record.recorder.ondataavailable = event => {
         if (record.stopped || !event.data.size) return;

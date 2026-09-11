@@ -95,7 +95,8 @@ export function browserVideoPoint(
 }
 
 interface MediaCallbacks {
-  page: (page: BrowserPage) => void
+  started?: (generation: string) => void
+  page: (page: BrowserPage, generation: string) => void
   error: (code: string) => void
   closed: (code: number) => void
   watch: () => boolean
@@ -137,7 +138,7 @@ export class BrowserMediaStream {
       window.location.href,
     )
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:"
-    this.socket = new WebSocket(url, "pi-browser-media-v1")
+    this.socket = new WebSocket(url, "pi-browser-media-v2")
     this.socket.binaryType = "arraybuffer"
     this.resetSource()
     this.socket.onmessage = (event) => this.receive(event.data)
@@ -154,6 +155,18 @@ export class BrowserMediaStream {
       if (typeof data === "string") {
         if (data.length > 1024) throw new Error("Invalid media message")
         const message = JSON.parse(data)
+        if (
+          message?.type === "started" &&
+          Object.keys(message).length === 3 &&
+          typeof message.generation === "string" &&
+          /^[a-zA-Z0-9_-]{1,128}$/.test(message.generation) &&
+          message.page_id === this.pid &&
+          !this.generation
+        ) {
+          this.generation = message.generation
+          this.callbacks.started?.(message.generation)
+          return
+        }
         if (message?.type === "heartbeat" && Object.keys(message).length === 1) {
           if (this.callbacks.watch() && this.socket.readyState === WebSocket.OPEN)
             this.socket.send(JSON.stringify({ watch: true }))
@@ -167,12 +180,8 @@ export class BrowserMediaStream {
       }
       const chunk = decodeBrowserMediaChunk(data as ArrayBuffer)
       if (chunk.metadata.page.id !== this.pid) throw new Error("Wrong media page")
-      if (chunk.metadata.generation !== this.generation) {
-        if (chunk.metadata.seq !== 1) throw new Error("Missing media initialization")
-        if (this.generation) this.resetSource()
-        this.generation = chunk.metadata.generation
-        this.lastSequence = 0
-      }
+      if (!this.generation || chunk.metadata.generation !== this.generation)
+        throw new Error("Media generation does not match the owned stream")
       if (chunk.metadata.seq !== this.lastSequence + 1)
         throw new Error("Discontinuous media stream")
       if (this.queuedBytes + chunk.bytes.byteLength > QUEUE_LIMIT) {
@@ -235,7 +244,7 @@ export class BrowserMediaStream {
       const { metadata, bytes } = this.inflight
       this.queuedBytes -= bytes.byteLength
       this.inflight = undefined
-      this.callbacks.page(metadata.page)
+      this.callbacks.page(metadata.page, metadata.generation)
       if (this.socket.readyState === WebSocket.OPEN)
         this.socket.send(JSON.stringify({ ack: metadata.seq }))
     }
