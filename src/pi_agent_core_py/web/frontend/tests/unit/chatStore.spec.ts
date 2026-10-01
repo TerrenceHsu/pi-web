@@ -9,7 +9,7 @@
 //
 // 不覆盖 sendPrompt 后续 WS / API 错误路径——这些由其它 E2E / integration 覆盖。
 
-import { describe, expect, it, vi, beforeEach } from "vitest"
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest"
 import { createPinia, setActivePinia } from "pinia"
 
 // ----- Mock api/messages -----
@@ -24,8 +24,8 @@ vi.mock("../../src/api/messages", () => ({
   getMessages: vi.fn(),
 }))
 
-vi.mock("../../src/api/client", () => ({
-  ApiError: class ApiError extends Error {},
+vi.mock("../../src/api/client", async (original) => ({
+  ApiError: (await original<typeof import("../../src/api/client")>()).ApiError,
   requestJson: vi.fn(),
 }))
 
@@ -462,6 +462,103 @@ describe("checkpointer state", () => {
     expect(store.streamItems.map((item) => item.id)).toEqual(["a-keep"])
     expect(store.error).toBe("provider unavailable")
     expect(store.checkpointing).toBe(false)
+  })
+})
+
+describe("request status independent of WebSocket", () => {
+  let store: ReturnType<typeof useChatStore>
+  beforeEach(() => {
+    vi.useFakeTimers()
+    store = useChatStore()
+    store.setActiveSession("sess-1")
+    vi.mocked(messagesApi.getMessages).mockResolvedValue({
+      session_id: "sess-1", count: 0, messages: [],
+    } as any)
+  })
+  afterEach(() => {
+    store.resetWorkspace()
+    vi.clearAllTimers()
+    vi.useRealTimers()
+  })
+
+  it("finishes a long run when no terminal event arrives", async () => {
+    vi.mocked(messagesApi.getRequestStatus).mockResolvedValue({
+      request_id: "req-fake", session_id: "sess-1", status: "running",
+    } as any)
+    await store.sendPrompt({ text: "long task", sessionId: "sess-1" })
+    await vi.advanceTimersByTimeAsync(15_000)
+    expect(store.sending).toBe(true)
+    expect(store.error).toBeNull()
+    vi.mocked(messagesApi.getRequestStatus).mockResolvedValue({
+      request_id: "req-fake", session_id: "sess-1", status: "completed",
+    } as any)
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(store.sending).toBe(false)
+    expect(store.currentRequestId).toBeNull()
+    expect(messagesApi.getMessages).toHaveBeenCalledWith("sess-1")
+  })
+
+  it("preserves the visible draft when persistence fails", async () => {
+    vi.mocked(messagesApi.getRequestStatus).mockResolvedValue({
+      request_id: "req-fake", session_id: "sess-1", status: "error",
+      error_type: "message_persistence_failed", error: "Response could not be saved",
+    } as any)
+    await store.sendPrompt({ text: "task", sessionId: "sess-1" })
+    store.streamItems.push({ ...makeAssistant("unsaved"), content: "unsaved answer" } as any)
+    await vi.advanceTimersByTimeAsync(300)
+    expect(store.streamItems.some((item) => item.id === "unsaved")).toBe(true)
+    expect(messagesApi.getMessages).not.toHaveBeenCalled()
+    expect(store.error).toBe("Response could not be saved")
+    expect(store.sending).toBe(false)
+  })
+
+  it("stops querying an old view after a session reset", async () => {
+    await store.sendPrompt({ text: "task", sessionId: "sess-1" })
+    store.resetForSession()
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(messagesApi.getRequestStatus).not.toHaveBeenCalled()
+  })
+
+  it("replays gaps immediately and deduplicates later delivery", async () => {
+    const event = (sequence: number, delta: string) => ({
+      type: "message_update", sequence, event_id: `evt-${sequence}`,
+      request_id: "req-fake", session_id: "sess-1", timestamp: "2026-10-01T00:00:00Z",
+      payload: { assistant_message_event: { type: "text_delta", delta } },
+    })
+    await store.sendPrompt({ text: "task", sessionId: "sess-1" })
+    store.handleEvent(event(1, "a"))
+    vi.mocked(eventsApi.getEvents).mockResolvedValue({
+      count: 2, events: [event(2, "b"), event(3, "c")], has_more: false, gap: false,
+    } as any)
+    store.handleEvent(event(3, "c"))
+    await Promise.resolve()
+    await Promise.resolve()
+    store.handleEvent(event(2, "b"))
+    expect(eventsApi.getEvents).toHaveBeenCalledWith({ afterSequence: 1, limit: 200 })
+    expect(store.streamItems.filter((item) => item.kind === "assistant_message")
+      .map((item: any) => item.content).join("")).toBe("abc")
+    expect(store.lastGlobalSequence).toBe(3)
+  })
+
+  it("ignores replay responses from a reset workspace", async () => {
+    let resolveReplay!: (value: any) => void
+    vi.mocked(eventsApi.getEvents).mockReturnValue(new Promise((resolve) => {
+      resolveReplay = resolve
+    }))
+    store.handleEvent({ type: "hello", last_available_sequence: 1 })
+    store.handleEvent({
+      type: "message_update", sequence: 3, event_id: "evt-old",
+      request_id: null, session_id: null, timestamp: "2026-10-01T00:00:00Z", payload: {},
+    })
+    store.resetWorkspace()
+    resolveReplay({ count: 1, events: [{
+      type: "message_update", sequence: 2, event_id: "evt-stale",
+      request_id: null, session_id: null, timestamp: "2026-10-01T00:00:00Z",
+      payload: { assistant_message_event: { type: "text_delta", delta: "stale" } },
+    }], has_more: false, gap: false })
+    await Promise.resolve()
+    expect(store.lastGlobalSequence).toBe(0)
+    expect(store.streamItems).toEqual([])
   })
 })
 

@@ -10,6 +10,15 @@
 > ⚠️ Web app **仅 localhost 使用**——当前已有本地账号登录、Cookie 网关与账号工作区隔离，但无 TLS / RBAC / OAuth / 公网部署加固；
 > **Localhost-first, authenticated local workspaces, not suitable for public exposure.**
 
+## Wiki 摘要与解析任务
+
+Wiki 摘要使用账户默认 Provider，并在任务开始时固定模型、端点和客户端，供所有批次及综合步骤复用。
+未设置可用默认 Provider 时，摘要接口返回 503 / `summary_provider_unavailable`。
+取消摘要会把 job 写为 `cancelled`；启动时将遗留的非解析任务写为 `failed` / `interrupted`，不自动重放模型生成。
+
+解析入队先在 SQLite 原子创建 `queued` job，保存 `requested_mode` 和来源版本，再返回已入队。
+内存队列只负责调度；重启后沿用现有恢复机制，将未结束的解析标记失败，并以原模式创建新 attempt。
+
 ## 本地改密与 Telemetry 维护（2026-09-07）
 
 `POST /api/auth/password` 接收 `current_password`、`new_password`，不接受用户 ID。
@@ -853,6 +862,8 @@ Sandbox 创建、验证和 Freeze 流程。`intent` 只含规则审计，不包�
 
 `result_summary`（仅 completed）: `{message_count, applied_skill_names, session_id}`——**不含** message 全文 / GLM key / MCP env / system prompt。
 
+普通 request registry 仍保存在当前进程内，重启后旧 request_id 返回 404。前端会结束该请求的状态查询并保留可见草稿，提示工具可能已执行；不会自动重新发送 prompt。
+
 `event_start_sequence` / `event_end_sequence` 字段 P1-B1 占位 `null`，P1-B2 起 envelope 改造后填充。
 
 **Response 404**: request 不存在（既不在 active 也不在 history）。
@@ -1420,7 +1431,14 @@ Connection: keep-alive
 
 **spec 推荐通道**。前端 P0-4 默认用 WS。
 
-每连接一个 `asyncio.Queue(maxsize=100)`；`_web_event_hook` 一次性生成 envelope 广播到所有连接；慢客户端 queue 满时丢弃该 event，不阻塞其它客户端 / 主 loop。
+握手时校验精确 Origin：允许当前服务同源和显式配置的开发 UI 来源；跨端口、`null` 和其它来源以 4403 拒绝。无 Origin 的 CLI 客户端仍可连接，登录与 Host 校验独立执行。
+
+每连接一个 `asyncio.Queue(maxsize=100)`；发送与断线检测并行。慢客户端队列满时发送裸控制帧 `{"type":"resync_required"}`，随后以 1013 关闭，客户端从原 cursor 补播；不阻塞其它客户端 / 主 loop。前端检测 sequence 缺口时也立即补播并去重。
+
+前端从收到 `request_id` 起独立轮询 `GET /api/requests/{id}`，正常运行超过 10 秒不会停止查询。消息提交失败返回 `status=error`、`error_type=message_persistence_failed`，前端保留可见草稿，提示工具可能已经执行。辅助 snapshot 写入失败不会撤销已提交的消息。
+
+重新生成回答与普通消息复用同一会话节点写入逻辑，同步序号、日志、分支缓存和统计。
+`005_regeneration_projections` 迁移仅回填旧重新生成留下的未分配序号节点及其派生记录；保留节点 ID、正文、父节点关系与已有日志序号，事务失败会回滚，重复启动不重复回填。
 
 **消息格式**（server → client）：
 

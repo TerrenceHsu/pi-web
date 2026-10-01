@@ -117,7 +117,7 @@ from .checkpointer import (
 )
 from .content_integrity import summarize_content_integrity
 from .execution import ExecutionSelectionPut, LocalBackendFactory, WebExecutionRuntime
-from .local_web_security import default_web_security_config
+from .local_web_security import default_web_security_config, websocket_origin_allowed
 from .providers.runtime import (
     ProviderInitializationError,
     ProviderSelectionDisabledError,
@@ -502,7 +502,7 @@ def create_app(
             for name in mcp_names
             if (cfg := state.mcp_server_configs.get(name)) is not None and cfg.enabled
         }
-        registry = harness.skill_registry
+        registry = template_skill_catalog
         if registry is None:
             skill_names = set()
         else:
@@ -518,11 +518,14 @@ def create_app(
     # The configured Harness is the product template and owns shared extension
     # transports.  CodingAgentRuntime maps every durable Web Session ID to an
     # independent Agent/Harness state machine.
+    template_skill_catalog = harness.skill_registry
+    template_client = harness.agent.client
     coding_agent_services = create_coding_agent_services(
         resources=HarnessCodingAgentResourceLoader(
             harness,
             selection_loader=_load_workspace_resource_selection,
             optional_tool_names=frozenset({"analyze_data", "run_python_analysis", "run_bash"}),
+            skill_catalog=template_skill_catalog,
         ),
     )
     coding_agent_runtime = CodingAgentRuntime(
@@ -1000,8 +1003,27 @@ def create_app(
                 source_retention_seconds=wiki_source_retention_seconds,
                 purge_interval_seconds=wiki_source_purge_interval_seconds,
             )
+            @asynccontextmanager
+            async def wiki_summary_client() -> AsyncIterator[Any]:
+                from .providers.runtime import RequestProviderRuntimeError
+                from .wiki.errors import WikiStoreError
+
+                runtime = _app.state.request_provider_runtime
+                if runtime is None:
+                    # Explicit legacy/embedder mode owns a fixed startup client.
+                    yield template_client
+                    return
+                try:
+                    selection = await runtime.resolve_default_selection()
+                    if selection is None:
+                        raise WikiStoreError("summary_provider_unavailable")
+                    async with runtime.open_client(selection) as client:
+                        yield client
+                except RequestProviderRuntimeError:
+                    raise WikiStoreError("summary_provider_unavailable") from None
+
             summary_agent = wiki_summary_agent or CoreAgentWikiSummaryAgent(
-                lambda: harness.agent.client
+                lambda: template_client, client_context=wiki_summary_client,
             )
             wiki_summary_service = WikiSummaryService(wiki_store, summary_agent)
             wiki_entry_page_service = WikiEntryPageService(wiki_store)
@@ -1762,6 +1784,7 @@ def create_app(
     sse_clients: set[asyncio.Queue[dict[str, Any]]] = container["sse_clients"]
     # WebSocket 客户端队列集合——同 SSE，独立 queue 池
     ws_clients: set[asyncio.Queue[dict[str, Any]]] = container["ws_clients"]
+    ws_overflowed: set[asyncio.Queue[dict[str, Any]]] = set()
 
     async def _emit_web_payload(
         payload: dict[str, Any],
@@ -1784,10 +1807,18 @@ def create_app(
         }
         state.event_buffer.append(envelope)
         for q in list(sse_clients) + list(ws_clients):
+            if q in ws_overflowed:
+                continue
             try:
                 q.put_nowait(envelope)
             except asyncio.QueueFull:
-                continue
+                # A bounded subscriber cannot silently miss the tail (including
+                # terminal events). Disconnect it explicitly; HTTP replay/status
+                # remains authoritative and other subscribers keep flowing.
+                ws_overflowed.add(q)
+                while not q.empty():
+                    q.get_nowait()
+                q.put_nowait({"type": "resync_required"})
 
     async def _web_event_hook(event: Any, _ctx: Any) -> None:
         """on_event hook：序列化 event → 包装 WebEventEnvelope → 写入 buffer + 广播。
@@ -2057,7 +2088,10 @@ def create_app(
         # applications always install the repository above and therefore bind
         # every Runtime Session to durable storage.
         uses_template = container["coding_agent_template_session_id"] is None
-        session_harness = harness if uses_template else clone_agent_harness(harness)
+        session_harness = (
+            harness if uses_template else
+            clone_agent_harness(harness, skill_catalog=template_skill_catalog)
+        )
         try:
             agent_session = create_coding_agent_session(
                 session_id=session_id,
@@ -2177,7 +2211,7 @@ def create_app(
         from ..agent.harness.skills import Skill, SkillRegistrationError
         from .extension_store import ExtensionSQLiteStore
 
-        registry = harness.skill_registry
+        registry = template_skill_catalog
         if registry is None:
             return
 
@@ -4844,8 +4878,8 @@ def create_app(
     ) -> PromptRunOutcome:
         """D2-4：普通 prompt 持久化路径——replace_messages + append_snapshot。
 
-        保留旧语义：历史 message ID 由 diff-based replace_messages 保持；
-        snapshot 失败仍记 state.last_error 但不影响主流程（旧 wrapper 兼容）。
+        历史 message ID 由 diff-based replace_messages 保持；消息提交失败必须
+        终止请求。snapshot 是辅助记录，其失败不撤销已提交的消息。
 
         finally 恢复 harness.agent.state.messages 到 validated.original_messages
         （保持旧行为——普通 prompt 不需要从 SQLite reload，因为 replace_messages
@@ -4859,15 +4893,24 @@ def create_app(
                     validated.session_id, list(execution.messages)
                 )
                 session_persisted = True
-                if request_harness.last_snapshot is not None:
-                    await validated.store.append_snapshot(
-                        validated.session_id, request_harness.last_snapshot
-                    )
             except Exception as e:
-                state.last_error = f"persist: {type(e).__name__}: {e}"
+                state.last_error = f"persist: {type(e).__name__}"
+                raise PromptRuntimeError(
+                    500,
+                    "Response could not be saved. Keep the visible draft before refreshing; "
+                    "tools may already have run.",
+                    "message_persistence_failed",
+                ) from e
             finally:
                 if not session_persisted and validated.original_messages is not None:
                     request_harness.agent.state.messages = validated.original_messages
+            if request_harness.last_snapshot is not None:
+                try:
+                    await validated.store.append_snapshot(
+                        validated.session_id, request_harness.last_snapshot
+                    )
+                except Exception as e:
+                    state.last_error = f"snapshot: {type(e).__name__}"
 
         applied_skill_names = list(
             (execution.result_summary or {}).get("applied_skill_names", [])
@@ -5107,7 +5150,7 @@ def create_app(
                     web_request.session_id,
                 )
             except Exception:
-                # The durable request status remains authoritative when a
+                # The HTTP request status remains authoritative when a
                 # disconnected client cannot receive the terminal event.
                 return
 
@@ -8357,7 +8400,7 @@ def create_app(
             selected_mcp = {"ddgs"} if enable_builtin_ddgs else set()
             selected_skills = set()
 
-        registry = harness.skill_registry
+        registry = template_skill_catalog
         skill_items = [] if registry is None else registry.list()
         selected_mcp.intersection_update(
             {
@@ -8462,7 +8505,7 @@ def create_app(
                 or not cfg.attached
             }
         )
-        registry = harness.skill_registry
+        registry = template_skill_catalog
         enabled_skills = (
             set()
             if registry is None
@@ -9165,7 +9208,7 @@ def create_app(
         request: Request,
         include_prompt: bool = False,
     ) -> dict[str, Any]:
-        registry = harness.skill_registry
+        registry = template_skill_catalog
         if registry is None:
             return {
                 "attached": False,
@@ -9210,7 +9253,7 @@ def create_app(
         WebAppState 在 lifespan 中通常会 attach 一个空 registry；调用方
         显式 detach 后才会变 None。
         """
-        registry = harness.skill_registry
+        registry = template_skill_catalog
         if registry is None:
             raise HTTPException(
                 status_code=422,
@@ -10300,9 +10343,12 @@ def create_app(
         行为：
         - 连接建立：发送 hello event，等待客户端消息保持连接（不限协议）
         - on_event hook 广播：通过 ws_clients set 广播到所有连接
-        - 慢客户端 queue 满（maxsize=100）：直接丢弃该 event，不阻塞其它客户端
+        - 慢客户端 queue 满（maxsize=100）：通知补播并关闭，不阻塞其它客户端
         - 客户端断开：从 ws_clients 移除，回收 queue
         """
+        if not websocket_origin_allowed(websocket.scope, telemetry_security_config):
+            await websocket.close(code=4403, reason="origin forbidden")
+            return
         await websocket.accept()
         client_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100)
         ws_clients.add(client_queue)
@@ -10329,26 +10375,43 @@ def create_app(
                     "_received_at_ms": int(time.time() * 1000),
                 }
             )
-            while True:
-                # 不真的从客户端读——这里只为检测断连。约定客户端可发任意 keepalive。
-                try:
-                    await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
-                except WebSocketDisconnect:
-                    return
-                except TimeoutError:
-                    pass
-                # 把 queue 中累积的事件批量 send；满了就丢弃
-                while not client_queue.empty():
-                    payload = client_queue.get_nowait()
-                    try:
-                        await websocket.send_json(payload)
-                    except WebSocketDisconnect:
+            async def receive_disconnect() -> None:
+                while True:
+                    await websocket.receive_text()
+
+            async def send_events() -> None:
+                while True:
+                    payload = await client_queue.get()
+                    await websocket.send_json(payload)
+                    if payload.get("type") == "resync_required":
+                        await websocket.close(
+                            code=1013, reason="event stream overflow; replay required",
+                        )
                         return
-                    except Exception:
-                        # 客户端 socket 异常——退出
+                    if payload.get("type") == "shutdown":
                         return
+
+            receiver = asyncio.create_task(receive_disconnect())
+            sender = asyncio.create_task(send_events())
+            try:
+                done, _ = await asyncio.wait(
+                    (receiver, sender), return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in done:
+                    await task
+            except (WebSocketDisconnect, RuntimeError, OSError):
+                return
+            finally:
+                receiver.cancel()
+                sender.cancel()
+                await asyncio.gather(receiver, sender, return_exceptions=True)
+        except asyncio.CancelledError:
+            # Only the subscriber connection is cancelled here. Its child
+            # send/receive tasks have been cancelled; Agent requests are separate.
+            return
         finally:
             ws_clients.discard(client_queue)
+            ws_overflowed.discard(client_queue)
 
     # D2-4：内部函数挂到 app.state 便于测试访问——**不**是 public API；
     # 调用方应继续用 POST /api/prompt / async / (D2-5 未来的) /regenerate。

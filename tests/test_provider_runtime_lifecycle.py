@@ -13,6 +13,7 @@ per-feature files:
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -202,3 +203,28 @@ async def test_cancelled_error_propagates_from_body() -> None:
     with pytest.raises(asyncio.CancelledError):
         await _body()
     assert harness.agent.client is original
+
+
+async def test_default_task_selection_is_frozen_and_client_closes(monkeypatch) -> None:
+    runtime = _make_runtime()
+    profile = SimpleNamespace(
+        id="default", provider_id="qwen", default_model="original", enabled=True,
+        credential_id="cred", api_style=None, base_url=None,
+    )
+
+    async def default_profile():
+        return profile
+
+    runtime._provider_config_service.get_default_profile = default_profile
+    selection = await runtime.resolve_default_selection()
+    profile.default_model = "changed"
+    closed = []
+
+    async def close(client):
+        closed.append(client.model)
+
+    monkeypatch.setattr(ModelClient, "close", close)
+    async with runtime.open_client(selection) as client:
+        assert client.model == "original"
+        assert closed == []
+    assert closed == ["original"]

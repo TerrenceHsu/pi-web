@@ -22,10 +22,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from starlette.datastructures import URL, Headers
+from starlette.types import Scope
+
 __all__ = [
     "WebSecurityConfig",
     "DEFAULT_ALLOWED_HOSTS",
     "default_web_security_config",
+    "websocket_origin_allowed",
 ]
 
 
@@ -48,6 +52,23 @@ class WebSecurityConfig:
     allowed_ui_origins: tuple[str, ...] = ()
     require_ui_header: bool = True
     max_request_body_bytes: int = DEFAULT_MAX_REQUEST_BODY_BYTES
+
+
+def websocket_origin_allowed(scope: Scope, config: WebSecurityConfig) -> bool:
+    """Allow exact same-origin UI/dev origins; retain non-browser clients.
+
+    Browsers supply Origin during the handshake, including for same-site
+    requests to another port. Host trust is enforced separately by middleware.
+    """
+    origin = Headers(scope=scope).get("origin")
+    if origin is None:
+        return True
+    if origin == "null":
+        return False
+    url = URL(scope=scope)
+    scheme = "https" if url.scheme in {"https", "wss"} else "http"
+    same_origin = f"{scheme}://{url.netloc}"
+    return origin == same_origin or origin in config.allowed_ui_origins
 
 
 def default_web_security_config(

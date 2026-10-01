@@ -183,6 +183,42 @@ def test_4_async_request_completes_and_persists_messages(web_client):
 # ============================================================================
 
 
+def test_message_commit_failure_is_terminal_error_without_replaying(web_client, monkeypatch):
+    client, harness, app = web_client
+    store = app.state.web.session_store
+    calls = 0
+
+    async def fail_commit(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise OSError("private database path")
+
+    monkeypatch.setattr(store, "replace_messages", fail_commit)
+    accepted = client.post("/api/prompt/async", json={"text": "hello"}).json()
+    final = _wait_for_status(client, accepted["request_id"], ("error", "completed"))
+    assert final["status"] == "error"
+    assert final["error_type"] == "message_persistence_failed"
+    assert "private database path" not in final["error"]
+    assert calls == 1
+    assert client.get(f"/api/messages?session_id={accepted['session_id']}").json()["messages"] == []
+    assert harness.agent.state.messages == []
+
+
+def test_snapshot_failure_does_not_discard_committed_messages(web_client, monkeypatch):
+    client, _, app = web_client
+
+    async def fail_snapshot(*args, **kwargs):
+        raise OSError("private snapshot path")
+
+    monkeypatch.setattr(app.state.web.session_store, "append_snapshot", fail_snapshot)
+    accepted = client.post("/api/prompt/async", json={"text": "hello"}).json()
+    final = _wait_for_status(client, accepted["request_id"], ("error", "completed"))
+    assert final["status"] == "completed"
+    saved = client.get(f"/api/messages?session_id={accepted['session_id']}").json()["messages"]
+    assert len(saved) == 2
+    assert app.state.web.last_error == "snapshot: OSError"
+
+
 def test_6_async_prompt_with_file_ids(web_client):
     """async 请求带 file_ids 正常注入 FileBlock（§5.8 #6）。"""
     client, _, _ = web_client

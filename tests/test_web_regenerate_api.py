@@ -806,6 +806,10 @@ async def test_next_prompt_after_regenerate_sees_b_not_a(tmp_path):
 
         # 3. 下一轮：user "third" → assistant D
         _send_prompt(client, sid, "third")
+        stored = await app.state.web.session_store.list_messages(sid)
+        assert [_msg_text(message) for message in stored] == [
+            "first", "answer-B", "third", "answer-D",
+        ]
 
         # 取最后一次 LLM call 的输入（第三轮 prompt）
         all_calls = harness.agent.client.all_messages_calls

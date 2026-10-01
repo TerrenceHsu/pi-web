@@ -23,6 +23,7 @@ WikiErrorCode = Literal[
     "invalid_summary",
     "summary_not_found",
     "summary_generation_failed",
+    "summary_provider_unavailable",
     "summary_too_large",
     "invalid_page_proposal",
     "page_proposal_not_found",
@@ -75,6 +76,9 @@ _SAFE_MESSAGES: dict[WikiErrorCode, str] = {
     "invalid_summary": "Wiki source summary is invalid.",
     "summary_not_found": "Wiki source summary does not exist.",
     "summary_generation_failed": "Wiki source summary generation failed.",
+    "summary_provider_unavailable": (
+        "Configure an available default Provider before summarizing Wiki sources."
+    ),
     "summary_too_large": "Wiki source is too large for the configured summarizer.",
     "invalid_page_proposal": "Wiki page proposal is invalid.",
     "page_proposal_not_found": "Wiki page proposal does not exist.",

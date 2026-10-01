@@ -10,6 +10,8 @@ from importlib.resources import files
 
 import aiosqlite
 
+from .storage.entries import repair_unsequenced_entries
+
 
 class SQLiteMigrationError(RuntimeError):
     pass
@@ -286,6 +288,11 @@ async def apply_migrations(
             "004_repository_backfill",
             4,
             apply=lambda: _backfill_repository_state(db),
+        ),
+        SQLiteMigration(
+            "005_regeneration_projections",
+            5,
+            apply=lambda: repair_unsequenced_entries(db),
         ),
     )
 

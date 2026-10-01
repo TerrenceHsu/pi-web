@@ -240,6 +240,33 @@ class RequestProviderRuntime:
     # build_adapter
     # ------------------------------------------------------------------
 
+    async def resolve_default_selection(self) -> RequestProviderSelection | None:
+        """Freeze the account default for tasks that do not belong to a Session."""
+        profile = await self._provider_config_service.get_default_profile()
+        if profile is None:
+            return None
+        if not profile.enabled:
+            raise ProviderSelectionDisabledError(_MSG_PROFILE_DISABLED)
+        definition = self._provider_registry.get(profile.provider_id)
+        if definition is None:
+            raise ProviderInitializationError(_MSG_INITIALIZATION_FAILED)
+        return RequestProviderSelection(
+            profile_id=profile.id, provider_id=profile.provider_id,
+            model_id=profile.default_model, selection_source="default",
+            credential_id=profile.credential_id,
+            api_style=profile.api_style or definition.api_style,
+            base_url=profile.base_url or definition.default_base_url,
+        )
+
+    @asynccontextmanager
+    async def open_client(self, selection: RequestProviderSelection) -> AsyncIterator[ModelClient]:
+        """Own a task client without mutating a Session Harness."""
+        client = ModelClient(await self.build_adapter(selection))
+        try:
+            yield client
+        finally:
+            await _close_request_client_safely(client)
+
     async def build_adapter(
         self,
         selection: RequestProviderSelection,

@@ -37,6 +37,7 @@ from ..session_backends.sqlite.database import (
     database_for,
     serialized_operation,
 )
+from ..session_backends.sqlite.storage.entries import append_entry
 
 
 def _now_ms() -> int:
@@ -1825,17 +1826,21 @@ class ExtensionSQLiteStore:
                 )
             cursor = await db.execute(
                 "WITH RECURSIVE path("
-                "id, parent_id, message_id, role, content_json, created_at, depth"
+                "id, parent_id, message_id, role, content_json, created_at, "
+                "entry_type, payload_json, depth"
                 ") AS ("
-                "SELECT id, parent_id, message_id, role, content_json, created_at, 0 "
+                "SELECT id, parent_id, message_id, role, content_json, created_at, "
+                "entry_type, payload_json, 0 "
                 "FROM session_entries WHERE session_id = ? AND id = ? "
                 "UNION ALL "
                 "SELECT parent.id, parent.parent_id, parent.message_id, parent.role, "
-                "parent.content_json, parent.created_at, path.depth + 1 "
+                "parent.content_json, parent.created_at, parent.entry_type, "
+                "parent.payload_json, path.depth + 1 "
                 "FROM session_entries AS parent "
                 "JOIN path ON parent.id = path.parent_id "
                 "WHERE parent.session_id = ?"
-                ") SELECT id, parent_id, message_id, role, content_json, created_at "
+                ") SELECT id, parent_id, message_id, role, content_json, created_at, "
+                "entry_type, payload_json "
                 "FROM path ORDER BY depth DESC",
                 (session_id, lane_row["leaf_entry_id"], session_id),
             )
@@ -1853,14 +1858,6 @@ class ExtensionSQLiteStore:
                 raise ExtensionStoreError(
                     "finalize failed: assistant is not on the active session path"
                 )
-            cursor = await db.execute(
-                "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq "
-                "FROM session_entries WHERE session_id = ?",
-                (session_id,),
-            )
-            seq_row = await cursor.fetchone()
-            await cursor.close()
-            next_seq = int(seq_row["next_seq"]) if seq_row is not None else 0
             parent_id = path_rows[target_index]["parent_id"]
             leaf_entry_id: str | None = None
             for suffix_index, path_entry in enumerate(path_rows[target_index:]):
@@ -1870,20 +1867,13 @@ class ExtensionSQLiteStore:
                     if suffix_index == 0
                     else path_entry["content_json"]
                 )
-                await db.execute(
-                    "INSERT INTO session_entries "
-                    "(id, session_id, seq, parent_id, message_id, role, "
-                    "content_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        entry_id,
-                        session_id,
-                        next_seq + suffix_index,
-                        parent_id,
-                        path_entry["message_id"],
-                        path_entry["role"],
-                        content_json,
-                        path_entry["created_at"],
-                    ),
+                await append_entry(
+                    db, session_id=session_id, entry_id=entry_id,
+                    parent_id=parent_id, message_id=path_entry["message_id"],
+                    role=path_entry["role"], content_json=content_json,
+                    created_at=path_entry["created_at"],
+                    entry_type=path_entry["entry_type"],
+                    payload=None if suffix_index == 0 else json.loads(path_entry["payload_json"]),
                 )
                 parent_id = entry_id
                 leaf_entry_id = entry_id

@@ -22,8 +22,10 @@ import threading
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from pi_agent_core_py.agent import Agent
+from pi_agent_core_py.agent.events import AgentEndEvent, AgentStartEvent
 from pi_agent_core_py.harness import AgentHarness
 from pi_agent_core_py.model_client import DoneEvent, FakeClient, TextDeltaEvent
 from pi_agent_core_py.web.app import create_app
@@ -319,6 +321,34 @@ def test_9_ws_hello_not_in_event_buffer(web_client):
     assert hello_in_buffer == [], (
         f"hello leaked into event buffer: {hello_in_buffer}"
     )
+
+
+def test_websocket_overflow_explicitly_requests_replay(web_client):
+    client, harness, _ = web_client
+    hook = next(h for h in harness.on_event_hooks if h.__name__ == "_web_event_hook")
+
+    async def burst():
+        for _ in range(150):
+            await hook(AgentStartEvent(), harness.context)
+        await hook(AgentEndEvent(messages=[]), harness.context)
+
+    with client.websocket_connect("/ws/events") as socket:
+        assert socket.receive_json()["type"] == "hello"
+        client.portal.call(burst)
+        assert socket.receive_json() == {"type": "resync_required"}
+        with pytest.raises(WebSocketDisconnect) as closed:
+            socket.receive_json()
+        assert closed.value.code == 1013
+    replay = client.get("/api/events").json()
+    assert replay["events"][-1]["type"] == "agent_end"
+
+
+def test_standalone_websocket_rejects_cross_port_origin(web_client):
+    client, _, _ = web_client
+    with pytest.raises(WebSocketDisconnect) as closed:
+        with client.websocket_connect("/ws/events", headers={"Origin": "http://testserver:9999"}):
+            pass
+    assert closed.value.code == 4403
 
 
 def test_9b_ws_and_get_events_share_envelope_schema(web_client):

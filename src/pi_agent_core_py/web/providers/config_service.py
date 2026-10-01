@@ -466,6 +466,14 @@ class ProviderConfigService:
             for p in profiles
         )
 
+    async def get_default_profile(self) -> ProviderProfileView | None:
+        """Snapshot the account default without creating a Session binding."""
+        profile = await self._store.get_default_profile()
+        if profile is None:
+            return None
+        credential = await self._safe_get_credential(profile.credential_id)
+        return self._project(profile, credential)
+
     async def get_profile(self, profile_id: str) -> ProviderProfileView:
         """Return projected Profile view (used internally + by list_models)."""
         profile = await self._store.get_profile(profile_id)

@@ -1786,6 +1786,23 @@ class WikiStore:
                 raise
         return requests
 
+    async def recover_interrupted_derived_jobs(self) -> None:
+        """Derived model drafts are not replayed after restart; release stale work."""
+        async with self._write_lock:
+            db = self._require_db()
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                await db.execute(
+                    "UPDATE wiki_jobs SET status = 'failed', safe_error_code = 'interrupted', "
+                    "finished_at_ms = MAX(created_at_ms, ?) "
+                    "WHERE kind <> 'parse' AND status IN ('queued', 'running')",
+                    (self._clock_ms(),),
+                )
+                await db.execute("COMMIT")
+            except BaseException:
+                await self._rollback_quietly(db)
+                raise
+
     async def set_source_status(
         self,
         source_id: str,
@@ -2161,6 +2178,7 @@ class WikiStore:
         status: WikiJobStatus,
         *,
         safe_error_code: str = "",
+        expected_status: WikiJobStatus | None = None,
     ) -> WikiJob:
         if status not in _JOB_STATUS_TRANSITIONS:
             raise WikiStoreError("invalid_job")
@@ -2178,6 +2196,8 @@ class WikiStore:
                 if row is None:
                     raise WikiStoreError("job_not_found")
                 current = _row_to_job(row)
+                if expected_status is not None and current.status != expected_status:
+                    raise WikiStoreError("job_conflict")
                 if status == current.status:
                     await db.execute("COMMIT")
                     return current

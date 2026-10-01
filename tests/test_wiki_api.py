@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -22,6 +23,7 @@ from pi_agent_core_py.model_client import (
 )
 from pi_agent_core_py.web.app import create_app
 from pi_agent_core_py.web.wiki.knowledge_agent import KNOWLEDGE_AGENT_TOOL_NAMES
+from pi_agent_core_py.web.wiki.summary import CoreAgentWikiSummaryAgent
 from wiki_parser import (
     FakeMineruParserProvider,
     FakeParserOutput,
@@ -41,6 +43,7 @@ def _app(
     model_scripts: list[list[Any]] | None = None,
     source_retention_seconds: float = 7 * 24 * 60 * 60,
     enable_intent_routing: bool = False,
+    fake_summary: bool = False,
 ) -> FastAPI:
     fake = FakeClient(
         scripts=model_scripts or [[TextDeltaEvent(delta=model_text), DoneEvent(stop_reason="stop")]]
@@ -57,9 +60,59 @@ def _app(
         enable_wiki_api=True,
         wiki_pdf_provider=provider,
         wiki_pdf_provider_v2=provider_v2,
+        wiki_summary_agent=CoreAgentWikiSummaryAgent(lambda: fake) if fake_summary else None,
         wiki_source_retention_seconds=source_retention_seconds,
         enable_intent_routing=enable_intent_routing,
     )
+
+
+def test_summary_uses_account_default_instead_of_bound_chat_client(tmp_path, monkeypatch):
+    app = _app(tmp_path)
+    summary_text = json.dumps({
+        "suggested_title": "Account default", "overview": "Hello.",
+        "key_points": [{"text": "Hello.", "page_numbers": [1]}],
+        "topics": [], "caveats": [],
+    })
+    adapter = FakeClient([
+        [TextDeltaEvent(delta=summary_text), DoneEvent(stop_reason="stop")],
+    ]).adapter
+    models = []
+    closed = []
+
+    def factory(**kwargs):
+        models.append(kwargs["model_id"])
+        return adapter
+
+    async def close_adapter():
+        closed.append(True)
+
+    monkeypatch.setattr(adapter, "aclose", close_adapter)
+    with TestClient(app) as client:
+        credential = client.post("/api/credentials", headers=_HEADERS, json={
+            "label": "Summary", "storage_mode": "session_only", "secret_value": "local-test-key",
+        })
+        assert credential.status_code == 201, credential.text
+        profile = client.post("/api/provider-profiles", headers=_HEADERS, json={
+            "name": "Default", "provider_id": "qwen", "default_model": "summary-model",
+            "credential_id": credential.json()["credential"]["credential_id"], "is_default": True,
+        })
+        assert profile.status_code == 201, profile.text
+        runtime = app.state.request_provider_runtime
+        monkeypatch.setattr(runtime, "_provider_factory", factory)
+        # An active chat binding must not supply the Wiki model or transport.
+        monkeypatch.setattr(app.state.web.harness.agent, "client", FakeClient([
+            [TextDeltaEvent(delta="wrong chat result"), DoneEvent(stop_reason="stop")],
+        ]))
+        space = client.post("/api/wiki/spaces", headers=_HEADERS, json={"name": "Default"}).json()
+        upload = client.post(f"/api/wiki/spaces/{space['id']}/sources", headers=_HEADERS,
+                             files={"file": ("guide.html", b"<h1>Hello</h1>", "text/html")})
+        source_id = upload.json()["source"]["id"]
+        _wait_source(client, source_id, "parsed")
+        result = client.post(f"/api/wiki/sources/{source_id}/summaries", headers=_HEADERS)
+        assert result.status_code == 201, result.text
+        assert result.json()["content"]["suggested_title"] == "Account default"
+        assert models == ["summary-model"]
+        assert closed == [True]
 
 
 def _wait_source(client: TestClient, source_id: str, status: str) -> dict[str, Any]:
@@ -221,7 +274,10 @@ def test_wiki_source_delete_disables_raw_and_purges_due_files(tmp_path: Path) ->
         assert unavailable.json()["detail"]["code"] == "source_not_available"
 
 
-def test_wiki_api_generates_and_reads_agent_summary_draft(tmp_path: Path) -> None:
+@pytest.mark.parametrize("fake_summary", [False, True])
+def test_wiki_api_generates_and_reads_agent_summary_draft(
+    tmp_path: Path, fake_summary: bool,
+) -> None:
     summary_text = json.dumps(
         {
             "suggested_title": "Guide",
@@ -231,7 +287,7 @@ def test_wiki_api_generates_and_reads_agent_summary_draft(tmp_path: Path) -> Non
             "caveats": [],
         }
     )
-    app = _app(tmp_path, model_text=summary_text)
+    app = _app(tmp_path, model_text=summary_text, fake_summary=fake_summary)
     with TestClient(app) as client:
         space = client.post(
             "/api/wiki/spaces",
@@ -250,6 +306,12 @@ def test_wiki_api_generates_and_reads_agent_summary_draft(tmp_path: Path) -> Non
             f"/api/wiki/sources/{source_id}/summaries",
             headers=_HEADERS,
         )
+        if not fake_summary:
+            # Production mode cannot silently borrow the fake chat template.
+            assert generated.status_code == 503
+            assert generated.json()["detail"]["code"] == "summary_provider_unavailable"
+            assert "default Provider" in generated.json()["detail"]["message"]
+            return
         assert generated.status_code == 201, generated.text
         summary = generated.json()
         assert summary["content"]["suggested_title"] == "Guide"

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections.abc import Iterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -145,6 +147,78 @@ async def test_invalid_agent_json_fails_job_without_persisting_summary(
         assert tuple(row) == ("failed", "invalid_summary")
     finally:
         await store.close()
+
+
+async def test_summary_task_pins_client_and_owns_transport_lifetime() -> None:
+    task_client = FakeClient([
+        [TextDeltaEvent(delta=_summary_json()), DoneEvent(stop_reason="stop")],
+        [TextDeltaEvent(delta=_summary_json(title="Second")), DoneEvent(stop_reason="stop")],
+    ])
+    other_client = FakeClient([[TextDeltaEvent(delta="wrong provider"), DoneEvent()]])
+    current = other_client
+    closed = []
+
+    @asynccontextmanager
+    async def own_client():
+        try:
+            yield task_client
+        finally:
+            closed.append(task_client)
+
+    agent = CoreAgentWikiSummaryAgent(lambda: current, client_context=own_client)
+    async with agent.task_scope() as pinned:
+        first = await pinned.generate("first batch")
+        current = other_client
+        second = await pinned.generate("second batch")
+        assert json.loads(first.text)["suggested_title"] == "Guide"
+        assert json.loads(second.text)["suggested_title"] == "Second"
+        assert closed == []
+    assert closed == [task_client]
+
+
+async def test_cancelled_summary_releases_job_and_restart_recovers_stale_drafts(
+    tmp_path: Path,
+) -> None:
+    store, _, source_id = await _parsed_html_store(tmp_path)
+    entered = asyncio.Event()
+
+    class BlockingAgent:
+        async def generate(self, prompt):
+            entered.set()
+            await asyncio.Event().wait()
+
+    try:
+        task = asyncio.create_task(
+            WikiSummaryService(store, BlockingAgent()).summarize_source(source_id),
+        )
+        await asyncio.wait_for(entered.wait(), 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        source = await store.get_source(source_id)
+        db = store._require_db()
+        async with db.execute(
+            "SELECT status, safe_error_code FROM wiki_jobs WHERE kind='summarize_source'",
+        ) as cursor:
+            assert tuple(await cursor.fetchone()) == ("cancelled", "cancelled")
+        stale = await store.create_job(
+            source.space_id, kind="summarize_source", source_id=source_id,
+        )
+        await store.set_job_status(stale.id, "running")
+    finally:
+        await store.close()
+    reopened = await WikiStore.open(tmp_path)
+    from pi_agent_core_py.web.wiki.worker import WikiIngestionWorkerManager
+    worker = WikiIngestionWorkerManager(store=reopened, service=WikiIngestionService(reopened))
+    try:
+        await worker.start()
+        recovered = await reopened.get_job(stale.id)
+        assert recovered.status == "failed"
+        assert recovered.safe_error_code == "interrupted"
+        assert (await reopened.get_source(source_id)).status == "parsed"
+    finally:
+        await worker.stop()
+        await reopened.close()
 
 
 async def test_entry_page_proposal_is_deterministic_and_not_published(

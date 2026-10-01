@@ -196,6 +196,9 @@ def _safe_error(status_code: int, code: str) -> HTTPException:
         "summary_not_found": "Wiki source summary does not exist.",
         "invalid_summary": "Wiki source summary is invalid.",
         "summary_generation_failed": "Wiki source summary generation failed.",
+        "summary_provider_unavailable": (
+            "Configure an available default Provider before summarizing Wiki sources."
+        ),
         "summary_too_large": "Wiki source is too large for summarization.",
         "page_proposal_not_found": "Wiki page proposal does not exist.",
         "invalid_page_proposal": "Wiki page proposal is invalid.",
@@ -220,6 +223,8 @@ def _safe_error(status_code: int, code: str) -> HTTPException:
 
 
 def _translate_error(exc: WikiStoreError) -> HTTPException:
+    if exc.code == "summary_provider_unavailable":
+        return _safe_error(503, exc.code)
     if exc.code in {
         "space_not_found",
         "source_not_found",

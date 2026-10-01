@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 from pi_agent_core_py.agent.harness import AgentHarness
-from pi_agent_core_py.agent.harness.skills import Skill
+from pi_agent_core_py.agent.harness.skills import Skill, SkillRegistry
 from pi_agent_core_py.agent.tooling import AgentTool
 from pi_agent_core_py.mcp import MCPAgentTool
 
@@ -82,9 +82,12 @@ class HarnessCodingAgentResourceLoader:
     harness: AgentHarness
     selection_loader: CodingAgentResourceSelectionLoader | None = None
     optional_tool_names: frozenset[str] = frozenset()
+    skill_catalog: SkillRegistry | None = None
 
     async def load(self, session_id: str | None) -> CodingAgentResourceSnapshot:
-        skill_registry = self.harness.skill_registry
+        skill_registry = (
+            self.skill_catalog if self.skill_catalog is not None else self.harness.skill_registry
+        )
         skills = (
             tuple(skill.model_copy(deep=True) for skill in skill_registry.list())
             if skill_registry is not None

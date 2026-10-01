@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from pi_agent_core_py.web.wiki import WikiIngestionService, WikiStore, WikiStoreError
 from pi_agent_core_py.web.wiki.worker import WikiIngestionWorkerManager
 from wiki_parser import (
@@ -96,7 +98,8 @@ async def test_worker_recovers_interrupted_parse_with_new_attempt(tmp_path: Path
         await second.close()
 
 
-async def test_worker_recovery_preserves_v2_gpu_mode(tmp_path: Path) -> None:
+@pytest.mark.parametrize("started", [False, True])
+async def test_worker_recovery_preserves_v2_gpu_mode(tmp_path: Path, started: bool) -> None:
     root = tmp_path / "wiki-v2"
     first = await WikiStore.open(
         root,
@@ -115,7 +118,8 @@ async def test_worker_recovery_preserves_v2_gpu_mode(tmp_path: Path) -> None:
         source.id,
         requested_mode="gpu-high",
     )
-    await first.set_job_status(interrupted_job.id, "running")
+    if started:
+        await first.set_job_status(interrupted_job.id, "running")
     await first.close()
 
     second = await WikiStore.open(
@@ -193,3 +197,78 @@ async def test_worker_recovery_skips_mode_unsupported_by_reconfigured_provider(
     finally:
         await worker.stop()
         await second.close()
+
+
+async def test_enqueue_persists_mode_before_worker_consumes_it(tmp_path: Path, monkeypatch) -> None:
+    store = await WikiStore.open(tmp_path)
+    provider = FakeMineruParserProvider()
+    worker = WikiIngestionWorkerManager(
+        store=store, service=WikiIngestionService(store, pdf_provider_v2=provider),
+        shutdown_timeout_seconds=0.01,
+    )
+
+    async def parked():
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(worker, "_run", parked)
+    try:
+        await worker.start()
+        space = await store.create_space(name="Admission")
+        source = await store.upload_source(
+            space.id, display_name="paper.pdf", mime_type="application/pdf",
+            content=b"%PDF-1.7\nqueued\n%%EOF\n",
+        )
+        assert await worker.enqueue(source.id, requested_mode="gpu-high")
+        assert not await worker.enqueue(source.id, requested_mode="pipeline")
+        jobs = await store.list_parse_jobs(source.id)
+        assert len(jobs) == 1
+        assert jobs[0].status == "queued"
+        assert jobs[0].requested_mode == "gpu-high"
+        assert provider.created_specs == []
+    finally:
+        await worker.stop()
+        await store.close()
+    reopened = await WikiStore.open(tmp_path)
+    try:
+        assert (await reopened.list_parse_jobs(source.id))[0].requested_mode == "gpu-high"
+        assert await reopened.recover_interrupted_parses() == ((source.id, "gpu-high"),)
+    finally:
+        await reopened.close()
+
+
+async def test_queued_parse_can_be_claimed_only_once(tmp_path: Path, monkeypatch) -> None:
+    store = await WikiStore.open(tmp_path)
+    try:
+        space = await store.create_space(name="Queued claim")
+        source = await store.upload_source(
+            space.id, display_name="guide.html", mime_type="text/html", content=b"<h1>Hello</h1>",
+        )
+        _, job = await store.begin_parse_job(source.id)
+        real_status = store.set_job_status
+        claims = 0
+        ready = asyncio.Event()
+
+        async def simultaneous_claim(job_id, status, **kwargs):
+            nonlocal claims
+            if status == "running":
+                claims += 1
+                if claims == 2:
+                    ready.set()
+                await ready.wait()
+            return await real_status(job_id, status, **kwargs)
+
+        monkeypatch.setattr(store, "set_job_status", simultaneous_claim)
+        service = WikiIngestionService(store)
+        results = await asyncio.wait_for(asyncio.gather(
+            service.parse_source(source.id, queued_job_id=job.id),
+            service.parse_source(source.id, queued_job_id=job.id),
+            return_exceptions=True,
+        ), 2)
+        failures = [r for r in results if isinstance(r, WikiStoreError)]
+        assert len(failures) == 1
+        assert failures[0].code == "job_conflict"
+        assert len([r for r in results if not isinstance(r, BaseException)]) == 1
+        assert (await store.get_job(job.id)).status == "succeeded"
+        assert (await store.get_source(source.id)).status == "parsed"
+    finally:
+        await store.close()

@@ -511,3 +511,34 @@ async def test_harness_resource_loader_filters_mcp_and_skills_per_session() -> N
     assert tuple(skill.name for skill in snapshot.skills) == ("alpha",)
     assert tuple(tool.name for tool in snapshot.tools) == ("read_file",)
     assert snapshot.mcp_tool_names == ()
+
+
+@pytest.mark.asyncio
+async def test_skill_catalog_survives_another_session_composition() -> None:
+    template = _harness("read_file")
+    template.attach_skills([
+        Skill(name="alpha", description="alpha", prompt="alpha"),
+        Skill(name="beta", description="beta", prompt="beta"),
+    ])
+    catalog = template.skill_registry
+
+    async def selection(sid: str) -> CodingAgentResourceSelection:
+        return CodingAgentResourceSelection(skill_names=frozenset({sid}))
+
+    loader = HarnessCodingAgentResourceLoader(
+        template, selection_loader=selection, skill_catalog=catalog,
+    )
+    first = create_coding_agent_session(
+        session_id="alpha", harness=template, read_only_tool=_read_only,
+    )
+    async with first.compose_request(mode="direct", resources=await loader.load("alpha")):
+        assert template.skill_registry.names() == ["alpha"]
+        assert [s.name for s in (await loader.load("beta")).skills] == ["beta"]
+        # Catalog management stays visible to the next request during composition.
+        catalog.disable("beta")
+        assert (await loader.load("beta")).skills[0].status == "disabled"
+        catalog.enable("beta")
+        clone = clone_agent_harness(template, skill_catalog=catalog)
+        assert clone.skill_registry.names() == ["alpha", "beta"]
+        await clone.close()
+    assert template.skill_registry is catalog

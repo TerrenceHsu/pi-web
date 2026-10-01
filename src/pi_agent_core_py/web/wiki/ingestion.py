@@ -154,14 +154,25 @@ class WikiIngestionService:
         *,
         requested_mode: WikiParseMode | None = None,
         signal: asyncio.Event | None = None,
+        queued_job_id: str | None = None,
     ) -> WikiParseOutcome:
         pending = await self._store.get_source(source_id)
         resolved_mode = self.resolve_parse_mode(pending, requested_mode)
-        source, job = await self._store.begin_parse_job(
-            source_id,
-            requested_mode=resolved_mode,
-        )
-        job = await self._store.set_job_status(job.id, "running")
+        if queued_job_id is None:
+            source, job = await self._store.begin_parse_job(
+                source_id, requested_mode=resolved_mode,
+            )
+        else:
+            source = pending
+            job = await self._store.get_job(queued_job_id)
+            if (
+                job.kind != "parse" or job.source_id != source_id or job.status != "queued"
+                or source.status != "parsing" or job.requested_mode != resolved_mode
+                or job.base_selection_version != source.selection_version
+                or job.base_selected_parse_revision_id != source.selected_parse_revision_id
+            ):
+                raise WikiStoreError("job_conflict")
+        job = await self._store.set_job_status(job.id, "running", expected_status="queued")
         try:
             if signal is not None and signal.is_set():
                 raise asyncio.CancelledError

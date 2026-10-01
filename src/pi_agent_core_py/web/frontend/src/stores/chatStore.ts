@@ -321,6 +321,7 @@ export const useChatStore = defineStore("chat", () => {
   // P1-B3-2: reconnect replay state
   /** replay 进行中——新 WS event 暂存到 liveEventsDuringReplay */
   const replaying = ref(false)
+  let replayToken = 0
   /** replay 期间 WS 收到的 live envelope——合并到 replay events 后清空 */
   let liveEventsDuringReplay: any[] = []
   let activeRecoveryToken = 0
@@ -729,13 +730,11 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   /**
-   * P1-B3-3: request_end 后轮询 GET /api/requests/{id} 直到 terminal——避免
-   * request_end 早于 SQLite 持久化导致的 loadMessages 缺最终消息。
-   *
-   * 间隔 250ms → 500ms；总超时 10s。terminal 后调 reconcileMessagesFromServer。
+   * 从接收 request_id 起独立确认状态；WS 终止事件只用于加速。
+   * 正常运行无 10s 截断；断线时保留草稿并继续查询直到切换视图或终止。
    */
   async function pollRequestUntilTerminalCore(requestId: string) {
-    const startedAt = Date.now()
+    let lastStatusAt = Date.now()
     let delay = 250
 
     // request operation 决定 terminal 后的 UI 收敛策略。
@@ -744,11 +743,13 @@ export const useChatStore = defineStore("chat", () => {
     const isCheckpointer = meta?.operation === "checkpointer"
     const maxTimeoutMs = isCheckpointer ? 120_000 : 10_000
 
-    while (Date.now() - startedAt < maxTimeoutMs) {
+    while (currentRequestId.value === requestId) {
       await new Promise((r) => setTimeout(r, delay))
-      delay = Math.min(delay * 2, 500)
+      if (currentRequestId.value !== requestId) break
+      delay = Math.min(delay * 2, 2_000)
       try {
         const r = await messagesApi.getRequestStatus(requestId)
+        lastStatusAt = Date.now()
         if (
           r.status === "completed" ||
           r.status === "error" ||
@@ -833,7 +834,7 @@ export const useChatStore = defineStore("chat", () => {
             }
           } else {
             // 普通 prompt 路径——reconcile messages
-            if (r.session_id) {
+            if (r.session_id && r.error_type !== "message_persistence_failed") {
               await reconcileMessagesFromServer(r.session_id)
             }
             if (r.status === "error" || r.status === "aborted") {
@@ -858,15 +859,23 @@ export const useChatStore = defineStore("chat", () => {
           requestMetadataById.delete(requestId)
           return r
         }
-      } catch {
-        // 404 / 网络——继续 poll，由 timeout 兜底
+      } catch (cause) {
+        if (currentRequestId.value !== requestId) break
+        if (cause instanceof ApiError && cause.status === 404) {
+          error.value = "Request is unavailable — keep the draft; tools may already have run"
+          sending.value = false
+          streaming.value = false
+          aborting.value = false
+          checkpointing.value = false
+          currentRequestId.value = null
+          break
+        }
+        if (Date.now() - lastStatusAt >= maxTimeoutMs) {
+          error.value = "Unable to confirm request status — reconnecting; keep the draft"
+        }
       }
     }
-    // timeout——保留 draft + 显示轻量错误
-    if (currentRequestId.value === requestId) {
-      checkpointing.value = false
-      error.value = "Request finalization timeout — please refresh to sync"
-    }
+    requestMetadataById.delete(requestId)
     return null
   }
 
@@ -974,6 +983,7 @@ export const useChatStore = defineStore("chat", () => {
         errorMessage: null,
       }
     }
+    void pollRequestUntilTerminal(requestId)
   }
 
   /**
@@ -1188,7 +1198,8 @@ export const useChatStore = defineStore("chat", () => {
         }
       }
 
-      // 不清 sending/streaming——等 WS 推 request_end / status poll 决定
+      void pollRequestUntilTerminal(resp.request_id)
+      // 不清 sending/streaming——由状态查询决定最终结果
       // 不在 finally 内清——async 立即返回后 request 还在后台运行
       return resp
     } catch (e: any) {
@@ -1361,6 +1372,7 @@ export const useChatStore = defineStore("chat", () => {
         }
       }
 
+      void pollRequestUntilTerminal(resp.request_id)
       return resp
     } catch (e: any) {
       let msg: string
@@ -1432,6 +1444,7 @@ export const useChatStore = defineStore("chat", () => {
   async function replayFromCursor() {
     if (replaying.value) return
     replaying.value = true
+    const token = ++replayToken
 
     try {
       const MAX_PAGES = 20
@@ -1447,6 +1460,7 @@ export const useChatStore = defineStore("chat", () => {
           limit: PAGE_LIMIT,
           // **不**传 sessionId——sequence 是全局的，必须拉全部 envelope
         })
+        if (token !== replayToken) return
         if (resp.gap) {
           needsFinalResync.value = true
         }
@@ -1474,26 +1488,13 @@ export const useChatStore = defineStore("chat", () => {
         if (!unique.has(env.event_id)) unique.set(env.event_id, env)
       }
 
-      // 走下游 mapper——session / request 隔离照常；
-      // 不调 handleEvent（避免再次 rememberEventId + advance cursor + buffer）
+      // Replay uses the same deduplication and isolation path as live delivery.
       replaying.value = false
       for (const env of unique.values()) {
-        if (
-          env.session_id &&
-          activeSessionId.value &&
-          env.session_id !== activeSessionId.value
-        ) {
-          continue
-        }
-        const requestId = env.request_id
-        const isTurnControl =
-          requestId !== null && TURN_CONTROL_TYPES.has(env.type)
-        if (isTurnControl && requestId !== currentRequestId.value) {
-          continue
-        }
-        applyEventToStreamItems({ ...env.payload, type: env.type })
+        handleEvent(env, true)
       }
     } catch {
+      if (token !== replayToken) return
       // replay 失败——降级为 needsFinalResync；用户可手动刷新
       needsFinalResync.value = true
       replaying.value = false
@@ -1694,7 +1695,7 @@ export const useChatStore = defineStore("chat", () => {
   // handleEvent —— WS event → ChatStreamItem 完整映射
   // ----------------------------------------------------------------------
 
-  function handleEvent(rawEvent: WebEvent) {
+  function handleEvent(rawEvent: WebEvent, replayed = false) {
     if (!rawEvent || typeof rawEvent.type !== "string") return
 
     // 1. 协议事件——hello / shutdown 是裸 dict（控制 frame，不走 envelope 路径）
@@ -1725,6 +1726,11 @@ export const useChatStore = defineStore("chat", () => {
       wsConnected.value = false
       return
     }
+    if (rawEvent.type === "resync_required") {
+      gapDetected.value = true
+      void replayFromCursor()
+      return
+    }
 
     // P1-B2: envelope-aware 处理——提取 payload 作为下游 event；envelope 元数据用于
     // 去重 + session/request 隔离 + sequence gap 检测。hello / shutdown / legacy
@@ -1734,6 +1740,17 @@ export const useChatStore = defineStore("chat", () => {
       ? (rawEvent as WebEventEnvelope)
       : null
     if (envelope) {
+      if (replaying.value && !replayed) {
+        liveEventsDuringReplay.push(envelope)
+        return
+      }
+      if (!replayed && lastGlobalSequence.value > 0 &&
+          envelope.sequence > lastGlobalSequence.value + 1) {
+        gapDetected.value = true
+        liveEventsDuringReplay.push(envelope)
+        void replayFromCursor()
+        return
+      }
       // 去重：event_id 已见过 → 跳过（B2 验收 #8）
       // P1-B3 hardening: rememberEventId 实现 FIFO 淘汰——只淘汰最旧 ID，
       // 不清空全部历史，避免边界后旧 event 被 replay 时重复处理。
@@ -1742,9 +1759,6 @@ export const useChatStore = defineStore("chat", () => {
       // sequence gap 检测——用全局 cursor（后端 sequence 是全局单调）。
       // per-session cursor 不能用于 gap 判断：跨 session 事件会让 per-session
       // 看起来"缺号"但实际没丢（B2.1 hardening）。
-      if (lastGlobalSequence.value > 0 && envelope.sequence > lastGlobalSequence.value + 1) {
-        gapDetected.value = true
-      }
       lastGlobalSequence.value = Math.max(lastGlobalSequence.value, envelope.sequence)
 
       // per-session sequence cursor（统计 + B3 replay 用，不参与 gap 判断）
@@ -1770,13 +1784,6 @@ export const useChatStore = defineStore("chat", () => {
         envelope.request_id === recoveringActiveRequestId
       ) {
         liveEventsDuringActiveRecovery.push(envelope)
-        return
-      }
-
-      // P1-B3-2: replay 期间——live envelope 暂存（已通过 event_id 去重 + advance cursor）
-      // flush 时与 replay events 合并 → sort by sequence → applyEventToStreamItems
-      if (replaying.value) {
-        liveEventsDuringReplay.push(envelope)
         return
       }
 
@@ -2439,6 +2446,7 @@ export const useChatStore = defineStore("chat", () => {
     seenEventQueue.splice(0)
     requestMetadataById.clear()
     terminalPolls.clear()
+    replayToken += 1
     replaying.value = false
     liveEventsDuringReplay = []
     regeneration.value = {

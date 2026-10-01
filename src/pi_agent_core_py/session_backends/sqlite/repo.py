@@ -61,13 +61,13 @@ from ...agent.messages import (
     ToolResultMessage,
     UserMessage,
 )
-from .branch_cache import append_entry_to_branch_cache, rebuild_branch_cache
+from .branch_cache import rebuild_branch_cache
 from .database import ReentrantAsyncLock, database_for, serialized_operation
 from .migrations import apply_migrations
-from .storage.entries import id_exists_in_entries
+from .storage.entries import append_entry, id_exists_in_entries
 from .storage.records import id_exists_in_records
 from .storage.session_sequences import allocate_sequence, create_sequence
-from .storage.session_stats import add_usage, create_stats, increment_messages, read_stats
+from .storage.session_stats import add_usage, create_stats, read_stats
 from .storage.sessions import session_exists
 from .storage.writer_leases import (
     WriterLease,
@@ -879,17 +879,6 @@ class SQLiteSessionStore:
             )
         return rows
 
-    async def _next_entry_seq(self, session_id: str) -> int:
-        db = self._require_db()
-        cur = await db.execute(
-            "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq "
-            "FROM session_entries WHERE session_id = ?",
-            (session_id,),
-        )
-        row = await cur.fetchone()
-        await cur.close()
-        return int(row["next_seq"]) if row is not None else 0
-
     async def _insert_entry(
         self,
         *,
@@ -905,64 +894,15 @@ class SQLiteSessionStore:
     ) -> tuple[str, int]:
         db = self._require_db()
         resolved_entry_id = entry_id or _gen_id("entry")
-        local_seq = await self._next_entry_seq(session_id)
-        if payload is None:
-            loaded_payload = json.loads(content_json)
-            payload = loaded_payload if isinstance(loaded_payload, dict) else {}
-        global_seq = await self._append_log_item(
-            session_id,
-            kind="entry",
-            item_id=resolved_entry_id,
-            timestamp=created_at,
-            payload={
-                "id": resolved_entry_id,
-                "type": entry_type,
-                "parent_id": parent_id,
-                "message_id": message_id,
-                "role": role,
-                "payload": payload,
-            },
-        )
-        await db.execute(
-            "INSERT INTO session_entries "
-            "(id, session_id, seq, parent_id, message_id, role, content_json, "
-            "created_at, entry_type, payload_json, global_seq) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                resolved_entry_id,
-                session_id,
-                local_seq,
-                parent_id,
-                message_id,
-                role,
-                content_json,
-                created_at,
-                entry_type,
-                json.dumps(payload, ensure_ascii=False),
-                global_seq,
-            ),
-        )
-        await append_entry_to_branch_cache(
-            db,
-            session_id=session_id,
-            entry_id=resolved_entry_id,
-            entry_seq=global_seq,
-            entry_type=entry_type,
-            parent_id=parent_id,
-        )
         if entry_type == "message":
-            await increment_messages(db, session_id)
-            message = _deserialize_message(content_json)
-            if isinstance(message, AssistantMessage):
-                usage = message.usage
-                await add_usage(
-                    db,
-                    session_id,
-                    cached_tokens=usage.cache_read,
-                    uncached_tokens=usage.input + usage.cache_write,
-                    total_tokens=usage.total_tokens,
-                    cost_total=usage.cost.total if usage.cost is not None else 0,
-                )
+            # Retain the repository's typed message validation before writing.
+            _deserialize_message(content_json)
+        global_seq = await append_entry(
+            db, session_id=session_id, entry_id=resolved_entry_id,
+            parent_id=parent_id, message_id=message_id, role=role,
+            content_json=content_json, created_at=created_at,
+            entry_type=entry_type, payload=payload,
+        )
         return resolved_entry_id, global_seq
 
     async def _materialize_path(

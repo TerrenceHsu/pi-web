@@ -24,7 +24,11 @@ from coding_agent_app.execution.control import ExecutionControl
 from ... import __version__
 from ..app import _FALLBACK_HTML, _STATIC_DIR
 from ..credentials.api import CredentialBodyLimitMiddleware, build_credential_router
-from ..local_web_security import WebSecurityConfig, default_web_security_config
+from ..local_web_security import (
+    WebSecurityConfig,
+    default_web_security_config,
+    websocket_origin_allowed,
+)
 from .models import AuthUser
 from .service import DEFAULT_SESSION_TTL_SECONDS, AuthService
 from .store import AuthStore
@@ -106,9 +110,12 @@ class _GatewayRuntime:
 class AuthDispatchMiddleware:
     """Require a valid Cookie before dispatching workspace HTTP/WS traffic."""
 
-    def __init__(self, app: ASGIApp, *, runtime: _GatewayRuntime) -> None:
+    def __init__(
+        self, app: ASGIApp, *, runtime: _GatewayRuntime, config: WebSecurityConfig,
+    ) -> None:
         self.app = app
         self.runtime = runtime
+        self.config = config
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         scope_type = scope.get("type")
@@ -118,6 +125,10 @@ class AuthDispatchMiddleware:
         is_auth_path = path == "/api/auth" or path.startswith("/api/auth/")
         if (not is_workspace_http and not is_workspace_ws) or is_auth_path:
             await self.app(scope, receive, send)
+            return
+
+        if is_workspace_ws and not websocket_origin_allowed(scope, self.config):
+            await send({"type": "websocket.close", "code": 4403, "reason": "origin forbidden"})
             return
 
         service = self.runtime.auth_service
@@ -494,7 +505,7 @@ def create_authenticated_app(
         max_bytes=LOGIN_BODY_MAX_BYTES,
         path_prefixes=("/api/auth/login", "/api/auth/password"),
     )
-    app.add_middleware(AuthDispatchMiddleware, runtime=runtime)
+    app.add_middleware(AuthDispatchMiddleware, runtime=runtime, config=security_config)
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=list(security_config.allowed_hosts),

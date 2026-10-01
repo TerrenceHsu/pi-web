@@ -7,6 +7,7 @@ from copy import copy
 
 from pi_agent_core_py.agent import Agent
 from pi_agent_core_py.agent.harness import AgentHarness
+from pi_agent_core_py.agent.harness.skills import SkillRegistry
 from pi_agent_core_py.ai.providers.base import ProviderAdapter, ProviderRequest
 from pi_agent_core_py.ai.stream_events import StreamEvent
 
@@ -32,7 +33,9 @@ class _BorrowedProviderAdapter(ProviderAdapter):
         return None
 
 
-def clone_agent_harness(prototype: AgentHarness) -> AgentHarness:
+def clone_agent_harness(
+    prototype: AgentHarness, *, skill_catalog: SkillRegistry | None = None,
+) -> AgentHarness:
     """Clone mutable Agent/Harness state while borrowing shared resources.
 
     Tool implementations may be shared because request-local Workspace and
@@ -78,9 +81,10 @@ def clone_agent_harness(prototype: AgentHarness) -> AgentHarness:
         permission_policy=prototype.permission_policy,
         tool_approval_handler=prototype.tool_approval_handler,
     )
-    if prototype.skill_registry is not None:
+    skills = skill_catalog if skill_catalog is not None else prototype.skill_registry
+    if skills is not None:
         cloned.attach_skills(
-            [skill.model_copy(deep=True) for skill in prototype.skill_registry.list()],
+            [skill.model_copy(deep=True) for skill in skills.list()],
             injection_config=prototype.skill_injection_config.model_copy(deep=True),
         )
     return cloned

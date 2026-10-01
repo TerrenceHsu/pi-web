@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from pi_agent_core_py.session_backends.sqlite import (
     WriterLeaseError,
 )
 from pi_agent_core_py.session_backends.sqlite import migrations as sqlite_migrations
+from pi_agent_core_py.session_backends.sqlite import repo as sqlite_repo
 from pi_agent_core_py.session_backends.sqlite.database import (
     database_for,
     serialized_operation,
@@ -248,6 +250,81 @@ async def test_branch_cache_can_be_repaired(tmp_path: Path) -> None:
         )
     ] == ["root", "tail"]
     await repository.close()
+
+
+@pytest.mark.asyncio
+async def test_startup_repairs_old_regeneration_projections_idempotently(tmp_path: Path) -> None:
+    database = tmp_path / "regeneration.sqlite"
+    store = SQLiteSessionStore(database)
+    await store.init()
+    try:
+        sid = (await store.create_session(title="Legacy regeneration")).id
+        await store.append_message(sid, UserMessage(content=[TextContent(text="first")]))
+        await store.append_message(sid, AssistantMessage(
+            content=[TextContent(text="old")], api="fake", provider="fake", model="fake-1",
+        ))
+        db = store.connection
+        new_content = sqlite_repo._serialize_message(
+            AssistantMessage(
+                content=[TextContent(text="regenerated")],
+                api="fake", provider="fake", model="fake-1",
+            ),
+        )
+        # Plant exactly the old Web writer's incomplete entry, retaining its
+        # canonical identity and sibling history while omitting projections.
+        await db.execute(
+            "INSERT INTO session_entries "
+            "(id, session_id, seq, parent_id, message_id, role, content_json, created_at) "
+            "SELECT 'legacy-regeneration', session_id, seq + 1, parent_id, "
+            "message_id, role, ?, created_at FROM session_entries "
+            "WHERE session_id = ? AND role = 'assistant'",
+            (new_content, sid),
+        )
+        await db.execute(
+            "UPDATE session_lanes SET leaf_entry_id = 'legacy-regeneration' WHERE session_id = ?",
+            (sid,),
+        )
+        await db.execute(
+            "UPDATE messages SET content_json = ? WHERE session_id = ? AND role = 'assistant'",
+            (new_content, sid),
+        )
+        await db.execute("DELETE FROM session_migrations WHERE id = '005_regeneration_projections'")
+        await db.commit()
+    finally:
+        await store.close()
+
+    restored = SQLiteSessionStore(database)
+    await restored.init()
+    try:
+        db = restored.connection
+        async with db.execute(
+            "SELECT global_seq, payload_json FROM session_entries WHERE id = 'legacy-regeneration'",
+        ) as cursor:
+            entry = await cursor.fetchone()
+        assert entry["global_seq"] is not None
+        assert json.loads(entry["payload_json"]) == json.loads(new_content)
+        assert (await restored.get_session_stats(sid)).message_count == 3
+        history = await restored.list_messages(sid)
+        await restored.replace_messages(
+            sid, history + [UserMessage(content=[TextContent(text="next")])],
+        )
+        assert len(await restored.list_messages(sid)) == 3
+        async with db.execute(
+            "SELECT COUNT(*) FROM session_log WHERE session_id = ?", (sid,),
+        ) as cursor:
+            log_count = (await cursor.fetchone())[0]
+    finally:
+        await restored.close()
+    reopened = SQLiteSessionStore(database)
+    await reopened.init()
+    try:
+        async with reopened.connection.execute(
+            "SELECT COUNT(*) FROM session_log WHERE session_id = ?", (sid,),
+        ) as cursor:
+            assert (await cursor.fetchone())[0] == log_count
+        assert (await reopened.get_session_stats(sid)).message_count == 4
+    finally:
+        await reopened.close()
 
 
 @pytest.mark.asyncio

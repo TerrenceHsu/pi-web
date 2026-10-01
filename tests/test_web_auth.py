@@ -88,6 +88,34 @@ def _login_admin(client: TestClient, password: str = "123456") -> str:
     return str(client.cookies.get(AUTH_COOKIE_NAME))
 
 
+@pytest.mark.parametrize("origin", ["null", "https://evil.test", "http://testserver:9999"])
+def test_workspace_websocket_rejects_untrusted_origin(tmp_path: Path, origin: str) -> None:
+    with TestClient(_build_gateway(tmp_path)) as client:
+        _login_admin(client)
+        with pytest.raises(WebSocketDisconnect) as rejected:
+            with client.websocket_connect("/ws/events", headers={"Origin": origin}):
+                pass
+        assert rejected.value.code == 4403
+        assert not client.app.state.workspace_manager._apps
+
+
+@pytest.mark.parametrize("origin", [None, "http://testserver", "http://localhost:5173"])
+def test_workspace_websocket_allows_same_origin_and_configured_dev(
+    tmp_path: Path, origin: str | None,
+) -> None:
+    app = create_authenticated_app(
+        _workspace_factory, auth_db_path=tmp_path / "auth.sqlite",
+        user_data_root=tmp_path / "users", extra_hosts=("testserver",),
+        extra_ui_origins=("http://localhost:5173",),
+    )
+    with TestClient(app) as client:
+        _login_admin(client)
+        with client.websocket_connect(
+            "/ws/events", headers={"Origin": origin} if origin is not None else {},
+        ) as socket:
+            assert socket.receive_json() == {"user": "admin"}
+
+
 def test_change_password_revokes_all_old_sessions_and_survives_restart(tmp_path: Path) -> None:
     payload = {"current_password": "123456", "new_password": NEW_PASSWORD}
     with TestClient(_build_gateway(tmp_path)) as client:

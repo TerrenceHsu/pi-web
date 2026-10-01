@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -64,8 +66,22 @@ class WikiSummaryAgent(Protocol):
 class CoreAgentWikiSummaryAgent:
     """Run each summary request through a tool-free, one-turn core Agent."""
 
-    def __init__(self, client_getter: Callable[[], ModelClient]) -> None:
+    def __init__(
+        self, client_getter: Callable[[], ModelClient], *,
+        client_context: Callable[[], AbstractAsyncContextManager[ModelClient]] | None = None,
+    ) -> None:
         self._client_getter = client_getter
+        self._client_context = client_context
+
+    @asynccontextmanager
+    async def task_scope(self) -> AsyncIterator[CoreAgentWikiSummaryAgent]:
+        """Pin one client for all batches and synthesis of this task."""
+        if self._client_context is None:
+            client = self._client_getter()
+            yield CoreAgentWikiSummaryAgent(lambda: client)
+        else:
+            async with self._client_context() as client:
+                yield CoreAgentWikiSummaryAgent(lambda: client)
 
     async def generate(self, prompt: str) -> WikiSummaryAgentResponse:
         agent = Agent(
@@ -151,43 +167,55 @@ class WikiSummaryService:
                 source_id=source.id,
             )
             job = await self._store.set_job_status(job.id, "running")
-            pages = await self._read_selected_pages(source, revision.page_count)
-            batches = self._batch_pages(pages)
-            responses: list[tuple[WikiSourceSummaryContent, WikiSummaryAgentResponse]] = []
-            for index, batch in enumerate(batches, start=1):
-                response = await self._agent.generate(
-                    self._batch_prompt(batch, index=index, total=len(batches))
-                )
-                content = self._parse_response(response.text)
-                self._validate_page_scope(content, {page.number for page in batch})
-                responses.append((content, response))
+            async with AsyncExitStack() as stack:
+                agent = self._agent
+                if isinstance(agent, CoreAgentWikiSummaryAgent):
+                    agent = await stack.enter_async_context(agent.task_scope())
+                pages = await self._read_selected_pages(source, revision.page_count)
+                batches = self._batch_pages(pages)
+                responses: list[tuple[WikiSourceSummaryContent, WikiSummaryAgentResponse]] = []
+                for index, batch in enumerate(batches, start=1):
+                    response = await agent.generate(
+                        self._batch_prompt(batch, index=index, total=len(batches))
+                    )
+                    content = self._parse_response(response.text)
+                    self._validate_page_scope(content, {page.number for page in batch})
+                    responses.append((content, response))
 
-            if len(responses) == 1:
-                content, identity = responses[0]
-            else:
-                identities = {(item.provider, item.model) for _, item in responses}
-                if len(identities) != 1:
-                    raise WikiStoreError("summary_generation_failed")
-                synthesis_prompt = self._synthesis_prompt(
-                    [fragment for fragment, _ in responses],
-                    page_count=revision.page_count,
-                )
-                identity = await self._agent.generate(synthesis_prompt)
-                if (identity.provider, identity.model) not in identities:
-                    raise WikiStoreError("summary_generation_failed")
-                content = self._parse_response(identity.text)
-                self._validate_page_scope(content, set(range(1, revision.page_count + 1)))
+                if len(responses) == 1:
+                    content, identity = responses[0]
+                else:
+                    identities = {(item.provider, item.model) for _, item in responses}
+                    if len(identities) != 1:
+                        raise WikiStoreError("summary_generation_failed")
+                    synthesis_prompt = self._synthesis_prompt(
+                        [fragment for fragment, _ in responses],
+                        page_count=revision.page_count,
+                    )
+                    identity = await agent.generate(synthesis_prompt)
+                    if (identity.provider, identity.model) not in identities:
+                        raise WikiStoreError("summary_generation_failed")
+                    content = self._parse_response(identity.text)
+                    self._validate_page_scope(content, set(range(1, revision.page_count + 1)))
 
-            summary = self._store.new_source_summary(
-                source,
-                revision,
-                job,
-                prompt_revision=self._prompt_revision,
-                provider=identity.provider,
-                model=identity.model,
-                content=content,
-            )
-            return await self._store.complete_source_summary(summary)
+                summary = self._store.new_source_summary(
+                    source,
+                    revision,
+                    job,
+                    prompt_revision=self._prompt_revision,
+                    provider=identity.provider,
+                    model=identity.model,
+                    content=content,
+                )
+                return await self._store.complete_source_summary(summary)
+        except asyncio.CancelledError:
+            if job is not None:
+                cleanup = asyncio.create_task(self._cancel_job_quietly(job.id))
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    await cleanup
+            raise
         except WikiStoreError as exc:
             await self._fail_job_quietly(job, self._safe_failure_code(exc))
             raise
@@ -314,8 +342,18 @@ class WikiSummaryService:
         except WikiStoreError:
             pass
 
+    async def _cancel_job_quietly(self, job_id: str) -> None:
+        try:
+            await self._store.set_job_status(job_id, "cancelled", safe_error_code="cancelled")
+        except Exception:
+            # Startup recovery handles an unavailable database. Cancellation
+            # must remain visible to the caller even if cleanup cannot commit.
+            pass
+
     @staticmethod
     def _safe_failure_code(exc: WikiStoreError) -> str:
+        if exc.code == "summary_provider_unavailable":
+            return exc.code
         if exc.code == "summary_too_large":
             return "summary_too_large"
         if exc.code == "source_conflict":
